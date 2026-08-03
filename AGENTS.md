@@ -35,3 +35,5 @@ Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 - No async runtime; std threads + mpsc.
 - Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`); branch `master`.
 - Never commit secrets; API keys live in the OS keyring via `cantrip key`, not files.
+
+Organization root context: @~/Development/misty-step/AGENTS.md
