@@ -15,6 +15,7 @@ pub enum Command {
     Cancel,
     Status,
     Ping,
+    Reload,
 }
 
 impl Command {
@@ -26,6 +27,7 @@ impl Command {
             "cancel" => Some(Self::Cancel),
             "status" => Some(Self::Status),
             "ping" => Some(Self::Ping),
+            "reload" => Some(Self::Reload),
             _ => None,
         }
     }
@@ -38,6 +40,7 @@ impl Command {
             Self::Cancel => "cancel",
             Self::Status => "status",
             Self::Ping => "ping",
+            Self::Reload => "reload",
         }
     }
 }
@@ -92,6 +95,7 @@ mod tests {
             Command::Cancel,
             Command::Status,
             Command::Ping,
+            Command::Reload,
         ];
         for command in commands {
             assert_eq!(Command::parse(command.as_str()), Some(command));

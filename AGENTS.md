@@ -12,6 +12,8 @@ Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 - `src/models.rs` — model download/verify (`~/.local/share/cantrip/models`)
 - `src/inject.rs` — wtype → ydotool → wl-copy chain
 - `src/config.rs` / `src/paths.rs` — TOML config, XDG paths
+- `src/postproc.rs` — OpenAI-compatible transcript cleanup
+- `src/keys.rs` — OS keyring API key access
 - `docs/adr/` — architecture decisions; add an ADR before non-obvious changes
 
 ## Commands
@@ -21,11 +23,10 @@ Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 - `cargo fmt --check` (CI-enforced)
 - Smoke test: `cargo run -- transcribe samples/jfk.wav`
 
-## Rules
-
 - Never log transcript content — character counts only. `cantrip transcribe`
-  stdout is the single exemption.
-- Log tags: `[Daemon]` `[Capture]` `[STT]` `[Inject]` `[Models]`.
+  stdout is the single exemption. Postproc/cloud HTTP errors log status codes
+  only, never bodies.
+- Log tags: `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]`.
 - Stop `pw-record` with SIGINT and wait; SIGKILL corrupts the WAV.
 - Type-mode injection must never touch the clipboard.
 - Recordings live only under `$XDG_RUNTIME_DIR/cantrip` and are deleted after
@@ -33,4 +34,4 @@ Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 - anyhow errors with `.context()`; no `unwrap()` outside tests.
 - No async runtime; std threads + mpsc.
 - Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`); branch `master`.
-- Never commit secrets; BYOK keys (future) go through the OS keyring, not files.
+- Never commit secrets; API keys live in the OS keyring via `cantrip key`, not files.

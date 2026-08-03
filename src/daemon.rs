@@ -1,14 +1,15 @@
 //! The cantrip daemon and its socket-driven state machine.
 
 use crate::capture::{self, Recorder};
-use crate::config::Config;
+use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::inject::{self, InjectionMode, InjectionOutcome};
 use crate::ipc::{Command, Reply};
-use crate::models::{self, PARAKEET_V3_INT8};
+use crate::models;
 use crate::paths;
 use crate::stt::Transcriber;
+use crate::{keys, postproc, stt};
 use anyhow::{Context, Result};
-use notify_rust::Notification;
+use notify_rust::{Notification, NotificationHandle, Timeout};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -49,9 +50,90 @@ impl State {
     }
 }
 
+#[derive(Default)]
+struct StatusUi {
+    handle: Option<NotificationHandle>,
+    last_shown_seconds: u64,
+}
+
+impl StatusUi {
+    fn recording(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.close();
+        }
+        self.last_shown_seconds = 0;
+        match Notification::new()
+            .summary("Cantrip")
+            .body("Listening… 0s — press your hotkey to stop")
+            .timeout(Timeout::Never)
+            .show()
+        {
+            Ok(handle) => self.handle = Some(handle),
+            Err(error) => tracing::debug!("[Daemon] notification unavailable: {}", error),
+        }
+    }
+
+    fn tick(&mut self, elapsed: Duration) {
+        let Some(handle) = self.handle.as_mut() else {
+            return;
+        };
+        let seconds = elapsed.as_secs();
+        if seconds <= self.last_shown_seconds {
+            return;
+        }
+        self.last_shown_seconds = seconds;
+        let body = format!("Listening… {seconds}s — press your hotkey to stop");
+        handle.body(&body);
+        if let Err(error) = handle.update() {
+            tracing::debug!("[Daemon] notification unavailable: {}", error);
+        }
+    }
+
+    fn processing(&mut self) {
+        let Some(handle) = self.handle.as_mut() else {
+            return;
+        };
+        handle.body("Transcribing…");
+        if let Err(error) = handle.update() {
+            tracing::debug!("[Daemon] notification unavailable: {}", error);
+        }
+    }
+
+    fn finish(&mut self, body: &str) {
+        if let Some(handle) = self.handle.take() {
+            handle.close();
+        }
+        if let Err(error) = Notification::new().summary("Cantrip").body(body).show() {
+            tracing::debug!("[Daemon] notification unavailable: {}", error);
+        }
+    }
+}
+
+impl Drop for StatusUi {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.close();
+        }
+    }
+}
+
+struct Job {
+    wav: PathBuf,
+    stt: SttConfig,
+    vocabulary: Vec<String>,
+    postproc: PostprocConfig,
+}
+
+enum PostprocStatus {
+    Off,
+    Applied { ms: u128 },
+    Failed,
+}
+
 struct WorkerResult {
     result: std::result::Result<String, String>,
     stt_elapsed: Duration,
+    postproc: PostprocStatus,
 }
 
 struct SocketCleanup(PathBuf);
@@ -81,9 +163,11 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
     SHUTDOWN.store(false, Ordering::SeqCst);
     install_signal_handlers();
 
-    let model_dir = models::installed(&PARAKEET_V3_INT8)?
-        .context("model not installed — run: cantrip models pull")?;
-    tracing::info!("[Models] model is installed");
+    if config.stt.endpoint.is_none() {
+        let spec = models::require(&config.stt.model)?;
+        models::installed(spec)?.context("model not installed — run: cantrip models pull")?;
+        tracing::info!("[Models] model is installed");
+    }
 
     let runtime_dir =
         paths::ensure_dir(paths::runtime_dir()?).context("creating runtime directory")?;
@@ -120,7 +204,7 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
         results: result_rx,
         ready: ready_rx,
         handle: worker,
-    } = spawn_worker(model_dir, warm);
+    } = spawn_worker(&config, warm);
     match ready_rx
         .recv()
         .context("waiting for transcription worker")?
@@ -134,7 +218,7 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
     }
 
     tracing::info!("[Daemon] listening");
-    let loop_result = serve(&listener, &config, &runtime_dir, &job_tx, &result_rx);
+    let loop_result = serve(&listener, config, &runtime_dir, &job_tx, &result_rx);
     drop(job_tx);
     if worker.join().is_err() {
         tracing::warn!("[STT] worker thread exited unexpectedly");
@@ -178,42 +262,71 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
 
 /// Channels wiring the daemon loop to its transcription worker thread.
 struct WorkerChannels {
-    jobs: Sender<PathBuf>,
+    jobs: Sender<Job>,
     results: Receiver<WorkerResult>,
     ready: Receiver<std::result::Result<(), String>>,
     handle: JoinHandle<()>,
 }
 
-fn spawn_worker(model_dir: PathBuf, warm: bool) -> WorkerChannels {
-    let (job_tx, job_rx) = mpsc::channel::<PathBuf>();
+fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
+    let (job_tx, job_rx) = mpsc::channel::<Job>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
     let (ready_tx, ready_rx) = mpsc::channel::<std::result::Result<(), String>>();
+    let warm_stt = config.stt.clone();
     let worker = thread::spawn(move || {
-        let mut transcriber = if warm {
-            match Transcriber::load(&model_dir) {
-                Ok(transcriber) => Some(transcriber),
+        let mut transcriber: Option<(String, Transcriber)> = None;
+        if warm && warm_stt.endpoint.is_none() {
+            match load_local_transcriber(&warm_stt.model) {
+                Ok(loaded) => transcriber = Some(loaded),
                 Err(error) => {
                     let _ = ready_tx.send(Err(format!("loading transcription model: {error:#}")));
                     return;
                 }
             }
-        } else {
-            None
-        };
+        }
         let _ = ready_tx.send(Ok(()));
 
-        while let Ok(wav) = job_rx.recv() {
+        while let Ok(job) = job_rx.recv() {
+            let Job {
+                wav,
+                stt,
+                vocabulary,
+                postproc: postproc_cfg,
+            } = job;
             let wav = RecordingCleanup(wav);
-            let started = Instant::now();
-            let transcription = transcribe_one(&mut transcriber, &model_dir, &wav.0)
+            let stt_started = Instant::now();
+            let transcription = transcribe_job(&mut transcriber, &wav.0, &stt, &vocabulary)
                 .map_err(|error| format!("{error:#}"));
-            let chars = transcription
-                .as_ref()
-                .map_or(0, |text| text.chars().count());
+            let stt_elapsed = stt_started.elapsed();
+            let (result, postproc) = match transcription {
+                Ok(text) if !text.trim().is_empty() && postproc_cfg.enabled => {
+                    let postproc_started = Instant::now();
+                    let refined =
+                        resolve_api_key(postproc_cfg.api_key_id.as_deref()).and_then(|key| {
+                            postproc::refine(&text, &postproc_cfg, &vocabulary, key.as_deref())
+                        });
+                    match refined {
+                        Ok(text) => (
+                            Ok(text),
+                            PostprocStatus::Applied {
+                                ms: postproc_started.elapsed().as_millis(),
+                            },
+                        ),
+                        Err(error) => {
+                            tracing::warn!("[Postproc] cleanup failed error={error:#}");
+                            (Ok(text), PostprocStatus::Failed)
+                        }
+                    }
+                }
+                Ok(text) => (Ok(text), PostprocStatus::Off),
+                Err(error) => (Err(error), PostprocStatus::Off),
+            };
+            let chars = result.as_ref().map_or(0, |text| text.chars().count());
             if result_tx
                 .send(WorkerResult {
-                    result: transcription,
-                    stt_elapsed: started.elapsed(),
+                    result,
+                    stt_elapsed,
+                    postproc,
                 })
                 .is_err()
             {
@@ -229,40 +342,73 @@ fn spawn_worker(model_dir: PathBuf, warm: bool) -> WorkerChannels {
     }
 }
 
-fn transcribe_one(
-    transcriber: &mut Option<Transcriber>,
-    model_dir: &Path,
+fn resolve_api_key(id: Option<&str>) -> Result<Option<String>> {
+    id.map(|id| keys::get(id).with_context(|| format!("api key '{id}' unavailable")))
+        .transpose()
+}
+
+fn load_local_transcriber(model: &str) -> Result<(String, Transcriber)> {
+    let spec = models::require(model)?;
+    let model_dir =
+        models::installed(spec)?.context("model not installed — run: cantrip models pull")?;
+    let transcriber = Transcriber::load(&model_dir)
+        .with_context(|| format!("loading transcription model '{model}'"))?;
+    Ok((model.to_owned(), transcriber))
+}
+
+fn transcribe_job(
+    transcriber: &mut Option<(String, Transcriber)>,
     wav: &Path,
+    stt: &SttConfig,
+    vocabulary: &[String],
 ) -> Result<String> {
-    if transcriber.is_none() {
-        *transcriber = Some(Transcriber::load(model_dir)?);
+    if let Some(endpoint) = &stt.endpoint {
+        let key = resolve_api_key(stt.api_key_id.as_deref())?;
+        return stt::transcribe_remote(wav, endpoint, &stt.model, vocabulary, key.as_deref());
+    }
+
+    let reload = transcriber
+        .as_ref()
+        .is_none_or(|(name, _)| name != &stt.model);
+    if reload {
+        *transcriber = Some(load_local_transcriber(&stt.model)?);
     }
     transcriber
         .as_mut()
+        .map(|(_, transcriber)| transcriber)
         .context("transcription worker has no model")?
         .transcribe_wav(wav)
 }
 
 fn serve(
     listener: &UnixListener,
-    config: &Config,
+    mut config: Config,
     runtime_dir: &Path,
-    job_tx: &Sender<PathBuf>,
+    job_tx: &Sender<Job>,
     result_rx: &Receiver<WorkerResult>,
 ) -> Result<()> {
     let mut state = State::Idle;
+    let mut status = StatusUi::default();
     loop {
-        drain_worker_results(&mut state, config, result_rx)?;
+        drain_worker_results(&mut state, &config, result_rx, &mut status)?;
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
+        }
+        if let State::Recording { started, .. } = &state {
+            status.tick(started.elapsed());
         }
 
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    if let Err(error) =
-                        handle_connection(stream, &mut state, config, runtime_dir, job_tx)
-                    {
+                    if let Err(error) = handle_connection(
+                        stream,
+                        &mut state,
+                        &mut config,
+                        runtime_dir,
+                        job_tx,
+                        &mut status,
+                    ) {
                         tracing::warn!("[Daemon] client request failed: {error:#}");
                     }
                 }
@@ -276,12 +422,13 @@ fn serve(
 
     if matches!(&state, State::Processing { .. }) {
         match result_rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(result) => handle_worker_result(&mut state, config, result)?,
+            Ok(result) => handle_worker_result(&mut state, &config, result, &mut status)?,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 tracing::warn!("[STT] transcription result timed out during shutdown");
-                notify("Transcription failed: worker timed out");
+                status.finish("Transcription failed: worker timed out");
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                status.finish("Transcription failed: worker died");
                 anyhow::bail!("transcription worker died");
             }
         }
@@ -290,13 +437,13 @@ fn serve(
     tracing::info!("[Daemon] shutting down");
     Ok(())
 }
-
 fn handle_connection(
     mut stream: UnixStream,
     state: &mut State,
-    config: &Config,
+    config: &mut Config,
     runtime_dir: &Path,
-    job_tx: &Sender<PathBuf>,
+    job_tx: &Sender<Job>,
+    status: &mut StatusUi,
 ) -> Result<()> {
     let deadline = Instant::now() + CLIENT_READ_DEADLINE;
     let mut command_line = Vec::with_capacity(CLIENT_LINE_LIMIT);
@@ -338,7 +485,7 @@ fn handle_connection(
 
     let command_line = String::from_utf8_lossy(&command_line);
     let reply = match Command::parse(&command_line) {
-        Some(command) => execute(command, state, config, runtime_dir, job_tx),
+        Some(command) => execute(command, state, config, runtime_dir, job_tx, status),
         None => Reply {
             ok: false,
             state: state.name().to_owned(),
@@ -364,18 +511,19 @@ fn write_client_error(stream: &mut UnixStream, state: &State, message: &str) -> 
 fn execute(
     command: Command,
     state: &mut State,
-    config: &Config,
+    config: &mut Config,
     runtime_dir: &Path,
-    job_tx: &Sender<PathBuf>,
+    job_tx: &Sender<Job>,
+    status: &mut StatusUi,
 ) -> Reply {
     match command {
         Command::Toggle => match state {
-            State::Idle => start_recording(state, config, runtime_dir),
-            State::Recording { .. } => stop_recording(state, job_tx),
+            State::Idle => start_recording(state, config, runtime_dir, status),
+            State::Recording { .. } => stop_recording(state, config, job_tx, status),
             State::Processing { .. } => busy_reply(state),
         },
         Command::Start => match state {
-            State::Idle => start_recording(state, config, runtime_dir),
+            State::Idle => start_recording(state, config, runtime_dir, status),
             _ => Reply {
                 ok: false,
                 state: state.name().to_owned(),
@@ -383,7 +531,7 @@ fn execute(
             },
         },
         Command::Stop => match state {
-            State::Recording { .. } => stop_recording(state, job_tx),
+            State::Recording { .. } => stop_recording(state, config, job_tx, status),
             State::Idle => Reply {
                 ok: false,
                 state: state.name().to_owned(),
@@ -391,7 +539,7 @@ fn execute(
             },
             State::Processing { .. } => busy_reply(state),
         },
-        Command::Cancel => cancel_recording(state),
+        Command::Cancel => cancel_recording(state, status),
         Command::Status => Reply {
             ok: true,
             state: state.name().to_owned(),
@@ -402,10 +550,31 @@ fn execute(
             state: state.name().to_owned(),
             message: Some("pong".to_owned()),
         },
+        Command::Reload => match Config::load() {
+            Ok(new_config) => {
+                *config = new_config;
+                tracing::info!("[Daemon] config reloaded");
+                Reply {
+                    ok: true,
+                    state: state.name().to_owned(),
+                    message: Some("reloaded".to_owned()),
+                }
+            }
+            Err(error) => Reply {
+                ok: false,
+                state: state.name().to_owned(),
+                message: Some(format!("{error:#}")),
+            },
+        },
     }
 }
 
-fn start_recording(state: &mut State, config: &Config, runtime_dir: &Path) -> Reply {
+fn start_recording(
+    state: &mut State,
+    config: &Config,
+    runtime_dir: &Path,
+    status: &mut StatusUi,
+) -> Reply {
     let wav = runtime_dir.join(format!("rec-{}.wav", unix_millis()));
     match Recorder::start(&wav, config.audio_source.as_deref()) {
         Ok(recorder) => {
@@ -414,7 +583,7 @@ fn start_recording(state: &mut State, config: &Config, runtime_dir: &Path) -> Re
                 started: Instant::now(),
             };
             tracing::info!("[Daemon] state idle -> recording");
-            notify("Listening…");
+            status.recording();
             Reply {
                 ok: true,
                 state: state.name().to_owned(),
@@ -429,7 +598,12 @@ fn start_recording(state: &mut State, config: &Config, runtime_dir: &Path) -> Re
     }
 }
 
-fn stop_recording(state: &mut State, job_tx: &Sender<PathBuf>) -> Reply {
+fn stop_recording(
+    state: &mut State,
+    config: &Config,
+    job_tx: &Sender<Job>,
+    status: &mut StatusUi,
+) -> Reply {
     let State::Recording { recorder, started } = std::mem::replace(state, State::Idle) else {
         unreachable!("stop_recording called outside recording state");
     };
@@ -438,7 +612,7 @@ fn stop_recording(state: &mut State, job_tx: &Sender<PathBuf>) -> Reply {
     let wav = match recorder.stop() {
         Ok(wav) => wav,
         Err(error) => {
-            notify(&format!("Recording failed: {error:#}"));
+            status.finish(&format!("Recording failed: {error:#}"));
             return Reply {
                 ok: false,
                 state: state.name().to_owned(),
@@ -446,11 +620,17 @@ fn stop_recording(state: &mut State, job_tx: &Sender<PathBuf>) -> Reply {
             };
         }
     };
-    if job_tx.send(wav.clone()).is_err() {
+    let job = Job {
+        wav: wav.clone(),
+        stt: config.stt.clone(),
+        vocabulary: config.vocabulary.clone(),
+        postproc: config.postproc.clone(),
+    };
+    if job_tx.send(job).is_err() {
         if let Err(error) = capture::remove_recording(&wav) {
             tracing::warn!("[Capture] recording cleanup failed: {error:#}");
         }
-        notify("Transcription failed: worker unavailable");
+        status.finish("Transcription failed: worker unavailable");
         return Reply {
             ok: false,
             state: state.name().to_owned(),
@@ -461,7 +641,7 @@ fn stop_recording(state: &mut State, job_tx: &Sender<PathBuf>) -> Reply {
         started: Instant::now(),
     };
     tracing::info!("[Daemon] state recording -> processing record_secs={record_secs:.3}");
-    notify("Transcribing…");
+    status.processing();
     Reply {
         ok: true,
         state: state.name().to_owned(),
@@ -469,24 +649,27 @@ fn stop_recording(state: &mut State, job_tx: &Sender<PathBuf>) -> Reply {
     }
 }
 
-fn cancel_recording(state: &mut State) -> Reply {
+fn cancel_recording(state: &mut State, status: &mut StatusUi) -> Reply {
     let previous = std::mem::replace(state, State::Idle);
     match previous {
         State::Recording { recorder, .. } => match recorder.cancel() {
             Ok(()) => {
                 tracing::info!("[Daemon] state recording -> idle (cancelled)");
-                notify("Cancelled");
+                status.finish("Cancelled");
                 Reply {
                     ok: true,
                     state: state.name().to_owned(),
                     message: Some("cancelled".to_owned()),
                 }
             }
-            Err(error) => Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some(format!("cancelling recording failed: {error:#}")),
-            },
+            Err(error) => {
+                status.finish(&format!("Cancelling recording failed: {error:#}"));
+                Reply {
+                    ok: false,
+                    state: state.name().to_owned(),
+                    message: Some(format!("cancelling recording failed: {error:#}")),
+                }
+            }
         },
         other => {
             *state = other;
@@ -515,20 +698,26 @@ fn drain_worker_results(
     state: &mut State,
     config: &Config,
     result_rx: &Receiver<WorkerResult>,
+    status: &mut StatusUi,
 ) -> Result<()> {
     loop {
         let result = match result_rx.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => {
+                status.finish("Transcription failed: worker died");
                 anyhow::bail!("transcription worker died");
             }
         };
-        handle_worker_result(state, config, result)?;
+        handle_worker_result(state, config, result, status)?;
     }
 }
-
-fn handle_worker_result(state: &mut State, config: &Config, result: WorkerResult) -> Result<()> {
+fn handle_worker_result(
+    state: &mut State,
+    config: &Config,
+    result: WorkerResult,
+    status: &mut StatusUi,
+) -> Result<()> {
     let processing_started = match state {
         State::Processing { started } => *started,
         _ => {
@@ -536,85 +725,117 @@ fn handle_worker_result(state: &mut State, config: &Config, result: WorkerResult
             return Ok(());
         }
     };
+    let WorkerResult {
+        result: transcript,
+        stt_elapsed,
+        postproc,
+    } = result;
+    let postproc_failed = matches!(&postproc, PostprocStatus::Failed);
+    let postproc_ms = match postproc {
+        PostprocStatus::Applied { ms } => Some(ms),
+        PostprocStatus::Off | PostprocStatus::Failed => None,
+    };
 
-    match result.result {
+    match transcript {
         Ok(text) if text.trim().is_empty() => {
             tracing::info!(
                 "[Daemon] state processing -> idle stt_ms={} chars=0 (no speech detected)",
-                result.stt_elapsed.as_millis()
+                stt_elapsed.as_millis()
             );
-            notify("Heard nothing");
+            status.finish("Heard nothing");
         }
         Ok(text) => {
             let chars = text.chars().count();
             let inject_started = Instant::now();
+            let cleanup_suffix = if postproc_failed {
+                " (cleanup failed — raw text)"
+            } else {
+                ""
+            };
             match inject::inject(&text, config.injection) {
                 Ok(outcome) => {
                     let inject_ms = inject_started.elapsed().as_millis();
                     let total_ms = processing_started.elapsed().as_millis();
                     let message = match outcome {
-                        InjectionOutcome::Typed(tool) => format!("Typed {chars} chars ({tool})"),
+                        InjectionOutcome::Typed(tool) => {
+                            format!("Typed {chars} chars ({tool}){cleanup_suffix}")
+                        }
                         InjectionOutcome::Clipboard => {
-                            format!("Copied to clipboard — press Ctrl+V ({chars} chars)")
+                            format!(
+                                "Copied to clipboard — press Ctrl+V ({chars} chars){cleanup_suffix}"
+                            )
                         }
                     };
-                    tracing::info!(
-                        "[Daemon] state processing -> idle stt_ms={} inject_ms={} chars={chars}",
-                        result.stt_elapsed.as_millis(),
-                        inject_ms
-                    );
+                    log_processing_idle(stt_elapsed, inject_ms, chars, postproc_ms);
                     tracing::info!("[Inject] injected chars={chars} total_ms={total_ms}");
-                    notify(&message);
+                    status.finish(&message);
                 }
                 Err(error) if config.injection != InjectionMode::Clipboard => {
                     tracing::warn!(
                         "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
-                        result.stt_elapsed.as_millis()
+                        stt_elapsed.as_millis()
                     );
                     match inject::inject(&text, InjectionMode::Clipboard) {
                         Ok(_) => {
                             let inject_ms = inject_started.elapsed().as_millis();
                             let total_ms = processing_started.elapsed().as_millis();
-                            tracing::info!(
-                                "[Daemon] state processing -> idle stt_ms={} inject_ms={} chars={chars}",
-                                result.stt_elapsed.as_millis(),
-                                inject_ms
-                            );
+                            log_processing_idle(stt_elapsed, inject_ms, chars, postproc_ms);
                             tracing::info!(
                                 "[Inject] clipboard fallback chars={chars} total_ms={total_ms}"
                             );
-                            notify(&format!(
-                                "Typing failed — copied to clipboard ({chars} chars)"
+                            status.finish(&format!(
+                                "Typing failed — copied to clipboard ({chars} chars){cleanup_suffix}"
                             ));
                         }
                         Err(fallback_error) => {
                             tracing::warn!(
                                 "[Inject] clipboard fallback failed chars={chars} stt_ms={} error={fallback_error:#}",
-                                result.stt_elapsed.as_millis()
+                                stt_elapsed.as_millis()
                             );
-                            notify("Typing failed; clipboard fallback failed");
+                            status.finish("Typing failed; clipboard fallback failed");
                         }
                     }
                 }
                 Err(error) => {
                     tracing::warn!(
                         "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
-                        result.stt_elapsed.as_millis()
+                        stt_elapsed.as_millis()
                     );
-                    notify(&format!("Injection failed: {error:#}"));
+                    status.finish(&format!("Injection failed: {error:#}"));
                 }
             }
         }
         Err(error) => {
             tracing::warn!(
                 "[STT] transcription failed stt_ms={} error={error}",
-                result.stt_elapsed.as_millis()
+                stt_elapsed.as_millis()
             );
-            notify(&format!("Transcription failed: {error}"));
+            status.finish(&format!("Transcription failed: {error}"));
         }
     }
     *state = State::Idle;
     Ok(())
+}
+
+fn log_processing_idle(
+    stt_elapsed: Duration,
+    inject_ms: u128,
+    chars: usize,
+    postproc_ms: Option<u128>,
+) {
+    if let Some(postproc_ms) = postproc_ms {
+        tracing::info!(
+            "[Daemon] state processing -> idle stt_ms={} inject_ms={} postproc_ms={postproc_ms} chars={chars}",
+            stt_elapsed.as_millis(),
+            inject_ms
+        );
+    } else {
+        tracing::info!(
+            "[Daemon] state processing -> idle stt_ms={} inject_ms={} chars={chars}",
+            stt_elapsed.as_millis(),
+            inject_ms
+        );
+    }
 }
 
 fn shutdown_state(state: &mut State) {
@@ -623,12 +844,6 @@ fn shutdown_state(state: &mut State) {
         if let Err(error) = recorder.cancel() {
             tracing::warn!("[Capture] shutdown cancellation failed: {error:#}");
         }
-    }
-}
-
-fn notify(body: &str) {
-    if let Err(error) = Notification::new().summary("Cantrip").body(body).show() {
-        tracing::debug!("[Daemon] notification unavailable: {}", error);
     }
 }
 

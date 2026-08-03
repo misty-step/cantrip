@@ -1,0 +1,174 @@
+//! HTTP round-trip contracts for post-processing and remote transcription
+//! against a local mock OpenAI-compatible server.
+
+use cantrip::config::PostprocConfig;
+use cantrip::postproc;
+use cantrip::stt;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+
+/// One-shot HTTP server: accepts a single request, captures it, sends `response`.
+fn mock_server(response: String) -> (String, thread::JoinHandle<CapturedRequest>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binding mock server");
+    let addr = listener.local_addr().expect("mock server address");
+    let handle = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accepting mock connection");
+        let captured = read_request(&stream);
+        let mut stream = stream;
+        stream
+            .write_all(response.as_bytes())
+            .expect("writing mock response");
+        captured
+    });
+    (format!("http://{addr}"), handle)
+}
+
+struct CapturedRequest {
+    request_line: String,
+    headers: Vec<String>,
+    body: Vec<u8>,
+}
+
+impl CapturedRequest {
+    fn header(&self, name: &str) -> Option<&str> {
+        let prefix = format!("{}:", name.to_ascii_lowercase());
+        self.headers
+            .iter()
+            .find(|line| line.to_ascii_lowercase().starts_with(&prefix))
+            .map(|line| line[prefix.len()..].trim())
+    }
+}
+
+fn read_request(stream: &TcpStream) -> CapturedRequest {
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .expect("reading request line");
+    let mut headers = Vec::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("reading header line");
+        let line = line.trim_end().to_owned();
+        if line.is_empty() {
+            break;
+        }
+        headers.push(line);
+    }
+    let length: usize = headers
+        .iter()
+        .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+        .and_then(|line| line.split(':').nth(1))
+        .and_then(|value| value.trim().parse().ok())
+        .expect("content-length header");
+    let mut body = vec![0_u8; length];
+    reader.read_exact(&mut body).expect("reading request body");
+    CapturedRequest {
+        request_line: request_line.trim_end().to_owned(),
+        headers,
+        body,
+    }
+}
+
+fn ok_json(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn postproc_config(endpoint: String) -> PostprocConfig {
+    PostprocConfig {
+        enabled: true,
+        endpoint,
+        model: "test-model".to_owned(),
+        api_key_id: None,
+        timeout_ms: 5_000,
+        instructions: "Keep numerals as digits.".to_owned(),
+    }
+}
+
+#[test]
+fn refine_round_trip_sends_contract_request_and_strips_think() {
+    let response = ok_json(
+        r#"{"choices":[{"message":{"content":"<think>internal chain</think>Hello, Cantrip world."}}],"usage":{"total_tokens":9}}"#,
+    );
+    let (endpoint, server) = mock_server(response);
+    let cfg = postproc_config(endpoint);
+    let vocabulary = vec!["Cantrip".to_owned(), "PipeWire".to_owned()];
+
+    let refined = postproc::refine("hello cantrip world", &cfg, &vocabulary, Some("sk-test"))
+        .expect("refine should succeed");
+    assert_eq!(refined, "Hello, Cantrip world.");
+
+    let request = server.join().expect("mock server thread");
+    assert_eq!(request.request_line, "POST /chat/completions HTTP/1.1");
+    assert_eq!(request.header("authorization"), Some("Bearer sk-test"));
+    assert_eq!(request.header("content-type"), Some("application/json"));
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&request.body).expect("request body is JSON");
+    assert_eq!(body["model"], "test-model");
+    assert_eq!(body["temperature"], 0);
+    assert_eq!(body["messages"][0]["role"], "system");
+    let system = body["messages"][0]["content"]
+        .as_str()
+        .expect("system prompt");
+    assert!(system.contains("Cantrip, PipeWire"));
+    assert!(system.contains("Keep numerals as digits."));
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], "hello cantrip world");
+}
+
+#[test]
+fn refine_http_error_reports_status_without_response_body() {
+    static RESPONSE: &str = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 43\r\nConnection: close\r\n\r\n{\"error\":\"SECRET-MARKER transcript echoed\"}";
+    let (endpoint, server) = mock_server(RESPONSE.to_owned());
+    let cfg = postproc_config(endpoint);
+
+    let error =
+        postproc::refine("some dictated words", &cfg, &[], None).expect_err("HTTP 500 must fail");
+    let message = format!("{error:#}");
+    assert!(message.contains("HTTP 500"), "got: {message}");
+    assert!(
+        !message.contains("SECRET-MARKER"),
+        "error must not embed the response body: {message}"
+    );
+    server.join().expect("mock server thread");
+}
+
+#[test]
+fn transcribe_remote_round_trip_sends_multipart_wav() {
+    let (endpoint, server) = mock_server(ok_json(r#"{"text":" hello from the cloud "}"#));
+
+    let dir = std::env::temp_dir().join(format!("cantrip-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("creating temp dir");
+    let wav = dir.join("fake.wav");
+    std::fs::write(&wav, b"RIFF-fake-wav-bytes").expect("writing fake wav");
+
+    let text = stt::transcribe_remote(
+        &wav,
+        &endpoint,
+        "whisper-large-v3-turbo",
+        &["Cantrip".to_owned()],
+        Some("sk-cloud"),
+    )
+    .expect("remote transcription should succeed");
+    assert_eq!(text, "hello from the cloud");
+
+    let request = server.join().expect("mock server thread");
+    assert_eq!(request.request_line, "POST /audio/transcriptions HTTP/1.1");
+    assert_eq!(request.header("authorization"), Some("Bearer sk-cloud"));
+    let content_type = request.header("content-type").expect("content type");
+    assert!(content_type.starts_with("multipart/form-data; boundary="));
+
+    let body = String::from_utf8_lossy(&request.body);
+    assert!(body.contains("name=\"model\"\r\n\r\nwhisper-large-v3-turbo"));
+    assert!(body.contains("name=\"prompt\"\r\n\r\nCantrip"));
+    assert!(body.contains("name=\"response_format\"\r\n\r\njson"));
+    assert!(body.contains("filename=\"audio.wav\""));
+    assert!(body.contains("RIFF-fake-wav-bytes"));
+
+    std::fs::remove_dir_all(&dir).expect("removing temp dir");
+}

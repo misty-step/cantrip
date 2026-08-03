@@ -29,6 +29,26 @@ pub const PARAKEET_V3_INT8: ModelSpec = ModelSpec {
     ],
 };
 
+pub const MODEL_NAMES: &[&str] = &["parakeet-tdt-0.6b-v3-int8"];
+
+fn spec(name: &str) -> Option<&'static ModelSpec> {
+    if PARAKEET_V3_INT8.dir_name == name {
+        Some(&PARAKEET_V3_INT8)
+    } else {
+        None
+    }
+}
+
+/// Look up a local model by name, failing with the list of valid names.
+pub fn require(name: &str) -> Result<&'static ModelSpec> {
+    spec(name).with_context(|| {
+        format!(
+            "unknown local stt.model '{name}'; valid names: {}",
+            MODEL_NAMES.join(", ")
+        )
+    })
+}
+
 pub fn installed(spec: &ModelSpec) -> Result<Option<PathBuf>> {
     let root = models_dir().context("locating model directory")?;
     installed_in(&root, spec)
@@ -259,6 +279,16 @@ mod tests {
             Some(dir)
         );
         fs::remove_dir_all(root).expect("remove test model");
+    }
+
+    #[test]
+    fn registry_lookup_uses_directory_name() {
+        assert_eq!(
+            spec("parakeet-tdt-0.6b-v3-int8").map(|model| model.dir_name),
+            Some("parakeet-tdt-0.6b-v3-int8")
+        );
+        assert!(spec("missing-model").is_none());
+        assert_eq!(MODEL_NAMES, &["parakeet-tdt-0.6b-v3-int8"]);
     }
 
     fn test_root() -> PathBuf {
