@@ -50,6 +50,20 @@ pub struct Reply {
     pub ok: bool,
     pub state: String,
     pub message: Option<String>,
+    /// Recording elapsed seconds, present while state is "recording".
+    #[serde(default)]
+    pub elapsed: Option<u64>,
+    /// Processing sub-stage, present while state is "processing":
+    /// "transcribing" | "cleaning".
+    #[serde(default)]
+    pub stage: Option<String>,
+    /// Most recent terminal message (Typed N chars, Heard nothing,
+    /// Cancelled, ...), cleared when a new recording starts.
+    #[serde(default)]
+    pub last: Option<String>,
+    /// Whether the last terminal message was a delivered dictation.
+    #[serde(default)]
+    pub last_ok: Option<bool>,
 }
 
 /// Send one command and read one JSON reply from the daemon.
@@ -109,6 +123,10 @@ mod tests {
             ok: true,
             state: "processing".to_owned(),
             message: Some("queued".to_owned()),
+            elapsed: Some(3),
+            stage: Some("cleaning".to_owned()),
+            last: Some("Typed 42 chars".to_owned()),
+            last_ok: Some(true),
         };
         let json = serde_json::to_string(&reply).expect("reply should serialize");
         let decoded: Reply = serde_json::from_str(&json).expect("reply should deserialize");

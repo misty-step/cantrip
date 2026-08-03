@@ -14,6 +14,8 @@ Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 - `src/config.rs` / `src/paths.rs` — TOML config, XDG paths
 - `src/postproc.rs` — OpenAI-compatible transcript cleanup
 - `src/keys.rs` — OS keyring API key access
+- `src/pipeline.rs` — shared STT + postproc job pipeline (daemon + `transcribe`)
+- `src/hud.rs` — layer-shell status HUD (`cantrip hud`)
 - `docs/adr/` — architecture decisions; add an ADR before non-obvious changes
 
 ## Commands
@@ -26,7 +28,7 @@ Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 - Never log transcript content — character counts only. `cantrip transcribe`
   stdout is the single exemption. Postproc/cloud HTTP errors log status codes
   only, never bodies.
-- Log tags: `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]`.
+- Log tags: `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 - Stop `pw-record` with SIGINT and wait; SIGKILL corrupts the WAV.
 - Type-mode injection must never touch the clipboard.
 - Recordings live only under `$XDG_RUNTIME_DIR/cantrip` and are deleted after

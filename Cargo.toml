@@ -21,6 +21,9 @@ notify-rust = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
+smithay-client-toolkit = { version = "0.21.1", default-features = false }
+wayland-client = "0.31.14"
+ab_glyph = "0.2.32"
 
 [features]
 default = []

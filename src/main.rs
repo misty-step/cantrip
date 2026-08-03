@@ -8,8 +8,7 @@ use std::process::Command as ProcessCommand;
 
 use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
-use cantrip::stt::Transcriber;
-use cantrip::{config::Config, daemon, keys, paths};
+use cantrip::{config::Config, daemon, hud, keys, paths, pipeline};
 
 #[derive(Debug, Parser)]
 #[command(name = "cantrip", version, about = "Local-first Linux dictation")]
@@ -25,6 +24,8 @@ enum CliCommand {
         #[arg(long)]
         preload: bool,
     },
+    /// Show the layer-shell status HUD.
+    Hud,
     Toggle,
     Start,
     Stop,
@@ -95,6 +96,7 @@ fn run() -> Result<()> {
             let config = Config::load().context("loading configuration")?;
             daemon::run(config, preload)
         }
+        CliCommand::Hud => hud::run(),
         CliCommand::Toggle => send_command(Command::Toggle),
         CliCommand::Start => send_command(Command::Start),
         CliCommand::Stop => send_command(Command::Stop),
@@ -271,6 +273,15 @@ fn send_command(command: Command) -> Result<()> {
     if let Some(message) = &reply.message {
         println!("message: {message}");
     }
+    if let Some(elapsed) = reply.elapsed {
+        println!("elapsed: {elapsed}s");
+    }
+    if let Some(stage) = reply.stage {
+        println!("stage: {stage}");
+    }
+    if let Some(last) = &reply.last {
+        println!("last: {last}");
+    }
     if !reply.ok {
         anyhow::bail!("daemon rejected the command");
     }
@@ -278,13 +289,29 @@ fn send_command(command: Command) -> Result<()> {
 }
 
 fn transcribe_file(wav: &std::path::Path) -> Result<()> {
-    let model_dir =
-        models::ensure_model(&PARAKEET_V3_INT8).context("ensuring transcription model")?;
-    let mut transcriber = Transcriber::load(&model_dir).context("loading transcription model")?;
-    let text = transcriber
-        .transcribe_wav(wav)
-        .with_context(|| format!("transcribing {}", wav.display()))?;
-    println!("{text}");
+    let config = Config::load().context("loading configuration")?;
+    if config.stt.endpoint.is_none() {
+        let spec = models::require(&config.stt.model)?;
+        models::ensure_model(spec).context("ensuring transcription model")?;
+    }
+    let mut cache = None;
+    let outcome = pipeline::run(
+        &mut cache,
+        wav,
+        &config.stt,
+        &config.vocabulary,
+        &config.postproc,
+        |_| {},
+    );
+    match &outcome.text {
+        Ok(text) => {
+            if outcome.postproc == pipeline::PostprocStatus::Failed {
+                eprintln!("post-processing failed; showing the raw transcript");
+            }
+            println!("{text}");
+        }
+        Err(error) => anyhow::bail!("transcribing {}: {error}", wav.display()),
+    }
     Ok(())
 }
 
