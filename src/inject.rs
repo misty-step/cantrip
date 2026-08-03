@@ -50,7 +50,10 @@ struct AvailableBackends {
 
 /// Inject text with the requested backend policy.
 pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
-    let available = detect_backends();
+    let available = AvailableBackends {
+        wtype: executable_in_path("wtype"),
+        ydotool: executable_in_path("ydotool") && ydotool_socket_exists(),
+    };
     let order = backend_order(mode, available);
     let mut failures = Vec::new();
 
@@ -93,13 +96,6 @@ pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
     }
 }
 
-fn detect_backends() -> AvailableBackends {
-    AvailableBackends {
-        wtype: executable_in_path("wtype"),
-        ydotool: executable_in_path("ydotool") && ydotool_socket_exists(),
-    }
-}
-
 fn backend_order(mode: InjectionMode, available: AvailableBackends) -> Vec<Backend> {
     match mode {
         InjectionMode::Auto => {
@@ -127,7 +123,9 @@ fn backend_order(mode: InjectionMode, available: AvailableBackends) -> Vec<Backe
     }
 }
 
-fn executable_in_path(binary: &str) -> bool {
+/// True when `name` resolves to an executable file on `PATH`.
+/// `pub` (not `pub(crate)`): the `cantrip` binary is a separate crate.
+pub fn executable_in_path(name: &str) -> bool {
     let Some(path_var) = env::var_os("PATH") else {
         return false;
     };
@@ -137,7 +135,7 @@ fn executable_in_path(binary: &str) -> bool {
         } else {
             directory
         };
-        let candidate = directory.join(binary);
+        let candidate = directory.join(name);
         match candidate.metadata() {
             Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
             Err(_) => false,
@@ -150,13 +148,11 @@ fn ydotool_socket_exists() -> bool {
         .filter(|socket| !socket.is_empty())
         .map(|socket| PathBuf::from(socket).exists())
         .unwrap_or(false);
-    configured || default_ydotool_socket().exists()
-}
-
-fn default_ydotool_socket() -> PathBuf {
-    PathBuf::from(format!("/run/user/{}/.ydotool_socket", unsafe {
-        libc::getuid()
-    }))
+    configured
+        || PathBuf::from(format!("/run/user/{}/.ydotool_socket", unsafe {
+            libc::getuid()
+        }))
+        .exists()
 }
 
 fn run_wtype(text: &str) -> Result<()> {

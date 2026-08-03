@@ -77,11 +77,9 @@ trigger is just a CLI call. `cantrip cancel` discards an in-flight recording.
 `~/.config/cantrip/config.toml`:
 
 ```toml
-model = "parakeet-tdt-0.6b-v3-int8"
 injection = "auto"        # auto | type | clipboard
 keep_warm = true           # keep model loaded in the daemon
-# language = "en"          # Parakeet v3 auto-detects when unset
-# audio_source = "..."     # PipeWire target (default: system default mic)
+# audio_source = "..."     # PipeWire node name (default: system default mic)
 ```
 
 ## Privacy

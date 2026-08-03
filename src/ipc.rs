@@ -67,7 +67,6 @@ pub fn send(cmd: Command) -> Result<Reply> {
         .set_read_timeout(Some(timeout))
         .context("setting daemon reply timeout")?;
     writeln!(stream, "{}", cmd.as_str()).context("sending daemon command")?;
-    stream.flush().context("flushing daemon command")?;
 
     let mut line = String::new();
     let mut reader = BufReader::new(stream);

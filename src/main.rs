@@ -1,13 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::env;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use cantrip::config::Config;
 use cantrip::daemon;
-use cantrip::ipc::{self, Command, Reply};
+use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
 use cantrip::stt::Transcriber;
 
@@ -87,10 +85,6 @@ fn run() -> Result<()> {
 
 fn send_command(command: Command) -> Result<()> {
     let reply = ipc::send(command)?;
-    print_reply(&reply)
-}
-
-fn print_reply(reply: &Reply) -> Result<()> {
     println!("state: {}", reply.state);
     if let Some(message) = &reply.message {
         println!("message: {message}");
@@ -155,24 +149,11 @@ fn doctor() -> Result<()> {
 }
 
 fn availability(name: &str) -> &'static str {
-    if command_available(name) {
+    if cantrip::inject::executable_in_path(name) {
         "found"
     } else {
         "not found"
     }
-}
-
-fn command_available(name: &str) -> bool {
-    let Some(path_value) = env::var_os("PATH") else {
-        return false;
-    };
-    env::split_paths(&path_value).any(|dir| {
-        let candidate = dir.join(name);
-        match fs::metadata(candidate) {
-            Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
-            Err(_) => false,
-        }
-    })
 }
 
 fn ydotool_socket() -> Option<PathBuf> {

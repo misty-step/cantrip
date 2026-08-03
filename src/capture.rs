@@ -14,10 +14,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A running `pw-record` process and its output path.
 ///
-/// `stop`/`cancel` consume the recorder and disarm the drop guard. If the
-/// recorder is dropped any other way (daemon shutdown, panic), `Drop` kills
-/// the child so no orphaned pw-record keeps holding the microphone, and
-/// removes the partial recording.
+/// `stop` and `cancel` consume the recorder. If the recorder is dropped any
+/// other way (daemon shutdown, panic), `Drop` stops the child and removes the
+/// partial recording.
 pub struct Recorder {
     child: Child,
     wav_path: PathBuf,
@@ -48,9 +47,9 @@ impl Recorder {
 
     /// Stop the process cleanly and return the completed WAV path.
     pub fn stop(mut self) -> Result<PathBuf> {
-        self.disarmed = true;
         stop_child(&mut self.child).with_context(|| "stopping pw-record")?;
         verify_wav(&self.wav_path)?;
+        self.disarmed = true;
         tracing::info!(
             "[Capture] recording stopped after {} ms",
             self.started_at.elapsed().as_millis()
@@ -62,7 +61,7 @@ impl Recorder {
     pub fn cancel(mut self) -> Result<()> {
         self.disarmed = true;
         let elapsed = self.started_at.elapsed();
-        let stop_result = cancel_child(&mut self.child);
+        let stop_result = stop_child(&mut self.child);
         if let Err(error) = stop_result {
             if let Err(remove_error) = remove_recording(&self.wav_path) {
                 tracing::warn!(
@@ -88,8 +87,8 @@ impl Drop for Recorder {
         if self.disarmed {
             return;
         }
-        tracing::warn!("[Capture] recorder dropped while running; killing pw-record");
-        if cancel_child(&mut self.child).is_err() {
+        tracing::warn!("[Capture] recorder dropped while running; stopping pw-record");
+        if stop_child(&mut self.child).is_err() {
             let _ = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGKILL) };
             let _ = self.child.wait();
         }
@@ -122,7 +121,12 @@ fn pw_record_args(wav_path: &Path, source: Option<&str>) -> Vec<OsString> {
 
 fn stop_child(child: &mut Child) -> Result<()> {
     if let Some(status) = child.try_wait().context("checking pw-record state")? {
-        return Err(already_exited_error(child, status)?);
+        let stderr = read_stderr(child)?;
+        tracing::debug!(
+            "[Capture] pw-record already exited before SIGINT: {status}; stderr: {}",
+            display_stderr(&stderr)
+        );
+        return Ok(());
     }
 
     send_sigint(child).or_else(|signal_error| {
@@ -130,7 +134,12 @@ fn stop_child(child: &mut Child) -> Result<()> {
             .try_wait()
             .context("checking pw-record after SIGINT failure")?
         {
-            return Err(already_exited_error(child, status)?);
+            let stderr = read_stderr(child)?;
+            tracing::debug!(
+                "[Capture] pw-record already exited before SIGINT: {status}; stderr: {}",
+                display_stderr(&stderr)
+            );
+            return Ok(());
         }
         Err(signal_error)
     })?;
@@ -174,51 +183,6 @@ fn stop_child(child: &mut Child) -> Result<()> {
     );
 }
 
-fn cancel_child(child: &mut Child) -> Result<()> {
-    if child
-        .try_wait()
-        .context("checking pw-record state")?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    if let Err(signal_error) = send_sigint(child) {
-        if child
-            .try_wait()
-            .context("checking pw-record after SIGINT failure")?
-            .is_some()
-        {
-            return Ok(());
-        }
-        return Err(signal_error);
-    }
-
-    if wait_for_exit(child)?.is_some() {
-        return Ok(());
-    }
-
-    let pid = child.id();
-    let kill_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    let status = child
-        .wait()
-        .context("waiting for pw-record after SIGKILL")?;
-    let stderr = read_stderr(child)?;
-    if kill_result == -1 {
-        let error = std::io::Error::last_os_error();
-        bail!(
-            "pw-record did not stop within {} seconds; SIGKILL failed: {error}; status {status}; stderr: {}",
-            STOP_TIMEOUT.as_secs(),
-            display_stderr(&stderr)
-        );
-    }
-    bail!(
-        "pw-record did not stop within {} seconds; sent SIGKILL; status {status}; stderr: {}",
-        STOP_TIMEOUT.as_secs(),
-        display_stderr(&stderr)
-    );
-}
-
 fn send_sigint(child: &Child) -> Result<()> {
     let pid = child.id();
     let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
@@ -241,14 +205,6 @@ fn wait_for_exit(child: &mut Child) -> Result<Option<ExitStatus>> {
         }
         thread::sleep(POLL_INTERVAL);
     }
-}
-
-fn already_exited_error(child: &mut Child, status: ExitStatus) -> Result<anyhow::Error> {
-    let stderr = read_stderr(child)?;
-    Ok(anyhow!(
-        "pw-record exited before stop ({status}); stderr: {}",
-        display_stderr(&stderr)
-    ))
 }
 
 fn read_stderr(child: &mut Child) -> Result<String> {
@@ -283,7 +239,7 @@ fn verify_wav(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_recording(path: &Path) -> Result<()> {
+pub(crate) fn remove_recording(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
