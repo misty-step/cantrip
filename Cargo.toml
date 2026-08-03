@@ -1,0 +1,29 @@
+[package]
+name = "cantrip"
+version = "0.1.0"
+edition = "2021"
+description = "Local-first dictation for Linux: hold a key, speak, get text."
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+transcribe-rs = { version = "0.3", features = ["onnx"] }
+ureq = "2"
+tar = "0.4"
+flate2 = "1"
+notify-rust = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+
+[features]
+default = []
+cuda = ["transcribe-rs/ort-cuda"]
+
+[profile.release]
+lto = "thin"

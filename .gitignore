@@ -1,0 +1,5 @@
+/target
+*.wav
+!samples/*.wav
+.env*
+/.cargo/config.toml
