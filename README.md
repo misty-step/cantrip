@@ -71,6 +71,7 @@ running: `ollama pull qwen3:8b`), the corrected text lands at your cursor.
 |---|---|
 | `cantrip daemon [--preload]` | Run the dictation daemon |
 | `cantrip hud` | Run the layer-shell status HUD |
+| `cantrip settings` | Open the configuration window (view, edit, reload) |
 | `cantrip toggle` / `start` / `stop` / `cancel` | Dictation transitions |
 | `cantrip status` / `ping` | Daemon state |
 | `cantrip transcribe <wav>` | One-shot file transcription (debug; prints to stdout) |
@@ -90,10 +91,11 @@ the flag, `[postproc].enabled` decides.
 ## Configuration
 
 Everything lives in `~/.config/cantrip/config.toml` (or `cantrip config path`);
-`cantrip config show` prints the active file and `config edit` opens it. The
-gauntlet-informed recommended setup and every knob (STT model, cloud STT,
-postproc model + instructions, cloud postproc) are documented in
-[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
+`cantrip config show` prints the active file, `config edit` opens it, and
+`cantrip settings` opens a window you can keep open to view and adjust it
+(Save reloads the daemon). The gauntlet-informed recommended setup and every
+knob (STT model, cloud STT, postproc model + instructions, cloud postproc) are
+documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 ## Privacy
 

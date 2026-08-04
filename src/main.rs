@@ -8,7 +8,7 @@ use std::process::Command as ProcessCommand;
 
 use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
-use cantrip::{config::Config, daemon, hud, keys, paths, pipeline};
+use cantrip::{config::Config, daemon, hud, keys, paths, pipeline, settings};
 
 /// Per-dictation post-processing request, overriding [postproc].enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -35,6 +35,12 @@ enum CliCommand {
     },
     /// Show the layer-shell status HUD.
     Hud,
+    /// Open the configuration window.
+    Settings {
+        /// Render one frame to a PNG at PATH, then exit (visual testing).
+        #[arg(long, value_name = "PATH")]
+        screenshot: Option<PathBuf>,
+    },
     Toggle {
         /// Post-processing for this dictation: clean | raw (default: [postproc].enabled).
         #[arg(long, value_enum)]
@@ -114,6 +120,7 @@ fn run() -> Result<()> {
             daemon::run(config, preload)
         }
         CliCommand::Hud => hud::run(),
+        CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Toggle { postproc } => send_command(Command::Toggle {
             postproc: postproc.map(|mode| mode == PostprocMode::Clean),
         }),

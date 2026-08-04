@@ -24,6 +24,9 @@ libc = "0.2"
 smithay-client-toolkit = { version = "0.21.1", default-features = false }
 wayland-client = "0.31.14"
 ab_glyph = "0.2.32"
+eframe = "0.29"
+toml_edit = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]
 default = []

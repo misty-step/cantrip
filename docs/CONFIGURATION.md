@@ -3,7 +3,9 @@
 Cantrip reads one TOML file. `cantrip config path` prints its location
 (default `~/.config/cantrip/config.toml`), `config show` prints it,
 `config init` creates it with defaults, and `config edit` opens it in
-`$EDITOR`.
+`$EDITOR`. `cantrip settings` opens a window you can keep open to view
+and adjust the common settings; its Save button writes the file back
+(with comments preserved) and reloads the running daemon.
 
 Changes take effect on daemon start. Use `cantrip start` / `stop`, or restart
 the daemon process, after editing.
