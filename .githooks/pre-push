@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Heavier gates on every push: full test suite + authoritative secret scan of
+# the working tree (trufflehog). Install with: git config core.hooksPath .githooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "── pre-push: cargo test"
+cargo test
+
+echo "── pre-push: secret scan (trufflehog, working tree)"
+if command -v trufflehog >/dev/null 2>&1; then
+    trufflehog filesystem . --exclude-paths .trufflehog-exclude --only-verified >/dev/null 2>&1 || {
+        echo "✗ working tree contains a verified secret (trufflehog). Refusing to push."
+        exit 1
+    }
+else
+    echo "⚠ trufflehog not installed; skipping scan. Install: https://github.com/trufflesecurity/trufflehog"
+fi

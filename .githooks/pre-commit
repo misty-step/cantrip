@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fast gates on every commit: format, clippy, staged secret scan.
+# Install with: git config core.hooksPath .githooks  (see .githooks/install.sh)
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "── pre-commit: cargo fmt --check"
+cargo fmt --check
+
+echo "── pre-commit: cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets -- -D warnings
+
+echo "── pre-commit: staged secret scan (gitleaks)"
+if command -v gitleaks >/dev/null 2>&1; then
+    gitleaks protect --staged --no-banner 2>/dev/null || {
+        echo "✗ staged changes contain a detected secret (gitleaks). Refusing to commit."
+        exit 1
+    }
+else
+    echo "⚠ gitleaks not installed; skipping staged scan. Install: https://github.com/gitleaks/gitleaks"
+fi
