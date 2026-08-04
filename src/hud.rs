@@ -3,14 +3,17 @@
 //! The HUD is a read-only mirror of the daemon. It polls the existing status
 //! command and never sends a command which can change daemon state.
 //!
-//! Visual design: a top-centre capsule with a soft drop shadow and a 1px top
-//! rim light, one quiet UI-font label ("Listening…", "Transcribing…",
-//! "Cleaning…") with a small inline state glyph, and a trailing mm:ss counter
-//! while recording. Every visual state change eases over ~260ms
-//! (easeOutCubic): the pill pops in with scale+alpha, accent colors crossfade,
-//! and the pill width follows the content. The recording dot breathes with an
-//! expanding ping ring, processing shows a smooth rotating comet arc, and the
-//! result flash lands with a gentle check pop.
+//! Visual design: a top-centre capsule with a soft drop shadow, a 1px top
+//! rim light, and a whisper of the state accent in the capsule fill itself
+//! plus a 1px accent underglow along the bottom edge — so the whole pill
+//! reads the mode, not just the glyph. One quiet UI-font label
+//! ("Listening…", "Transcribing…", "Cleaning…") sits beside a small inline
+//! state glyph, with a trailing mm:ss counter while recording. Every visual
+//! state change eases over ~260ms (easeOutCubic): the pill pops in with
+//! scale+alpha, accent colors crossfade, and the pill width follows the
+//! content. The recording dot breathes with an expanding ping ring,
+//! processing shows a smooth rotating comet arc, and the result flash lands
+//! with a gentle check pop.
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use anyhow::{Context, Result};
@@ -56,17 +59,21 @@ const MAX_WIDTH: u32 = 900;
 const FONT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 // Layout, in design units (pixels at pop-in scale 1.0).
-const PILL_HEIGHT: f32 = 38.0;
-const MIN_PILL_WIDTH: f32 = 112.0;
+const PILL_HEIGHT: f32 = 36.0;
+const MIN_PILL_WIDTH: f32 = 108.0;
 /// Distance from the pill's left edge to the state-glyph centre.
-const GLYPH_CENTER_X: f32 = 19.0;
+const GLYPH_CENTER_X: f32 = 18.0;
 /// Distance from the pill's left edge to the label's left edge.
-const LABEL_X: f32 = 34.0;
-const PAD_RIGHT: f32 = 18.0;
+const LABEL_X: f32 = 32.0;
+const PAD_RIGHT: f32 = 16.0;
 /// Minimum gap between the label and the trailing detail text.
-const DETAIL_GAP: f32 = 14.0;
+const DETAIL_GAP: f32 = 12.0;
 const LABEL_SIZE: f32 = 15.0;
 const DETAIL_SIZE: f32 = 13.0;
+/// How much of the state accent is mixed into the capsule fill.
+const FILL_TINT: f32 = 0.10;
+/// Alpha of the accent underglow ribbon along the pill's bottom edge.
+const RIBBON_ALPHA: f32 = 0.5;
 
 // Palette: near-black capsule, near-white text, one warm accent per state.
 const PILL_FILL: [u8; 4] = [14, 14, 17, 225];
@@ -84,7 +91,11 @@ const PULSE_PERIOD: f32 = 2.0;
 ///
 /// Display and daemon failures are deliberately non-fatal. The HUD is an
 /// optional client and must not affect the daemon's operation.
-pub fn run() -> Result<()> {
+///
+/// With `--screenshot <path>` the HUD renders the recording pill (fixed
+/// 00:07 timer, no daemon polling), dumps one frame to a PNG, and exits —
+/// the same visual-test hook the settings window has.
+pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     tracing::info!("[HUD] connecting to Wayland display");
     let connection = match Connection::connect_to_env() {
         Ok(connection) => connection,
@@ -169,6 +180,7 @@ pub fn run() -> Result<()> {
         shm,
         pool,
         layer,
+        screenshot,
     );
     if let Err(error) = event_queue.roundtrip(&mut hud) {
         tracing::warn!("[HUD] display disconnected during setup: {error}");
@@ -178,7 +190,9 @@ pub fn run() -> Result<()> {
     let mut last_poll: Option<Instant> = None;
     while !hud.exit {
         let now = Instant::now();
-        if last_poll.is_none_or(|at| now.duration_since(at) >= POLL_INTERVAL) {
+        if hud.screenshot.is_none()
+            && last_poll.is_none_or(|at| now.duration_since(at) >= POLL_INTERVAL)
+        {
             hud.poll_status();
             last_poll = Some(now);
         }
@@ -265,6 +279,8 @@ struct HudState {
     visible: bool,
     daemon_available: bool,
     exit: bool,
+    screenshot: Option<PathBuf>,
+    screenshot_done: bool,
 }
 
 impl HudState {
@@ -274,7 +290,15 @@ impl HudState {
         shm: Shm,
         pool: SlotPool,
         layer: LayerSurface,
+        screenshot: Option<PathBuf>,
     ) -> Self {
+        // Screenshot mode renders the recording pill deterministically and
+        // skips daemon polling, so the frame is stable and offline.
+        let state = if screenshot.is_some() {
+            UiState::Recording { elapsed: 7 }
+        } else {
+            UiState::Idle
+        };
         Self {
             registry_state,
             output_state,
@@ -283,7 +307,7 @@ impl HudState {
             layer,
             fonts: None,
             font_retry_at: Instant::now(),
-            state: UiState::Idle,
+            state,
             previous_state: None,
             flash_until: None,
             flash_text: None,
@@ -301,6 +325,8 @@ impl HudState {
             visible: false,
             daemon_available: false,
             exit: false,
+            screenshot,
+            screenshot_done: false,
         }
     }
 
@@ -600,6 +626,14 @@ impl HudState {
         let center_y = height as f32 / 2.0 - 1.0;
         let half_width = pill_width / 2.0 * scale_factor;
         let half_height = PILL_HEIGHT.min(height as f32 - 12.0) / 2.0 * scale_factor;
+        // The capsule fill carries a whisper of the state accent, so the
+        // pill body itself (not just the glyph) signals the current mode.
+        let tint = mix_rgb(
+            [PILL_FILL[0], PILL_FILL[1], PILL_FILL[2]],
+            accent,
+            FILL_TINT,
+        );
+        let fill = [tint[0], tint[1], tint[2], PILL_FILL[3]];
         pill(
             canvas,
             width,
@@ -608,6 +642,8 @@ impl HudState {
             center_y,
             half_width,
             half_height,
+            fill,
+            accent,
             visibility,
         );
 
@@ -695,8 +731,47 @@ impl HudState {
             .attach_to(self.layer.wl_surface())
             .context("attaching HUD buffer")?;
         self.layer.commit();
+
+        // Screenshot mode: once the pill has finished its pop-in, dump the
+        // frame and exit. The buffer is premultiplied ARGB; convert to
+        // straight RGBA so the PNG shows the intended colors.
+        if !self.screenshot_done && view.progress >= 1.0 {
+            let path = match &self.screenshot {
+                Some(path) => path.clone(),
+                None => return Ok(true),
+            };
+            self.screenshot_done = true;
+            let mut rgba = Vec::with_capacity(canvas.len());
+            for pixel in canvas.chunks_exact(4) {
+                let (b, g, r, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
+                if a == 0 {
+                    rgba.extend_from_slice(&[0, 0, 0, 0]);
+                } else {
+                    let scale = 255.0 / a as f32;
+                    let un = |channel: u8| ((channel as f32 * scale).round() as u16).min(255) as u8;
+                    rgba.extend_from_slice(&[un(r), un(g), un(b), a]);
+                }
+            }
+            match write_png(&path, width, height, &rgba) {
+                Ok(()) => {
+                    eprintln!("saved HUD screenshot to {}", path.display());
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("HUD screenshot save failed: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Ok(true)
     }
+}
+
+/// Write an RGBA frame to PNG via the `image` crate (same helper as the
+/// settings window's screenshot hook).
+fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
+    image::save_buffer(path, rgba, width, height, image::ColorType::Rgba8)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1035,7 +1110,8 @@ fn accent_color(kind: ChipKind) -> [u8; 3] {
     }
 }
 
-/// Capsule with a soft drop shadow below and a 1px top rim light.
+/// Capsule with a soft drop shadow below, a 1px top rim light, and a 1px
+/// accent underglow ribbon along the bottom edge.
 #[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
 fn pill(
     canvas: &mut [u8],
@@ -1045,6 +1121,8 @@ fn pill(
     center_y: f32,
     half_width: f32,
     half_height: f32,
+    fill: [u8; 4],
+    accent: [u8; 3],
     alpha: f32,
 ) {
     const SHADOW_SPREAD: f32 = 6.0;
@@ -1056,8 +1134,9 @@ fn pill(
     let min_y = (center_y - half_height - 2.0).max(0.0) as u32;
     let max_y =
         (center_y + half_height + SHADOW_DROP + SHADOW_SPREAD + 1.0).min(height as f32) as u32;
-    let fill = scale_alpha(PILL_FILL, alpha);
+    let fill = scale_alpha(fill, alpha);
     let rim = scale_alpha(RIM_LIGHT, alpha);
+    let ribbon_color = [accent[0], accent[1], accent[2], 255];
     let shadow_strength = 0.45 * alpha;
     for y in min_y..max_y {
         let dy = y as f32 + 0.5 - center_y;
@@ -1084,6 +1163,25 @@ fn pill(
                     if edge > 0.0 {
                         let vertical = (-dy / half_height).clamp(0.0, 1.0);
                         blend_pixel(canvas, width, height, x, y, rim, edge * vertical);
+                    }
+                } else {
+                    // Accent underglow: a thin band hugging the bottom edge,
+                    // strongest at the bottom centre and fading at the ends.
+                    let edge = (1.0 - signed.abs()).clamp(0.0, 1.0);
+                    if edge > 0.0 {
+                        let vertical = (dy / half_height).clamp(0.0, 1.0);
+                        let coverage = edge * vertical * RIBBON_ALPHA;
+                        if coverage > 0.01 {
+                            blend_pixel(
+                                canvas,
+                                width,
+                                height,
+                                x,
+                                y,
+                                ribbon_color,
+                                coverage * alpha,
+                            );
+                        }
                     }
                 }
             }
@@ -1270,7 +1368,7 @@ fn recording_dot(
 ) {
     let u = (phase / PULSE_PERIOD).fract();
     let k = pulse(u);
-    let ring_alpha = (1.0 - u) * (1.0 - u) * 0.4;
+    let ring_alpha = (1.0 - u) * (1.0 - u) * 0.35;
     if ring_alpha > 0.01 {
         arc(
             canvas,
@@ -1278,8 +1376,8 @@ fn recording_dot(
             height,
             center_x,
             center_y,
-            (4.6 + 6.5 * u) * scale,
-            1.5 * scale,
+            (5.0 + 7.0 * u) * scale,
+            1.4 * scale,
             0.0,
             std::f32::consts::TAU,
             1.0,
@@ -1292,7 +1390,7 @@ fn recording_dot(
         height,
         center_x,
         center_y,
-        (4.2 + 0.6 * k) * scale,
+        (3.8 + 0.6 * k) * scale,
         scale_alpha(color, 0.6 + 0.4 * k),
     );
 }

@@ -34,7 +34,11 @@ enum CliCommand {
         preload: bool,
     },
     /// Show the layer-shell status HUD.
-    Hud,
+    Hud {
+        /// Render one frame to a PNG at PATH, then exit (visual testing).
+        #[arg(long, value_name = "PATH")]
+        screenshot: Option<PathBuf>,
+    },
     /// Open the configuration window.
     Settings {
         /// Render one frame to a PNG at PATH, then exit (visual testing).
@@ -119,7 +123,7 @@ fn run() -> Result<()> {
             let config = Config::load().context("loading configuration")?;
             daemon::run(config, preload)
         }
-        CliCommand::Hud => hud::run(),
+        CliCommand::Hud { screenshot } => hud::run(screenshot),
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Toggle { postproc } => send_command(Command::Toggle {
             postproc: postproc.map(|mode| mode == PostprocMode::Clean),

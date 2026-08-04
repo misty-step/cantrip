@@ -70,8 +70,8 @@ running: `ollama pull qwen3:8b`), the corrected text lands at your cursor.
 | Command | Purpose |
 |---|---|
 | `cantrip daemon [--preload]` | Run the dictation daemon |
-| `cantrip hud` | Run the layer-shell status HUD |
-| `cantrip settings` | Open the configuration window (view, edit, reload) |
+| `cantrip hud [--screenshot PATH]` | Run the layer-shell status HUD (or dump one frame to a PNG and exit) |
+| `cantrip settings [--screenshot PATH]` | Open the configuration window (view, edit, reload; or dump a frame) |
 | `cantrip toggle` / `start` / `stop` / `cancel` | Dictation transitions |
 | `cantrip status` / `ping` | Daemon state |
 | `cantrip transcribe <wav>` | One-shot file transcription (debug; prints to stdout) |
