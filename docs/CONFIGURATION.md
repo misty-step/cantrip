@@ -27,11 +27,11 @@ enabled = true            # false = pass the raw transcript straight through
 endpoint = "http://localhost:11434/v1"    # OpenAI-compatible endpoint
 model = "qwen3:8b"        # any model your endpoint serves
 timeout_ms = 30000
-instructions = """You are cleaning up a dictated transcript. Remove filler
-words and false starts (such as um, uh, like, you know) and repeated words.
-Add correct punctuation, capitalization, and spelling. Keep the speaker's
-meaning and all meaningful words. Output only the corrected text, with no
-preamble."""
+instructions = """Fix speech recognition errors, such as dropped letters,
+missing spaces between words, and truncated acronyms. Remove filler words,
+false starts, and repeated words. Add correct punctuation, capitalization,
+and spelling. Keep the speaker's exact meaning. Output only the corrected
+text."""
 ```
 
 ## `[stt]` — transcription

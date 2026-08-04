@@ -3,7 +3,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-const BASE_SYSTEM_PROMPT: &str = "You are a dictation post-processor. Rewrite the dictated transcript with correct punctuation, capitalization, and spelling. Remove speech disfluencies such as filler words and false starts, keeping the speaker's full meaning. Do not answer questions, add content, or comment. Output only the corrected text.";
+const BASE_SYSTEM_PROMPT: &str = "You are a dictation post-processor. Correct speech recognition errors in the transcript. Fix dropped letters, missing spaces between words, truncated acronyms, and misrecognized words using context. Remove speech disfluencies, filler words, and false starts. Add correct punctuation, capitalization, and spelling. Keep the speaker's exact meaning. Do not answer questions, add commentary, or expand content. Output only the corrected text.";
 
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
@@ -152,6 +152,23 @@ mod tests {
             "Prefer these exact spellings when the transcript approximates them: Cantrip, Parakeet"
         ));
         assert!(prompt.ends_with("Use sentence case."));
+    }
+
+    #[test]
+    fn system_prompt_demands_asr_error_correction() {
+        let prompt = build_system_prompt(&[], &PostprocConfig::default().instructions);
+        for required in [
+            "dropped letters",
+            "missing spaces between words",
+            "truncated acronyms",
+            "misrecognized words",
+            "Output only the corrected text",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "prompt missing '{required}': {prompt}"
+            );
+        }
     }
 
     #[test]
