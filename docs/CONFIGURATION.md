@@ -27,6 +27,7 @@ enabled = true            # false = pass the raw transcript straight through
 endpoint = "http://localhost:11434/v1"    # OpenAI-compatible endpoint
 model = "qwen3:8b"        # any model your endpoint serves
 timeout_ms = 30000
+passes = 2              # cleanup rounds: a second pass re-reads and fixes residuals
 instructions = """Fix speech recognition errors, such as dropped letters,
 missing spaces between words, and truncated acronyms. Remove filler words,
 false starts, and repeated words. Add correct punctuation, capitalization,
@@ -62,6 +63,12 @@ the `instructions` text, so it is safe to experiment from the config alone:
 - **Disfluency removal.** The default instructions permit deleting filler
   words, false starts, and repetitions. Earlier wording that said "never
   remove any word" is what let "um"/"uh"/repeats survive.
+- **`passes`.** The cleanup runs `passes` rounds in a chain (default 2). The
+  first round uses `instructions`; every later round is a focused proofread
+  pass that re-reads the output and fixes residual speech-recognition errors
+  the earlier round left (e.g. a truncated acronym like `AP` for `API`).
+  A single pass of a small model reliably misses a few errors on longer
+  dictations, so 2 is the quality default; set 1 for minimum latency.
 - **Local.** Default endpoint is Ollama at `localhost:11434`.
   `qwen3:8b` is the gauntlet recommendation (free, fast, neutral on accuracy);
   any `ollama list` model works.

@@ -41,6 +41,7 @@ struct Editable {
     pp_model: String,
     pp_key: String,
     pp_timeout: u64,
+    pp_passes: u8,
     pp_instructions: String,
 }
 
@@ -59,6 +60,7 @@ impl Editable {
             pp_model: cfg.postproc.model.clone(),
             pp_key: cfg.postproc.api_key_id.clone().unwrap_or_default(),
             pp_timeout: cfg.postproc.timeout_ms,
+            pp_passes: cfg.postproc.passes,
             pp_instructions: cfg.postproc.instructions.clone(),
         }
     }
@@ -86,6 +88,7 @@ impl Editable {
                 model: self.pp_model.trim().to_owned(),
                 api_key_id: non_empty(self.pp_key.trim()),
                 timeout_ms: self.pp_timeout,
+                passes: self.pp_passes.clamp(1, 3),
                 instructions: self.pp_instructions.clone(),
             },
         }
@@ -356,6 +359,18 @@ impl SettingsApp {
                         .clamp_existing_to_range(false),
                 );
                 ui.end_row();
+
+                ui.label("Cleanup passes");
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.edit.pp_passes)
+                            .speed(0.1)
+                            .range(1..=3)
+                            .clamp_existing_to_range(false),
+                    );
+                    ui.label("2 = one extra proofread pass for residual errors");
+                });
+                ui.end_row();
             });
         ui.label("Instructions (the cleanup behavior)");
         ui.add(
@@ -506,6 +521,11 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
         postproc,
         "timeout_ms",
         toml_edit::value(config.postproc.timeout_ms as i64),
+    );
+    set_preserving_decor(
+        postproc,
+        "passes",
+        toml_edit::value(config.postproc.passes as i64),
     );
     set_preserving_decor(
         postproc,
@@ -676,6 +696,7 @@ mod tests {
                 model: "qwen3:8b".to_owned(),
                 api_key_id: None,
                 timeout_ms: 30_000,
+                passes: 2,
                 instructions: "Remove filler words.".to_owned(),
             },
         }
@@ -702,6 +723,7 @@ mod tests {
             pp_model: String::new(),
             pp_key: String::new(),
             pp_timeout: 10_000,
+            pp_passes: 2,
             pp_instructions: String::new(),
         };
         let config = edit.to_config();

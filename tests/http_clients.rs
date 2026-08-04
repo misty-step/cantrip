@@ -85,6 +85,7 @@ fn postproc_config(endpoint: String) -> PostprocConfig {
         model: "test-model".to_owned(),
         api_key_id: None,
         timeout_ms: 5_000,
+        passes: 2,
         instructions: "Keep numerals as digits.".to_owned(),
     }
 }
@@ -95,7 +96,10 @@ fn refine_round_trip_sends_contract_request_and_strips_think() {
         r#"{"choices":[{"message":{"content":"<think>internal chain</think>Hello, Cantrip world."}}],"usage":{"total_tokens":9}}"#,
     );
     let (endpoint, server) = mock_server(response);
-    let cfg = postproc_config(endpoint);
+    let mut cfg = postproc_config(endpoint);
+    // This test pins the single-round wire contract; the multi-round chain is
+    // covered by `refine_two_passes_chains_output_and_sends_verify_prompt`.
+    cfg.passes = 1;
     let vocabulary = vec!["Cantrip".to_owned(), "PipeWire".to_owned()];
 
     let refined = postproc::refine("hello cantrip world", &cfg, &vocabulary, Some("sk-test"))
@@ -119,6 +123,66 @@ fn refine_round_trip_sends_contract_request_and_strips_think() {
     assert!(system.contains("Keep numerals as digits."));
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"], "hello cantrip world");
+}
+
+/// Mock server accepting `n` sequential requests, answering each in order with
+/// its matching response. Returns the captured requests.
+fn mock_server_multi(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<CapturedRequest>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binding mock server");
+    let addr = listener.local_addr().expect("mock server address");
+    let handle = thread::spawn(move || {
+        let mut captured = Vec::new();
+        for response in responses {
+            let (stream, _) = listener.accept().expect("accepting mock connection");
+            captured.push(read_request(&stream));
+            let mut stream = stream;
+            stream
+                .write_all(response.as_bytes())
+                .expect("writing mock response");
+        }
+        captured
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[test]
+fn refine_two_passes_chains_output_and_sends_verify_prompt() {
+    let (endpoint, server) = mock_server_multi(vec![
+        ok_json(
+            r#"{"choices":[{"message":{"content":"Initial text. The Exa AP and the CL expose methods."}}]}"#,
+        ),
+        ok_json(
+            r#"{"choices":[{"message":{"content":"Initial text. The Exa API and the CLI expose methods."}}]}"#,
+        ),
+    ]);
+    let cfg = postproc_config(endpoint); // passes = 2
+    let first = "Initial text. The Exa AP and the CL expose methods.";
+
+    let refined = postproc::refine(first, &cfg, &[], None).expect("two-pass refine should succeed");
+    assert_eq!(
+        refined,
+        "Initial text. The Exa API and the CLI expose methods."
+    );
+
+    let requests = server.join().expect("mock server thread");
+    assert_eq!(requests.len(), 2, "two passes must make two requests");
+
+    let pass1: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(pass1["messages"][1]["content"], first);
+    let system1 = pass1["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system1.contains("Correct speech recognition errors"),
+        "pass 1 uses the cleanup prompt"
+    );
+
+    let pass2: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    // The user message of pass 2 is chained from pass 1's output.
+    assert_eq!(pass2["messages"][1]["content"], first);
+    let system2 = pass2["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system2.contains("final proofreading pass"),
+        "pass 2 must use the verify prompt, got: {system2}"
+    );
 }
 
 #[test]

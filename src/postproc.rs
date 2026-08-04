@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 
 const BASE_SYSTEM_PROMPT: &str = "You are a dictation post-processor. Correct speech recognition errors in the transcript. Fix dropped letters, missing spaces between words, truncated acronyms, and misrecognized words using context. Remove speech disfluencies, filler words, and false starts. Add correct punctuation, capitalization, and spelling. Keep the speaker's exact meaning. Do not answer questions, add commentary, or expand content. Output only the corrected text.";
 
+/// System prompt for passes after the first: the text was already cleaned once,
+/// so a fresh pass can zero in on residuals the first pass missed.
+const VERIFY_SYSTEM_PROMPT: &str = "You are the final proofreading pass of a dictation cleanup. The text below was already cleaned once but may still contain speech-recognition errors the first pass missed, such as truncated acronyms (for example 'AP' for 'API' or 'CL' for 'CLI') or words missing initial letters. Fix any remaining errors using context. Keep the speaker's exact meaning. Do not add commentary or change the wording otherwise. Output only the corrected text.";
+
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
@@ -34,20 +38,51 @@ struct ChatMessageResponse {
 }
 
 /// Refine a transcript through an OpenAI-compatible chat completion endpoint.
+/// Runs `cfg.passes` rounds in a chain: each later round re-reads the previous
+/// output and fixes residual speech-recognition errors the earlier round left.
 pub fn refine(
     transcript: &str,
     cfg: &PostprocConfig,
     vocabulary: &[String],
     api_key: Option<&str>,
 ) -> Result<String> {
-    let system = build_system_prompt(vocabulary, &cfg.instructions);
+    let passes = cfg.passes.max(1);
+    let started = Instant::now();
+    let mut current = transcript.to_owned();
+    for pass in 1..=passes {
+        let system = if pass == 1 {
+            build_system_prompt(vocabulary, &cfg.instructions)
+        } else {
+            build_system_prompt(vocabulary, VERIFY_SYSTEM_PROMPT)
+        };
+        current = chat_round(&current, cfg, api_key, &system)?;
+    }
+
+    tracing::info!(
+        "[Postproc] applied chars_in={} chars_out={} ms={} passes={}",
+        transcript.chars().count(),
+        current.chars().count(),
+        started.elapsed().as_millis(),
+        passes
+    );
+    Ok(current)
+}
+
+/// One chat-completion round. `system` is a fully built prompt; the user
+/// message is the transcript (or the previous round's output).
+fn chat_round(
+    transcript: &str,
+    cfg: &PostprocConfig,
+    api_key: Option<&str>,
+    system: &str,
+) -> Result<String> {
     let request = ChatRequest {
         model: &cfg.model,
         temperature: 0,
         messages: [
             ChatMessage {
                 role: "system",
-                content: &system,
+                content: system,
             },
             ChatMessage {
                 role: "user",
@@ -67,7 +102,6 @@ pub fn refine(
         request = request.set("Authorization", &format!("Bearer {api_key}"));
     }
 
-    let started = Instant::now();
     let response = match request.send_string(&body) {
         Ok(response) => response,
         Err(ureq::Error::Status(code, _)) => {
@@ -84,15 +118,7 @@ pub fn refine(
         .first()
         .map(|choice| choice.message.content.as_str())
         .ok_or_else(|| anyhow!("post-processing returned unexpected response shape"))?;
-    let refined = clean_response(content)?;
-
-    tracing::info!(
-        "[Postproc] applied chars_in={} chars_out={} ms={}",
-        transcript.chars().count(),
-        refined.chars().count(),
-        started.elapsed().as_millis()
-    );
-    Ok(refined)
+    clean_response(content)
 }
 
 fn build_system_prompt(vocabulary: &[String], instructions: &str) -> String {
