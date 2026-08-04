@@ -9,8 +9,10 @@ cargo test
 
 echo "── pre-push: secret scan (trufflehog, working tree)"
 if command -v trufflehog >/dev/null 2>&1; then
-    trufflehog filesystem . --exclude-paths .trufflehog-exclude --only-verified >/dev/null 2>&1 || {
-        echo "✗ working tree contains a verified secret (trufflehog). Refusing to push."
+    # --fail makes trufflehog exit non-zero when anything is found; without it
+    # the scan always exits 0 and this gate would prove nothing.
+    trufflehog filesystem . --exclude-paths .trufflehog-exclude --fail >/dev/null 2>&1 || {
+        echo "✗ working tree contains a secret (trufflehog). Refusing to push."
         exit 1
     }
 else

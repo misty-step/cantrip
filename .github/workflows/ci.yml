@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  GITLEAKS_VERSION: v8.30.1
+  TRUFFLEHOG_VERSION: v3.96.0
 
 jobs:
   check:
@@ -26,15 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      - name: TruffleHog (git history vs base)
-        uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
-          extra_args: --results=verified,unknown
-      - name: Gitleaks (full history)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0   # full history for the gitleaks history scan
+      - name: Install gitleaks (pinned release)
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION#v}_linux_x64.tar.gz" -o /tmp/gitleaks.tgz
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+      - name: Gitleaks — full-history scan (fails on any leak)
+        run: /tmp/gitleaks git . --no-banner --exit-code 1
+      - name: Install trufflehog (pinned release)
+        run: |
+          curl -sSfL "https://github.com/trufflesecurity/trufflehog/releases/download/${TRUFFLEHOG_VERSION}/trufflehog_${TRUFFLEHOG_VERSION#v}_linux_amd64.tar.gz" -o /tmp/trufflehog.tgz
+          mkdir -p /tmp/th && tar -xzf /tmp/trufflehog.tgz -C /tmp/th trufflehog
+      - name: TruffleHog — working-tree scan (fails on any finding)
+        run: /tmp/th/trufflehog filesystem . --exclude-paths .trufflehog-exclude --fail
