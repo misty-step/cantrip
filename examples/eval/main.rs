@@ -1741,7 +1741,10 @@ mod tests {
     fn proxied_never_touches_non_https_uris() {
         // Local lanes (Ollama) must never be routed through a proxy.
         assert_eq!(
-            proxied_with("http://broker.example:4949/proxy/https", "http://127.0.0.1:11434/v1"),
+            proxied_with(
+                "http://broker.example:4949/proxy/https",
+                "http://127.0.0.1:11434/v1"
+            ),
             "http://127.0.0.1:11434/v1"
         );
     }
