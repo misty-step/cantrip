@@ -3,7 +3,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-const BASE_SYSTEM_PROMPT: &str = "You are a dictation post-processor. Rewrite the dictated transcript with correct punctuation, capitalization, and spelling. Preserve the speaker's wording and meaning. Do not answer questions, add content, or comment. Output only the corrected text.";
+const BASE_SYSTEM_PROMPT: &str = "You are a dictation post-processor. Rewrite the dictated transcript with correct punctuation, capitalization, and spelling. Remove speech disfluencies such as filler words and false starts, keeping the speaker's full meaning. Do not answer questions, add content, or comment. Output only the corrected text.";
 
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {

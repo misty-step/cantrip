@@ -66,8 +66,9 @@ impl Default for PostprocConfig {
             endpoint: "http://localhost:11434/v1".to_owned(),
             model: String::new(),
             api_key_id: None,
-            timeout_ms: 10_000,
-            instructions: String::new(),
+            timeout_ms: 30_000,
+            instructions: "You are cleaning up a dictated transcript. Remove filler words and false starts (such as um, uh, like, you know) and repeated words. Add correct punctuation, capitalization, and spelling. Keep the speaker's meaning and all meaningful words. Output only the corrected text, with no preamble."
+                .to_owned(),
         }
     }
 }
@@ -135,9 +136,12 @@ mod tests {
         assert!(config.postproc.enabled);
         assert_eq!(config.postproc.model, "llama3");
         assert_eq!(config.postproc.endpoint, "http://localhost:11434/v1");
-        assert_eq!(config.postproc.timeout_ms, 10_000);
+        assert_eq!(config.postproc.timeout_ms, 30_000);
         assert_eq!(config.postproc.api_key_id, None);
-        assert_eq!(config.postproc.instructions, "");
+        assert_eq!(
+            config.postproc.instructions,
+            PostprocConfig::default().instructions
+        );
     }
 
     #[test]
