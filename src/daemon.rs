@@ -33,6 +33,10 @@ enum State {
     Recording {
         recorder: Recorder,
         started: Instant,
+        /// Per-capture post-processing override (Some(true)=clean,
+        /// Some(false)=raw, None=follow config). Applied when this capture
+        /// is stopped and dispatched to the worker.
+        postproc: Option<bool>,
     },
     Processing {
         started: Instant,
@@ -541,13 +545,17 @@ fn execute(
     last_outcome: &mut LastOutcome,
 ) -> Reply {
     match command {
-        Command::Toggle => match state {
-            State::Idle => start_recording(state, config, runtime_dir, status, last_outcome),
+        Command::Toggle { postproc } => match state {
+            State::Idle => {
+                start_recording(state, config, runtime_dir, status, last_outcome, postproc)
+            }
             State::Recording { .. } => stop_recording(state, config, job_tx, status, last_outcome),
             State::Processing { .. } => busy_reply(state),
         },
-        Command::Start => match state {
-            State::Idle => start_recording(state, config, runtime_dir, status, last_outcome),
+        Command::Start { postproc } => match state {
+            State::Idle => {
+                start_recording(state, config, runtime_dir, status, last_outcome, postproc)
+            }
             _ => Reply {
                 ok: false,
                 state: state.name().to_owned(),
@@ -615,13 +623,31 @@ fn start_recording(
     runtime_dir: &Path,
     status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
+    postproc_override: Option<bool>,
 ) -> Reply {
+    // Forcing cleanup when no model is configured would silently degrade to
+    // "cleanup failed — raw text", so reject it up front with a clear error.
+    if postproc_override == Some(true) && config.postproc.model.trim().is_empty() {
+        *last_outcome = LastOutcome::notice("Post-processing requested but no model set");
+        return Reply {
+            ok: false,
+            state: state.name().to_owned(),
+            message: Some(
+                "post-processing requested but [postproc].model is not set — add a model or drop --postproc clean".to_owned(),
+            ),
+            elapsed: None,
+            stage: None,
+            last: None,
+            last_ok: None,
+        };
+    }
     let wav = runtime_dir.join(format!("rec-{}.wav", unix_millis()));
     match Recorder::start(&wav, config.audio_source.as_deref()) {
         Ok(recorder) => {
             *state = State::Recording {
                 recorder,
                 started: Instant::now(),
+                postproc: postproc_override,
             };
             *last_outcome = LastOutcome::default();
             tracing::info!("[Daemon] state idle -> recording");
@@ -658,7 +684,12 @@ fn stop_recording(
     status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
 ) -> Reply {
-    let State::Recording { recorder, started } = std::mem::replace(state, State::Idle) else {
+    let State::Recording {
+        recorder,
+        started,
+        postproc,
+    } = std::mem::replace(state, State::Idle)
+    else {
         unreachable!("stop_recording called outside recording state");
     };
 
@@ -679,11 +710,16 @@ fn stop_recording(
             };
         }
     };
+    // Apply this capture's override (None = follow config) to the worker job.
+    let mut postproc_cfg = config.postproc.clone();
+    if let Some(force) = postproc {
+        postproc_cfg.enabled = force;
+    }
     let job = Job {
         wav: wav.clone(),
         stt: config.stt.clone(),
         vocabulary: config.vocabulary.clone(),
-        postproc: config.postproc.clone(),
+        postproc: postproc_cfg,
     };
     if job_tx.send(job).is_err() {
         if let Err(error) = capture::remove_recording(&wav) {

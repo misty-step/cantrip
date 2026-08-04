@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::env;
 use std::fs;
 use std::io::Read;
@@ -9,6 +9,15 @@ use std::process::Command as ProcessCommand;
 use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
 use cantrip::{config::Config, daemon, hud, keys, paths, pipeline};
+
+/// Per-dictation post-processing request, overriding [postproc].enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PostprocMode {
+    /// Run transcript cleanup for this dictation.
+    Clean,
+    /// Skip transcript cleanup for this dictation.
+    Raw,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "cantrip", version, about = "Local-first Linux dictation")]
@@ -26,8 +35,16 @@ enum CliCommand {
     },
     /// Show the layer-shell status HUD.
     Hud,
-    Toggle,
-    Start,
+    Toggle {
+        /// Post-processing for this dictation: clean | raw (default: [postproc].enabled).
+        #[arg(long, value_enum)]
+        postproc: Option<PostprocMode>,
+    },
+    Start {
+        /// Post-processing for this dictation: clean | raw (default: [postproc].enabled).
+        #[arg(long, value_enum)]
+        postproc: Option<PostprocMode>,
+    },
     Stop,
     Cancel,
     Status,
@@ -97,8 +114,12 @@ fn run() -> Result<()> {
             daemon::run(config, preload)
         }
         CliCommand::Hud => hud::run(),
-        CliCommand::Toggle => send_command(Command::Toggle),
-        CliCommand::Start => send_command(Command::Start),
+        CliCommand::Toggle { postproc } => send_command(Command::Toggle {
+            postproc: postproc.map(|mode| mode == PostprocMode::Clean),
+        }),
+        CliCommand::Start { postproc } => send_command(Command::Start {
+            postproc: postproc.map(|mode| mode == PostprocMode::Clean),
+        }),
         CliCommand::Stop => send_command(Command::Stop),
         CliCommand::Cancel => send_command(Command::Cancel),
         CliCommand::Status => send_command(Command::Status),
@@ -133,8 +154,10 @@ enabled = false
 endpoint = "http://localhost:11434/v1"
 model = ""                # required when enabled
 # api_key_id = "openai"   # keyring entry; omit for local endpoints
-timeout_ms = 10000
+timeout_ms = 30000
 instructions = ""         # optional extra style guidance
+# Per-dictation override (two hotkeys): `cantrip toggle --postproc clean|raw`
+# forces cleanup on/off for that capture, regardless of `enabled` above.
 "#;
 
 fn run_config(command: ConfigCommand) -> Result<()> {

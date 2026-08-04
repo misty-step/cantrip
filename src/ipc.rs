@@ -9,8 +9,14 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    Toggle,
-    Start,
+    Toggle {
+        /// Post-processing override for this capture: Some(true) = clean,
+        /// Some(false) = raw, None = follow [postproc].enabled.
+        postproc: Option<bool>,
+    },
+    Start {
+        postproc: Option<bool>,
+    },
     Stop,
     Cancel,
     Status,
@@ -21,8 +27,20 @@ pub enum Command {
 impl Command {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
-            "toggle" => Some(Self::Toggle),
-            "start" => Some(Self::Start),
+            "toggle" => Some(Self::Toggle { postproc: None }),
+            "toggle-clean" => Some(Self::Toggle {
+                postproc: Some(true),
+            }),
+            "toggle-raw" => Some(Self::Toggle {
+                postproc: Some(false),
+            }),
+            "start" => Some(Self::Start { postproc: None }),
+            "start-clean" => Some(Self::Start {
+                postproc: Some(true),
+            }),
+            "start-raw" => Some(Self::Start {
+                postproc: Some(false),
+            }),
             "stop" => Some(Self::Stop),
             "cancel" => Some(Self::Cancel),
             "status" => Some(Self::Status),
@@ -34,8 +52,20 @@ impl Command {
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Toggle => "toggle",
-            Self::Start => "start",
+            Self::Toggle { postproc: None } => "toggle",
+            Self::Toggle {
+                postproc: Some(true),
+            } => "toggle-clean",
+            Self::Toggle {
+                postproc: Some(false),
+            } => "toggle-raw",
+            Self::Start { postproc: None } => "start",
+            Self::Start {
+                postproc: Some(true),
+            } => "start-clean",
+            Self::Start {
+                postproc: Some(false),
+            } => "start-raw",
             Self::Stop => "stop",
             Self::Cancel => "cancel",
             Self::Status => "status",
@@ -77,7 +107,7 @@ pub fn send(cmd: Command) -> Result<Reply> {
     })?;
 
     let timeout = match cmd {
-        Command::Toggle | Command::Stop => Duration::from_secs(30),
+        Command::Toggle { .. } | Command::Stop => Duration::from_secs(30),
         _ => Duration::from_secs(10),
     };
     stream
@@ -103,8 +133,20 @@ mod tests {
     #[test]
     fn command_parse_round_trip() {
         let commands = [
-            Command::Toggle,
-            Command::Start,
+            Command::Toggle { postproc: None },
+            Command::Toggle {
+                postproc: Some(true),
+            },
+            Command::Toggle {
+                postproc: Some(false),
+            },
+            Command::Start { postproc: None },
+            Command::Start {
+                postproc: Some(true),
+            },
+            Command::Start {
+                postproc: Some(false),
+            },
             Command::Stop,
             Command::Cancel,
             Command::Status,

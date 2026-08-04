@@ -79,6 +79,14 @@ running: `ollama pull qwen3:8b`), the corrected text lands at your cursor.
 | `cantrip key set` / `rm` / `status <id>` | Store and manage keyring credential ids |
 | `cantrip doctor` | Environment report |
 
+Two hotkeys, one with cleanup and one without: `toggle` and `start` take
+`--postproc clean|raw` to force transcript cleanup on or off for that
+dictation, overriding `[postproc].enabled`. Bind one key to
+`cantrip toggle --postproc clean` and the other to
+`cantrip toggle --postproc raw`; each key starts and stops its own dictation
+mode (cleanup runs only when the capture was started with `clean`). Without
+the flag, `[postproc].enabled` decides.
+
 ## Configuration
 
 Everything lives in `~/.config/cantrip/config.toml` (or `cantrip config path`);
