@@ -8,7 +8,6 @@ use crate::models;
 use crate::paths;
 use crate::pipeline::{self, PostprocStatus};
 use anyhow::{Context, Result};
-use notify_rust::{Notification, NotificationHandle, Timeout};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -54,73 +53,6 @@ impl State {
     }
 }
 
-#[derive(Default)]
-struct StatusUi {
-    handle: Option<NotificationHandle>,
-    last_shown_seconds: u64,
-}
-
-impl StatusUi {
-    fn recording(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.close();
-        }
-        self.last_shown_seconds = 0;
-        match Notification::new()
-            .summary("Cantrip")
-            .body("Listening… 0s — press your hotkey to stop")
-            .timeout(Timeout::Never)
-            .show()
-        {
-            Ok(handle) => self.handle = Some(handle),
-            Err(error) => tracing::debug!("[Daemon] notification unavailable: {}", error),
-        }
-    }
-
-    fn tick(&mut self, elapsed: Duration) {
-        let Some(handle) = self.handle.as_mut() else {
-            return;
-        };
-        let seconds = elapsed.as_secs();
-        if seconds <= self.last_shown_seconds {
-            return;
-        }
-        self.last_shown_seconds = seconds;
-        let body = format!("Listening… {seconds}s — press your hotkey to stop");
-        handle.body(&body);
-        if let Err(error) = handle.update() {
-            tracing::debug!("[Daemon] notification unavailable: {}", error);
-        }
-    }
-
-    fn processing(&mut self) {
-        let Some(handle) = self.handle.as_mut() else {
-            return;
-        };
-        handle.body("Transcribing…");
-        if let Err(error) = handle.update() {
-            tracing::debug!("[Daemon] notification unavailable: {}", error);
-        }
-    }
-
-    fn finish(&mut self, body: &str) {
-        if let Some(handle) = self.handle.take() {
-            handle.close();
-        }
-        if let Err(error) = Notification::new().summary("Cantrip").body(body).show() {
-            tracing::debug!("[Daemon] notification unavailable: {}", error);
-        }
-    }
-}
-
-impl Drop for StatusUi {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.close();
-        }
-    }
-}
-
 struct Job {
     wav: PathBuf,
     stt: SttConfig,
@@ -134,8 +66,8 @@ struct WorkerResult {
     postproc: PostprocStatus,
 }
 
-/// The daemon's most recent terminal outcome, surfaced on `status` so the
-/// HUD can flash the true result instead of a fake success.
+/// The daemon's most recent terminal outcome, surfaced on status replies so
+/// the HUD pill can flash the true result instead of a fake success.
 #[derive(Debug, Clone, Default)]
 struct LastOutcome {
     message: Option<String>,
@@ -370,22 +302,12 @@ fn serve(
     stage_rx: &Receiver<pipeline::Stage>,
 ) -> Result<()> {
     let mut state = State::Idle;
-    let mut status = StatusUi::default();
     let mut last_outcome = LastOutcome::default();
     loop {
         drain_stage(&mut state, stage_rx);
-        drain_worker_results(
-            &mut state,
-            &config,
-            result_rx,
-            &mut status,
-            &mut last_outcome,
-        )?;
+        drain_worker_results(&mut state, &config, result_rx, &mut last_outcome)?;
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
-        }
-        if let State::Recording { started, .. } = &state {
-            status.tick(started.elapsed());
         }
 
         loop {
@@ -397,7 +319,6 @@ fn serve(
                         &mut config,
                         runtime_dir,
                         job_tx,
-                        &mut status,
                         &mut last_outcome,
                     ) {
                         tracing::warn!("[Daemon] client request failed: {error:#}");
@@ -413,15 +334,11 @@ fn serve(
 
     if matches!(&state, State::Processing { .. }) {
         match result_rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(result) => {
-                handle_worker_result(&mut state, &config, result, &mut status, &mut last_outcome)?
-            }
+            Ok(result) => handle_worker_result(&mut state, &config, result, &mut last_outcome)?,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 tracing::warn!("[STT] transcription result timed out during shutdown");
-                status.finish("Transcription failed: worker timed out");
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                status.finish("Transcription failed: worker died");
                 anyhow::bail!("transcription worker died");
             }
         }
@@ -436,7 +353,6 @@ fn handle_connection(
     config: &mut Config,
     runtime_dir: &Path,
     job_tx: &Sender<Job>,
-    status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
 ) -> Result<()> {
     let deadline = Instant::now() + CLIENT_READ_DEADLINE;
@@ -479,15 +395,7 @@ fn handle_connection(
 
     let command_line = String::from_utf8_lossy(&command_line);
     let reply = match Command::parse(&command_line) {
-        Some(command) => execute(
-            command,
-            state,
-            config,
-            runtime_dir,
-            job_tx,
-            status,
-            last_outcome,
-        ),
+        Some(command) => execute(command, state, config, runtime_dir, job_tx, last_outcome),
         None => Reply {
             ok: false,
             state: state.name().to_owned(),
@@ -541,21 +449,16 @@ fn execute(
     config: &mut Config,
     runtime_dir: &Path,
     job_tx: &Sender<Job>,
-    status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
 ) -> Reply {
     match command {
         Command::Toggle { postproc } => match state {
-            State::Idle => {
-                start_recording(state, config, runtime_dir, status, last_outcome, postproc)
-            }
-            State::Recording { .. } => stop_recording(state, config, job_tx, status, last_outcome),
+            State::Idle => start_recording(state, config, runtime_dir, last_outcome, postproc),
+            State::Recording { .. } => stop_recording(state, config, job_tx, last_outcome),
             State::Processing { .. } => busy_reply(state),
         },
         Command::Start { postproc } => match state {
-            State::Idle => {
-                start_recording(state, config, runtime_dir, status, last_outcome, postproc)
-            }
+            State::Idle => start_recording(state, config, runtime_dir, last_outcome, postproc),
             _ => Reply {
                 ok: false,
                 state: state.name().to_owned(),
@@ -567,7 +470,7 @@ fn execute(
             },
         },
         Command::Stop => match state {
-            State::Recording { .. } => stop_recording(state, config, job_tx, status, last_outcome),
+            State::Recording { .. } => stop_recording(state, config, job_tx, last_outcome),
             State::Idle => Reply {
                 ok: false,
                 state: state.name().to_owned(),
@@ -579,7 +482,7 @@ fn execute(
             },
             State::Processing { .. } => busy_reply(state),
         },
-        Command::Cancel => cancel_recording(state, status, last_outcome),
+        Command::Cancel => cancel_recording(state, last_outcome),
         Command::Status => status_reply(state, last_outcome),
         Command::Ping => Reply {
             ok: true,
@@ -621,7 +524,6 @@ fn start_recording(
     state: &mut State,
     config: &Config,
     runtime_dir: &Path,
-    status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
     postproc_override: Option<bool>,
 ) -> Reply {
@@ -651,7 +553,6 @@ fn start_recording(
             };
             *last_outcome = LastOutcome::default();
             tracing::info!("[Daemon] state idle -> recording");
-            status.recording();
             Reply {
                 ok: true,
                 state: state.name().to_owned(),
@@ -681,7 +582,6 @@ fn stop_recording(
     state: &mut State,
     config: &Config,
     job_tx: &Sender<Job>,
-    status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
 ) -> Reply {
     let State::Recording {
@@ -697,7 +597,6 @@ fn stop_recording(
     let wav = match recorder.stop() {
         Ok(wav) => wav,
         Err(error) => {
-            status.finish(&format!("Recording failed: {error:#}"));
             *last_outcome = LastOutcome::notice("Recording failed");
             return Reply {
                 ok: false,
@@ -725,7 +624,6 @@ fn stop_recording(
         if let Err(error) = capture::remove_recording(&wav) {
             tracing::warn!("[Capture] recording cleanup failed: {error:#}");
         }
-        status.finish("Transcription failed: worker unavailable");
         *last_outcome = LastOutcome::notice("Transcription failed");
         return Reply {
             ok: false,
@@ -742,7 +640,6 @@ fn stop_recording(
         stage: pipeline::Stage::Transcribing,
     };
     tracing::info!("[Daemon] state recording -> processing record_secs={record_secs:.3}");
-    status.processing();
     Reply {
         ok: true,
         state: state.name().to_owned(),
@@ -754,17 +651,12 @@ fn stop_recording(
     }
 }
 
-fn cancel_recording(
-    state: &mut State,
-    status: &mut StatusUi,
-    last_outcome: &mut LastOutcome,
-) -> Reply {
+fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> Reply {
     let previous = std::mem::replace(state, State::Idle);
     match previous {
         State::Recording { recorder, .. } => match recorder.cancel() {
             Ok(()) => {
                 tracing::info!("[Daemon] state recording -> idle (cancelled)");
-                status.finish("Cancelled");
                 *last_outcome = LastOutcome::notice("Cancelled");
                 Reply {
                     ok: true,
@@ -777,7 +669,6 @@ fn cancel_recording(
                 }
             }
             Err(error) => {
-                status.finish(&format!("Cancelling recording failed: {error:#}"));
                 *last_outcome = LastOutcome::notice("Cancelling failed");
                 Reply {
                     ok: false,
@@ -838,7 +729,6 @@ fn drain_worker_results(
     state: &mut State,
     config: &Config,
     result_rx: &Receiver<WorkerResult>,
-    status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
 ) -> Result<()> {
     loop {
@@ -846,19 +736,17 @@ fn drain_worker_results(
             Ok(result) => result,
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => {
-                status.finish("Transcription failed: worker died");
                 *last_outcome = LastOutcome::notice("Transcription failed");
                 anyhow::bail!("transcription worker died");
             }
         };
-        handle_worker_result(state, config, result, status, last_outcome)?;
+        handle_worker_result(state, config, result, last_outcome)?;
     }
 }
 fn handle_worker_result(
     state: &mut State,
     config: &Config,
     result: WorkerResult,
-    status: &mut StatusUi,
     last_outcome: &mut LastOutcome,
 ) -> Result<()> {
     let processing_started = match state {
@@ -885,7 +773,6 @@ fn handle_worker_result(
                 "[Daemon] state processing -> idle stt_ms={} chars=0 (no speech detected)",
                 stt_elapsed.as_millis()
             );
-            status.finish("Heard nothing");
             *last_outcome = LastOutcome::notice("Heard nothing");
         }
         Ok(text) => {
@@ -912,7 +799,6 @@ fn handle_worker_result(
                     };
                     log_processing_idle(stt_elapsed, inject_ms, chars, postproc_ms);
                     tracing::info!("[Inject] injected chars={chars} total_ms={total_ms}");
-                    status.finish(&message);
                     *last_outcome = LastOutcome::success(message);
                 }
                 Err(error) if config.injection != InjectionMode::Clipboard => {
@@ -928,9 +814,6 @@ fn handle_worker_result(
                             tracing::info!(
                                 "[Inject] clipboard fallback chars={chars} total_ms={total_ms}"
                             );
-                            status.finish(&format!(
-                                "Typing failed — copied to clipboard ({chars} chars){cleanup_suffix}"
-                            ));
                             *last_outcome = LastOutcome::success(format!(
                                 "Copied to clipboard ({chars} chars){cleanup_suffix}"
                             ));
@@ -940,7 +823,6 @@ fn handle_worker_result(
                                 "[Inject] clipboard fallback failed chars={chars} stt_ms={} error={fallback_error:#}",
                                 stt_elapsed.as_millis()
                             );
-                            status.finish("Typing failed; clipboard fallback failed");
                             *last_outcome = LastOutcome::notice("Typing failed");
                         }
                     }
@@ -950,7 +832,6 @@ fn handle_worker_result(
                         "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
                         stt_elapsed.as_millis()
                     );
-                    status.finish(&format!("Injection failed: {error:#}"));
                     *last_outcome = LastOutcome::notice("Injection failed");
                 }
             }
@@ -960,7 +841,6 @@ fn handle_worker_result(
                 "[STT] transcription failed stt_ms={} error={error}",
                 stt_elapsed.as_millis()
             );
-            status.finish(&format!("Transcription failed: {error}"));
             *last_outcome = LastOutcome::notice("Transcription failed");
         }
     }

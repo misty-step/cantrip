@@ -17,7 +17,6 @@ keyring = { version = "3", default-features = false, features = ["async-secret-s
 ureq = "2"
 tar = "0.4"
 flate2 = "1"
-notify-rust = "4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
