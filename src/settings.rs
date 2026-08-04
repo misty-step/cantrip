@@ -9,7 +9,7 @@
 //!
 //! `cantrip settings --screenshot <path>` renders the window and dumps a PNG of
 //! one frame, then exits. It exists for visual testing on machines without a
-//! screenshot utility; the PNG is written by the tiny encoder at the bottom.
+//! screenshot utility.
 
 use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::inject::InjectionMode;
@@ -191,70 +191,146 @@ impl SettingsApp {
     }
 
     fn form(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.heading("Cantrip Settings");
-            self.daemon_badge(ui);
-        });
-        ui.label(format!("Config: {}", self.config_path.display()));
+        self.header(ui);
+        ui.add_space(2.0);
         if let Some(status) = &self.status {
-            let color = if status.ok {
-                egui::Color32::from_rgb(120, 200, 120)
-            } else {
-                egui::Color32::from_rgb(220, 90, 90)
-            };
+            let color = if status.ok { OK } else { ERR };
             ui.colored_label(color, &status.text);
         }
-        ui.separator();
+        ui.add_space(8.0);
 
-        egui::CollapsingHeader::new("General")
-            .default_open(true)
-            .show(ui, |ui| self.general_section(ui));
-        egui::CollapsingHeader::new("Transcription (STT)")
-            .default_open(true)
-            .show(ui, |ui| self.stt_section(ui));
-        egui::CollapsingHeader::new("Transcript cleanup (postproc)")
-            .default_open(true)
-            .show(ui, |ui| self.postproc_section(ui));
+        Self::section(
+            ui,
+            "General",
+            "Injection, warm-up, audio, vocabulary",
+            |ui| {
+                self.general_section(ui);
+            },
+        );
+        Self::section(
+            ui,
+            "Transcription",
+            "Speech-to-text model and endpoint",
+            |ui| {
+                self.stt_section(ui);
+            },
+        );
+        Self::section(
+            ui,
+            "Transcript cleanup",
+            "Post-processing behavior and model",
+            |ui| {
+                self.postproc_section(ui);
+            },
+        );
 
-        ui.separator();
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("Reload from disk").clicked() {
-                self.reload_from_disk();
-            }
-            if ui
-                .add_enabled(self.loaded_ok, egui::Button::new("Save & reload daemon"))
-                .clicked()
-            {
+            let save = egui::Button::new(
+                egui::RichText::new("Save & reload daemon")
+                    .strong()
+                    .color(BG),
+            )
+            .fill(ACCENT)
+            .rounding(egui::Rounding::same(8.0));
+            if ui.add_enabled(self.loaded_ok, save).clicked() {
                 self.save();
+            }
+            let reload = egui::Button::new("Reload from disk")
+                .fill(PANEL_ALT)
+                .stroke(egui::Stroke::new(1.0_f32, BORDER))
+                .rounding(egui::Rounding::same(8.0));
+            if ui.add(reload).clicked() {
+                self.reload_from_disk();
             }
         });
     }
 
+    fn header(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("Cantrip")
+                    .strong()
+                    .size(21.0)
+                    .color(ACCENT),
+            );
+            ui.label(egui::RichText::new("Settings").size(21.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.daemon_badge(ui);
+            });
+        });
+        ui.label(
+            egui::RichText::new(format!("Config: {}", self.config_path.display()))
+                .weak()
+                .small(),
+        );
+    }
+
+    /// Always-open group: accent tick + title + hint above a bordered panel.
+    fn section(ui: &mut egui::Ui, title: &str, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 14.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(rect, egui::Rounding::same(1.5), ACCENT);
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(title).strong().size(13.5));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(hint).weak().small());
+        });
+        ui.add_space(3.0);
+        egui::Frame::group(ui.style())
+            .fill(PANEL)
+            .stroke(egui::Stroke::new(1.0_f32, BORDER))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+            .show(ui, add);
+        ui.add_space(10.0);
+    }
+
+    /// Live daemon state as a small rounded chip with a status dot.
     fn daemon_badge(&mut self, ui: &mut egui::Ui) {
         let (color, text) = if !self.daemon_online {
-            (egui::Color32::GRAY, "daemon offline".to_owned())
+            (
+                egui::Color32::from_rgb(0x66, 0x6c, 0x76),
+                "daemon offline".to_owned(),
+            )
         } else {
             match self.daemon_state.as_str() {
-                "idle" => (
-                    egui::Color32::from_rgb(120, 200, 120),
-                    "daemon: idle".to_owned(),
-                ),
-                other => (
-                    egui::Color32::from_rgb(240, 200, 90),
-                    format!("daemon: {other}"),
-                ),
+                "idle" => (OK, "daemon: idle".to_owned()),
+                "recording" => (ACCENT, "daemon: recording".to_owned()),
+                other => (WARN, format!("daemon: {other}")),
             }
         };
-        ui.colored_label(color, text);
+        let text_width = ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), TEXT)
+                .size()
+                .x
+        }) + 28.0;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(text_width, 24.0), egui::Sense::hover());
+        let painter = ui.painter();
+        painter.rect(
+            rect,
+            egui::Rounding::same(12.0),
+            PANEL_ALT,
+            egui::Stroke::new(1.0_f32, color.linear_multiply(0.4)),
+        );
+        painter.circle_filled(rect.left_center() + egui::vec2(10.0, 0.0), 3.5, color);
+        painter.text(
+            rect.left_center() + egui::vec2(20.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::FontId::proportional(12.0),
+            TEXT,
+        );
     }
 
     fn general_section(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("general")
             .num_columns(2)
-            .spacing([10.0, 6.0])
+            .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Injection");
+                ui.label(egui::RichText::new("Injection").weak());
                 egui::ComboBox::from_id_salt("injection")
                     .selected_text(injection_str(self.edit.injection))
                     .show_ui(ui, |ui| {
@@ -274,7 +350,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label("Audio source (empty = default)");
+                ui.label(egui::RichText::new("Audio source (empty = default)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.audio_source)
                         .hint_text("e.g. alsa_input…")
@@ -282,7 +358,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label("Vocabulary (comma-separated)");
+                ui.label(egui::RichText::new("Vocabulary (comma-separated)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.vocabulary)
                         .hint_text("PipeWire, Parakeet")
@@ -295,16 +371,16 @@ impl SettingsApp {
     fn stt_section(&mut self, ui: &mut egui::Ui) {
         egui::Grid::new("stt")
             .num_columns(2)
-            .spacing([10.0, 6.0])
+            .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Model (empty endpoint = local)");
+                ui.label(egui::RichText::new("Model (empty endpoint = local)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.stt_model)
                         .desired_width(f32::INFINITY),
                 );
                 ui.end_row();
 
-                ui.label("Endpoint (empty = local STT)");
+                ui.label(egui::RichText::new("Endpoint (empty = local STT)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.stt_endpoint)
                         .hint_text("https://…/audio/transcriptions")
@@ -312,7 +388,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label("API key id (keyring)");
+                ui.label(egui::RichText::new("API key id (keyring)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.stt_key)
                         .hint_text("openai")
@@ -327,23 +403,23 @@ impl SettingsApp {
         ui.add_space(4.0);
         egui::Grid::new("postproc")
             .num_columns(2)
-            .spacing([10.0, 6.0])
+            .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Endpoint");
+                ui.label(egui::RichText::new("Endpoint").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.pp_endpoint)
                         .desired_width(f32::INFINITY),
                 );
                 ui.end_row();
 
-                ui.label("Model");
+                ui.label(egui::RichText::new("Model").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.pp_model)
                         .desired_width(f32::INFINITY),
                 );
                 ui.end_row();
 
-                ui.label("API key id (keyring)");
+                ui.label(egui::RichText::new("API key id (keyring)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.pp_key)
                         .hint_text("openrouter")
@@ -351,7 +427,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label("Timeout (ms)");
+                ui.label(egui::RichText::new("Timeout (ms)").weak());
                 ui.add(
                     egui::DragValue::new(&mut self.edit.pp_timeout)
                         .speed(500)
@@ -360,7 +436,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label("Cleanup passes");
+                ui.label(egui::RichText::new("Cleanup passes").weak());
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::DragValue::new(&mut self.edit.pp_passes)
@@ -368,14 +444,18 @@ impl SettingsApp {
                             .range(1..=3)
                             .clamp_existing_to_range(false),
                     );
-                    ui.label("2 = one extra proofread pass for residual errors");
+                    ui.label(
+                        egui::RichText::new("2 = one extra proofread pass for residual errors")
+                            .weak()
+                            .small(),
+                    );
                 });
                 ui.end_row();
             });
-        ui.label("Instructions (the cleanup behavior)");
+        ui.label(egui::RichText::new("Instructions (the cleanup behavior)").weak());
         ui.add(
             egui::TextEdit::multiline(&mut self.edit.pp_instructions)
-                .desired_rows(5)
+                .desired_rows(4)
                 .desired_width(f32::INFINITY),
         );
     }
@@ -592,7 +672,7 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([640.0, 720.0])
+            .with_inner_size([620.0, 700.0])
             .with_maximized(false)
             .with_title("Cantrip Settings"),
         ..Default::default()
@@ -600,9 +680,60 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     eframe::run_native(
         "cantrip-settings",
         options,
-        Box::new(move |cc| Ok(Box::new(SettingsApp::new(cc, screenshot, config_path)))),
+        Box::new(move |cc| {
+            apply_theme(&cc.egui_ctx);
+            Ok(Box::new(SettingsApp::new(cc, screenshot, config_path)))
+        }),
     )
     .map_err(|error| anyhow!("settings window error: {error}"))
+}
+
+/// Brand palette shared with the HUD pill.
+const BG: egui::Color32 = egui::Color32::from_rgb(0x0e, 0x0e, 0x11);
+const PANEL: egui::Color32 = egui::Color32::from_rgb(0x15, 0x16, 0x1b);
+const PANEL_ALT: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x1c, 0x22);
+const BORDER: egui::Color32 = egui::Color32::from_rgb(0x2b, 0x2d, 0x35);
+const TEXT: egui::Color32 = egui::Color32::from_rgb(0xf2, 0xf4, 0xf8);
+const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x99, 0x9f, 0xa8);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xff, 0x6a, 0x5c);
+const OK: egui::Color32 = egui::Color32::from_rgb(0x74, 0xdc, 0x96);
+const WARN: egui::Color32 = egui::Color32::from_rgb(0xff, 0xba, 0x4a);
+const ERR: egui::Color32 = egui::Color32::from_rgb(0xe5, 0x6a, 0x6a);
+
+/// Force a consistent dark palette that matches the HUD pill, regardless of
+/// the desktop theme egui would otherwise inherit.
+fn apply_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = BG;
+    visuals.window_fill = BG;
+    visuals.extreme_bg_color = BG;
+    visuals.faint_bg_color = egui::Color32::from_rgb(0x13, 0x14, 0x18);
+    visuals.override_text_color = Some(TEXT);
+    visuals.hyperlink_color = ACCENT;
+
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_MUTED);
+    visuals.widgets.noninteractive.bg_fill = BG;
+    visuals.widgets.noninteractive.rounding = egui::Rounding::same(6.0);
+
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT);
+    visuals.widgets.inactive.bg_fill = PANEL_ALT;
+    visuals.widgets.inactive.weak_bg_fill = PANEL_ALT;
+    visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x26, 0x27, 0x2f);
+    visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x30, 0x32, 0x3b);
+    visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+
+    visuals.selection.bg_fill = ACCENT.linear_multiply(0.35);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
+    visuals.text_cursor.stroke = egui::Stroke::new(2.0_f32, ACCENT);
+
+    ctx.set_visuals(visuals);
+    ctx.style_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+    });
 }
 
 /// Write an RGBA frame to PNG. `image` is already compiled transitively via
