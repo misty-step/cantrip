@@ -1,0 +1,39 @@
+{
+  "clips": [
+    {
+      "id": "jfk",
+      "file": "samples/jfk.wav",
+      "source": "JFK 'And so, my fellow Americans' (public domain; ships with cantrip)",
+      "license": "public-domain",
+      "ref": "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country."
+    },
+    {
+      "id": "librispeech-clean",
+      "file": "samples/eval/librispeech-clean.wav",
+      "source": "LibriSpeech openSLR12 dev-clean utterance 2277-149896-0000 (CC BY 4.0)",
+      "license": "CC BY 4.0",
+      "ref": "HE WAS IN A FEVERED STATE OF MIND OWING TO THE BLIGHT HIS WIFE'S ACTION THREATENED TO CAST UPON HIS ENTIRE FUTURE"
+    },
+    {
+      "id": "librispeech-spelling",
+      "file": "samples/eval/librispeech-spelling.wav",
+      "source": "LibriSpeech openSLR12 dev-clean utterance 2035-147960-0002 (CC BY 4.0)",
+      "license": "CC BY 4.0",
+      "ref": "ONE DAY WHEN I RODE OVER TO THE SHIMERDAS I FOUND ANTONIA STARTING OFF ON FOOT FOR RUSSIAN PETER'S HOUSE TO BORROW A SPADE AMBROSCH NEEDED"
+    },
+    {
+      "id": "librispeech-other",
+      "file": "samples/eval/librispeech-other.wav",
+      "source": "LibriSpeech openSLR12 test-other utterance 7902-96591-0008 (CC BY 4.0)",
+      "license": "CC BY 4.0",
+      "ref": "HE LAUGHED BUT IT WAS A CURIOUS KIND OF LAUGH FULL OF VEXATION INJURED AMOUR PROPRE AS THE FRENCH CALL OUR LOVE OF OUR OWN DIGNITY OF WHICH ARCHIBALD RAYSTOKE IN THE FULL FLUSH OF HIS YOUNG BELIEF IN HIS IMPORTANCE AS A BRITISH OFFICER HAD A PRETTY GOOD STOCK"
+    },
+    {
+      "id": "commonvoice-37021060",
+      "file": "samples/eval/commonvoice-37021060.wav",
+      "source": "Common Voice 22.0 en/test utterance common_voice_en_37021060 (CC0-1.0)",
+      "license": "CC0-1.0",
+      "ref": "More recent popular titles include \"Prime Suspect,\" \"The Forsyte Saga,\" \"Sherlock,\" and \"Downton Abbey\"."
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+Cantrip evaluation model assets
+
+Source inspection (transcribe-rs 0.3.11):
+- CanaryModel::load always opens nemo128.onnx and vocab.txt.
+- CanaryModel::load calls resolve_model_path(model_dir, "encoder-model", quantization) and decoder-model.
+- resolve_model_path maps FP32 -> name.onnx, FP16 -> name.fp16.onnx, Int8 -> name.int8.onnx, Int4 -> name.int4.onnx; missing suffixed file falls back to name.onnx.
+- MoonshineModel::load calls resolve_model_path(model_dir, "encoder_model", quantization) and "decoder_model_merged" and then MoonshineTokenizer::new, which requires tokenizer.json with model.vocab and reads added_tokens special IDs.
+- MoonshineVariant has Tiny and Base (no Small). Base has 8 layers and head_dim 52. The config here reports 8 layers and hidden_size 416 (8 * 52), so this is Moonshine Base, the 245M/small-sized model.
+
+Downloads (all through Mint broker):
+- Canary encoder/decoder/vocab: https://huggingface.co/istupakov/canary-1b-v2-onnx (HF commit 5ebc1520cef7b6b318b3526ad17adbfe00bc1bfc)
+- Canary nemo128 preprocessor: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx (HF commit 8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce; generic NeMo 128-bin preprocessor)
+- Moonshine Base merged ONNX and tokenizer/config: https://huggingface.co/UsefulSensors/moonshine (HF commit 48b4e427b587bcf67797a5be706d6ddc4a298149; onnx/merged/base/float)
+
+Selected quantization:
+- Canary uses Int8 files: encoder-model.int8.onnx and decoder-model.int8.onnx, so Quantization::Int8 resolves them.
+- Moonshine uses FP32 files: encoder_model.onnx and decoder_model_merged.onnx, so Quantization::FP32 resolves them. UsefulSensors provides quantized merged files, but they are 20,513,063 and 42,498,870 bytes (<50 MB); FP32 files are 80,818,781 and 166,211,345 bytes and satisfy the weight-size gate. The transcribe-rs resolver would use .int8 files if copied and selected with Quantization::Int8.
+
+SHA-256 and exact bytes are emitted by /tmp/cantrip-eval/verify_assets.py.

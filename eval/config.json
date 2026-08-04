@@ -1,0 +1,170 @@
+{
+  "manifest": "samples/eval/manifest.json",
+  "out_dir": "eval/results",
+  "instructions": "You are cleaning up dictation output. Add correct punctuation and capitalization. Preserve the speaker's exact wording; never add, remove, or change the meaning of any word. Do not answer questions or add commentary. Output only the corrected text, with no preamble.",
+  "stt": [
+    {
+      "id": "parakeet-v3-int8",
+      "kind": "transcribe_rs",
+      "family": "parakeet",
+      "dir": "/home/phaedrus/.local/share/cantrip/models/parakeet-tdt-0.6b-v3-int8",
+      "quant": "int8",
+      "pricing": {
+        "unit": "zero"
+      }
+    },
+    {
+      "id": "canary-1b-alt",
+      "kind": "transcribe_rs",
+      "family": "canary",
+      "dir": "/home/phaedrus/.cache/cantrip-eval/models/canary",
+      "quant": "int8",
+      "pricing": {
+        "unit": "zero"
+      }
+    },
+    {
+      "id": "moonshine-base",
+      "kind": "transcribe_rs",
+      "family": "moonshine",
+      "dir": "/home/phaedrus/.cache/cantrip-eval/models/moonshine",
+      "variant": "base",
+      "quant": "fp32",
+      "pricing": {
+        "unit": "zero"
+      }
+    },
+    {
+      "id": "whisper-large-v3-turbo",
+      "kind": "whisper_cpp",
+      "bin": "/home/phaedrus/.cache/cantrip-eval/whisper/bin/whisper-cli",
+      "model_file": "/home/phaedrus/.cache/cantrip-eval/whisper/models/ggml-large-v3-turbo.bin",
+      "pricing": {
+        "unit": "zero"
+      }
+    },
+    {
+      "id": "whisper-large-v3",
+      "kind": "whisper_cpp",
+      "bin": "/home/phaedrus/.cache/cantrip-eval/whisper/bin/whisper-cli",
+      "model_file": "/home/phaedrus/.cache/cantrip-eval/whisper/models/ggml-large-v3.bin",
+      "pricing": {
+        "unit": "zero"
+      }
+    },
+    {
+      "id": "openai-whisper-1",
+      "kind": "openai",
+      "endpoint": "https://api.openai.com",
+      "path": "/v1/audio/transcriptions",
+      "model": "whisper-1",
+      "marker": "__mint.openai.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.006
+      }
+    },
+    {
+      "id": "openai-gpt4o-mini-transcribe",
+      "kind": "openai",
+      "endpoint": "https://api.openai.com",
+      "path": "/v1/audio/transcriptions",
+      "model": "gpt-4o-mini-transcribe",
+      "marker": "__mint.openai.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_token",
+        "input": 1.25,
+        "output": 5
+      }
+    },
+    {
+      "id": "deepgram-nova-3",
+      "kind": "deepgram",
+      "endpoint": "https://api.deepgram.com",
+      "path": "/v1/listen",
+      "model": "nova-3",
+      "marker": "__mint.deepgram.default__",
+      "scheme": "Token",
+      "extra": [
+        "smart_format=true"
+      ],
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.0048
+      }
+    },
+    {
+      "id": "elevenlabs-scribe-v2",
+      "kind": "elevenlabs",
+      "endpoint": "https://api.elevenlabs.io",
+      "path": "/v1/speech-to-text",
+      "model": "scribe_v2",
+      "marker": "__mint.elevenlabs.default__",
+      "scheme": "xi-api-key",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.003667
+      }
+    }
+  ],
+  "postproc": [
+    {
+      "id": "qwen3-8b",
+      "endpoint": "http://127.0.0.1:11434/v1",
+      "model": "qwen3:8b",
+      "pricing": {
+        "unit": "zero"
+      },
+      "ollama_base": "http://127.0.0.1:11434"
+    },
+    {
+      "id": "qwen3-14b",
+      "endpoint": "http://127.0.0.1:11434/v1",
+      "model": "qwen3:14b",
+      "pricing": {
+        "unit": "zero"
+      },
+      "ollama_base": "http://127.0.0.1:11434"
+    },
+    {
+      "id": "phi4-14b",
+      "endpoint": "http://127.0.0.1:11434/v1",
+      "model": "phi4:14b",
+      "pricing": {
+        "unit": "zero"
+      },
+      "ollama_base": "http://127.0.0.1:11434"
+    },
+    {
+      "id": "gemma3-12b",
+      "endpoint": "http://127.0.0.1:11434/v1",
+      "model": "gemma3:12b",
+      "pricing": {
+        "unit": "zero"
+      },
+      "ollama_base": "http://127.0.0.1:11434"
+    },
+    {
+      "id": "openrouter-qwen3-14b",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "qwen/qwen3-14b",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      }
+    },
+    {
+      "id": "openrouter-qwen3-30b-a3b",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "qwen/qwen3-30b-a3b-instruct-2507",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      }
+    }
+  ]
+}
