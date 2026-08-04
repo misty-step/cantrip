@@ -1,0 +1,15 @@
+# Gitleaks configuration for the cantrip repository.
+# The only default-config additions are allowlists for value-free strings the
+# eval harness carries (Mint credential markers — the broker substitutes real
+# keys only at request time) so history scans stay clean.
+
+title = "cantrip gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "cantrip eval broker markers (value-free; replaced by the Mint broker)"
+regexes = [
+    '''__mint(\.[a-z0-9-]+)+\.default__''',
+]
