@@ -228,7 +228,8 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
 
     // Screenshot mode is the visual-test hook: it must render the same
     // frame regardless of the host's animation setting, so it always
-    // animates. Live mode honors the desktop preference.
+    // animates (with a frozen breathing phase — byte-identical output).
+    // Live mode honors the desktop preference.
     let reduced_motion = screenshot.is_none() && prefers_reduced_motion();
     let mut hud = HudState::new(
         RegistryState::new(&globals),
@@ -596,11 +597,24 @@ impl HudState {
         let eased = ease_out_cubic(
             now.duration_since(self.transition_at).as_secs_f32() / TRANSITION.as_secs_f32(),
         );
-        // Reduced motion swaps states instantly instead of animating.
-        let progress = if self.reduced_motion { 1.0 } else { eased };
+        // Reduced motion and screenshot mode swap states instantly: the
+        // former disables entry animations, the latter ensures the first
+        // redraw captures the settled frame (no quantization race).
+        let progress = if self.reduced_motion || self.screenshot.is_some() {
+            1.0
+        } else {
+            eased
+        };
         // A 60s window keeps f32 phase math precise over long uptimes; the
-        // breathing pulse period divides it, so motion never jumps.
-        let phase = (now.duration_since(self.started_at).as_secs_f64() % 60.0) as f32;
+        // breathing pulse period divides it, so motion never jumps. Reduced
+        // motion and screenshot mode freeze the phase: the former renders a
+        // static chip (and stops rerasterizing every frame), the latter
+        // captures byte-identical frames independent of scheduling.
+        let phase = if self.reduced_motion || self.screenshot.is_some() {
+            0.0
+        } else {
+            (now.duration_since(self.started_at).as_secs_f64() % 60.0) as f32
+        };
         Some(ChipView {
             label,
             detail,
@@ -808,7 +822,12 @@ impl HudState {
         // Screenshot mode: once the pill has finished its pop-in, dump the
         // frame and exit. The buffer is premultiplied ARGB; convert to
         // straight RGBA so the PNG shows the intended colors.
-        if !self.screenshot_done && view.progress >= 1.0 {
+        //
+        // Capture at 0.99, not 1.0: the render key quantizes progress to a
+        // byte, so the draw at progress == 1.0 is skipped as a duplicate of
+        // the 0.9987 frame (rounds to the same key) — waiting for it would
+        // hang the hook. The 0.99+ frame is visually settled.
+        if !self.screenshot_done && view.progress >= 0.99 {
             let path = match &self.screenshot {
                 Some(path) => path.clone(),
                 None => return Ok(true),
