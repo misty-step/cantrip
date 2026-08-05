@@ -5,3 +5,5 @@
 /eval/results
 .env*
 /.cargo/config.toml
+
+/.scratch

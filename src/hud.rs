@@ -3,17 +3,20 @@
 //! The HUD is a read-only mirror of the daemon. It polls the existing status
 //! command and never sends a command which can change daemon state.
 //!
-//! Visual design: a top-centre capsule with a soft drop shadow, a 1px top
-//! rim light, and a whisper of the state accent in the capsule fill itself
-//! plus a 1px accent underglow along the bottom edge — so the whole pill
-//! reads the mode, not just the glyph. One quiet UI-font label
-//! ("Listening…", "Transcribing…", "Cleaning…") sits beside a small inline
-//! state glyph, with a trailing mm:ss counter while recording. Every visual
-//! state change eases over ~260ms (easeOutCubic): the pill pops in with
-//! scale+alpha, accent colors crossfade, and the pill width follows the
-//! content. The recording dot breathes with an expanding ping ring,
-//! processing shows a smooth rotating comet arc, and the result flash lands
-//! with a gentle check pop.
+//! Visual design ("Warm Minimal", ADR 0010): a fixed 360×40 borderless
+//! capsule, top-centre, filled with an opaque blend of the near-black floor
+//! and a whisper of the state accent — the whole pill reads the mode, and
+//! it never signals progress. A quiet UI-font label ("Listening…",
+//! "Transcribing…", "Cleaning…") sits centered as the visual anchor, with a
+//! small state glyph in a 28px zone at the left and a monospace mm:ss
+//! counter at the right while recording. Every phase is a static
+//! composition: the only motion is a localized breathing pulse on the glyph
+//! (alpha/scale — never a sweep or length change), the ticking elapsed
+//! timer, and the ~2.5s outcome flashes. State changes ease over ~260ms
+//! (easeOutCubic): the pill pops in with scale+alpha and accent colors
+//! crossfade. A reduced-motion desktop (gsettings enable-animations=false)
+//! freezes the pulse, draws the recording glyph as a plain dot, and skips
+//! entry motion.
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use anyhow::{Context, Result};
@@ -58,34 +61,35 @@ const FALLBACK_WIDTH: u32 = 420;
 const MAX_WIDTH: u32 = 900;
 const FONT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
-// Layout, in design units (pixels at pop-in scale 1.0).
-const PILL_HEIGHT: f32 = 36.0;
-const MIN_PILL_WIDTH: f32 = 108.0;
-/// Distance from the pill's left edge to the state-glyph centre.
-const GLYPH_CENTER_X: f32 = 18.0;
-/// Distance from the pill's left edge to the label's left edge.
-const LABEL_X: f32 = 32.0;
-const PAD_RIGHT: f32 = 16.0;
-/// Minimum gap between the label and the trailing detail text.
-const DETAIL_GAP: f32 = 12.0;
+// Layout, in design units (pixels at pop-in scale 1.0). The capsule is a
+// fixed geometry ("Warm Minimal", ADR 0010): it never resizes with content.
+const CAPSULE_WIDTH: f32 = 360.0;
+const CAPSULE_HEIGHT: f32 = 40.0;
+/// Distance from the capsule's left edge to the state-glyph centre; the
+/// glyph lives in a 28px zone at the left of the capsule.
+const GLYPH_CENTER_X: f32 = 26.0;
+/// The stage word is centered within
+/// [left + WORD_AREA_LEFT, right - WORD_AREA_RIGHT].
+const WORD_AREA_LEFT: f32 = 48.0;
+/// Reserved width for the trailing timer (determinate) cluster.
+const WORD_AREA_RIGHT: f32 = 92.0;
+const PAD_RIGHT: f32 = 18.0;
 const LABEL_SIZE: f32 = 15.0;
 const DETAIL_SIZE: f32 = 13.0;
-/// How much of the state accent is mixed into the capsule fill.
-const FILL_TINT: f32 = 0.10;
-/// Alpha of the accent underglow ribbon along the pill's bottom edge.
-const RIBBON_ALPHA: f32 = 0.5;
+/// Stronger tint for the Sent flash: the capsule "full-lits" green.
+const SENT_TINT: f32 = 0.45;
+/// Faint tint for the Notice flash: the capsule "drains" warm.
+const NOTICE_TINT: f32 = 0.06;
 
-// Palette: near-black capsule, near-white text, one warm accent per state.
-const PILL_FILL: [u8; 4] = [14, 14, 17, 225];
-const RIM_LIGHT: [u8; 4] = [255, 255, 255, 34];
-const SHADOW_COLOR: [u8; 4] = [0, 0, 0, 255];
+// Palette: near-black floor, near-white text, one warm accent per state.
+const FLOOR: [u8; 3] = [14, 14, 17];
 const TEXT_PRIMARY: [u8; 4] = [242, 244, 248, 255];
 const TEXT_SECONDARY: [u8; 4] = [242, 244, 248, 160];
 
-const SPIN_TURNS_PER_SECOND: f32 = 0.9;
-const ARC_SWEEP: f32 = std::f32::consts::TAU * 0.3;
-/// Recording pulse period in seconds; must divide the 60s phase window.
+/// Breathing pulse period in seconds; must divide the 60s phase window.
 const PULSE_PERIOD: f32 = 2.0;
+/// Breathing alpha range: the working glyph pulses between these opacities.
+const BREATHE_MIN: f32 = 0.8;
 
 /// Take the single-instance flock on `hud.lock`. Returns `None` when another
 /// HUD already holds the lock. The returned file must stay open for the
@@ -228,6 +232,7 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
         pool,
         layer,
         screenshot,
+        prefers_reduced_motion(),
     );
     if let Err(error) = event_queue.roundtrip(&mut hud) {
         tracing::warn!("[HUD] display disconnected during setup: {error}");
@@ -315,10 +320,9 @@ struct HudState {
     transition_at: Instant,
     /// Kind faded from during the current transition; None means pop-in.
     transition_from: Option<ChipKind>,
-    /// Pill width at the moment the current transition started.
-    pill_width_from: f32,
-    /// Pill width drawn on the previous frame.
-    pill_width_last: f32,
+    /// Desktop animations disabled (gsettings enable-animations=false):
+    /// freezes the breathing pulse and skips entry motion.
+    reduced_motion: bool,
     last_render: Option<RenderKey>,
     configured: bool,
     width: u32,
@@ -338,6 +342,7 @@ impl HudState {
         pool: SlotPool,
         layer: LayerSurface,
         screenshot: Option<PathBuf>,
+        reduced_motion: bool,
     ) -> Self {
         // Screenshot mode renders the recording pill deterministically and
         // skips daemon polling, so the frame is stable and offline.
@@ -363,8 +368,7 @@ impl HudState {
             shown_kind: None,
             transition_at: Instant::now(),
             transition_from: None,
-            pill_width_from: 0.0,
-            pill_width_last: 0.0,
+            reduced_motion,
             last_render: None,
             configured: false,
             width: FALLBACK_WIDTH,
@@ -581,12 +585,13 @@ impl HudState {
         if self.shown_kind != Some(kind) {
             self.transition_from = self.shown_kind;
             self.transition_at = now;
-            self.pill_width_from = self.pill_width_last;
             self.shown_kind = Some(kind);
         }
-        let progress = ease_out_cubic(
+        let eased = ease_out_cubic(
             now.duration_since(self.transition_at).as_secs_f32() / TRANSITION.as_secs_f32(),
         );
+        // Reduced motion swaps states instantly instead of animating.
+        let progress = if self.reduced_motion { 1.0 } else { eased };
         // A 60s window keeps f32 phase math precise over long uptimes; the
         // pulse and spinner periods both divide it, so motion never jumps.
         let phase = (now.duration_since(self.started_at).as_secs_f64() % 60.0) as f32;
@@ -651,36 +656,22 @@ impl HudState {
             _ => accent_color(view.kind),
         };
 
-        // Layout in design units; the pill width eases towards its content.
-        let label_width = measure_text(&fonts.strong, &view.label, PxScale::from(LABEL_SIZE));
-        let detail_width = view.detail.as_deref().map_or(0.0, |detail| {
-            measure_text(&fonts.regular, detail, PxScale::from(DETAIL_SIZE))
-        });
-        let mut target_width = LABEL_X + label_width + PAD_RIGHT;
-        if view.detail.is_some() {
-            target_width += DETAIL_GAP + detail_width;
-        }
-        let target_width = target_width.clamp(MIN_PILL_WIDTH, width as f32 - 16.0);
-        let pill_width = if view.from.is_some() && view.progress < 1.0 && self.pill_width_from > 0.0
-        {
-            self.pill_width_from + (target_width - self.pill_width_from) * view.progress
-        } else {
-            target_width
-        };
-        self.pill_width_last = pill_width;
-
+        // Layout: fixed capsule geometry ("Warm Minimal") — it never
+        // resizes with content, so state reads by composition, not by shape.
+        let capsule_width = CAPSULE_WIDTH.min(width as f32 - 8.0);
         let center_x = width as f32 / 2.0;
         let center_y = height as f32 / 2.0 - 1.0;
-        let half_width = pill_width / 2.0 * scale_factor;
-        let half_height = PILL_HEIGHT.min(height as f32 - 12.0) / 2.0 * scale_factor;
-        // The capsule fill carries a whisper of the state accent, so the
+        let half_width = capsule_width / 2.0 * scale_factor;
+        let half_height = CAPSULE_HEIGHT.min(height as f32 - 12.0) / 2.0 * scale_factor;
+        // The opaque fill carries a whisper of the state accent, so the
         // pill body itself (not just the glyph) signals the current mode.
-        let tint = mix_rgb(
-            [PILL_FILL[0], PILL_FILL[1], PILL_FILL[2]],
-            accent,
-            FILL_TINT,
-        );
-        let fill = [tint[0], tint[1], tint[2], PILL_FILL[3]];
+        let fill_rgb = match view.from {
+            Some(from) if view.progress < 1.0 => {
+                mix_rgb(capsule_blend(from), capsule_blend(view.kind), view.progress)
+            }
+            _ => capsule_blend(view.kind),
+        };
+        let fill = [fill_rgb[0], fill_rgb[1], fill_rgb[2], 255];
         pill(
             canvas,
             width,
@@ -690,37 +681,59 @@ impl HudState {
             half_width,
             half_height,
             fill,
-            accent,
             visibility,
         );
 
         let left = center_x - half_width;
+        let right = center_x + half_width;
         let content_alpha = visibility * swap;
         let glyph_x = left + GLYPH_CENTER_X * scale_factor;
         let accent_solid = [accent[0], accent[1], accent[2], 255];
+        // Working states breathe (alpha/scale, localized to the glyph);
+        // flashes are static compositions. Reduced motion freezes both.
+        let (breathe_alpha, breathe_scale) = breathe(view.phase, self.reduced_motion);
         match view.kind {
-            ChipKind::Recording => recording_dot(
+            ChipKind::Recording => {
+                if self.reduced_motion {
+                    circle(
+                        canvas,
+                        width,
+                        height,
+                        glyph_x,
+                        center_y,
+                        4.2 * scale_factor,
+                        scale_alpha(accent_solid, content_alpha),
+                    );
+                } else {
+                    recording_dot(
+                        canvas,
+                        width,
+                        height,
+                        glyph_x,
+                        center_y,
+                        view.phase,
+                        scale_factor * breathe_scale,
+                        scale_alpha(accent_solid, content_alpha * breathe_alpha),
+                    );
+                }
+            }
+            ChipKind::Transcribing => waveform(
                 canvas,
                 width,
                 height,
                 glyph_x,
                 center_y,
-                view.phase,
-                scale_factor,
-                scale_alpha(accent_solid, content_alpha),
+                scale_factor * breathe_scale,
+                scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
-            ChipKind::Transcribing | ChipKind::Cleaning => arc(
+            ChipKind::Cleaning => sparkle(
                 canvas,
                 width,
                 height,
                 glyph_x,
                 center_y,
-                6.4 * scale_factor,
-                2.4 * scale_factor,
-                view.phase * std::f32::consts::TAU * SPIN_TURNS_PER_SECOND,
-                ARC_SWEEP,
-                0.08,
-                scale_alpha(accent_solid, content_alpha),
+                scale_factor * breathe_scale,
+                scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
             ChipKind::Sent => check(
                 canvas,
@@ -731,42 +744,53 @@ impl HudState {
                 ease_out_back(view.progress) * scale_factor,
                 scale_alpha(accent_solid, content_alpha),
             ),
-            ChipKind::Notice => circle(
+            ChipKind::Notice => slashed_ring(
                 canvas,
                 width,
                 height,
                 glyph_x,
                 center_y,
-                4.2 * scale_factor,
-                scale_alpha(accent_solid, 0.95 * content_alpha),
+                scale_factor,
+                scale_alpha(accent_solid, content_alpha),
             ),
         }
 
         let label_px = PxScale::from(LABEL_SIZE * scale_factor);
         let metrics = fonts.strong.as_scaled(label_px);
         let baseline = center_y - metrics.height() / 2.0 + metrics.ascent();
+        // The stage word is the centered anchor, clamped to the zone between
+        // the glyph and the trailing timer; overlong words truncate.
+        let word_budget = (right - left) - WORD_AREA_LEFT - WORD_AREA_RIGHT;
+        let label = fit_text(&fonts.strong, &view.label, label_px, word_budget);
+        let label_width = measure_text(&fonts.strong, &label, label_px);
+        let label_x = (center_x - label_width / 2.0).clamp(
+            left + WORD_AREA_LEFT,
+            (right - WORD_AREA_RIGHT - label_width).max(left + WORD_AREA_LEFT),
+        );
         draw_text(
             canvas,
             width,
             height,
             &fonts.strong,
-            &view.label,
-            left + LABEL_X * scale_factor,
+            &label,
+            label_x,
             baseline,
             label_px,
             scale_alpha(TEXT_PRIMARY, content_alpha),
         );
         if let Some(detail) = view.detail.as_deref() {
-            let detail_x = center_x + half_width - (PAD_RIGHT + detail_width) * scale_factor;
+            let detail_px = PxScale::from(DETAIL_SIZE * scale_factor);
+            let detail_x =
+                right - (PAD_RIGHT + measure_text(&fonts.mono, detail, detail_px)) * scale_factor;
             draw_text(
                 canvas,
                 width,
                 height,
-                &fonts.regular,
+                &fonts.mono,
                 detail,
                 detail_x,
                 baseline,
-                PxScale::from(DETAIL_SIZE * scale_factor),
+                detail_px,
                 scale_alpha(TEXT_SECONDARY, content_alpha),
             );
         }
@@ -1157,8 +1181,9 @@ fn accent_color(kind: ChipKind) -> [u8; 3] {
     }
 }
 
-/// Capsule with a soft drop shadow below, a 1px top rim light, and a 1px
-/// accent underglow ribbon along the bottom edge.
+/// Capsule: a plain opaque rounded-rectangle pill ("Warm Minimal" —
+/// borderless, no rim light, no underglow, no drop shadow). The fill is
+/// already the fully opaque tint blend; `alpha` is the global visibility.
 #[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
 fn pill(
     canvas: &mut [u8],
@@ -1169,68 +1194,24 @@ fn pill(
     half_width: f32,
     half_height: f32,
     fill: [u8; 4],
-    accent: [u8; 3],
     alpha: f32,
 ) {
-    const SHADOW_SPREAD: f32 = 6.0;
-    const SHADOW_DROP: f32 = 2.5;
     let radius = half_height;
     let flat = (half_width - radius).max(0.0);
-    let min_x = (center_x - half_width - SHADOW_SPREAD - 1.0).max(0.0) as u32;
-    let max_x = (center_x + half_width + SHADOW_SPREAD + 1.0).min(width as f32) as u32;
-    let min_y = (center_y - half_height - 2.0).max(0.0) as u32;
-    let max_y =
-        (center_y + half_height + SHADOW_DROP + SHADOW_SPREAD + 1.0).min(height as f32) as u32;
+    let min_x = (center_x - half_width - 1.0).max(0.0) as u32;
+    let max_x = (center_x + half_width + 1.0).min(width as f32) as u32;
+    let min_y = (center_y - half_height - 1.0).max(0.0) as u32;
+    let max_y = (center_y + half_height + 1.0).min(height as f32) as u32;
     let fill = scale_alpha(fill, alpha);
-    let rim = scale_alpha(RIM_LIGHT, alpha);
-    let ribbon_color = [accent[0], accent[1], accent[2], 255];
-    let shadow_strength = 0.45 * alpha;
     for y in min_y..max_y {
         let dy = y as f32 + 0.5 - center_y;
         for x in min_x..max_x {
             let dx = x as f32 + 0.5 - center_x;
             let qx = (dx.abs() - flat).max(0.0);
             let signed = (qx * qx + dy * dy).sqrt() - radius;
-            let fill_coverage = (0.5 - signed).clamp(0.0, 1.0);
-            if fill_coverage < 1.0 {
-                let shadow_dy = dy - SHADOW_DROP;
-                let shadow_signed = (qx * qx + shadow_dy * shadow_dy).sqrt() - radius;
-                if shadow_signed < SHADOW_SPREAD {
-                    let falloff = 1.0 - (shadow_signed.max(0.0) / SHADOW_SPREAD);
-                    let coverage = falloff * falloff * shadow_strength * (1.0 - fill_coverage);
-                    if coverage > 0.004 {
-                        blend_pixel(canvas, width, height, x, y, SHADOW_COLOR, coverage);
-                    }
-                }
-            }
-            if fill_coverage > 0.0 {
-                blend_pixel(canvas, width, height, x, y, fill, fill_coverage);
-                if dy < 0.0 {
-                    let edge = (1.0 - (signed + 1.1).abs()).clamp(0.0, 1.0);
-                    if edge > 0.0 {
-                        let vertical = (-dy / half_height).clamp(0.0, 1.0);
-                        blend_pixel(canvas, width, height, x, y, rim, edge * vertical);
-                    }
-                } else {
-                    // Accent underglow: a thin band hugging the bottom edge,
-                    // strongest at the bottom centre and fading at the ends.
-                    let edge = (1.0 - signed.abs()).clamp(0.0, 1.0);
-                    if edge > 0.0 {
-                        let vertical = (dy / half_height).clamp(0.0, 1.0);
-                        let coverage = edge * vertical * RIBBON_ALPHA;
-                        if coverage > 0.01 {
-                            blend_pixel(
-                                canvas,
-                                width,
-                                height,
-                                x,
-                                y,
-                                ribbon_color,
-                                coverage * alpha,
-                            );
-                        }
-                    }
-                }
+            let coverage = (0.5 - signed).clamp(0.0, 1.0);
+            if coverage > 0.0 {
+                blend_pixel(canvas, width, height, x, y, fill, coverage);
             }
         }
     }
@@ -1442,6 +1423,178 @@ fn recording_dot(
     );
 }
 
+/// Static waveform glyph (transcribing): three vertical bars. It never
+/// animates its shape — only `breathe` modulates alpha/scale, so it reads
+/// "busy, unmeasured", never progress.
+fn waveform(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+    scale: f32,
+    color: [u8; 4],
+) {
+    const BAR_HEIGHTS: [f32; 3] = [6.0, 10.0, 6.0];
+    for (offset, bar_height) in [(-5.0_f32, 0_usize), (0.0, 1), (5.0, 2)] {
+        let bar = BAR_HEIGHTS[bar_height] * scale;
+        segment(
+            canvas,
+            width,
+            height,
+            center_x + offset * scale,
+            center_y - bar / 2.0,
+            center_x + offset * scale,
+            center_y + bar / 2.0,
+            2.2 * scale,
+            color,
+        );
+    }
+}
+
+/// Static sparkle glyph (cleaning): a four-point star. Shape is fixed; only
+/// `breathe` modulates alpha/scale.
+fn sparkle(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+    scale: f32,
+    color: [u8; 4],
+) {
+    let arm = 6.0 * scale;
+    segment(
+        canvas,
+        width,
+        height,
+        center_x - arm,
+        center_y - arm,
+        center_x + arm,
+        center_y + arm,
+        2.2 * scale,
+        color,
+    );
+    segment(
+        canvas,
+        width,
+        height,
+        center_x - arm,
+        center_y + arm,
+        center_x + arm,
+        center_y - arm,
+        2.2 * scale,
+        color,
+    );
+}
+
+/// Slashed ring glyph (notice): a uniform ring with a diagonal slash. Reads
+/// as "rejected / nothing heard" by shape, not color.
+fn slashed_ring(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+    scale: f32,
+    color: [u8; 4],
+) {
+    arc(
+        canvas,
+        width,
+        height,
+        center_x,
+        center_y,
+        5.2 * scale,
+        2.2 * scale,
+        0.0,
+        std::f32::consts::TAU,
+        1.0,
+        color,
+    );
+    segment(
+        canvas,
+        width,
+        height,
+        center_x - 4.6 * scale,
+        center_y - 4.6 * scale,
+        center_x + 4.6 * scale,
+        center_y + 4.6 * scale,
+        2.0 * scale,
+        color,
+    );
+}
+
+/// Localized "alive" pulse for the working glyphs: alpha between
+/// `BREATHE_MIN` and 1.0, scale between 0.96 and 1.0. With reduced motion
+/// the pulse freezes at full strength. This is the ONLY continuous motion
+/// of the working states — it never travels or grows across the capsule.
+fn breathe(phase: f32, reduced_motion: bool) -> (f32, f32) {
+    if reduced_motion {
+        return (1.0, 1.0);
+    }
+    let k = pulse(phase / PULSE_PERIOD);
+    (BREATHE_MIN + (1.0 - BREATHE_MIN) * k, 0.96 + 0.04 * k)
+}
+
+/// Opaque capsule fill for a chip kind: `FLOOR` mixed with the state accent
+/// at the "Warm Minimal" tint ratio. The pill body (not just the glyph)
+/// carries the mode, and it never claims progress.
+fn capsule_blend(kind: ChipKind) -> [u8; 3] {
+    let ratio = match kind {
+        ChipKind::Recording => 0.15,
+        ChipKind::Transcribing | ChipKind::Cleaning => 0.13,
+        ChipKind::Sent => SENT_TINT,
+        ChipKind::Notice => NOTICE_TINT,
+    };
+    mix_rgb(FLOOR, accent_color(kind), ratio)
+}
+
+/// Shorten `text` with a trailing ellipsis so it fits `max_width` at
+/// `scale`, using `measure` for widths (injectable for tests).
+fn fit_text_measured<F: Fn(&str) -> f32>(measure: F, text: &str, max_width: f32) -> String {
+    if max_width <= 0.0 {
+        return String::new();
+    }
+    if measure(text) <= max_width {
+        return text.to_owned();
+    }
+    const ELLIPSIS: &str = "…";
+    let budget = (max_width - measure(ELLIPSIS)).max(0.0);
+    let mut result = String::new();
+    for character in text.chars() {
+        let mut candidate = result.clone();
+        candidate.push(character);
+        if measure(&candidate) > budget {
+            break;
+        }
+        result = candidate;
+    }
+    result.push_str(ELLIPSIS);
+    result
+}
+
+fn fit_text(font: &FontArc, text: &str, scale: PxScale, max_width: f32) -> String {
+    fit_text_measured(
+        |candidate| measure_text(font, candidate, scale),
+        text,
+        max_width,
+    )
+}
+
+/// Read the desktop's animation preference once at startup. Standard
+/// GNOME/COSMIC key; without gsettings (or on a desktop that does not
+/// expose it) animations stay on.
+fn prefers_reduced_motion() -> bool {
+    let Ok(output) = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
+        .output()
+    else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout).trim() == "false"
+}
+
 fn blend_pixel(
     canvas: &mut [u8],
     width: u32,
@@ -1474,11 +1627,12 @@ fn blend_pixel(
     canvas[index + 3] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
 }
 
-/// Regular + medium ("strong") UI faces; strong falls back to regular.
+/// Medium ("strong") UI face for the stage word plus a monospace face for
+/// the tabular elapsed timer; both fall back to the regular face.
 #[derive(Clone)]
 struct Fonts {
-    regular: FontArc,
     strong: FontArc,
+    mono: FontArc,
 }
 
 /// Known UI faces, preferred over the recursive any-font fallback.
@@ -1499,11 +1653,19 @@ const UI_FONT_STRONG_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/opentype/fira/FiraSans-Medium.otf",
 ];
+/// Monospace faces give the timer true tabular digits on every platform.
+const UI_FONT_MONO_CANDIDATES: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansMono-Regular.otf",
+];
 
 fn load_fonts() -> Option<Fonts> {
     let regular = first_font(UI_FONT_CANDIDATES).or_else(fallback_font)?;
     let strong = first_font(UI_FONT_STRONG_CANDIDATES).unwrap_or_else(|| regular.clone());
-    Some(Fonts { regular, strong })
+    let mono = first_font(UI_FONT_MONO_CANDIDATES).unwrap_or(regular);
+    Some(Fonts { strong, mono })
 }
 
 fn first_font(candidates: &[&str]) -> Option<FontArc> {
@@ -1563,7 +1725,10 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire_lock_on, ease_out_back, ease_out_cubic, format_elapsed, mix_rgb, pulse};
+    use super::{
+        acquire_lock_on, breathe, capsule_blend, ease_out_back, ease_out_cubic, fit_text_measured,
+        format_elapsed, mix_rgb, pulse, ChipKind, BREATHE_MIN,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -1643,5 +1808,37 @@ mod tests {
         assert_eq!(mix_rgb([0, 0, 0], [255, 255, 255], 1.0), [255, 255, 255]);
         assert_eq!(mix_rgb([0, 0, 0], [200, 100, 50], 0.5), [100, 50, 25]);
         assert_eq!(mix_rgb([10, 20, 30], [10, 20, 30], 0.7), [10, 20, 30]);
+    }
+
+    #[test]
+    fn capsule_blend_matches_warm_minimal_tint_blends() {
+        // Floor #0e0e11 mixed with the state accent at the locked ratios:
+        // recording 0.15, transcribing/cleaning 0.13, sent 0.45, notice 0.06.
+        assert_eq!(capsule_blend(ChipKind::Recording), [50, 28, 28]);
+        assert_eq!(capsule_blend(ChipKind::Transcribing), [45, 36, 24]);
+        assert_eq!(capsule_blend(ChipKind::Cleaning), [37, 31, 48]);
+        assert_eq!(capsule_blend(ChipKind::Sent), [60, 107, 77]);
+        assert_eq!(capsule_blend(ChipKind::Notice), [28, 24, 22]);
+    }
+
+    #[test]
+    fn breathe_stays_localized_and_freezes_with_reduced_motion() {
+        for step in 0..=120 {
+            let phase = step as f32 / 120.0 * 60.0;
+            let (alpha, scale) = breathe(phase, false);
+            assert!((BREATHE_MIN..=1.0).contains(&alpha));
+            assert!((0.96..=1.0).contains(&scale));
+        }
+        assert_eq!(breathe(0.0, true), (1.0, 1.0));
+        assert_eq!(breathe(123.4, true), (1.0, 1.0));
+    }
+
+    #[test]
+    fn fit_text_truncates_with_ellipsis_within_budget() {
+        // Fake measure: 4.0 units per character, ellipsis included.
+        let measure = |text: &str| text.chars().count() as f32 * 4.0;
+        assert_eq!(fit_text_measured(measure, "short", 200.0), "short");
+        assert_eq!(fit_text_measured(measure, "longword", 20.0), "long…");
+        assert_eq!(fit_text_measured(measure, "longword", 0.0), "");
     }
 }

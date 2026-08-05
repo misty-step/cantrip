@@ -18,9 +18,11 @@ that, for text.
 - **Optional cloud lanes.** Any OpenAI-compatible STT or chat endpoint can
   replace the local models (see `docs/CONFIGURATION.md`). API keys live in
   the OS keyring, never in files.
-- **Layer-shell status HUD.** A small always-on-top capsule shows live state:
-  listening (with a breathing pulse and timer), transcribing, cleaning up,
-  and a gentle success check. Pure Rust, no GTK.
+- **Layer-shell status HUD.** A small always-on-top capsule shows live state
+  with a static per-phase composition — a centered stage word, a breathing
+  state glyph, and a timer — plus a gentle success/failure flash. No fake
+  progress: determinate readings appear only when the daemon can measure
+  them. Pure Rust, no GTK.
 - **Atomic paste-first injection.** The default pastes the finished text
   from the clipboard (`wl-copy` then one `Ctrl+V`), so paragraph breaks
   survive and a focus change mid-dictation cannot interrupt delivery.
