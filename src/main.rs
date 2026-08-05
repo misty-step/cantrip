@@ -38,6 +38,10 @@ enum CliCommand {
         /// Render one frame to a PNG at PATH, then exit (visual testing).
         #[arg(long, value_name = "PATH")]
         screenshot: Option<PathBuf>,
+        /// State to render with --screenshot: recording | transcribing |
+        /// cleaning | sent | notice (default: recording).
+        #[arg(long, value_enum)]
+        state: Option<hud::ScreenshotState>,
     },
     /// Open the configuration window.
     Settings {
@@ -123,7 +127,7 @@ fn run() -> Result<()> {
             let config = Config::load().context("loading configuration")?;
             daemon::run(config, preload)
         }
-        CliCommand::Hud { screenshot } => hud::run(screenshot),
+        CliCommand::Hud { screenshot, state } => hud::run(screenshot, state),
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Toggle { postproc } => send_command(Command::Toggle {
             postproc: postproc.map(|mode| mode == PostprocMode::Clean),

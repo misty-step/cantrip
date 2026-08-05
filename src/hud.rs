@@ -3,23 +3,27 @@
 //! The HUD is a read-only mirror of the daemon. It polls the existing status
 //! command and never sends a command which can change daemon state.
 //!
-//! Visual design ("Warm Minimal", ADR 0010): a fixed 360×40 borderless
+//! Visual design ("Warm Minimal", ADR 0010): a fixed 320×40 borderless
 //! capsule, top-centre, filled with an opaque blend of the near-black floor
 //! and a whisper of the state accent — the whole pill reads the mode, and
-//! it never signals progress. A quiet UI-font label ("Listening…",
+//! it never signals determinate progress. A quiet UI-font label ("Listening…",
 //! "Transcribing…", "Cleaning…") sits centered as the visual anchor, with a
 //! small state glyph in a 28px zone at the left and a monospace mm:ss
-//! counter at the right while recording. Every phase is a static
-//! composition: the only motion is a localized breathing pulse on the glyph
-//! (alpha/scale — never a sweep or length change), the ticking elapsed
-//! timer, and the ~2.5s outcome flashes. State changes ease over ~260ms
-//! (easeOutCubic): the pill pops in with scale+alpha and accent colors
-//! crossfade. A reduced-motion desktop (gsettings enable-animations=false)
-//! freezes the pulse, draws the recording glyph as a plain dot, and skips
-//! entry motion.
+//! counter at the right while recording. Each working state carries an
+//! honest, distinct glyph: recording is a plain dot, transcribing is an
+//! indeterminate spinner (a rotating open arc that never fills), and
+//! cleaning is an eight-ray sparkle. The only continuous motion is the
+//! localized breathing pulse and the spinner's turn (alpha/scale — never a
+//! length change or a determinate meter), the ticking elapsed timer, and
+//! the ~2.5s outcome flashes. State changes ease over ~260ms: the pill pops
+//! in with scale+alpha, accent/fill colors crossfade, the fresh glyph scales
+//! in, and the stage word drifts up a few pixels. A reduced-motion desktop
+//! (gsettings enable-animations=false) freezes all motion, draws the
+//! transcribing spinner as a calm static ring, and skips entry motion.
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_registry,
@@ -64,7 +68,7 @@ const FONT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 // Layout, in design units (pixels at pop-in scale 1.0). The capsule is a
 // fixed geometry ("Warm Minimal", ADR 0010): it never resizes with content.
-const CAPSULE_WIDTH: f32 = 360.0;
+const CAPSULE_WIDTH: f32 = 320.0;
 const CAPSULE_HEIGHT: f32 = 40.0;
 /// Distance from the capsule's left edge to the state-glyph centre; the
 /// glyph lives in a 28px zone at the left of the capsule.
@@ -91,6 +95,9 @@ const TEXT_SECONDARY: [u8; 4] = [242, 244, 248, 160];
 const PULSE_PERIOD: f32 = 2.0;
 /// Breathing alpha range: the working glyph pulses between these opacities.
 const BREATHE_MIN: f32 = 0.8;
+/// Spinner turn period in seconds; a pure function of the phase window, so
+/// a frozen phase draws a byte-identical arc.
+const SPIN_PERIOD: f32 = 0.8;
 
 /// Take the single-instance flock on `hud.lock`. Returns `None` when another
 /// HUD already holds the lock. The returned file must stay open for the
@@ -126,10 +133,11 @@ fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
 /// Display and daemon failures are deliberately non-fatal. The HUD is an
 /// optional client and must not affect the daemon's operation.
 ///
-/// With `--screenshot <path>` the HUD renders the recording pill (fixed
-/// 00:07 timer, no daemon polling), dumps one frame to a PNG, and exits —
-/// the same visual-test hook the settings window has.
-pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
+/// With `--screenshot <path>` the HUD renders one state (fixed 00:07 timer
+/// for recording, no daemon polling), dumps a settled frame to a PNG, and
+/// exits — the same visual-test hook the settings window has. `state`
+/// selects the composition; None means Recording.
+pub fn run(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Result<()> {
     // Single instance: hold an exclusive flock for the process lifetime so
     // the daemon can detect this HUD (and respawn one when it is missing).
     // Screenshot mode is a test hook and deliberately skips the lock.
@@ -238,6 +246,7 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
         pool,
         layer,
         screenshot,
+        state,
         reduced_motion,
     );
     if let Err(error) = event_queue.roundtrip(&mut hud) {
@@ -337,10 +346,13 @@ struct HudState {
     daemon_available: bool,
     exit: bool,
     screenshot: Option<PathBuf>,
+    /// State to render in screenshot mode; None selects Recording.
+    screenshot_state: Option<ScreenshotState>,
     screenshot_done: bool,
 }
 
 impl HudState {
+    #[allow(clippy::too_many_arguments)] // construction plumbing (registry, pool, surface)
     fn new(
         registry_state: RegistryState,
         output_state: OutputState,
@@ -348,10 +360,11 @@ impl HudState {
         pool: SlotPool,
         layer: LayerSurface,
         screenshot: Option<PathBuf>,
+        screenshot_state: Option<ScreenshotState>,
         reduced_motion: bool,
     ) -> Self {
-        // Screenshot mode renders the recording pill deterministically and
-        // skips daemon polling, so the frame is stable and offline.
+        // Screenshot mode skips daemon polling so the frame is stable and
+        // offline; `view` renders the requested state deterministically.
         let state = if screenshot.is_some() {
             UiState::Recording { elapsed: 7 }
         } else {
@@ -383,6 +396,7 @@ impl HudState {
             daemon_available: false,
             exit: false,
             screenshot,
+            screenshot_state,
             screenshot_done: false,
         }
     }
@@ -554,6 +568,34 @@ impl HudState {
     }
 
     fn view(&mut self, now: Instant) -> Option<ChipView> {
+        // Screenshot hook: render exactly the requested state, settled
+        // (progress 1.0, phase 0.0) and with no time-window flash fade, so
+        // every run captures the same byte-identical frame.
+        if let Some(state) = self.screenshot_state {
+            let content = match state {
+                ScreenshotState::Recording => (
+                    "Listening…".to_owned(),
+                    Some(format_elapsed(7)),
+                    ChipKind::Recording,
+                ),
+                ScreenshotState::Transcribing => {
+                    ("Transcribing…".to_owned(), None, ChipKind::Transcribing)
+                }
+                ScreenshotState::Cleaning => ("Cleaning…".to_owned(), None, ChipKind::Cleaning),
+                ScreenshotState::Sent => ("Pasted 617 chars".to_owned(), None, ChipKind::Sent),
+                ScreenshotState::Notice => ("Heard nothing".to_owned(), None, ChipKind::Notice),
+            };
+            self.shown_kind = Some(content.2);
+            return Some(ChipView {
+                label: content.0,
+                detail: content.1,
+                kind: content.2,
+                from: None,
+                progress: 1.0,
+                fade: 1.0,
+                phase: 0.0,
+            });
+        }
         let content = match &self.state {
             UiState::Idle => match self.flash_until {
                 Some(until) if now < until => {
@@ -712,6 +754,14 @@ impl HudState {
         // Working states breathe (alpha/scale, localized to the glyph);
         // flashes are static compositions. Reduced motion freezes both.
         let (breathe_alpha, breathe_scale) = breathe(view.phase, self.reduced_motion);
+        // Every state change eases the fresh glyph in from 62% scale
+        // (ease-out-back, ~260ms). Reduced motion and screenshot mode run
+        // at progress 1.0, so the composition is static and deterministic.
+        let glyph_in = 0.62 + 0.38 * ease_out_back(view.progress);
+        // The spinner turns only while live; reduced motion and the
+        // screenshot hook freeze it as a calm full ring (an open static arc
+        // could be misread as a partially-filled meter).
+        let spinner_animated = !(self.reduced_motion || self.screenshot.is_some());
         match view.kind {
             ChipKind::Recording => circle(
                 canvas,
@@ -719,16 +769,19 @@ impl HudState {
                 height,
                 glyph_x,
                 center_y,
-                4.2 * scale_factor * breathe_scale,
+                4.2 * scale_factor * breathe_scale * glyph_in,
                 scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
-            ChipKind::Transcribing => waveform(
+            ChipKind::Transcribing => spinner(
                 canvas,
                 width,
                 height,
                 glyph_x,
                 center_y,
-                scale_factor * breathe_scale,
+                4.8 * scale_factor * breathe_scale * glyph_in,
+                2.2 * scale_factor,
+                view.phase,
+                spinner_animated,
                 scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
             ChipKind::Cleaning => sparkle(
@@ -737,7 +790,7 @@ impl HudState {
                 height,
                 glyph_x,
                 center_y,
-                scale_factor * breathe_scale,
+                scale_factor * breathe_scale * glyph_in,
                 scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
             ChipKind::Sent => check(
@@ -755,7 +808,7 @@ impl HudState {
                 height,
                 glyph_x,
                 center_y,
-                scale_factor,
+                scale_factor * glyph_in,
                 scale_alpha(accent_solid, content_alpha),
             ),
         }
@@ -763,6 +816,10 @@ impl HudState {
         let label_px = PxScale::from(LABEL_SIZE * scale_factor);
         let metrics = fonts.strong.as_scaled(label_px);
         let baseline = center_y - metrics.height() / 2.0 + metrics.ascent();
+        // The stage word drifts up ~3px while it fades in on every state
+        // change; reduced motion and screenshot run at progress 1.0, so the
+        // composition settles at the same baseline on every platform.
+        let label_y = baseline + 3.0 * (1.0 - ease_out_cubic(view.progress));
         // The stage word is the centered anchor, clamped to the zone between
         // the glyph and the trailing timer; overlong words truncate. The
         // zone constants scale with the pop-in so the whole composition
@@ -787,7 +844,7 @@ impl HudState {
             &fonts.strong,
             &label,
             label_x,
-            baseline,
+            label_y,
             label_px,
             scale_alpha(TEXT_PRIMARY, content_alpha),
         );
@@ -906,6 +963,18 @@ enum ChipKind {
     Recording,
     Transcribing,
     Cleaning,
+}
+
+/// A state to render deterministically with `--screenshot` (the visual-test
+/// hook), for verifying every composition offline. Defaults to Recording
+/// when the hook runs without `--state`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ScreenshotState {
+    Recording,
+    Transcribing,
+    Cleaning,
+    Sent,
+    Notice,
 }
 
 /// One frame of chip content plus the motion inputs which style it.
@@ -1362,37 +1431,61 @@ fn check(
     );
 }
 
-/// Static waveform glyph (transcribing): three vertical bars. It never
-/// animates its shape — only `breathe` modulates alpha/scale, so it reads
-/// "busy, unmeasured", never progress.
-fn waveform(
+/// Indeterminate spinner glyph (transcribing): a round-capped open arc that
+/// rotates a full turn without ever completing — "busy, unmeasured", never
+/// a determinate meter. The rotation angle is a pure function of `phase`,
+/// so a frozen phase draws a fixed, byte-identical frame. With
+/// `animated == false` (reduced motion, screenshot) it draws a calm full
+/// ring instead of a rotating gap: a static open arc could be misread as a
+/// partially-filled progress ring.
+#[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin, phase)
+fn spinner(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     center_x: f32,
     center_y: f32,
-    scale: f32,
+    radius: f32,
+    thickness: f32,
+    phase: f32,
+    animated: bool,
     color: [u8; 4],
 ) {
-    const BAR_HEIGHTS: [f32; 3] = [6.0, 10.0, 6.0];
-    for (offset, bar_height) in [(-5.0_f32, 0_usize), (0.0, 1), (5.0, 2)] {
-        let bar = BAR_HEIGHTS[bar_height] * scale;
+    /// Arc length of the spinner in radians: a 264° sweep leaves a clear
+    /// gap, unmistakably a spinner rather than a ring.
+    const SWEEP: f32 = 4.608;
+    const SEGMENTS: usize = 30;
+    let sweep = if animated {
+        SWEEP
+    } else {
+        std::f32::consts::TAU
+    };
+    let start = if animated {
+        (phase / SPIN_PERIOD).fract() * std::f32::consts::TAU
+    } else {
+        0.0
+    };
+    for segment_index in 0..SEGMENTS {
+        let t0 = start + sweep * (segment_index as f32 / SEGMENTS as f32);
+        let t1 = start + sweep * ((segment_index + 1) as f32 / SEGMENTS as f32);
         segment(
             canvas,
             width,
             height,
-            center_x + offset * scale,
-            center_y - bar / 2.0,
-            center_x + offset * scale,
-            center_y + bar / 2.0,
-            2.2 * scale,
+            center_x + radius * t0.cos(),
+            center_y + radius * t0.sin(),
+            center_x + radius * t1.cos(),
+            center_y + radius * t1.sin(),
+            thickness,
             color,
         );
     }
 }
 
-/// Static sparkle glyph (cleaning): a four-point star. Shape is fixed; only
-/// `breathe` modulates alpha/scale.
+/// Sparkle glyph (cleaning): an eight-ray star — four cardinal rays plus
+/// four shorter diagonal ones around a bright centre dot. Unmistakably a
+/// sparkle, never the crossed lines of an X. Shape is fixed; only `breathe`
+/// modulates alpha/scale.
 fn sparkle(
     canvas: &mut [u8],
     width: u32,
@@ -1402,27 +1495,48 @@ fn sparkle(
     scale: f32,
     color: [u8; 4],
 ) {
-    let arm = 6.0 * scale;
-    segment(
+    const LONG_ARM: f32 = 5.6;
+    const SHORT_ARM: f32 = 2.7;
+    const THICKNESS: f32 = 2.1;
+    let long = LONG_ARM * scale;
+    let short = SHORT_ARM * scale;
+    let thickness = THICKNESS * scale;
+    // Four cardinal rays.
+    for (dx, dy) in [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)] {
+        segment(
+            canvas,
+            width,
+            height,
+            center_x,
+            center_y,
+            center_x + long * dx,
+            center_y + long * dy,
+            thickness,
+            color,
+        );
+    }
+    // Four shorter diagonal rays.
+    let diagonal = std::f32::consts::FRAC_1_SQRT_2;
+    for (dx, dy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+        segment(
+            canvas,
+            width,
+            height,
+            center_x,
+            center_y,
+            center_x + short * dx * diagonal,
+            center_y + short * dy * diagonal,
+            thickness,
+            color,
+        );
+    }
+    circle(
         canvas,
         width,
         height,
-        center_x - arm,
-        center_y - arm,
-        center_x + arm,
-        center_y + arm,
-        2.2 * scale,
-        color,
-    );
-    segment(
-        canvas,
-        width,
-        height,
-        center_x - arm,
-        center_y + arm,
-        center_x + arm,
-        center_y - arm,
-        2.2 * scale,
+        center_x,
+        center_y,
+        1.3 * scale,
         color,
     );
 }
@@ -1666,7 +1780,7 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         acquire_lock_on, breathe, capsule_blend, ease_out_back, ease_out_cubic, fit_text_measured,
-        format_elapsed, mix_rgb, pulse, ChipKind, BREATHE_MIN,
+        format_elapsed, mix_rgb, pulse, sparkle, spinner, ChipKind, BREATHE_MIN,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1789,5 +1903,129 @@ mod tests {
         // First character already exceeds the budget: drop it and keep only
         // the ellipsis — never admit text beyond the declared width.
         assert_eq!(fit_text_measured(measure, "longword", 5.0), "…");
+    }
+
+    fn alpha_at(canvas: &[u8], width: u32, x: u32, y: u32) -> u8 {
+        canvas[(y * width + x) as usize * 4 + 3]
+    }
+
+    #[test]
+    fn spinner_rotation_is_periodic_in_phase() {
+        // The spinner must be a pure function of `phase` so the 60s phase
+        // window never drifts: one SPIN_PERIOD later draws the same frame.
+        let mut first = [0u8; 32 * 32 * 4];
+        spinner(
+            &mut first,
+            32,
+            32,
+            16.0,
+            16.0,
+            4.8,
+            2.2,
+            1.7,
+            true,
+            [255, 255, 255, 255],
+        );
+        let mut second = [0u8; 32 * 32 * 4];
+        spinner(
+            &mut second,
+            32,
+            32,
+            16.0,
+            16.0,
+            4.8,
+            2.2,
+            2.5,
+            true,
+            [255, 255, 255, 255],
+        );
+        assert_eq!(first, second, "one SPIN_PERIOD later must repeat the frame");
+        // A different phase inside the period must rotate the arc.
+        let mut third = [0u8; 32 * 32 * 4];
+        spinner(
+            &mut third,
+            32,
+            32,
+            16.0,
+            16.0,
+            4.8,
+            2.2,
+            2.0,
+            true,
+            [255, 255, 255, 255],
+        );
+        assert_ne!(first, third, "mid-turn phases must differ");
+    }
+
+    #[test]
+    fn spinner_frozen_draws_a_full_ring() {
+        // Reduced motion / screenshot freeze the spinner: the frozen glyph
+        // must be phase-independent (byte-identical) and cover the full
+        // circle rather than a static open arc (which could read as a
+        // partially-filled meter).
+        let mut first = [0u8; 32 * 32 * 4];
+        spinner(
+            &mut first,
+            32,
+            32,
+            16.0,
+            16.0,
+            4.8,
+            2.2,
+            0.0,
+            false,
+            [255, 255, 255, 255],
+        );
+        let mut second = [0u8; 32 * 32 * 4];
+        spinner(
+            &mut second,
+            32,
+            32,
+            16.0,
+            16.0,
+            4.8,
+            2.2,
+            9.3,
+            false,
+            [255, 255, 255, 255],
+        );
+        assert_eq!(first, second);
+        // The ring must be lit all the way around (top, right, bottom, left).
+        for (x, y) in [(16, 11), (21, 16), (16, 21), (11, 16)] {
+            assert!(
+                alpha_at(&first, 32, x, y) > 0,
+                "frozen ring must cover ({x},{y})"
+            );
+        }
+    }
+
+    #[test]
+    fn sparkle_has_cardinal_rays_and_short_diagonals_not_an_x() {
+        // The cleaning glyph is a real sparkle: four cardinal rays and four
+        // short diagonal ones. A bare X (two crossing corner lines) has no
+        // cardinal density and long diagonal arms — the two complaints the
+        // eight-ray shape fixes.
+        let mut canvas = [0u8; 32 * 32 * 4];
+        sparkle(&mut canvas, 32, 32, 16.0, 16.0, 1.0, [255, 255, 255, 255]);
+        // Cardinal ray tips are lit.
+        for (x, y) in [(21, 16), (16, 21), (11, 16), (16, 11)] {
+            assert!(alpha_at(&canvas, 32, x, y) > 0, "cardinal ray at ({x},{y})");
+        }
+        // Short diagonal rays are lit near the centre.
+        for (x, y) in [(18, 18), (18, 14), (14, 18), (14, 14)] {
+            assert!(
+                alpha_at(&canvas, 32, x, y) > 0,
+                "short diagonal at ({x},{y})"
+            );
+        }
+        // No long diagonal arm: the corner at radius ~8.5 is empty, so the
+        // glyph cannot read as an X.
+        for (x, y) in [(22, 22), (22, 10), (10, 22), (10, 10)] {
+            assert_eq!(
+                alpha_at(&canvas, 32, x, y),
+                0,
+                "no long diagonal at ({x},{y})"
+            );
+        }
     }
 }
