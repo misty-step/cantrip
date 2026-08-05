@@ -1229,8 +1229,7 @@ fn circle(
     }
 }
 
-/// Uniform round-capped ring (the only arc caller needs no sweep, head, or
-/// taper — the spinner-capable endpoint is gone with the spinner).
+/// Uniform round-capped ring, used by the notice's slashed-ring glyph.
 #[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
 fn ring(
     canvas: &mut [u8],

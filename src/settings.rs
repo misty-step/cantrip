@@ -629,17 +629,13 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
     let tmp = parent.join(format!(
         ".cantrip-config-{}-{}.tmp",
         std::process::id(),
-        tmp_counter()
+        TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     fs::write(&tmp, doc.to_string()).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
 static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn tmp_counter() -> u64 {
-    TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
 
 /// Assign `item` to `key`, carrying over any decor (inline comment) the key
 /// already has, so edited values keep their trailing annotations and column
