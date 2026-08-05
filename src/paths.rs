@@ -37,6 +37,15 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("cantrip.sock"))
 }
 
+/// `$XDG_RUNTIME_DIR/cantrip/hud.lock`
+///
+/// Single-instance flock target for the HUD: the HUD holds an exclusive
+/// lock for its lifetime, and the daemon uses the same lock to detect a
+/// missing HUD and respawn it.
+pub fn hud_lock_path() -> Result<PathBuf> {
+    Ok(runtime_dir()?.join("hud.lock"))
+}
+
 /// Create a directory (and parents) if missing, then return it.
 pub fn ensure_dir(dir: PathBuf) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

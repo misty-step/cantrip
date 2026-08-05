@@ -2,6 +2,7 @@
 
 use crate::capture::{self, Recorder};
 use crate::config::{Config, PostprocConfig, SttConfig};
+use crate::hud;
 use crate::inject::{self, InjectionMode, InjectionOutcome};
 use crate::ipc::{Command, Reply};
 use crate::models;
@@ -12,7 +13,9 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
@@ -20,6 +23,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CLIENT_LINE_LIMIT: usize = 256;
 const CLIENT_READ_DEADLINE: Duration = Duration::from_secs(2);
+/// How often the daemon checks that a HUD is alive and holding its lock.
+const HUD_SUPERVISE_INTERVAL: Duration = Duration::from_secs(5);
+/// Minimum gap between HUD spawn attempts, so a broken HUD (for example a
+/// headless session with no Wayland) cannot cause a respawn hot loop.
+const HUD_SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -174,6 +182,7 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
     }
 
     tracing::info!("[Daemon] listening");
+    start_hud_supervisor(runtime_dir.clone());
     let loop_result = serve(
         &listener,
         config,
@@ -195,6 +204,65 @@ fn install_signal_handlers() {
         libc::signal(libc::SIGINT, handler as usize);
         libc::signal(libc::SIGTERM, handler as usize);
     }
+}
+
+/// Own the HUD lifecycle: check every few seconds that a HUD is alive (it
+/// holds an exclusive flock on `hud.lock`); when the lock is free, spawn a
+/// detached HUD. The user never has to start or restart the pill by hand.
+fn start_hud_supervisor(runtime_dir: PathBuf) {
+    thread::spawn(move || {
+        // Start in the past so the first check can spawn immediately.
+        let mut last_spawn = Instant::now() - HUD_SPAWN_COOLDOWN;
+        loop {
+            if last_spawn.elapsed() >= HUD_SPAWN_COOLDOWN {
+                match hud::acquire_instance_lock() {
+                    Ok(Some(_lock)) => {
+                        // Lock free: no HUD is running. Release it and spawn
+                        // one; the child takes the lock itself (or exits if
+                        // another instance won the race).
+                        drop(_lock);
+                        last_spawn = Instant::now();
+                        match spawn_hud(&runtime_dir) {
+                            Ok(()) => tracing::info!("[Daemon] HUD not running; spawned it"),
+                            Err(error) => tracing::warn!("[Daemon] spawning HUD failed: {error:#}"),
+                        }
+                    }
+                    Ok(None) => {} // a HUD holds the lock and is alive
+                    Err(error) => tracing::warn!("[Daemon] HUD lock check failed: {error:#}"),
+                }
+            }
+            thread::sleep(HUD_SUPERVISE_INTERVAL);
+        }
+    });
+}
+
+/// Launch the HUD as a detached child of this process. Its output goes to
+/// `hud.log` in the runtime directory; it leaves the daemon's process group
+/// so terminal signals to the daemon do not kill the pill.
+fn spawn_hud(runtime_dir: &Path) -> Result<()> {
+    let executable = std::env::current_exe().context("locating the cantrip binary")?;
+    let log_path = runtime_dir.join("hud.log");
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening HUD log {}", log_path.display()))?;
+    let mut command = ProcessCommand::new(executable);
+    command
+        .arg("hud")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            log.try_clone().context("cloning HUD log handle")?,
+        ))
+        .stderr(Stdio::from(log));
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    command.spawn().context("spawning the HUD")?;
+    Ok(())
 }
 
 fn remove_stale_socket(path: &Path) -> Result<()> {

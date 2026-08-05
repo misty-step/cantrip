@@ -53,9 +53,8 @@ cargo build --release
 # 2. Initialize config at ~/.config/cantrip/config.toml
 ./target/release/cantrip config init
 
-# 3. Bring up the daemon and the HUD
-./target/release/cantrip daemon &     # keeps the STT model warm
-./target/release/cantrip hud &        # the status capsule
+# 3. Bring up the daemon (it keeps the STT model warm and runs the HUD itself)
+./target/release/cantrip daemon &
 
 # 4. Dictate — bind this to a key in your compositor
 ./target/release/cantrip toggle       # press once to start, once to stop
@@ -70,7 +69,7 @@ running: `ollama pull qwen3:8b`), the corrected text lands at your cursor.
 | Command | Purpose |
 |---|---|
 | `cantrip daemon [--preload]` | Run the dictation daemon |
-| `cantrip hud [--screenshot PATH]` | Run the layer-shell status HUD (or dump one frame to a PNG and exit) |
+| `cantrip hud [--screenshot PATH]` | Run the layer-shell status HUD (or dump one frame to a PNG and exit). The daemon spawns and watches it; run manually only to override |
 | `cantrip settings [--screenshot PATH]` | Open the configuration window (view, edit, reload; or dump a frame) |
 | `cantrip toggle` / `start` / `stop` / `cancel` | Dictation transitions |
 | `cantrip status` / `ping` | Daemon state |

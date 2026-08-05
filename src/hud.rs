@@ -87,6 +87,35 @@ const ARC_SWEEP: f32 = std::f32::consts::TAU * 0.3;
 /// Recording pulse period in seconds; must divide the 60s phase window.
 const PULSE_PERIOD: f32 = 2.0;
 
+/// Take the single-instance flock on `hud.lock`. Returns `None` when another
+/// HUD already holds the lock. The returned file must stay open for the
+/// process lifetime; the lock is released when the file drops or the process
+/// exits, so a crashed HUD never leaves a stale lock behind.
+/// Shared with the daemon, which uses the same lock to detect a missing HUD.
+pub(crate) fn acquire_instance_lock() -> Result<Option<fs::File>> {
+    acquire_lock_on(&crate::paths::hud_lock_path()?)
+}
+
+/// `acquire_instance_lock` against an explicit path (testable without the
+/// real runtime directory).
+fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening HUD lock {}", path.display()))?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(Some(file));
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(None);
+    }
+    Err(error).with_context(|| format!("locking HUD instance file {}", path.display()))
+}
+
 /// Run the HUD until the compositor closes it or the display disconnects.
 ///
 /// Display and daemon failures are deliberately non-fatal. The HUD is an
@@ -96,6 +125,24 @@ const PULSE_PERIOD: f32 = 2.0;
 /// 00:07 timer, no daemon polling), dumps one frame to a PNG, and exits —
 /// the same visual-test hook the settings window has.
 pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
+    // Single instance: hold an exclusive flock for the process lifetime so
+    // the daemon can detect this HUD (and respawn one when it is missing).
+    // Screenshot mode is a test hook and deliberately skips the lock.
+    let _instance_lock = match screenshot {
+        Some(_) => None,
+        None => match acquire_instance_lock() {
+            Ok(Some(file)) => Some(file),
+            Ok(None) => {
+                tracing::info!("[HUD] another HUD instance is running; exiting");
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!("[HUD] cannot take the instance lock: {error:#}");
+                return Ok(());
+            }
+        },
+    };
+
     tracing::info!("[HUD] connecting to Wayland display");
     let connection = match Connection::connect_to_env() {
         Ok(connection) => connection,
@@ -1516,7 +1563,35 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ease_out_back, ease_out_cubic, format_elapsed, mix_rgb, pulse};
+    use super::{acquire_lock_on, ease_out_back, ease_out_cubic, format_elapsed, mix_rgb, pulse};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn lock_path() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("cantrip-hud-lock-test-{}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        path
+    }
+
+    #[test]
+    fn lock_is_exclusive_until_the_file_drops() {
+        let path = lock_path();
+        let first = acquire_lock_on(&path).expect("first lock should succeed");
+        assert!(first.is_some());
+
+        // A second open of the same inode must contend (flock is per fd,
+        // not per process), so a duplicate HUD instance cannot start.
+        let second = acquire_lock_on(&path).expect("lock check should not error");
+        assert!(second.is_none());
+
+        // Dropping the file releases the lock: the daemon can respawn.
+        drop(first);
+        let third = acquire_lock_on(&path).expect("re-lock after drop should succeed");
+        assert!(third.is_some());
+        drop(third);
+        let _ = fs::remove_file(&path);
+    }
 
     #[test]
     fn formats_elapsed_as_minutes_and_seconds() {
