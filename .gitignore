@@ -7,3 +7,5 @@
 /.cargo/config.toml
 
 /.scratch
+
+/.omp
