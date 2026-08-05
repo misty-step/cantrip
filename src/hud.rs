@@ -35,6 +35,7 @@ use smithay_client_toolkit::{
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
 use std::{
+    borrow::Cow,
     fs,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
@@ -71,7 +72,7 @@ const GLYPH_CENTER_X: f32 = 26.0;
 /// The stage word is centered within
 /// [left + WORD_AREA_LEFT, right - WORD_AREA_RIGHT].
 const WORD_AREA_LEFT: f32 = 48.0;
-/// Reserved width for the trailing timer (determinate) cluster.
+/// Reserved width for the trailing timer cluster.
 const WORD_AREA_RIGHT: f32 = 92.0;
 const PAD_RIGHT: f32 = 18.0;
 const LABEL_SIZE: f32 = 15.0;
@@ -197,7 +198,7 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     );
     layer.set_anchor(Anchor::TOP);
     // wlroots rejects a zero width with only the TOP anchor. A fixed width
-    // keeps the surface top-centered while allowing the chip to resize inside.
+    // keeps the surface top-centered for the fixed-size capsule inside.
     layer.set_size(FALLBACK_WIDTH, HUD_HEIGHT);
     layer.set_exclusive_zone(0);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -493,7 +494,7 @@ impl HudState {
             if self
                 .previous_state
                 .is_some_and(|state| state != UiStateKind::Idle)
-                && next_state.is_idle()
+                && matches!(next_state, UiState::Idle)
             {
                 self.flash_until = Some(now + RESULT_FLASH);
                 // Show the daemon's actual terminal message (Typed N chars,
@@ -509,7 +510,8 @@ impl HudState {
             self.previous_state = Some(next_kind);
         }
         self.state = next_state;
-        if self.state.is_idle() && self.flash_until.is_some_and(|until| now >= until) {
+        if matches!(self.state, UiState::Idle) && self.flash_until.is_some_and(|until| now >= until)
+        {
             self.flash_until = None;
         }
     }
@@ -593,7 +595,7 @@ impl HudState {
         // Reduced motion swaps states instantly instead of animating.
         let progress = if self.reduced_motion { 1.0 } else { eased };
         // A 60s window keeps f32 phase math precise over long uptimes; the
-        // pulse and spinner periods both divide it, so motion never jumps.
+        // breathing pulse period divides it, so motion never jumps.
         let phase = (now.duration_since(self.started_at).as_secs_f64() % 60.0) as f32;
         Some(ChipView {
             label,
@@ -693,30 +695,15 @@ impl HudState {
         // flashes are static compositions. Reduced motion freezes both.
         let (breathe_alpha, breathe_scale) = breathe(view.phase, self.reduced_motion);
         match view.kind {
-            ChipKind::Recording => {
-                if self.reduced_motion {
-                    circle(
-                        canvas,
-                        width,
-                        height,
-                        glyph_x,
-                        center_y,
-                        4.2 * scale_factor,
-                        scale_alpha(accent_solid, content_alpha),
-                    );
-                } else {
-                    recording_dot(
-                        canvas,
-                        width,
-                        height,
-                        glyph_x,
-                        center_y,
-                        view.phase,
-                        scale_factor * breathe_scale,
-                        scale_alpha(accent_solid, content_alpha * breathe_alpha),
-                    );
-                }
-            }
+            ChipKind::Recording => circle(
+                canvas,
+                width,
+                height,
+                glyph_x,
+                center_y,
+                4.2 * scale_factor * breathe_scale,
+                scale_alpha(accent_solid, content_alpha * breathe_alpha),
+            ),
             ChipKind::Transcribing => waveform(
                 canvas,
                 width,
@@ -759,13 +746,21 @@ impl HudState {
         let metrics = fonts.strong.as_scaled(label_px);
         let baseline = center_y - metrics.height() / 2.0 + metrics.ascent();
         // The stage word is the centered anchor, clamped to the zone between
-        // the glyph and the trailing timer; overlong words truncate.
-        let word_budget = (right - left) - WORD_AREA_LEFT - WORD_AREA_RIGHT;
-        let label = fit_text(&fonts.strong, &view.label, label_px, word_budget);
+        // the glyph and the trailing timer; overlong words truncate. The
+        // zone constants scale with the pop-in so the whole composition
+        // stays proportional.
+        let left_zone = WORD_AREA_LEFT * scale_factor;
+        let right_zone = WORD_AREA_RIGHT * scale_factor;
+        let word_budget = (right - left) - left_zone - right_zone;
+        let label = fit_text_measured(
+            |candidate| measure_text(&fonts.strong, candidate, label_px),
+            &view.label,
+            word_budget,
+        );
         let label_width = measure_text(&fonts.strong, &label, label_px);
         let label_x = (center_x - label_width / 2.0).clamp(
-            left + WORD_AREA_LEFT,
-            (right - WORD_AREA_RIGHT - label_width).max(left + WORD_AREA_LEFT),
+            left + left_zone,
+            (right - right_zone - label_width).max(left + left_zone),
         );
         draw_text(
             canvas,
@@ -781,7 +776,7 @@ impl HudState {
         if let Some(detail) = view.detail.as_deref() {
             let detail_px = PxScale::from(DETAIL_SIZE * scale_factor);
             let detail_x =
-                right - (PAD_RIGHT + measure_text(&fonts.mono, detail, detail_px)) * scale_factor;
+                right - PAD_RIGHT * scale_factor - measure_text(&fonts.mono, detail, detail_px);
             draw_text(
                 canvas,
                 width,
@@ -823,7 +818,9 @@ impl HudState {
                     rgba.extend_from_slice(&[un(r), un(g), un(b), a]);
                 }
             }
-            match write_png(&path, width, height, &rgba) {
+            match image::save_buffer(&path, &rgba, width, height, image::ColorType::Rgba8)
+                .with_context(|| format!("writing {}", path.display()))
+            {
                 Ok(()) => {
                     eprintln!("saved HUD screenshot to {}", path.display());
                     std::process::exit(0);
@@ -836,13 +833,6 @@ impl HudState {
         }
         Ok(true)
     }
-}
-
-/// Write an RGBA frame to PNG via the `image` crate (same helper as the
-/// settings window's screenshot hook).
-fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
-    image::save_buffer(path, rgba, width, height, image::ColorType::Rgba8)
-        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -872,10 +862,6 @@ impl UiState {
             Self::Processing { stage } if stage == "cleaning" => UiStateKind::Cleaning,
             Self::Processing { .. } => UiStateKind::Transcribing,
         }
-    }
-
-    fn is_idle(&self) -> bool {
-        matches!(self, Self::Idle)
     }
 }
 
@@ -908,7 +894,7 @@ struct ChipView {
     progress: f32,
     /// Global fade multiplier for the result-flash tail.
     fade: f32,
-    /// Wrapped seconds driving continuous motion (pulse, spinner).
+    /// Wrapped seconds driving the continuous breathing pulse.
     phase: f32,
 }
 
@@ -1243,11 +1229,10 @@ fn circle(
     }
 }
 
-/// Round-capped circular arc ending at `head`, sweeping `sweep` radians
-/// behind it. Alpha tapers from 1.0 at the head to `tail_alpha` at the tail;
-/// pass `sweep = TAU`, `tail_alpha = 1.0` for a uniform ring.
+/// Uniform round-capped ring (the only arc caller needs no sweep, head, or
+/// taper — the spinner-capable endpoint is gone with the spinner).
 #[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
-fn arc(
+fn ring(
     canvas: &mut [u8],
     width: u32,
     height: u32,
@@ -1255,53 +1240,24 @@ fn arc(
     center_y: f32,
     radius: f32,
     thickness: f32,
-    head: f32,
-    sweep: f32,
-    tail_alpha: f32,
     color: [u8; 4],
 ) {
-    use std::f32::consts::TAU;
     let half = thickness / 2.0;
     let reach = radius + half + 1.0;
     let min_x = (center_x - reach).max(0.0) as u32;
     let max_x = (center_x + reach).min(width as f32) as u32;
     let min_y = (center_y - reach).max(0.0) as u32;
     let max_y = (center_y + reach).min(height as f32) as u32;
-    let head_point = (
-        center_x + head.cos() * radius,
-        center_y + head.sin() * radius,
-    );
-    let tail = head - sweep;
-    let tail_point = (
-        center_x + tail.cos() * radius,
-        center_y + tail.sin() * radius,
-    );
     for y in min_y..max_y {
         for x in min_x..max_x {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
             let dx = px - center_x;
             let dy = py - center_y;
-            let band = ((dx * dx + dy * dy).sqrt() - radius).abs();
-            if band > half + 1.0 {
-                continue;
-            }
-            let behind_head = (head - dy.atan2(dx)).rem_euclid(TAU);
-            let (distance, taper) = if behind_head <= sweep {
-                (band, behind_head / sweep)
-            } else {
-                let to_head = (px - head_point.0).hypot(py - head_point.1);
-                let to_tail = (px - tail_point.0).hypot(py - tail_point.1);
-                if to_head <= to_tail {
-                    (to_head, 0.0)
-                } else {
-                    (to_tail, 1.0)
-                }
-            };
-            let coverage = (half + 0.5 - distance).clamp(0.0, 1.0);
+            let distance = (dx * dx + dy * dy).sqrt();
+            let coverage = (half + 0.5 - (distance - radius).abs()).clamp(0.0, 1.0);
             if coverage > 0.0 {
-                let fade = 1.0 - taper * (1.0 - tail_alpha);
-                blend_pixel(canvas, width, height, x, y, color, coverage * fade);
+                blend_pixel(canvas, width, height, x, y, color, coverage);
             }
         }
     }
@@ -1381,48 +1337,6 @@ fn check(
     );
 }
 
-/// Breathing recording dot: a core which swells with each pulse plus an
-/// expanding, fading ping ring.
-#[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
-fn recording_dot(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    center_x: f32,
-    center_y: f32,
-    phase: f32,
-    scale: f32,
-    color: [u8; 4],
-) {
-    let u = (phase / PULSE_PERIOD).fract();
-    let k = pulse(u);
-    let ring_alpha = (1.0 - u) * (1.0 - u) * 0.35;
-    if ring_alpha > 0.01 {
-        arc(
-            canvas,
-            width,
-            height,
-            center_x,
-            center_y,
-            (5.0 + 7.0 * u) * scale,
-            1.4 * scale,
-            0.0,
-            std::f32::consts::TAU,
-            1.0,
-            scale_alpha(color, ring_alpha),
-        );
-    }
-    circle(
-        canvas,
-        width,
-        height,
-        center_x,
-        center_y,
-        (3.8 + 0.6 * k) * scale,
-        scale_alpha(color, 0.6 + 0.4 * k),
-    );
-}
-
 /// Static waveform glyph (transcribing): three vertical bars. It never
 /// animates its shape — only `breathe` modulates alpha/scale, so it reads
 /// "busy, unmeasured", never progress.
@@ -1499,7 +1413,7 @@ fn slashed_ring(
     scale: f32,
     color: [u8; 4],
 ) {
-    arc(
+    ring(
         canvas,
         width,
         height,
@@ -1507,9 +1421,6 @@ fn slashed_ring(
         center_y,
         5.2 * scale,
         2.2 * scale,
-        0.0,
-        std::f32::consts::TAU,
-        1.0,
         color,
     );
     segment(
@@ -1551,35 +1462,38 @@ fn capsule_blend(kind: ChipKind) -> [u8; 3] {
 }
 
 /// Shorten `text` with a trailing ellipsis so it fits `max_width` at
-/// `scale`, using `measure` for widths (injectable for tests).
-fn fit_text_measured<F: Fn(&str) -> f32>(measure: F, text: &str, max_width: f32) -> String {
+/// `scale`, using `measure` for widths (injectable for tests). Borrows the
+/// input when it already fits — the render path allocates only for
+/// overlong words. Returns empty when not even the ellipsis fits.
+fn fit_text_measured<'a, F: Fn(&str) -> f32>(
+    measure: F,
+    text: &'a str,
+    max_width: f32,
+) -> Cow<'a, str> {
     if max_width <= 0.0 {
-        return String::new();
+        return Cow::Borrowed("");
     }
     if measure(text) <= max_width {
-        return text.to_owned();
+        return Cow::Borrowed(text);
     }
     const ELLIPSIS: &str = "…";
-    let budget = (max_width - measure(ELLIPSIS)).max(0.0);
+    let ellipsis_width = measure(ELLIPSIS);
+    if ellipsis_width > max_width {
+        return Cow::Borrowed("");
+    }
+    let budget = max_width - ellipsis_width;
     let mut result = String::new();
+    let mut width = 0.0;
     for character in text.chars() {
-        let mut candidate = result.clone();
-        candidate.push(character);
-        if measure(&candidate) > budget {
+        let char_width = measure(&character.to_string());
+        if width + char_width > budget && !result.is_empty() {
             break;
         }
-        result = candidate;
+        result.push(character);
+        width += char_width;
     }
     result.push_str(ELLIPSIS);
-    result
-}
-
-fn fit_text(font: &FontArc, text: &str, scale: PxScale, max_width: f32) -> String {
-    fit_text_measured(
-        |candidate| measure_text(font, candidate, scale),
-        text,
-        max_width,
-    )
+    Cow::Owned(result)
 }
 
 /// Read the desktop's animation preference once at startup. Standard
@@ -1840,5 +1754,8 @@ mod tests {
         assert_eq!(fit_text_measured(measure, "short", 200.0), "short");
         assert_eq!(fit_text_measured(measure, "longword", 20.0), "long…");
         assert_eq!(fit_text_measured(measure, "longword", 0.0), "");
+        // Narrower than the ellipsis itself: nothing can fit, return empty
+        // rather than overflowing the declared width.
+        assert_eq!(fit_text_measured(measure, "longword", 2.0), "");
     }
 }

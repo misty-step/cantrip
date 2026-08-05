@@ -742,14 +742,6 @@ fn apply_theme(ctx: &egui::Context) {
     });
 }
 
-/// Write an RGBA frame to PNG. `image` is already compiled transitively via
-/// eframe (which uses this same function for its own screenshot path), so no
-/// new crates are pulled in just for the `--screenshot` test hook.
-fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
-    image::save_buffer(path, rgba, width, height, image::ColorType::Rgba8)
-        .with_context(|| format!("writing {}", path.display()))
-}
-
 /// Full app loop; also handles the `--screenshot` dump then closes.
 #[allow(clippy::collapsible_if)]
 impl eframe::App for SettingsApp {
@@ -794,12 +786,15 @@ impl eframe::App for SettingsApp {
                 }
             });
             if let Some(image) = shot {
-                match write_png(
+                match image::save_buffer(
                     path,
+                    image.as_raw(),
                     image.width() as u32,
                     image.height() as u32,
-                    image.as_raw(),
-                ) {
+                    image::ColorType::Rgba8,
+                )
+                .with_context(|| format!("writing {}", path.display()))
+                {
                     Ok(()) => eprintln!("saved screenshot to {}", path.display()),
                     Err(error) => {
                         eprintln!("screenshot save failed: {error:#}");
