@@ -7,7 +7,7 @@
 //! capsule, top-centre, filled with an opaque blend of the near-black floor
 //! and a whisper of the state accent — the whole pill reads the mode, and
 //! it never signals determinate progress. A quiet UI-font label ("Listening…",
-//! "Transcribing…", "Cleaning…") sits centered as the visual anchor, with a
+//! "Cleaning…") sits centered as the visual anchor, with a
 //! small state glyph in a 28px zone at the left and a monospace mm:ss
 //! counter at the right while recording. Each working state carries an
 //! honest, distinct glyph: recording is a plain dot, transcribing is an
@@ -18,8 +18,9 @@
 //! the ~2.5s outcome flashes. State changes ease over ~260ms: the pill pops
 //! in with scale+alpha, accent/fill colors crossfade, the fresh glyph scales
 //! in, and the stage word drifts up a few pixels. A reduced-motion desktop
-//! (gsettings enable-animations=false) freezes all motion, draws the
-//! transcribing spinner as a calm static ring, and skips entry motion.
+//! (gsettings enable-animations=false) freezes the glyph pulse and entry
+//! motion, draws the transcribing spinner as a calm static ring, and keeps
+//! the elapsed timer ticking (it is data, not animation).
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use anyhow::{Context, Result};
@@ -1435,9 +1436,9 @@ fn check(
 /// rotates a full turn without ever completing — "busy, unmeasured", never
 /// a determinate meter. The rotation angle is a pure function of `phase`,
 /// so a frozen phase draws a fixed, byte-identical frame. With
-/// `animated == false` (reduced motion, screenshot) it draws a calm full
-/// ring instead of a rotating gap: a static open arc could be misread as a
-/// partially-filled progress ring.
+/// `animated == false` (reduced motion, screenshot) it draws the plain
+/// uniform `ring`: a static open arc could be misread as a partially-filled
+/// progress ring.
 #[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin, phase)
 fn spinner(
     canvas: &mut [u8],
@@ -1451,23 +1452,19 @@ fn spinner(
     animated: bool,
     color: [u8; 4],
 ) {
+    if !animated {
+        return ring(
+            canvas, width, height, center_x, center_y, radius, thickness, color,
+        );
+    }
     /// Arc length of the spinner in radians: a 264° sweep leaves a clear
     /// gap, unmistakably a spinner rather than a ring.
     const SWEEP: f32 = 4.608;
     const SEGMENTS: usize = 30;
-    let sweep = if animated {
-        SWEEP
-    } else {
-        std::f32::consts::TAU
-    };
-    let start = if animated {
-        (phase / SPIN_PERIOD).fract() * std::f32::consts::TAU
-    } else {
-        0.0
-    };
+    let start = (phase / SPIN_PERIOD).fract() * std::f32::consts::TAU;
     for segment_index in 0..SEGMENTS {
-        let t0 = start + sweep * (segment_index as f32 / SEGMENTS as f32);
-        let t1 = start + sweep * ((segment_index + 1) as f32 / SEGMENTS as f32);
+        let t0 = start + SWEEP * (segment_index as f32 / SEGMENTS as f32);
+        let t1 = start + SWEEP * ((segment_index + 1) as f32 / SEGMENTS as f32);
         segment(
             canvas,
             width,
@@ -1577,8 +1574,9 @@ fn slashed_ring(
 
 /// Localized "alive" pulse for the working glyphs: alpha between
 /// `BREATHE_MIN` and 1.0, scale between 0.96 and 1.0. With reduced motion
-/// the pulse freezes at full strength. This is the ONLY continuous motion
-/// of the working states — it never travels or grows across the capsule.
+/// the pulse freezes at full strength. This is the only pulse of the
+/// working states — it never travels or grows across the capsule (the
+/// spinner's turn is separate motion, see `spinner`).
 fn breathe(phase: f32, reduced_motion: bool) -> (f32, f32) {
     if reduced_motion {
         return (1.0, 1.0);

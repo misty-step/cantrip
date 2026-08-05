@@ -12,8 +12,9 @@ but the daemon cannot measure a fraction for any phase: there is no defined
 an interrupted transition left partial text on screen while the pill kept
 "filling". The operator locked a replacement direction ("Warm Minimal",
 prototype catalog `catalog.html` section G, 2026-08-05) with two rules:
-each phase is a static composition, and no surface may imply a trajectory
-that is not measurably real.
+each phase is a fixed composition (motion stays localized and never
+measures a trajectory), and no surface may imply a trajectory that is not
+measurably real.
 
 ## Decision
 
@@ -36,9 +37,10 @@ The HUD renders one fixed 320×40 borderless capsule, top-centre, on the
   of the render phase, so a frozen phase (reduced motion, screenshot) draws
   a calm full ring rather than a static open arc that could read as a
   partially-filled meter.
-- **Motion**: the only continuous motion is the localized breathing pulse on
-  the working glyphs (alpha 0.8–1.0, scale 0.96–1.0), the spinner's turn,
-  and the ticking timer — never a length change or a determinate meter.
+- **Motion**: each working phase is a fixed composition; the only continuous
+  motion is the localized breathing pulse on the working glyphs (alpha
+  0.8–1.0, scale 0.96–1.0), the spinner's turn, and the ticking timer —
+  never a length change or a determinate meter.
   State changes ease over ~260 ms: pill pop-in (scale + alpha), accent and
   fill crossfade, the fresh glyph scales in (ease-out-back), and the stage
   word drifts up ~3 px. Outcome flashes are static compositions for ~2.5 s.
