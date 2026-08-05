@@ -227,9 +227,9 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     };
 
     // Screenshot mode is the visual-test hook: it must render the same
-    // frame regardless of the host's animation setting, so it always
-    // animates (with a frozen breathing phase — byte-identical output).
-    // Live mode honors the desktop preference.
+    // settled frame regardless of the host's animation setting, so it
+    // forces the animation-free path (frozen phase and progress —
+    // byte-identical output). Live mode honors the desktop preference.
     let reduced_motion = screenshot.is_none() && prefers_reduced_motion();
     let mut hud = HudState::new(
         RegistryState::new(&globals),
