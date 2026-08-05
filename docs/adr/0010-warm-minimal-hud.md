@@ -29,13 +29,12 @@ The HUD renders one fixed 320×40 borderless capsule, top-centre, on the
   state glyph in a 28px zone at the left, and a monospace mm:ss timer
   right-aligned while recording. The capsule never resizes with content;
   overlong words truncate with an ellipsis.
-- **Glyphs**: each working state carries an honest, distinct shape —
-  recording is a plain dot, transcribing is an indeterminate spinner (a
-  rotating open arc that never fills), cleaning is an eight-ray sparkle
-  (cardinal + short diagonal rays; never the crossed lines of an X). The
-  spinner's turn is the only added continuous motion; it is a pure function
-  of the render phase, so a frozen phase (reduced motion, screenshot) draws
-  a calm full ring rather than a static open arc that could read as a
+- **Glyphs**: the working states stay minimal — listening is a pulsing dot,
+  and both transcribing and cleaning are the same indeterminate spinner (a
+  rotating open arc that never fills); the per-state accent color
+  differentiates the stage. The spinner's turn is a pure function of the
+  render phase, so a frozen phase (reduced motion, screenshot) draws a calm
+  full ring rather than a static open arc that could read as a
   partially-filled meter.
 - **Motion**: each working phase is a fixed composition; the only continuous
   motion is the localized breathing pulse on the working glyphs (alpha
@@ -49,7 +48,7 @@ The HUD renders one fixed 320×40 borderless capsule, top-centre, on the
   nothing"). Distinguishable by luminance and glyph shape without color.
 - **Reduced motion**: read once at startup from
   `gsettings get org.gnome.desktop.interface enable-animations`. When
-  disabled, the pulse freezes, the transcribing spinner draws as a static
+  disabled, the pulse freezes, the spinner draws as a static
   full ring, the recording glyph is a plain static dot, and state changes
   swap instantly.
 - **Screenshot hook**: `cantrip hud --screenshot <path> --state

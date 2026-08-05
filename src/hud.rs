@@ -9,17 +9,18 @@
 //! it never signals determinate progress. A quiet UI-font label ("Listening…",
 //! "Cleaning…") sits centered as the visual anchor, with a
 //! small state glyph in a 28px zone at the left and a monospace mm:ss
-//! counter at the right while recording. Each working state carries an
-//! honest, distinct glyph: recording is a plain dot, transcribing is an
-//! indeterminate spinner (a rotating open arc that never fills), and
-//! cleaning is an eight-ray sparkle. The only continuous motion is the
-//! localized breathing pulse and the spinner's turn (alpha/scale — never a
-//! length change or a determinate meter), the ticking elapsed timer, and
-//! the ~2.5s outcome flashes. State changes ease over ~260ms: the pill pops
-//! in with scale+alpha, accent/fill colors crossfade, the fresh glyph scales
-//! in, and the stage word drifts up a few pixels. A reduced-motion desktop
+//! counter at the right while recording. Each working state carries a
+//! simple, honest glyph: listening is a pulsing dot, and both transcribing
+//! and cleaning are the same indeterminate spinner (a rotating open arc
+//! that never fills; the accent color differentiates the stage). The only
+//! continuous motion is the localized breathing pulse and the spinner's
+//! turn (alpha/scale — never a length change or a determinate meter), the
+//! ticking elapsed timer, and the ~2.5s outcome flashes. State changes
+//! ease over ~260ms: the pill pops in with scale+alpha, accent/fill colors
+//! crossfade, the fresh glyph scales in, and the stage word drifts up a
+//! few pixels. A reduced-motion desktop
 //! (gsettings enable-animations=false) freezes the glyph pulse and entry
-//! motion, draws the transcribing spinner as a calm static ring, and keeps
+//! motion, draws the spinner as a calm static ring, and keeps
 //! the elapsed timer ticking (it is data, not animation).
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
@@ -95,7 +96,7 @@ const TEXT_SECONDARY: [u8; 4] = [242, 244, 248, 160];
 /// Breathing pulse period in seconds; must divide the 60s phase window.
 const PULSE_PERIOD: f32 = 2.0;
 /// Breathing alpha range: the working glyph pulses between these opacities.
-const BREATHE_MIN: f32 = 0.8;
+const BREATHE_MIN: f32 = 0.65;
 /// Spinner turn period in seconds; a pure function of the phase window, so
 /// a frozen phase draws a byte-identical arc.
 const SPIN_PERIOD: f32 = 0.8;
@@ -773,7 +774,7 @@ impl HudState {
                 4.2 * scale_factor * breathe_scale * glyph_in,
                 scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
-            ChipKind::Transcribing => spinner(
+            ChipKind::Transcribing | ChipKind::Cleaning => spinner(
                 canvas,
                 width,
                 height,
@@ -783,15 +784,6 @@ impl HudState {
                 2.2 * scale_factor,
                 view.phase,
                 spinner_animated,
-                scale_alpha(accent_solid, content_alpha * breathe_alpha),
-            ),
-            ChipKind::Cleaning => sparkle(
-                canvas,
-                width,
-                height,
-                glyph_x,
-                center_y,
-                scale_factor * breathe_scale * glyph_in,
                 scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
             ChipKind::Sent => check(
@@ -1479,65 +1471,6 @@ fn spinner(
     }
 }
 
-/// Sparkle glyph (cleaning): an eight-ray star — four cardinal rays plus
-/// four shorter diagonal ones around a bright centre dot. Unmistakably a
-/// sparkle, never the crossed lines of an X. Shape is fixed; only `breathe`
-/// modulates alpha/scale.
-fn sparkle(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    center_x: f32,
-    center_y: f32,
-    scale: f32,
-    color: [u8; 4],
-) {
-    const LONG_ARM: f32 = 5.6;
-    const SHORT_ARM: f32 = 2.7;
-    const THICKNESS: f32 = 2.1;
-    let long = LONG_ARM * scale;
-    let short = SHORT_ARM * scale;
-    let thickness = THICKNESS * scale;
-    // Four cardinal rays.
-    for (dx, dy) in [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)] {
-        segment(
-            canvas,
-            width,
-            height,
-            center_x,
-            center_y,
-            center_x + long * dx,
-            center_y + long * dy,
-            thickness,
-            color,
-        );
-    }
-    // Four shorter diagonal rays.
-    let diagonal = std::f32::consts::FRAC_1_SQRT_2;
-    for (dx, dy) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
-        segment(
-            canvas,
-            width,
-            height,
-            center_x,
-            center_y,
-            center_x + short * dx * diagonal,
-            center_y + short * dy * diagonal,
-            thickness,
-            color,
-        );
-    }
-    circle(
-        canvas,
-        width,
-        height,
-        center_x,
-        center_y,
-        1.3 * scale,
-        color,
-    );
-}
-
 /// Slashed ring glyph (notice): a uniform ring with a diagonal slash. Reads
 /// as "rejected / nothing heard" by shape, not color.
 fn slashed_ring(
@@ -1573,7 +1506,7 @@ fn slashed_ring(
 }
 
 /// Localized "alive" pulse for the working glyphs: alpha between
-/// `BREATHE_MIN` and 1.0, scale between 0.96 and 1.0. With reduced motion
+/// `BREATHE_MIN` and 1.0, scale between 0.94 and 1.0. With reduced motion
 /// the pulse freezes at full strength. This is the only pulse of the
 /// working states — it never travels or grows across the capsule (the
 /// spinner's turn is separate motion, see `spinner`).
@@ -1582,7 +1515,7 @@ fn breathe(phase: f32, reduced_motion: bool) -> (f32, f32) {
         return (1.0, 1.0);
     }
     let k = pulse((phase / PULSE_PERIOD).fract());
-    (BREATHE_MIN + (1.0 - BREATHE_MIN) * k, 0.96 + 0.04 * k)
+    (BREATHE_MIN + (1.0 - BREATHE_MIN) * k, 0.94 + 0.06 * k)
 }
 
 /// Opaque capsule fill for a chip kind: `FLOOR` mixed with the state accent
@@ -1778,7 +1711,7 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         acquire_lock_on, breathe, capsule_blend, ease_out_back, ease_out_cubic, fit_text_measured,
-        format_elapsed, mix_rgb, pulse, sparkle, spinner, ChipKind, BREATHE_MIN,
+        format_elapsed, mix_rgb, pulse, spinner, ChipKind, BREATHE_MIN,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1878,7 +1811,7 @@ mod tests {
             let phase = step as f32 / 120.0 * 60.0;
             let (alpha, scale) = breathe(phase, false);
             assert!((BREATHE_MIN..=1.0).contains(&alpha));
-            assert!((0.96..=1.0).contains(&scale));
+            assert!((0.94..=1.0).contains(&scale));
         }
         assert_eq!(breathe(0.0, true), (1.0, 1.0));
         assert_eq!(breathe(123.4, true), (1.0, 1.0));
@@ -1993,36 +1926,6 @@ mod tests {
             assert!(
                 alpha_at(&first, 32, x, y) > 0,
                 "frozen ring must cover ({x},{y})"
-            );
-        }
-    }
-
-    #[test]
-    fn sparkle_has_cardinal_rays_and_short_diagonals_not_an_x() {
-        // The cleaning glyph is a real sparkle: four cardinal rays and four
-        // short diagonal ones. A bare X (two crossing corner lines) has no
-        // cardinal density and long diagonal arms — the two complaints the
-        // eight-ray shape fixes.
-        let mut canvas = [0u8; 32 * 32 * 4];
-        sparkle(&mut canvas, 32, 32, 16.0, 16.0, 1.0, [255, 255, 255, 255]);
-        // Cardinal ray tips are lit.
-        for (x, y) in [(21, 16), (16, 21), (11, 16), (16, 11)] {
-            assert!(alpha_at(&canvas, 32, x, y) > 0, "cardinal ray at ({x},{y})");
-        }
-        // Short diagonal rays are lit near the centre.
-        for (x, y) in [(18, 18), (18, 14), (14, 18), (14, 14)] {
-            assert!(
-                alpha_at(&canvas, 32, x, y) > 0,
-                "short diagonal at ({x},{y})"
-            );
-        }
-        // No long diagonal arm: the corner at radius ~8.5 is empty, so the
-        // glyph cannot read as an X.
-        for (x, y) in [(22, 22), (22, 10), (10, 22), (10, 10)] {
-            assert_eq!(
-                alpha_at(&canvas, 32, x, y),
-                0,
-                "no long diagonal at ({x},{y})"
             );
         }
     }
