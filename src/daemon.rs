@@ -212,7 +212,11 @@ fn install_signal_handlers() {
 fn start_hud_supervisor(runtime_dir: PathBuf) {
     thread::spawn(move || {
         // Start in the past so the first check can spawn immediately.
-        let mut last_spawn = Instant::now() - HUD_SPAWN_COOLDOWN;
+        // checked_sub: on a machine with less than 30s of monotonic uptime a
+        // plain subtraction would panic.
+        let mut last_spawn = Instant::now()
+            .checked_sub(HUD_SPAWN_COOLDOWN)
+            .unwrap_or_else(Instant::now);
         loop {
             if last_spawn.elapsed() >= HUD_SPAWN_COOLDOWN {
                 match hud::acquire_instance_lock() {
