@@ -226,6 +226,10 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
         }
     };
 
+    // Screenshot mode is the visual-test hook: it must render the same
+    // frame regardless of the host's animation setting, so it always
+    // animates. Live mode honors the desktop preference.
+    let reduced_motion = screenshot.is_none() && prefers_reduced_motion();
     let mut hud = HudState::new(
         RegistryState::new(&globals),
         OutputState::new(&globals, &queue_handle),
@@ -233,7 +237,7 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
         pool,
         layer,
         screenshot,
-        prefers_reduced_motion(),
+        reduced_motion,
     );
     if let Err(error) = event_queue.roundtrip(&mut hud) {
         tracing::warn!("[HUD] display disconnected during setup: {error}");
@@ -775,8 +779,11 @@ impl HudState {
         );
         if let Some(detail) = view.detail.as_deref() {
             let detail_px = PxScale::from(DETAIL_SIZE * scale_factor);
+            // Right-aligned timer, clamped so it can never enter the glyph
+            // zone even if the mono face runs wide.
             let detail_x =
-                right - PAD_RIGHT * scale_factor - measure_text(&fonts.mono, detail, detail_px);
+                (right - PAD_RIGHT * scale_factor - measure_text(&fonts.mono, detail, detail_px))
+                    .max(left + left_zone);
             draw_text(
                 canvas,
                 width,
@@ -1443,7 +1450,7 @@ fn breathe(phase: f32, reduced_motion: bool) -> (f32, f32) {
     if reduced_motion {
         return (1.0, 1.0);
     }
-    let k = pulse(phase / PULSE_PERIOD);
+    let k = pulse((phase / PULSE_PERIOD).fract());
     (BREATHE_MIN + (1.0 - BREATHE_MIN) * k, 0.96 + 0.04 * k)
 }
 
@@ -1485,7 +1492,7 @@ fn fit_text_measured<'a, F: Fn(&str) -> f32>(
     let mut width = 0.0;
     for character in text.chars() {
         let char_width = measure(&character.to_string());
-        if width + char_width > budget && !result.is_empty() {
+        if width + char_width > budget {
             break;
         }
         result.push(character);
@@ -1744,6 +1751,10 @@ mod tests {
         }
         assert_eq!(breathe(0.0, true), (1.0, 1.0));
         assert_eq!(breathe(123.4, true), (1.0, 1.0));
+        // Periodicity: one wrapped 60s phase must repeat the same pulse
+        // every PULSE_PERIOD (2s), not drift with the raw phase value.
+        assert_eq!(breathe(1.0, false), breathe(3.0, false));
+        assert_eq!(breathe(0.5, false), breathe(2.5, false));
     }
 
     #[test]
@@ -1756,5 +1767,8 @@ mod tests {
         // Narrower than the ellipsis itself: nothing can fit, return empty
         // rather than overflowing the declared width.
         assert_eq!(fit_text_measured(measure, "longword", 2.0), "");
+        // First character already exceeds the budget: drop it and keep only
+        // the ellipsis — never admit text beyond the declared width.
+        assert_eq!(fit_text_measured(measure, "longword", 5.0), "…");
     }
 }
