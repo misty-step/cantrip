@@ -863,6 +863,9 @@ fn handle_worker_result(
                         InjectionOutcome::Typed(tool) => {
                             format!("Typed {chars} chars ({tool}){cleanup_suffix}")
                         }
+                        InjectionOutcome::Pasted => {
+                            format!("Pasted {chars} chars (clipboard + Ctrl+V){cleanup_suffix}")
+                        }
                         InjectionOutcome::Clipboard => {
                             format!(
                                 "Copied to clipboard — press Ctrl+V ({chars} chars){cleanup_suffix}"

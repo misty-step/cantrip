@@ -108,6 +108,7 @@ fn non_empty(text: &str) -> Option<String> {
 fn injection_str(mode: InjectionMode) -> &'static str {
     match mode {
         InjectionMode::Auto => "auto",
+        InjectionMode::Paste => "paste",
         InjectionMode::Type => "type",
         InjectionMode::Clipboard => "clipboard",
     }
@@ -335,6 +336,11 @@ impl SettingsApp {
                     .selected_text(injection_str(self.edit.injection))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.edit.injection, InjectionMode::Auto, "Auto");
+                        ui.selectable_value(
+                            &mut self.edit.injection,
+                            InjectionMode::Paste,
+                            "Paste",
+                        );
                         ui.selectable_value(&mut self.edit.injection, InjectionMode::Type, "Type");
                         ui.selectable_value(
                             &mut self.edit.injection,

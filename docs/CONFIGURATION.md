@@ -11,7 +11,7 @@ Changes take effect on daemon start. Use `cantrip start` / `stop`, or restart
 the daemon process, after editing.
 
 ```toml
-injection = "auto"        # auto | type | clipboard — how corrected text is delivered
+injection = "auto"        # auto | paste | type | clipboard — how corrected text is delivered
 keep_warm = true          # keep the STT model resident between dictations (faster)
 # audio_source = "…"      # optional PipeWire node; omit for the default input
 vocabulary = ["PipeWire", "Parakeet"]   # exact-spelling terms fed to postproc + cloud STT
@@ -86,7 +86,18 @@ you dictate often.
 
 ## `injection`
 
-- `auto` – use `wtype` when a compatible compositor is detected, else
-  `ydotool`, else the clipboard.
-- `type` – type directly (never touches the clipboard).
+- `auto` – the default: copy to the Wayland clipboard and send one `Ctrl+V`
+  (paragraph breaks are preserved), falling back to `wtype` typing, then
+  `ydotool`, then clipboard-only if any backend or shortcut is unavailable.
+- `paste` – copy and `Ctrl+V` only, no typing fallback; paragraph breaks are
+  preserved.
+- `type` – type directly (never touches the clipboard; newlines are flattened
+  to spaces because typing them would send a Return key, which submits in
+  chat apps).
 - `clipboard` – put the text on the Wayland clipboard for you to paste.
+
+Pasted or copied text stays on the clipboard, so you can paste it again by
+hand. Injection is atomic: nothing is typed into a live window until the whole
+text is ready, and the single paste keypress cannot be interrupted by losing
+focus mid-composition like long typing streams can. Dictating into a terminal
+is the one case for `type` (`Ctrl+V` is not paste there).

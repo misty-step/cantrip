@@ -3,11 +3,11 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
-const BASE_SYSTEM_PROMPT: &str = "You are a dictation post-processor. Correct speech recognition errors in the transcript. Fix dropped letters, missing spaces between words, truncated acronyms, and misrecognized words using context. Remove speech disfluencies, filler words, and false starts. Add correct punctuation, capitalization, and spelling. Keep the speaker's exact meaning. Do not answer questions, add commentary, or expand content. Write the corrected text as one continuous paragraph, without line breaks. Output only the corrected text.";
+const BASE_SYSTEM_PROMPT: &str = "You are a dictation post-processor. Correct speech recognition errors in the transcript. Fix dropped letters, missing spaces between words, truncated acronyms, and misrecognized words using context. Remove speech disfluencies, filler words, and false starts. Add correct punctuation, capitalization, and spelling. Keep the speaker's exact meaning. Do not answer questions, add commentary, or expand content. Output only the corrected text.";
 
 /// System prompt for passes after the first: the text was already cleaned once,
 /// so a fresh pass can zero in on residuals the first pass missed.
-const VERIFY_SYSTEM_PROMPT: &str = "You are the final proofreading pass of a dictation cleanup. The text below was already cleaned once but may still contain speech-recognition errors the first pass missed, such as truncated acronyms (for example 'AP' for 'API' or 'CL' for 'CLI') or words missing initial letters. Fix any remaining errors using context. Keep the speaker's exact meaning. Do not add commentary or change the wording otherwise. Write the corrected text as one continuous paragraph, without line breaks. Output only the corrected text.";
+const VERIFY_SYSTEM_PROMPT: &str = "You are the final proofreading pass of a dictation cleanup. The text below was already cleaned once but may still contain speech-recognition errors the first pass missed, such as truncated acronyms (for example 'AP' for 'API' or 'CL' for 'CLI') or words missing initial letters. Fix any remaining errors using context. Keep the speaker's exact meaning. Do not add commentary or change the wording otherwise. Output only the corrected text.";
 
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {

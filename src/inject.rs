@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 pub enum InjectionMode {
     #[default]
     Auto,
+    /// Copy, then send one Ctrl+V to the focused app (paragraph-safe).
+    Paste,
     Type,
     Clipboard,
 }
@@ -22,11 +24,14 @@ pub enum InjectionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionOutcome {
     Typed(&'static str),
+    /// Copied to the clipboard and pasted with a single Ctrl+V.
+    Pasted,
     Clipboard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Backend {
+    Paste,
     Wtype,
     Ydotool,
     Clipboard,
@@ -35,6 +40,7 @@ enum Backend {
 impl Backend {
     fn name(self) -> &'static str {
         match self {
+            Self::Paste => "paste",
             Self::Wtype => "wtype",
             Self::Ydotool => "ydotool",
             Self::Clipboard => "clipboard",
@@ -46,6 +52,7 @@ impl Backend {
 struct AvailableBackends {
     wtype: bool,
     ydotool: bool,
+    wl_copy: bool,
 }
 
 /// Inject text with the requested backend policy.
@@ -53,20 +60,21 @@ pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
     let available = AvailableBackends {
         wtype: executable_in_path("wtype"),
         ydotool: executable_in_path("ydotool") && ydotool_socket_exists(),
+        wl_copy: executable_in_path("wl-copy"),
     };
     let order = backend_order(mode, available);
     let mut failures = Vec::new();
 
-    // Typing backends translate control characters into key presses
-    // (wtype: \n = Return, \t = Tab, \e = Escape; ydotool likewise). A
-    // newline in a transcript would make the focused app submit the text
-    // typed so far, then keep typing the rest — exactly the "submitted
-    // halfway" failure. Neutralize controls for typing; the clipboard
-    // carries text verbatim.
+    // Paste and clipboard-copy carry the text verbatim, so paragraph breaks
+    // survive. Typing backends translate control characters into key presses
+    // (wtype: \n = Return, \t = Tab, \e = Escape; ydotool likewise), which
+    // would make the focused app submit mid-transcript — so the typing
+    // fallback flattens controls to spaces and cannot represent paragraphs.
     let typed = normalize_for_typing(text);
 
     for backend in order {
         let (result, payload) = match backend {
+            Backend::Paste => (run_paste(text), text),
             Backend::Wtype => (run_wtype(&typed), typed.as_str()),
             Backend::Ydotool => (run_ydotool(&typed), typed.as_str()),
             Backend::Clipboard => (run_clipboard(text), text),
@@ -79,6 +87,7 @@ pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
                     payload.chars().count()
                 );
                 return Ok(match backend {
+                    Backend::Paste => InjectionOutcome::Pasted,
                     Backend::Wtype => InjectionOutcome::Typed("wtype"),
                     Backend::Ydotool => InjectionOutcome::Typed("ydotool"),
                     Backend::Clipboard => InjectionOutcome::Clipboard,
@@ -98,6 +107,9 @@ pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
             "typing injection failed ({details}); install wtype or ydotool, ensure ydotool has a running daemon, or set injection = \"clipboard\""
         ),
         InjectionMode::Auto => bail!("all injection backends failed ({details})"),
+        InjectionMode::Paste => bail!(
+            "paste injection failed ({details}); install wl-clipboard and wtype (or a ydotool daemon)"
+        ),
         InjectionMode::Clipboard => bail!(
             "clipboard injection failed ({details}); install wl-clipboard so wl-copy is available"
         ),
@@ -105,9 +117,13 @@ pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
 }
 
 fn backend_order(mode: InjectionMode, available: AvailableBackends) -> Vec<Backend> {
+    let paste_ready = available.wl_copy && (available.wtype || available.ydotool);
     match mode {
         InjectionMode::Auto => {
-            let mut order = Vec::with_capacity(3);
+            let mut order = Vec::with_capacity(4);
+            if paste_ready {
+                order.push(Backend::Paste);
+            }
             if available.wtype {
                 order.push(Backend::Wtype);
             }
@@ -116,6 +132,13 @@ fn backend_order(mode: InjectionMode, available: AvailableBackends) -> Vec<Backe
             }
             order.push(Backend::Clipboard);
             order
+        }
+        InjectionMode::Paste => {
+            if paste_ready {
+                vec![Backend::Paste]
+            } else {
+                Vec::new()
+            }
         }
         InjectionMode::Type => {
             let mut order = Vec::with_capacity(2);
@@ -263,18 +286,79 @@ fn run_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Copy the text, then send one Ctrl+V to the focused app. Nothing is typed
+/// into a live window, so losing focus mid-composition is harmless: the
+/// clipboard was fully written before the single paste keypress. The text
+/// stays on the clipboard (wl-copy keeps holding the selection) for the
+/// user to paste again by hand.
+fn run_paste(text: &str) -> Result<()> {
+    run_clipboard(text)?;
+    send_paste_shortcut()
+}
+
+/// Emit a Ctrl+V keypress through wtype (or a ydotool key sequence).
+fn send_paste_shortcut() -> Result<()> {
+    if executable_in_path("wtype") {
+        let output = Command::new("wtype")
+            .args(["-M", "ctrl", "-k", "v"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .context("sending paste shortcut with wtype")?;
+        if output.status.success() {
+            return Ok(());
+        }
+    }
+    if executable_in_path("ydotool") && ydotool_socket_exists() {
+        // 29 = LeftCtrl, 47 = V; down V, up V, up Ctrl.
+        let output = Command::new("ydotool")
+            .args(["key", "29:1", "47:1", "47:0", "29:0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .context("sending paste shortcut with ydotool")?;
+        if output.status.success() {
+            return Ok(());
+        }
+    }
+    bail!("cannot send the paste shortcut (install wtype or a ydotool daemon)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{backend_order, normalize_for_typing, AvailableBackends, Backend, InjectionMode};
 
     #[test]
-    fn auto_order_prefers_typing_then_clipboard() {
+    fn auto_order_prefers_paste_then_typing_then_clipboard() {
         assert_eq!(
             backend_order(
                 InjectionMode::Auto,
                 AvailableBackends {
                     wtype: true,
                     ydotool: true,
+                    wl_copy: true,
+                },
+            ),
+            vec![
+                Backend::Paste,
+                Backend::Wtype,
+                Backend::Ydotool,
+                Backend::Clipboard
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_order_skips_paste_without_wl_copy() {
+        assert_eq!(
+            backend_order(
+                InjectionMode::Auto,
+                AvailableBackends {
+                    wtype: true,
+                    ydotool: true,
+                    wl_copy: false,
                 },
             ),
             vec![Backend::Wtype, Backend::Ydotool, Backend::Clipboard]
@@ -289,9 +373,47 @@ mod tests {
                 AvailableBackends {
                     wtype: false,
                     ydotool: true,
+                    wl_copy: true,
                 },
             ),
-            vec![Backend::Ydotool, Backend::Clipboard]
+            vec![Backend::Paste, Backend::Ydotool, Backend::Clipboard]
+        );
+    }
+
+    #[test]
+    fn paste_mode_requires_wl_copy_and_a_keyboard_backend() {
+        assert_eq!(
+            backend_order(
+                InjectionMode::Paste,
+                AvailableBackends {
+                    wtype: true,
+                    ydotool: false,
+                    wl_copy: true,
+                },
+            ),
+            vec![Backend::Paste]
+        );
+        assert_eq!(
+            backend_order(
+                InjectionMode::Paste,
+                AvailableBackends {
+                    wtype: false,
+                    ydotool: false,
+                    wl_copy: true,
+                },
+            ),
+            Vec::<Backend>::new()
+        );
+        assert_eq!(
+            backend_order(
+                InjectionMode::Paste,
+                AvailableBackends {
+                    wtype: true,
+                    ydotool: true,
+                    wl_copy: false,
+                },
+            ),
+            Vec::<Backend>::new()
         );
     }
 
@@ -303,6 +425,7 @@ mod tests {
                 AvailableBackends {
                     wtype: false,
                     ydotool: false,
+                    wl_copy: true,
                 },
             ),
             Vec::<Backend>::new()
@@ -313,6 +436,7 @@ mod tests {
                 AvailableBackends {
                     wtype: true,
                     ydotool: true,
+                    wl_copy: true,
                 },
             ),
             vec![Backend::Wtype, Backend::Ydotool]
@@ -327,6 +451,7 @@ mod tests {
                 AvailableBackends {
                     wtype: true,
                     ydotool: true,
+                    wl_copy: true,
                 },
             ),
             vec![Backend::Clipboard]

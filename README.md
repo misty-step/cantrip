@@ -21,18 +21,21 @@ that, for text.
 - **Layer-shell status HUD.** A small always-on-top capsule shows live state:
   listening (with a breathing pulse and timer), transcribing, cleaning up,
   and a gentle success check. Pure Rust, no GTK.
-- **Injection without touching the clipboard.** Type mode uses `wtype`
-  (wlroots/COSMIC) or `ydotool`; clipboard mode is a documented fallback.
+- **Atomic paste-first injection.** The default pastes the finished text
+  from the clipboard (`wl-copy` then one `Ctrl+V`), so paragraph breaks
+  survive and a focus change mid-dictation cannot interrupt delivery.
+  `type` mode (never touching the clipboard) still types via `wtype` or
+  `ydotool`, and `clipboard` mode only copies.
 
 ```
 trigger ──> capture (pw-record) ──> STT (local, default) ──> postproc (Ollama) ──> inject ──> notification
-             16 kHz mono s16          parakeet | canary | cloud    qwen3:8b | ...      wtype | clip
+             16 kHz mono s16          parakeet | canary | cloud    qwen3:8b | ...   paste | wtype | clip
 ```
 
 ## Requirements
 
 - Linux with PipeWire (`pw-record`) and a Wayland compositor.
-- `wl-clipboard` for the clipboard fallback (usually preinstalled).
+- `wl-clipboard` for the default paste/copy path (usually preinstalled).
 - For direct typing: `wtype` (wlroots/COSMIC) or `ydotool` (needs `ydotoold`).
 - The HUD needs a compositor with the Wayland layer-shell protocol (COSMIC,
   Sway, Hyprland, wlroots-based).

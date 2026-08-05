@@ -147,7 +147,7 @@ fn run() -> Result<()> {
     }
 }
 
-const CONFIG_TEMPLATE: &str = r#"injection = "auto"        # auto | type | clipboard
+const CONFIG_TEMPLATE: &str = r#"injection = "auto"        # auto | paste | type | clipboard
 keep_warm = true
 # audio_source = "…"      # optional PipeWire target
 vocabulary = []           # exact-spelling terms for postproc + cloud STT
