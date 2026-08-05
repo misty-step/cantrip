@@ -57,18 +57,26 @@ pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
     let order = backend_order(mode, available);
     let mut failures = Vec::new();
 
+    // Typing backends translate control characters into key presses
+    // (wtype: \n = Return, \t = Tab, \e = Escape; ydotool likewise). A
+    // newline in a transcript would make the focused app submit the text
+    // typed so far, then keep typing the rest — exactly the "submitted
+    // halfway" failure. Neutralize controls for typing; the clipboard
+    // carries text verbatim.
+    let typed = normalize_for_typing(text);
+
     for backend in order {
-        let result = match backend {
-            Backend::Wtype => run_wtype(text),
-            Backend::Ydotool => run_ydotool(text),
-            Backend::Clipboard => run_clipboard(text),
+        let (result, payload) = match backend {
+            Backend::Wtype => (run_wtype(&typed), typed.as_str()),
+            Backend::Ydotool => (run_ydotool(&typed), typed.as_str()),
+            Backend::Clipboard => (run_clipboard(text), text),
         };
         match result {
             Ok(()) => {
                 tracing::info!(
                     "[Inject] backend={} chars={}",
                     backend.name(),
-                    text.chars().count()
+                    payload.chars().count()
                 );
                 return Ok(match backend {
                     Backend::Wtype => InjectionOutcome::Typed("wtype"),
@@ -155,6 +163,30 @@ fn ydotool_socket_exists() -> bool {
         .exists()
 }
 
+/// Replace control characters with a single space so a transcript can never
+/// act as keys: wtype maps `\n` to Return, `\t` to Tab, `\e` to Escape (and
+/// ydotool maps newlines to Enter), which would make the focused app submit
+/// or navigate mid-injection. Consecutive controls collapse into one space.
+fn normalize_for_typing(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_control() {
+            pending_space = true;
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(character);
+        }
+    }
+    if pending_space {
+        out.push(' ');
+    }
+    out
+}
+
 fn run_wtype(text: &str) -> Result<()> {
     let output = Command::new("wtype")
         .arg("--")
@@ -233,7 +265,7 @@ fn run_clipboard(text: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_order, AvailableBackends, Backend, InjectionMode};
+    use super::{backend_order, normalize_for_typing, AvailableBackends, Backend, InjectionMode};
 
     #[test]
     fn auto_order_prefers_typing_then_clipboard() {
@@ -299,5 +331,34 @@ mod tests {
             ),
             vec![Backend::Clipboard]
         );
+    }
+
+    #[test]
+    fn normalize_replaces_control_chars_with_spaces() {
+        assert_eq!(normalize_for_typing("hello\nworld"), "hello world");
+        assert_eq!(normalize_for_typing("a\r\nb"), "a b");
+        assert_eq!(normalize_for_typing("a\tb"), "a b");
+        assert_eq!(normalize_for_typing("a\x1bb"), "a b");
+        assert_eq!(normalize_for_typing("a\x0cb"), "a b");
+    }
+
+    #[test]
+    fn normalize_collapses_consecutive_controls() {
+        assert_eq!(normalize_for_typing("one\n\n\ntwo"), "one two");
+        assert_eq!(normalize_for_typing("a\n\t\rb"), "a b");
+    }
+
+    #[test]
+    fn normalize_leaves_plain_text_alone() {
+        let text = "So yesterday, I was thinking about the Exa API and the CLI.";
+        assert_eq!(normalize_for_typing(text), text);
+    }
+
+    #[test]
+    fn normalize_handles_leading_and_trailing_controls() {
+        assert_eq!(normalize_for_typing("\nstart"), " start");
+        assert_eq!(normalize_for_typing("end\n"), "end ");
+        assert_eq!(normalize_for_typing("\n"), " ");
+        assert_eq!(normalize_for_typing(""), "");
     }
 }
