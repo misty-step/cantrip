@@ -7,8 +7,13 @@ Cantrip reads one TOML file. `cantrip config path` prints its location
 and adjust the common settings; its Save button writes the file back
 (with comments preserved) and reloads the running daemon.
 
-Changes take effect on daemon start. Use `cantrip start` / `stop`, or restart
-the daemon process, after editing.
+Changes apply immediately, no restart needed. The Save button (or `cantrip
+reload`, for edits made directly to the file with `config edit`) makes the
+daemon re-read the config in place. Each stage picks up the newest values at
+its own boundary: `[stt]`, `vocabulary`, and `[postproc]` when a recording
+stops, `injection` when the corrected text comes back, and `audio_source` on
+the next recording. The one setting that genuinely needs a daemon restart is
+`keep_warm`, which only governs model preload at startup.
 
 ```toml
 injection = "auto"        # auto | paste | type | clipboard — how corrected text is delivered
