@@ -43,16 +43,6 @@ impl Stage {
             Self::CleaningUp => "cleaning".to_owned(),
         }
     }
-
-    pub fn hud_label(&self) -> String {
-        match self {
-            Self::Transcribing { chunk, total } if *total > 1 => {
-                format!("Transcribing… {chunk}/{total}")
-            }
-            Self::Transcribing { .. } => "Transcribing…".to_owned(),
-            Self::CleaningUp => "Cleaning…".to_owned(),
-        }
-    }
 }
 
 /// Outcome of running one WAV through the backend.
@@ -79,6 +69,18 @@ pub type TranscriberCache = Option<(String, Transcriber)>;
 /// A post-processing failure never drops the dictation: the raw text is
 /// returned with `PostprocStatus::Failed`. Short transcripts under
 /// `postproc.min_chars` skip cleanup and return the raw text.
+/// Whether the cleanup pass should run for a transcript of `chars` length.
+pub fn should_run_postproc(cfg: &PostprocConfig, chars: usize) -> bool {
+    if !cfg.enabled {
+        return false;
+    }
+    // min_chars == 0 means never skip for length.
+    if cfg.min_chars > 0 && chars < cfg.min_chars {
+        return false;
+    }
+    true
+}
+
 pub fn run(
     cache: &mut TranscriberCache,
     wav: &Path,
@@ -96,7 +98,7 @@ pub fn run(
     let (text, postproc, partial, keep_wav) = match transcription {
         Ok(LocalOk { text, partial }) if !text.trim().is_empty() && postproc_cfg.enabled => {
             let chars = text.chars().count();
-            if postproc_cfg.min_chars > 0 && chars < postproc_cfg.min_chars {
+            if !should_run_postproc(postproc_cfg, chars) {
                 tracing::info!(
                     "[Postproc] skipped_short chars={} min_chars={}",
                     chars,
@@ -209,4 +211,48 @@ pub fn load_transcriber(model: &str) -> Result<(String, Transcriber)> {
 fn resolve_api_key(id: Option<&str>) -> Result<Option<String>> {
     id.map(|id| crate::keys::get(id).with_context(|| format!("api key '{id}' unavailable")))
         .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_as_str_matches_daemon_hud_contract() {
+        assert_eq!(
+            Stage::Transcribing { chunk: 1, total: 1 }.as_str(),
+            "transcribing"
+        );
+        assert_eq!(
+            Stage::Transcribing { chunk: 2, total: 5 }.as_str(),
+            "transcribing 2/5"
+        );
+        assert_eq!(Stage::CleaningUp.as_str(), "cleaning");
+    }
+
+    #[test]
+    fn should_run_postproc_respects_enabled_and_min_chars() {
+        let off = PostprocConfig {
+            enabled: false,
+            min_chars: 40,
+            ..Default::default()
+        };
+        assert!(!should_run_postproc(&off, 100));
+
+        let on = PostprocConfig {
+            enabled: true,
+            min_chars: 40,
+            ..Default::default()
+        };
+        assert!(!should_run_postproc(&on, 12));
+        assert!(should_run_postproc(&on, 40));
+        assert!(should_run_postproc(&on, 41));
+
+        let no_floor = PostprocConfig {
+            enabled: true,
+            min_chars: 0,
+            ..Default::default()
+        };
+        assert!(should_run_postproc(&no_floor, 1));
+    }
 }

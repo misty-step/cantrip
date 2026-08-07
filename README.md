@@ -31,7 +31,7 @@ that, for text.
 
 ```
 trigger ──> capture (pw-record) ──> STT (local, default) ──> postproc (Ollama) ──> inject ──> notification
-             16 kHz mono s16          parakeet | canary | cloud    qwen3:8b | ...   paste | wtype | clip
+             16 kHz mono s16          parakeet | cloud    qwen3:8b | ...   paste | wtype | clip
 ```
 
 ## Requirements

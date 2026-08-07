@@ -116,7 +116,24 @@ impl Config {
                 self.postproc.min_chars
             );
         }
-        if self.stt.endpoint.is_none() {
+        if let Some(endpoint) = &self.stt.endpoint {
+            let endpoint = endpoint.trim();
+            if endpoint.is_empty() {
+                bail!("stt.endpoint must not be empty when set");
+            }
+            // Remote STT posts to `{endpoint}/audio/transcriptions`. The
+            // value must be the API base (e.g. https://api.openai.com/v1),
+            // not the full transcriptions path.
+            let stripped = endpoint.trim_end_matches('/');
+            if stripped.ends_with("/audio/transcriptions") {
+                bail!(
+                    "stt.endpoint must be the API base URL (e.g. https://api.openai.com/v1),                      not the full /audio/transcriptions path"
+                );
+            }
+            if self.stt.model.trim().is_empty() {
+                bail!("stt.endpoint requires a non-empty stt.model");
+            }
+        } else {
             models::require(&self.stt.model)?;
         }
         Ok(())
@@ -228,5 +245,48 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("missing-model"));
         assert!(message.contains("parakeet-tdt-0.6b-v3-int8"));
+    }
+
+    #[test]
+    fn stt_endpoint_rejects_transcriptions_path() {
+        let config = Config {
+            stt: SttConfig {
+                endpoint: Some("https://api.openai.com/v1/audio/transcriptions".into()),
+                model: "whisper-large-v3".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = config.validate().expect_err("full path must fail");
+        assert!(
+            err.to_string().contains("API base"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn stt_endpoint_accepts_api_base() {
+        let config = Config {
+            stt: SttConfig {
+                endpoint: Some("https://api.openai.com/v1".into()),
+                model: "whisper-large-v3".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.validate().expect("base URL should validate");
+    }
+
+    #[test]
+    fn stt_endpoint_rejects_empty() {
+        let config = Config {
+            stt: SttConfig {
+                endpoint: Some("  ".into()),
+                model: "whisper-large-v3".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
     }
 }

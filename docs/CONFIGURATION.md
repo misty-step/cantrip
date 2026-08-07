@@ -18,7 +18,7 @@ vocabulary = ["PipeWire", "Parakeet"]   # exact-spelling terms fed to postproc +
 
 [stt]
 model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
-# endpoint = "https://api.openai.com/v1/audio/transcriptions"  # cloud override
+# endpoint = "https://api.openai.com/v1"  # cloud API base; cantrip appends /audio/transcriptions
 # model    = "gpt-4o-mini-transcribe"
 # api_key_id = "openai"
 
@@ -43,11 +43,11 @@ weights with `cantrip models pull`:
 
 | Model | Notes | Gauntlet WER |
 |---|---|---|
-| `parakeet-tdt-0.6b-v3-int8` | Fastest local; ships by default | 0.123 |
-| `canary-1b` | Most accurate free local (0.9 s); weights are gated on Hugging Face — place the four ONNX/tokenizer files in `~/.local/share/cantrip/models/canary-1b` to use | 0.083 |
+| `parakeet-tdt-0.6b-v3-int8` | Fastest local; ships by default (only local model in the registry today) | 0.123 |
 
-**Cloud.** Set `endpoint` (an OpenAI-compatible `/v1/audio/transcriptions`
-URL), `model`, and `api_key_id`. Store the credential id ahead of time:
+**Cloud.** Set `endpoint` to an OpenAI-compatible API **base** URL (for example
+`https://api.openai.com/v1`). Cantrip posts to `{endpoint}/audio/transcriptions`.
+Also set `model` and `api_key_id`. Store the credential id ahead of time:
 
 ```sh
 cantrip key set openai    # prompts for the key; stored in the OS keyring

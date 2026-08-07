@@ -55,6 +55,12 @@ struct AvailableBackends {
     wl_copy: bool,
 }
 
+/// True when the daemon may retry via clipboard after the primary mode fails.
+/// Only Auto may degrade: Type must never touch the clipboard; Paste is strict.
+pub fn allows_clipboard_fallback(mode: InjectionMode) -> bool {
+    matches!(mode, InjectionMode::Auto)
+}
+
 /// Inject text with the requested backend policy.
 pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
     let available = AvailableBackends {
@@ -174,16 +180,36 @@ pub fn executable_in_path(name: &str) -> bool {
     })
 }
 
+/// Candidate ydotool daemon sockets, highest priority first.
+/// Shared by injection and `cantrip doctor`.
+pub fn ydotool_socket_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(5);
+    if let Some(path) = env::var_os("YDOTOOL_SOCKET").filter(|socket| !socket.is_empty()) {
+        candidates.push(PathBuf::from(path));
+    }
+    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(runtime).join(".ydotool_socket"));
+    } else {
+        // Fallback when XDG_RUNTIME_DIR is unset (same layout as typical user sessions).
+        candidates.push(PathBuf::from(format!(
+            "/run/user/{}/.ydotool_socket",
+            unsafe { libc::getuid() }
+        )));
+    }
+    candidates.push(PathBuf::from("/tmp/.ydotool_socket"));
+    candidates.push(PathBuf::from("/run/ydotoold.socket"));
+    candidates
+}
+
+/// First existing ydotool socket from [`ydotool_socket_candidates`], if any.
+pub fn find_ydotool_socket() -> Option<PathBuf> {
+    ydotool_socket_candidates()
+        .into_iter()
+        .find(|path| path.exists())
+}
+
 fn ydotool_socket_exists() -> bool {
-    let configured = env::var_os("YDOTOOL_SOCKET")
-        .filter(|socket| !socket.is_empty())
-        .map(|socket| PathBuf::from(socket).exists())
-        .unwrap_or(false);
-    configured
-        || PathBuf::from(format!("/run/user/{}/.ydotool_socket", unsafe {
-            libc::getuid()
-        }))
-        .exists()
+    find_ydotool_socket().is_some()
 }
 
 /// Replace control characters with a single space so a transcript can never
@@ -328,7 +354,11 @@ fn send_paste_shortcut() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_order, normalize_for_typing, AvailableBackends, Backend, InjectionMode};
+    use super::{
+        allows_clipboard_fallback, backend_order, normalize_for_typing, ydotool_socket_candidates,
+        AvailableBackends, Backend, InjectionMode,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn auto_order_prefers_paste_then_typing_then_clipboard() {
@@ -441,6 +471,29 @@ mod tests {
             ),
             vec![Backend::Wtype, Backend::Ydotool]
         );
+    }
+
+    #[test]
+    fn ydotool_candidates_prefer_env_then_runtime() {
+        // Snapshot-free: only check ordering rules against the current env.
+        let list = ydotool_socket_candidates();
+        assert!(!list.is_empty());
+        if let Some(env_socket) = std::env::var_os("YDOTOOL_SOCKET").filter(|s| !s.is_empty()) {
+            assert_eq!(list[0], PathBuf::from(env_socket));
+        }
+        assert!(
+            list.iter()
+                .any(|p| p.ends_with(".ydotool_socket") || p.ends_with("ydotoold.socket")),
+            "expected known socket basenames: {list:?}"
+        );
+    }
+
+    #[test]
+    fn clipboard_fallback_only_for_auto() {
+        assert!(allows_clipboard_fallback(InjectionMode::Auto));
+        assert!(!allows_clipboard_fallback(InjectionMode::Type));
+        assert!(!allows_clipboard_fallback(InjectionMode::Paste));
+        assert!(!allows_clipboard_fallback(InjectionMode::Clipboard));
     }
 
     #[test]

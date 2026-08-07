@@ -42,7 +42,8 @@ enum CliCommand {
         screenshot: Option<PathBuf>,
         /// State to render with --screenshot: recording | transcribing |
         /// cleaning | sent | notice (default: recording).
-        #[arg(long, value_enum)]
+        /// Requires --screenshot.
+        #[arg(long, value_enum, requires = "screenshot")]
         state: Option<hud::ScreenshotState>,
     },
     /// Open the configuration window.
@@ -505,20 +506,7 @@ fn availability(name: &str) -> &'static str {
 }
 
 fn ydotool_socket() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("YDOTOOL_SOCKET") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    let mut candidates = vec![
-        PathBuf::from("/tmp/.ydotool_socket"),
-        PathBuf::from("/run/ydotoold.socket"),
-    ];
-    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
-        candidates.push(PathBuf::from(runtime).join(".ydotool_socket"));
-    }
-    candidates.into_iter().find(|path| path.exists())
+    cantrip::inject::find_ydotool_socket()
 }
 
 #[cfg(test)]

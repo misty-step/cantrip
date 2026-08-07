@@ -902,7 +902,8 @@ fn handle_worker_result(
                     tracing::info!("[Inject] injected chars={chars} total_ms={total_ms}");
                     *last_outcome = LastOutcome::success(message);
                 }
-                Err(error) if config.injection != InjectionMode::Clipboard => {
+                Err(error) if inject::allows_clipboard_fallback(config.injection) => {
+                    // Auto only: Type must never touch the clipboard; Paste is strict.
                     tracing::warn!(
                         "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
                         stt_elapsed.as_millis()
@@ -1204,4 +1205,40 @@ fn unix_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inject::{allows_clipboard_fallback, InjectionMode};
+
+    #[test]
+    fn last_outcome_success_and_notice_flags() {
+        let ok = LastOutcome::success("Pasted 3 chars");
+        assert_eq!(ok.ok, Some(true));
+        assert_eq!(ok.message.as_deref(), Some("Pasted 3 chars"));
+
+        let notice = LastOutcome::notice("Heard nothing");
+        assert_eq!(notice.ok, Some(false));
+        assert_eq!(notice.message.as_deref(), Some("Heard nothing"));
+    }
+
+    #[test]
+    fn busy_reply_rejects_with_processing_message() {
+        let reply = busy_reply(&State::Processing {
+            started: Instant::now(),
+            stage: pipeline::Stage::CleaningUp,
+        });
+        assert!(!reply.ok);
+        assert_eq!(reply.state, "processing");
+        assert_eq!(reply.message.as_deref(), Some("busy: processing"));
+    }
+
+    #[test]
+    fn injection_clipboard_fallback_matches_product_contract() {
+        // Daemon must only degrade Auto (see handle_worker_result).
+        assert!(allows_clipboard_fallback(InjectionMode::Auto));
+        assert!(!allows_clipboard_fallback(InjectionMode::Type));
+        assert!(!allows_clipboard_fallback(InjectionMode::Paste));
+    }
 }
