@@ -1,3 +1,4 @@
 target/
 eval/results/
 .git/
+.opencode/
