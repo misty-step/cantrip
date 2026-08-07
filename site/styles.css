@@ -1,0 +1,112 @@
+:root {
+  --bg: #0e0e11;
+  --bg-elev: #16161c;
+  --text: #f2f4f8;
+  --muted: #9aa3b2;
+  --coral: #ff6a5c;
+  --amber: #ffba4a;
+  --green: #74dc96;
+  --line: rgba(242, 244, 248, 0.08);
+  --max: 960px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.55;
+  min-height: 100vh;
+}
+.glow {
+  position: fixed; inset: -20% auto auto 30%;
+  width: 50vw; height: 50vw; border-radius: 50%;
+  background: radial-gradient(circle, rgba(255,106,92,.18), transparent 65%);
+  pointer-events: none; z-index: 0;
+}
+.top, main, footer { position: relative; z-index: 1; }
+.top {
+  max-width: var(--max); margin: 0 auto;
+  padding: 1.25rem 1.5rem;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.brand {
+  display: inline-flex; gap: .6rem; align-items: center;
+  color: var(--text); text-decoration: none; font-weight: 600;
+}
+nav { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+nav a { color: var(--muted); text-decoration: none; font-size: .95rem; }
+nav a:hover { color: var(--text); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; padding: .65rem 1.1rem;
+  text-decoration: none; font-weight: 550; font-size: .95rem;
+  border: 1px solid transparent;
+}
+.btn.primary { background: var(--coral); color: #1a0d0c; }
+.btn.ghost { border-color: var(--line); color: var(--text); background: transparent; }
+.hero {
+  max-width: var(--max); margin: 0 auto;
+  padding: 4rem 1.5rem 3rem;
+}
+.eyebrow {
+  color: var(--amber); text-transform: uppercase; letter-spacing: .12em;
+  font-size: .75rem; font-weight: 600; margin: 0 0 .75rem;
+}
+h1 {
+  font-family: Fraunces, Georgia, serif;
+  font-weight: 600; font-size: clamp(2.4rem, 6vw, 4rem);
+  line-height: 1.05; margin: 0 0 1rem; max-width: 12ch;
+}
+.lede { color: var(--muted); font-size: 1.15rem; max-width: 40rem; margin: 0 0 1.75rem; }
+.cta { display: flex; gap: .75rem; flex-wrap: wrap; margin-bottom: 2.5rem; }
+.pill-demo { display: flex; justify-content: flex-start; }
+.pill {
+  width: 320px; height: 40px; border-radius: 999px;
+  background: #321c1c; display: grid;
+  grid-template-columns: 40px 1fr 72px; align-items: center;
+  padding: 0 14px 0 10px; box-shadow: 0 10px 40px rgba(0,0,0,.35);
+}
+.dot {
+  width: 9px; height: 9px; border-radius: 50%; background: var(--coral);
+  margin: 0 auto; animation: pulse 2s ease-in-out infinite;
+}
+.word { text-align: center; font-size: .95rem; font-weight: 500; }
+.timer { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: .85rem; font-family: ui-monospace, monospace; }
+@keyframes pulse { 0%,100% { opacity: .65; transform: scale(.96);} 50% { opacity: 1; transform: scale(1);} }
+.grid {
+  max-width: var(--max); margin: 0 auto;
+  padding: 1rem 1.5rem 3rem;
+  display: grid; gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+.grid article {
+  background: var(--bg-elev); border: 1px solid var(--line);
+  border-radius: 16px; padding: 1.15rem 1.2rem;
+}
+.grid h3 { margin: 0 0 .4rem; font-size: 1.05rem; }
+.grid p { margin: 0; color: var(--muted); font-size: .95rem; }
+.install {
+  max-width: var(--max); margin: 0 auto 4rem;
+  padding: 0 1.5rem;
+}
+.install h2 {
+  font-family: Fraunces, Georgia, serif; font-weight: 600; margin: 0 0 1rem;
+}
+pre {
+  background: #121218; border: 1px solid var(--line); border-radius: 14px;
+  padding: 1rem 1.1rem; overflow: auto; color: #d7dbe3;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
+.fine { color: var(--muted); }
+.fine a { color: var(--amber); }
+footer {
+  max-width: var(--max); margin: 0 auto;
+  padding: 1.5rem; border-top: 1px solid var(--line);
+  display: flex; justify-content: space-between; color: var(--muted); font-size: .9rem;
+}
+footer a { color: var(--muted); }
+@media (max-width: 640px) {
+  nav a:not(.btn) { display: none; }
+  .pill { width: min(320px, 100%); }
+}

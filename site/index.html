@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cantrip — local-first dictation for Linux</title>
+  <meta name="description" content="Press a key, speak, let go. Local speech-to-text on Linux with a calm status capsule and paste-first injection." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+</head>
+<body>
+  <div class="glow" aria-hidden="true"></div>
+  <header class="top">
+    <a class="brand" href="./">
+      <img src="favicon.svg" width="28" height="28" alt="" />
+      <span>Cantrip</span>
+    </a>
+    <nav>
+      <a href="#features">Features</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/misty-step/cantrip">GitHub</a>
+      <a class="btn ghost" href="../docs/CONFIGURATION.md">Docs</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">Local-first Linux dictation</p>
+      <h1>A small spell for text.</h1>
+      <p class="lede">
+        Press a key, speak, let go. Cantrip turns speech into clean text at your
+        cursor — offline by default, calm status capsule, paste-first delivery.
+      </p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/misty-step/cantrip">View on GitHub</a>
+        <a class="btn ghost" href="#install">Quickstart</a>
+      </div>
+      <div class="pill-demo" aria-hidden="true">
+        <div class="pill">
+          <span class="dot"></span>
+          <span class="word">Listening…</span>
+          <span class="timer">00:12</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="grid">
+      <article>
+        <h3>Local STT</h3>
+        <p>Parakeet TDT 0.6B int8 on CPU. Short takes in a few hundred milliseconds. Speech stays on the machine.</p>
+      </article>
+      <article>
+        <h3>Honest HUD</h3>
+        <p>Warm Minimal capsule. Spinner when busy. Real chunk fill only when multi-chunk STT reports <code>N/M</code>. Success flash, not a novel.</p>
+      </article>
+      <article>
+        <h3>Paste-first</h3>
+        <p>Finished text lands via clipboard + Ctrl+V so paragraphs survive. Type mode still available for terminals.</p>
+      </article>
+      <article>
+        <h3>Optional cleanup</h3>
+        <p>OpenAI-compatible postproc for filler removal and punctuation. Skip short transcripts. One pass by default.</p>
+      </article>
+    </section>
+
+    <section id="install" class="install">
+      <h2>Quickstart</h2>
+      <pre><code>cargo build --release
+./target/release/cantrip models pull
+./target/release/cantrip config init
+./target/release/cantrip daemon &amp;
+./target/release/cantrip toggle</code></pre>
+      <p class="fine">Needs PipeWire, Wayland layer-shell, and <code>wl-clipboard</code>. See the full <a href="../docs/CONFIGURATION.md">configuration guide</a>.</p>
+    </section>
+  </main>
+
+  <footer>
+    <span>MIT · Misty Step</span>
+    <a href="https://github.com/misty-step/cantrip">Source</a>
+  </footer>
+</body>
+</html>

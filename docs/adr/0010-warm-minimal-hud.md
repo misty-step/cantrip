@@ -29,20 +29,20 @@ The HUD renders one fixed 320×40 borderless capsule, top-centre, on the
   state glyph in a 28px zone at the left, and a monospace mm:ss timer
   right-aligned while recording. The capsule never resizes with content;
   overlong words truncate with an ellipsis.
-- **Glyphs**: listening is a pulsing dot. Cleaning and single-chunk
-  transcription use the indeterminate spinner (a rotating open arc that
-  never fills). Multi-chunk transcription (`transcribing N/M`, M>1) uses a
-  calm full ring while the capsule fill carries the measured fraction. The
-  per-state accent color differentiates the stage. The spinner's turn is a
-  pure function of the render phase, so a frozen phase (reduced motion,
+- **Glyphs**: listening is a pulsing dot. Transcribing and cleaning use the
+  indeterminate spinner (a rotating open arc that never fills). Multi-chunk
+  transcription (`transcribing N/M`, M>1) keeps that spinner and adds a
+  timed left-to-right capsule fill from empty toward each measured fraction.
+  The per-state accent color differentiates the stage. The spinner's turn is
+  a pure function of the render phase, so a frozen phase (reduced motion,
   screenshot) draws a calm full ring rather than a static open arc that
   could read as an unmeasured partial meter.
 - **Motion**: each working phase is a fixed composition. Continuous motion
   is the localized breathing pulse on the working glyphs (alpha 0.8–1.0,
   scale 0.96–1.0), the spinner's turn when indeterminate, the ticking timer,
-  and — only when the daemon reports multi-chunk STT — a smooth left-to-right
-  capsule fill toward the measured `N/M` fraction. No unmeasured decorative
-  fill. State changes ease over ~260 ms: pill pop-in (scale + alpha), accent
+  and — only when the daemon reports multi-chunk STT — a timed left-to-right
+  capsule fill that always starts empty and eases toward each measured `N/M`
+  fraction (~480 ms). No unmeasured decorative fill. State changes ease over ~260 ms: pill pop-in (scale + alpha), accent
   and base-fill crossfade, the fresh glyph scales in (ease-out-back), and the
   stage word drifts up ~3 px. Outcome flashes are static compositions for
   ~2.5 s.

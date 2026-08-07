@@ -9,11 +9,11 @@
 //! quiet UI-font label ("Listening…", "Cleaning…") sits centered as the
 //! visual anchor, with a small state glyph in a 28px zone at the left and a
 //! monospace mm:ss counter at the right while recording. Listening is a
-//! pulsing dot. Cleaning keeps the indeterminate spinner. Multi-chunk
-//! transcription draws a real left-to-right fill from the daemon's
-//! `transcribing N/M` stage (single-chunk stays on the spinner — no fake
-//! meter). Continuous motion is the localized breathing pulse, spinner
-//! turn when indeterminate, smooth meter approach when determinate, the
+//! pulsing dot. Transcribing and cleaning keep the indeterminate spinner.
+//! Multi-chunk transcription also draws a real left-to-right fill that
+//! eases from empty toward each `transcribing N/M` fraction (single-chunk
+//! stays spinner-only — no fake meter). Continuous motion is the localized
+//! breathing pulse, spinner turn, timed meter ease when determinate, the
 //! ticking elapsed timer, and the ~2.5s outcome flashes. State changes
 //! ease over ~260ms. A reduced-motion desktop freezes pulse/entry motion,
 //! snaps the meter, draws the spinner as a calm static ring, and keeps
@@ -57,9 +57,11 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const RESULT_FLASH: Duration = Duration::from_millis(2_500);
 /// Duration of the eased transition run on every visual state change.
 const TRANSITION: Duration = Duration::from_millis(260);
-/// How fast the determinate chunk meter eases toward the latest N/M fraction
-/// per render frame (~33 ms). Higher = snappier.
-const METER_APPROACH: f32 = 0.28;
+/// Minimum wall time to ease the chunk meter from the previous display
+/// value to a new N/M target. Chunk inference is often <300 ms, so a
+/// per-frame multiplicative approach looks like a snap; a timed ease
+/// always shows a full empty→target fill.
+const METER_EASE: Duration = Duration::from_millis(480);
 /// Tail of the result flash spent fading out, inside the RESULT_FLASH window.
 const FLASH_FADE_TAIL: f32 = 0.25;
 const HUD_HEIGHT: u32 = 56;
@@ -336,8 +338,14 @@ struct HudState {
     transition_at: Instant,
     /// Kind faded from during the current transition; None means pop-in.
     transition_from: Option<ChipKind>,
-    /// Smoothed 0..=1 fill for multi-chunk transcription (eases toward target).
+    /// Current eased 0..=1 fill for multi-chunk transcription.
     meter_display: f32,
+    /// Value at the start of the active meter ease.
+    meter_from: f32,
+    /// Target fraction for the active meter ease (`chunk/total`).
+    meter_to: f32,
+    /// When the active meter ease began.
+    meter_ease_at: Instant,
     /// Desktop animations disabled (gsettings enable-animations=false):
     /// freezes the breathing pulse and skips entry motion.
     reduced_motion: bool,
@@ -391,6 +399,9 @@ impl HudState {
             transition_at: Instant::now(),
             transition_from: None,
             meter_display: 0.0,
+            meter_from: 0.0,
+            meter_to: 0.0,
+            meter_ease_at: Instant::now(),
             reduced_motion,
             last_render: None,
             configured: false,
@@ -666,27 +677,41 @@ impl HudState {
             self.transition_from = self.shown_kind;
             self.transition_at = now;
             self.shown_kind = Some(kind);
-            // Fresh visual state: drop any leftover meter from a prior run.
-            if meter_target.is_none() {
-                self.meter_display = 0.0;
-            }
+            // Entering a non-metered phase clears the fill. Entering metered
+            // transcription always restarts from empty so the first chunk
+            // never appears pre-filled.
+            self.meter_display = 0.0;
+            self.meter_from = 0.0;
+            self.meter_to = 0.0;
+            self.meter_ease_at = now;
         }
         let meter = match meter_target {
             Some(target) if self.reduced_motion || self.screenshot.is_some() => {
                 self.meter_display = target;
+                self.meter_from = target;
+                self.meter_to = target;
                 Some(target)
             }
             Some(target) => {
-                let delta = target - self.meter_display;
-                self.meter_display = if delta.abs() < 0.002 {
-                    target
-                } else {
-                    self.meter_display + delta * METER_APPROACH
-                };
-                Some(self.meter_display.clamp(0.0, 1.0))
+                let target = target.clamp(0.0, 1.0);
+                // New target (or first multi-chunk frame): start a timed ease
+                // from the current display value — from 0 on first entry.
+                if (target - self.meter_to).abs() > 0.0005 {
+                    self.meter_from = self.meter_display;
+                    self.meter_to = target;
+                    self.meter_ease_at = now;
+                }
+                let t = (now.duration_since(self.meter_ease_at).as_secs_f32()
+                    / METER_EASE.as_secs_f32())
+                .clamp(0.0, 1.0);
+                let eased = self.meter_from + (self.meter_to - self.meter_from) * ease_out_cubic(t);
+                self.meter_display = eased.clamp(0.0, 1.0);
+                Some(self.meter_display)
             }
             None => {
                 self.meter_display = 0.0;
+                self.meter_from = 0.0;
+                self.meter_to = 0.0;
                 None
             }
         };
@@ -842,16 +867,6 @@ impl HudState {
                 glyph_x,
                 center_y,
                 4.2 * scale_factor * breathe_scale * glyph_in,
-                scale_alpha(accent_solid, content_alpha * breathe_alpha),
-            ),
-            ChipKind::Transcribing if view.meter.is_some() => ring(
-                canvas,
-                width,
-                height,
-                glyph_x,
-                center_y,
-                4.8 * scale_factor * breathe_scale * glyph_in,
-                2.2 * scale_factor,
                 scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
             ChipKind::Transcribing | ChipKind::Cleaning => spinner(

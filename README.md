@@ -19,10 +19,10 @@ that, for text.
   replace the local models (see `docs/CONFIGURATION.md`). API keys live in
   the OS keyring, never in files.
 - **Layer-shell status HUD.** A small always-on-top capsule shows live state
-  with a static per-phase composition — a centered stage word, a breathing
-  state glyph, and a timer — plus a gentle success/failure flash. No fake
-  progress: determinate readings appear only when the daemon can measure
-  them. Pure Rust, no GTK.
+  with a centered stage word, breathing glyph, and timer. Multi-chunk STT
+  eases a real left-to-right fill from empty toward each `N/M` fraction;
+  single-chunk stays on the spinner. Delivered text flashes **Success**.
+  Pure Rust, no GTK.
 - **Atomic paste-first injection.** The default pastes the finished text
   from the clipboard (`wl-copy` then one `Ctrl+V`), so paragraph breaks
   survive and a focus change mid-dictation cannot interrupt delivery.
@@ -140,3 +140,14 @@ Design informed by [Handy](https://github.com/cjpais/Handy) (and its
 `transcribe-rs` engine, which Cantrip uses directly) and by
 [Vox](https://github.com/misty-step/vox), our macOS predecessor whose pipeline
 architecture and privacy rules carry over.
+
+## License
+
+[MIT](LICENSE) © Misty Step.
+
+## Docs
+
+- [Configuration](docs/CONFIGURATION.md)
+- [Evaluation gauntlet](docs/EVALUATION.md)
+- [Architecture decisions](docs/adr/)
+- Marketing/docs site scaffold: [`site/`](site/)
