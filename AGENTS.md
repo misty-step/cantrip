@@ -31,8 +31,9 @@ Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 - Log tags: `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 - Stop `pw-record` with SIGINT and wait; SIGKILL corrupts the WAV.
 - Type-mode injection must never touch the clipboard.
-- Recordings live only under `$XDG_RUNTIME_DIR/cantrip` and are deleted after
-  processing, success or failure.
+- In-flight recordings live under `$XDG_RUNTIME_DIR/cantrip` and are deleted
+  after processing. On a full STT failure the daemon may keep one copy at
+  `~/.local/state/cantrip/last-failed.wav` for `cantrip recover`.
 - anyhow errors with `.context()`; no `unwrap()` outside tests.
 - No async runtime; std threads + mpsc.
 - Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`); branch `master`.

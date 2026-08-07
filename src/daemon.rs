@@ -924,7 +924,7 @@ fn handle_worker_result(
                                 "[Inject] clipboard fallback failed chars={chars} stt_ms={} error={fallback_error:#}",
                                 stt_elapsed.as_millis()
                             );
-                            *last_outcome = LastOutcome::notice("Typing failed");
+                            *last_outcome = LastOutcome::notice("Saved — run: cantrip last");
                         }
                     }
                 }
@@ -933,7 +933,7 @@ fn handle_worker_result(
                         "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
                         stt_elapsed.as_millis()
                     );
-                    *last_outcome = LastOutcome::notice("Injection failed");
+                    *last_outcome = LastOutcome::notice("Saved — run: cantrip last");
                 }
             }
         }
@@ -943,7 +943,7 @@ fn handle_worker_result(
                 "[STT] transcription failed stt_ms={} notice={notice} error={error}",
                 stt_elapsed.as_millis()
             );
-            *last_outcome = LastOutcome::notice(notice);
+            *last_outcome = LastOutcome::notice(format!("{notice} — run: cantrip recover"));
         }
     }
     *state = State::Idle;
