@@ -392,7 +392,7 @@ impl SettingsApp {
                 ui.label(egui::RichText::new("Endpoint (empty = local STT)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.edit.stt_endpoint)
-                        .hint_text("https://…/audio/transcriptions")
+                        .hint_text("https://api.openai.com/v1")
                         .desired_width(f32::INFINITY),
                 );
                 ui.end_row();
