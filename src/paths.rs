@@ -46,9 +46,18 @@ pub fn hud_lock_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("hud.lock"))
 }
 
-/// `$XDG_RUNTIME_DIR/cantrip/daemon.log` — durable operator-facing log.
+/// `~/.local/state/cantrip/` (falls back to data_dir when state is unavailable).
+/// Durable operator-facing state that survives reboot, unlike the runtime dir.
+pub fn state_dir() -> Result<PathBuf> {
+    let base = dirs::state_dir()
+        .or_else(dirs::data_dir)
+        .context("no state dir")?;
+    Ok(base.join("cantrip"))
+}
+
+/// `~/.local/state/cantrip/daemon.log` — durable operator-facing log.
 pub fn daemon_log_path() -> Result<PathBuf> {
-    Ok(runtime_dir()?.join("daemon.log"))
+    Ok(state_dir()?.join("daemon.log"))
 }
 
 /// Create a directory (and parents) if missing, then return it.

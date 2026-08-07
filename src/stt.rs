@@ -9,10 +9,8 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use transcribe_rs::onnx::parakeet::ParakeetModel;
+use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
-use transcribe_rs::transcriber::{EnergyAdaptiveChunked, EnergyAdaptiveConfig, Transcriber as _};
-use transcribe_rs::TranscribeOptions;
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 const MULTIPART_BOUNDARY: &str = "cantrip-audio-boundary";
@@ -75,31 +73,81 @@ impl Transcriber {
         Ok(text)
     }
 
-    /// Run energy-adaptive chunked inference so long dictations stay under
-    /// the Parakeet encoder limit. Short audio still runs as one chunk.
+    /// Split long audio into energy-adaptive chunks so each Parakeet pass
+    /// stays under the encoder cliff. Short audio still runs as one pass.
+    /// Implemented here (not via transcribe-rs chunkers) so dependency
+    /// `log::info` of chunk text cannot leak transcript content.
     fn transcribe_samples(&mut self, samples: &[f32]) -> Result<String> {
-        let config = EnergyAdaptiveConfig {
-            target_chunk_secs: LOCAL_CHUNK_SECS,
-            search_window_secs: LOCAL_CHUNK_SEARCH_SECS,
-            // Chunker owns padding; disable the SpeechModel default pad so
-            // silence is not applied twice.
-            padding_secs: 0.25,
-            min_chunk_secs: LOCAL_MIN_CHUNK_SECS,
-            frame_size: 480,
-            merge_separator: " ".into(),
-        };
-        let options = TranscribeOptions {
-            language: Some("en".to_owned()),
-            translate: false,
-            leading_silence_ms: Some(0),
-            trailing_silence_ms: Some(0),
-        };
-        let mut chunker = EnergyAdaptiveChunked::new(config, options);
-        let result = chunker
-            .transcribe(&mut self.model, samples)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        Ok(result.text)
+        let chunk_len = (LOCAL_CHUNK_SECS * SAMPLE_RATE) as usize;
+        let min_len = (LOCAL_MIN_CHUNK_SECS * SAMPLE_RATE) as usize;
+        if samples.len() <= chunk_len {
+            return self.transcribe_chunk(samples);
+        }
+
+        let mut parts = Vec::new();
+        let mut start = 0;
+        let mut chunk_index = 0_u32;
+        while start < samples.len() {
+            let remaining = samples.len() - start;
+            let end = if remaining <= chunk_len {
+                samples.len()
+            } else {
+                let target = start + chunk_len;
+                let split = low_energy_split(samples, target, LOCAL_CHUNK_SEARCH_SECS);
+                split.max(start + min_len).min(samples.len())
+            };
+            let chunk = &samples[start..end];
+            tracing::info!(
+                "[STT] chunk={} start_s={:.2} duration_s={:.2}",
+                chunk_index,
+                start as f32 / SAMPLE_RATE,
+                chunk.len() as f32 / SAMPLE_RATE
+            );
+            let text = self.transcribe_chunk(chunk)?;
+            if !text.is_empty() {
+                parts.push(text);
+            }
+            chunk_index += 1;
+            start = end;
+        }
+        Ok(parts.join(" "))
     }
+
+    fn transcribe_chunk(&mut self, samples: &[f32]) -> Result<String> {
+        let result = self
+            .model
+            .transcribe_with(
+                samples,
+                &ParakeetParams {
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(result.text.trim().to_owned())
+    }
+}
+
+/// Find a low-energy frame near `target` to avoid splitting mid-word.
+fn low_energy_split(samples: &[f32], target: usize, search_secs: f32) -> usize {
+    const FRAME: usize = 480;
+    let search = (search_secs * SAMPLE_RATE) as usize;
+    let start = target.saturating_sub(search);
+    let end = (target + search).min(samples.len());
+    let start = (start / FRAME) * FRAME;
+
+    let mut best = target.min(samples.len());
+    let mut best_rms = f32::MAX;
+    let mut offset = start;
+    while offset + FRAME <= end {
+        let frame = &samples[offset..offset + FRAME];
+        let rms = (frame.iter().map(|s| s * s).sum::<f32>() / FRAME as f32).sqrt();
+        if rms < best_rms {
+            best_rms = rms;
+            best = offset + FRAME;
+        }
+        offset += FRAME;
+    }
+    best
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,22 +196,21 @@ pub fn transcribe_remote(
 }
 
 /// Classify a local STT failure into a short operator-facing notice.
-/// Never includes transcript content — status codes and structural causes only.
+/// Never includes transcript content — structural causes only.
 pub fn classify_failure(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("broadcast")
-        || lower.contains("axis ==")
-        || lower.contains("attempting to broadcast")
-    {
+    // Parakeet ONNX encoder cliff (observed live as axis broadcast 77 by 5077).
+    if lower.contains("broadcast") || lower.contains("axis ==") {
         return "Audio too long for the model";
     }
     if lower.contains("timed out") || lower.contains("timeout") {
         return "Transcription timed out";
     }
-    if lower.contains("http ") {
+    // Match the ureq status form we emit: "returned HTTP {code}".
+    if lower.contains("returned http ") || lower.contains("http 4") || lower.contains("http 5") {
         return "Transcription service error";
     }
-    if lower.contains("no such file") || lower.contains("reading wav") {
+    if lower.contains("reading wav") || lower.contains("failed to open") {
         return "Recording unreadable";
     }
     "Transcription failed"
@@ -252,14 +299,16 @@ mod tests {
     }
 
     #[test]
-    fn local_chunk_constants_stay_under_known_cliff() {
-        // The live failure was ~406s single-pass. Keep the target well below
-        // the longest successful single-pass observed in production (~180s).
-        const {
-            assert!(LOCAL_CHUNK_SECS <= 60.0);
-            assert!(LOCAL_CHUNK_SEARCH_SECS > 0.0);
-            assert!(LOCAL_MIN_CHUNK_SECS > 0.0);
-            assert!(LOCAL_MIN_CHUNK_SECS < LOCAL_CHUNK_SECS);
+    fn low_energy_split_prefers_quiet_frame_near_target() {
+        // 2s of noise, 0.25s of silence around 1.0s, more noise.
+        let mut samples = vec![0.2_f32; 32_000];
+        for sample in &mut samples[15_000..19_000] {
+            *sample = 0.0;
         }
+        let split = low_energy_split(&samples, 16_000, 0.5);
+        assert!(
+            (14_500..=19_500).contains(&split),
+            "split {split} should land in the quiet window"
+        );
     }
 }

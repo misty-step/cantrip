@@ -21,25 +21,28 @@ detach or reboot.
 
 ## Decision
 
-1. **Chunk local STT.** `Transcriber::transcribe_wav` now runs
-   `transcribe-rs`'s `EnergyAdaptiveChunked` strategy with a 30s target
-   chunk, a 3s low-energy search window, and a 0.5s minimum residual.
-   Short audio still becomes one chunk. Remote STT is unchanged (the
-   endpoint owns its own limits).
+1. **Chunk local STT.** `Transcriber::transcribe_wav` splits long audio
+   with a local energy-adaptive chunker (30s target, 3s low-energy search,
+   0.5s minimum residual) and runs each chunk through Parakeet. The
+   chunker lives in cantrip so dependency log lines cannot print
+   transcript text. Short audio still becomes one chunk. Remote STT is
+   unchanged (the endpoint owns its own limits).
 2. **Classify failures for the operator.** `stt::classify_failure` maps
    structural error text (broadcast/axis, HTTP status, timeout, unreadable
    WAV) to a short notice. The daemon writes that notice into `last` and
    the HUD flash; full error detail stays in the log (no transcript body).
 3. **Durable daemon log.** When `cantrip daemon` starts, tracing tees into
-   `$XDG_RUNTIME_DIR/cantrip/daemon.log` as well as stderr, so a detached
-   hub session still leaves an auditable trail.
+   `~/.local/state/cantrip/daemon.log` as well as stderr, so a detached
+   hub session still leaves an auditable trail that survives reboot.
 
 ## Why not alternatives
 
 - Cap recording length: hides the product limit behind a silent cutoff and
   throws away spoken content the operator already produced.
-- Hand-rolled fixed slicing: worse than energy-adaptive splits at pauses;
-  `transcribe-rs` already ships the strategy we need.
+- Use `transcribe-rs` EnergyAdaptiveChunked as-is: it `log::info`s each
+  chunk's text, which violates the no-transcript-logging rule whenever a
+  log bridge is active. A local chunker keeps the same energy split idea
+  without that side channel.
 - Keep the generic "Transcription failed" notice: forces the operator to
   dig logs for every length cliff.
 
@@ -48,7 +51,7 @@ detach or reboot.
 - Five-minute (and longer) local dictations should produce text again,
   with a small join seam risk at chunk boundaries.
 - Operators can run `cantrip status` and read `last:` for a cause, and
-  inspect `daemon.log` for the full structural error.
+  inspect `~/.local/state/cantrip/daemon.log` for the full structural error.
 - The 30s target is conservative relative to the longest known-good
   single-pass (~180s). Raise it only with a measured encoder pass that
   stays under the ONNX cliff.

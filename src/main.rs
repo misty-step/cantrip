@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
@@ -116,9 +117,13 @@ fn main() {
 }
 
 fn init_tracing(dual_sink: bool) {
+    // Always pin ort/transcribe_rs to warn so dependency info logs cannot
+    // carry transcript text even when RUST_LOG is broad.
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort=warn,transcribe_rs=warn"));
-    // Daemon sessions tee into the runtime log so a long dictation failure
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        .add_directive("ort=warn".parse().expect("static directive"))
+        .add_directive("transcribe_rs=warn".parse().expect("static directive"));
+    // Daemon sessions tee into the state log so a long dictation failure
     // is still visible after a detached hub session or a reboot.
     if dual_sink {
         if let Ok(file) = open_runtime_log() {
@@ -134,13 +139,18 @@ fn init_tracing(dual_sink: bool) {
 }
 
 fn open_runtime_log() -> Result<fs::File> {
-    let dir = paths::ensure_dir(paths::runtime_dir()?).context("creating runtime directory")?;
-    let path = dir.join("daemon.log");
-    fs::OpenOptions::new()
+    let _ = paths::ensure_dir(paths::state_dir()?).context("creating state directory")?;
+    let path = paths::daemon_log_path()?;
+    let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(&path)
-        .with_context(|| format!("opening runtime log {}", path.display()))
+        .with_context(|| format!("opening state log {}", path.display()))?;
+    // create(true) honors umask; force owner-only after open.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("setting permissions on {}", path.display()))?;
+    Ok(file)
 }
 
 /// Write each tracing line to stderr and the runtime log file.
