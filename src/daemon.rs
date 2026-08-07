@@ -1152,8 +1152,6 @@ fn recover_failed(
 }
 
 fn persist_last_transcript(text: &str) -> Result<()> {
-    let dir = paths::ensure_dir(paths::state_dir()?)?;
-    let _ = dir;
     let path = paths::last_transcript_path()?;
     write_owner_file(&path, text.as_bytes())
 }
@@ -1240,5 +1238,30 @@ mod tests {
         assert!(allows_clipboard_fallback(InjectionMode::Auto));
         assert!(!allows_clipboard_fallback(InjectionMode::Type));
         assert!(!allows_clipboard_fallback(InjectionMode::Paste));
+    }
+
+    #[test]
+    fn write_owner_file_creates_missing_parent_with_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = format!(
+            "cantrip-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        // Parent directory does not exist beforehand.
+        let root = std::env::temp_dir().join(unique).join("state");
+        let path = root.join("last-transcript.txt");
+
+        write_owner_file(&path, b"hello").expect("write_owner_file should create missing parent");
+
+        assert!(path.exists(), "file should exist");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "file should be owner-only");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
