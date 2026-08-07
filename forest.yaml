@@ -25,8 +25,7 @@ flows:
     agent: verifier
     interval_seconds: 30
     merge: squash
-    # Hold auto-merge until child PATH/tooling is proven (iron-forest#166).
-    auto_merge: false
+    auto_merge: true
   fixer:
     enabled: true
     agent: builder
