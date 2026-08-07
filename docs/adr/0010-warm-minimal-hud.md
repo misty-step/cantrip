@@ -43,9 +43,10 @@ The HUD renders one fixed 320×40 borderless capsule, top-centre, on the
   State changes ease over ~260 ms: pill pop-in (scale + alpha), accent and
   fill crossfade, the fresh glyph scales in (ease-out-back), and the stage
   word drifts up ~3 px. Outcome flashes are static compositions for ~2.5 s.
-- **Outcomes**: Sent = full-lit green capsule + check pop ("Pasted N
-  chars", no timer); Notice = drained warm capsule + slashed ring ("Heard
-  nothing"). Distinguishable by luminance and glyph shape without color.
+- **Outcomes**: Sent = full-lit green capsule + check pop ("Success", no
+  timer); Notice = drained warm capsule + slashed ring ("Heard nothing" or
+  the short operator reason). Distinguishable by luminance and glyph shape
+  without color. Detailed delivery text stays on `cantrip status` / logs.
 - **Reduced motion**: read once at startup from
   `gsettings get org.gnome.desktop.interface enable-animations`. When
   disabled, the pulse freezes, the spinner draws as a static
@@ -55,14 +56,12 @@ The HUD renders one fixed 320×40 borderless capsule, top-centre, on the
   recording|transcribing|cleaning|sent|notice` renders any state's settled
   frame (progress 1.0, phase 0.0, no flash fade window) and exits, so every
   composition verifies offline with byte-identical output.
-- **Determinate progress**: the "Warm Minimal" determinate cluster (five
-  coarse segments + exact %) is designed but NOT implemented. It ships only
-  when the daemon can reliably measure a fraction of a phase (candidate:
-  Parakeet decoder token position vs total audio frames — requires
-  `transcribe-rs` to expose a cursor; chunk counts are a coarser fallback).
-  A future `progress { stage, fraction }` daemon event gates it. The
-  transcribing spinner is indeterminate, not determinate progress: it
-  rotates without completing, so it never claims a fraction.
+- **Determinate progress**: multi-chunk local STT exposes a real fraction
+  via the existing status `stage` field (`transcribing N/M`). The HUD eases
+  a left-to-right capsule fill to `N/M` while that stage is active. Single-
+  chunk and cleaning stay on the indeterminate spinner — no decorative
+  meter without a measurement. A finer decoder-token cursor remains optional
+  future work if `transcribe-rs` exposes one.
 
 ## Why not alternatives
 

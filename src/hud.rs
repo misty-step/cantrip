@@ -5,22 +5,18 @@
 //!
 //! Visual design ("Warm Minimal", ADR 0010): a fixed 320×40 borderless
 //! capsule, top-centre, filled with an opaque blend of the near-black floor
-//! and a whisper of the state accent — the whole pill reads the mode, and
-//! it never signals determinate progress. A quiet UI-font label ("Listening…",
-//! "Cleaning…") sits centered as the visual anchor, with a
-//! small state glyph in a 28px zone at the left and a monospace mm:ss
-//! counter at the right while recording. Each working state carries a
-//! simple, honest glyph: listening is a pulsing dot, and both transcribing
-//! and cleaning are the same indeterminate spinner (a rotating open arc
-//! that never fills; the accent color differentiates the stage). The only
-//! continuous motion is the localized breathing pulse and the spinner's
-//! turn (alpha/scale — never a length change or a determinate meter), the
+//! and a whisper of the state accent — the whole pill reads the mode. A
+//! quiet UI-font label ("Listening…", "Cleaning…") sits centered as the
+//! visual anchor, with a small state glyph in a 28px zone at the left and a
+//! monospace mm:ss counter at the right while recording. Listening is a
+//! pulsing dot. Cleaning keeps the indeterminate spinner. Multi-chunk
+//! transcription draws a real left-to-right fill from the daemon's
+//! `transcribing N/M` stage (single-chunk stays on the spinner — no fake
+//! meter). Continuous motion is the localized breathing pulse, spinner
+//! turn when indeterminate, smooth meter approach when determinate, the
 //! ticking elapsed timer, and the ~2.5s outcome flashes. State changes
-//! ease over ~260ms: the pill pops in with scale+alpha, accent/fill colors
-//! crossfade, the fresh glyph scales in, and the stage word drifts up a
-//! few pixels. A reduced-motion desktop
-//! (gsettings enable-animations=false) freezes the glyph pulse and entry
-//! motion, draws the spinner as a calm static ring, and keeps
+//! ease over ~260ms. A reduced-motion desktop freezes pulse/entry motion,
+//! snaps the meter, draws the spinner as a calm static ring, and keeps
 //! the elapsed timer ticking (it is data, not animation).
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
@@ -61,6 +57,9 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const RESULT_FLASH: Duration = Duration::from_millis(2_500);
 /// Duration of the eased transition run on every visual state change.
 const TRANSITION: Duration = Duration::from_millis(260);
+/// How fast the determinate chunk meter eases toward the latest N/M fraction
+/// per render frame (~33 ms). Higher = snappier.
+const METER_APPROACH: f32 = 0.28;
 /// Tail of the result flash spent fading out, inside the RESULT_FLASH window.
 const FLASH_FADE_TAIL: f32 = 0.25;
 const HUD_HEIGHT: u32 = 56;
@@ -337,6 +336,8 @@ struct HudState {
     transition_at: Instant,
     /// Kind faded from during the current transition; None means pop-in.
     transition_from: Option<ChipKind>,
+    /// Smoothed 0..=1 fill for multi-chunk transcription (eases toward target).
+    meter_display: f32,
     /// Desktop animations disabled (gsettings enable-animations=false):
     /// freezes the breathing pulse and skips entry motion.
     reduced_motion: bool,
@@ -389,6 +390,7 @@ impl HudState {
             shown_kind: None,
             transition_at: Instant::now(),
             transition_from: None,
+            meter_display: 0.0,
             reduced_motion,
             last_render: None,
             configured: false,
@@ -518,8 +520,8 @@ impl HudState {
                 && matches!(next_state, UiState::Idle)
             {
                 self.flash_until = Some(now + RESULT_FLASH);
-                // Show the daemon's actual terminal message (Typed N chars,
-                // Heard nothing, Cancelled, ...) — never a fake success.
+                // Keep the daemon terminal message for logs/status; the chip
+                // flash uses a short label (Success / notice text).
                 self.flash_text = reply.last.clone();
                 self.flash_ok = reply.last_ok.unwrap_or(false);
                 tracing::info!(
@@ -584,7 +586,7 @@ impl HudState {
                     ("Transcribing…".to_owned(), None, ChipKind::Transcribing)
                 }
                 ScreenshotState::Cleaning => ("Cleaning…".to_owned(), None, ChipKind::Cleaning),
-                ScreenshotState::Sent => ("Pasted 617 chars".to_owned(), None, ChipKind::Sent),
+                ScreenshotState::Sent => ("Success".to_owned(), None, ChipKind::Sent),
                 ScreenshotState::Notice => ("Heard nothing".to_owned(), None, ChipKind::Notice),
             };
             self.shown_kind = Some(content.2);
@@ -596,12 +598,21 @@ impl HudState {
                 progress: 1.0,
                 fade: 1.0,
                 phase: 0.0,
+                meter: None,
             });
         }
         let content = match &self.state {
             UiState::Idle => match self.flash_until {
                 Some(until) if now < until => {
-                    let label = self.flash_text.clone().unwrap_or_else(|| "Done".to_owned());
+                    // Delivered dictations flash a short word; notices keep
+                    // the operator-facing reason (Heard nothing, Cancelled).
+                    let label = if self.flash_ok {
+                        "Success".to_owned()
+                    } else {
+                        self.flash_text
+                            .clone()
+                            .unwrap_or_else(|| "Notice".to_owned())
+                    };
                     let kind = if self.flash_ok {
                         ChipKind::Sent
                     } else {
@@ -609,7 +620,7 @@ impl HudState {
                     };
                     let remaining = until.duration_since(now).as_secs_f32();
                     let fade = ease_out_cubic(remaining / FLASH_FADE_TAIL);
-                    Some((label, None, kind, fade))
+                    Some((label, None, kind, fade, None))
                 }
                 _ => None,
             },
@@ -618,21 +629,27 @@ impl HudState {
                 Some(format_elapsed(*elapsed)),
                 ChipKind::Recording,
                 1.0,
+                None,
             )),
             UiState::Processing { stage } => {
-                let (label, kind) = if stage == "cleaning" || stage.starts_with("cleaning") {
-                    ("Cleaning…".to_owned(), ChipKind::Cleaning)
+                let (label, kind, meter) = if stage == "cleaning" || stage.starts_with("cleaning") {
+                    ("Cleaning…".to_owned(), ChipKind::Cleaning, None)
                 } else if let Some(rest) = stage.strip_prefix("transcribing ") {
                     // "transcribing 2/5" from the daemon stage field.
-                    (format!("Transcribing… {rest}"), ChipKind::Transcribing)
+                    (
+                        format!("Transcribing… {rest}"),
+                        ChipKind::Transcribing,
+                        parse_chunk_meter(stage),
+                    )
                 } else {
-                    ("Transcribing…".to_owned(), ChipKind::Transcribing)
+                    ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
                 };
-                Some((label, None, kind, 1.0))
+                Some((label, None, kind, 1.0, meter))
             }
         };
-        let Some((label, detail, kind, fade)) = content else {
+        let Some((label, detail, kind, fade, meter_target)) = content else {
             self.shown_kind = None;
+            self.meter_display = 0.0;
             return None;
         };
 
@@ -640,7 +657,30 @@ impl HudState {
             self.transition_from = self.shown_kind;
             self.transition_at = now;
             self.shown_kind = Some(kind);
+            // Fresh visual state: drop any leftover meter from a prior run.
+            if meter_target.is_none() {
+                self.meter_display = 0.0;
+            }
         }
+        let meter = match meter_target {
+            Some(target) if self.reduced_motion || self.screenshot.is_some() => {
+                self.meter_display = target;
+                Some(target)
+            }
+            Some(target) => {
+                let delta = target - self.meter_display;
+                self.meter_display = if delta.abs() < 0.002 {
+                    target
+                } else {
+                    self.meter_display + delta * METER_APPROACH
+                };
+                Some(self.meter_display.clamp(0.0, 1.0))
+            }
+            None => {
+                self.meter_display = 0.0;
+                None
+            }
+        };
         let eased = ease_out_cubic(
             now.duration_since(self.transition_at).as_secs_f32() / TRANSITION.as_secs_f32(),
         );
@@ -670,6 +710,7 @@ impl HudState {
             progress,
             fade,
             phase,
+            meter,
         })
     }
 
@@ -750,6 +791,23 @@ impl HudState {
             fill,
             visibility,
         );
+        // Real multi-chunk STT fraction only — never a decorative fill.
+        if let Some(meter) = view.meter.filter(|value| *value > 0.001) {
+            let meter_rgb = mix_rgb(fill_rgb, accent, 0.42);
+            let meter_fill = [meter_rgb[0], meter_rgb[1], meter_rgb[2], 255];
+            pill_meter(
+                canvas,
+                width,
+                height,
+                center_x,
+                center_y,
+                half_width,
+                half_height,
+                meter.clamp(0.0, 1.0),
+                meter_fill,
+                visibility * 0.92,
+            );
+        }
 
         let left = center_x - half_width;
         let right = center_x + half_width;
@@ -775,6 +833,16 @@ impl HudState {
                 glyph_x,
                 center_y,
                 4.2 * scale_factor * breathe_scale * glyph_in,
+                scale_alpha(accent_solid, content_alpha * breathe_alpha),
+            ),
+            ChipKind::Transcribing if view.meter.is_some() => ring(
+                canvas,
+                width,
+                height,
+                glyph_x,
+                center_y,
+                4.8 * scale_factor * breathe_scale * glyph_in,
+                2.2 * scale_factor,
                 scale_alpha(accent_solid, content_alpha * breathe_alpha),
             ),
             ChipKind::Transcribing | ChipKind::Cleaning => spinner(
@@ -987,6 +1055,8 @@ struct ChipView {
     fade: f32,
     /// Wrapped seconds driving the continuous breathing pulse.
     phase: f32,
+    /// Determinate capsule fill 0..=1 from multi-chunk STT; None = no meter.
+    meter: Option<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -997,6 +1067,7 @@ struct RenderKey {
     progress: u8,
     fade: u8,
     phase: u16,
+    meter: u8,
     width: u32,
     height: u32,
 }
@@ -1004,7 +1075,8 @@ struct RenderKey {
 impl RenderKey {
     fn from_view(view: &ChipView, width: u32, height: u32) -> Self {
         // Continuous motion only exists for these kinds; a result flash is
-        // static once its transition and fade are settled.
+        // static once its transition and fade are settled. Meter quantize
+        // forces redraws while the fill eases toward the latest chunk.
         let animated = matches!(
             view.kind,
             ChipKind::Recording | ChipKind::Transcribing | ChipKind::Cleaning
@@ -1020,6 +1092,10 @@ impl RenderKey {
             } else {
                 0
             },
+            meter: view
+                .meter
+                .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
+                .unwrap_or(0),
             width,
             height,
         }
@@ -1292,6 +1368,68 @@ fn pill(
             }
         }
     }
+}
+
+/// Left-to-right fill clipped to the capsule SDF. `meter` is 0..=1 of the
+/// capsule width; used only for measured multi-chunk transcription.
+#[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
+fn pill_meter(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+    half_width: f32,
+    half_height: f32,
+    meter: f32,
+    fill: [u8; 4],
+    alpha: f32,
+) {
+    let meter = meter.clamp(0.0, 1.0);
+    if meter <= 0.0 {
+        return;
+    }
+    let radius = half_height;
+    let flat = (half_width - radius).max(0.0);
+    let left = center_x - half_width;
+    let fill_right = left + (half_width * 2.0) * meter;
+    let min_x = (center_x - half_width - 1.0).max(0.0) as u32;
+    let max_x = fill_right.min(width as f32).max(0.0) as u32;
+    let min_y = (center_y - half_height - 1.0).max(0.0) as u32;
+    let max_y = (center_y + half_height + 1.0).min(height as f32) as u32;
+    let fill = scale_alpha(fill, alpha);
+    for y in min_y..max_y {
+        let dy = y as f32 + 0.5 - center_y;
+        for x in min_x..max_x {
+            let px = x as f32 + 0.5;
+            if px > fill_right {
+                continue;
+            }
+            let dx = px - center_x;
+            let qx = (dx.abs() - flat).max(0.0);
+            let signed = (qx * qx + dy * dy).sqrt() - radius;
+            let coverage = (0.5 - signed).clamp(0.0, 1.0);
+            // Soft edge at the moving fill front.
+            let edge = (fill_right - px + 0.5).clamp(0.0, 1.0);
+            let coverage = coverage * edge;
+            if coverage > 0.0 {
+                blend_pixel(canvas, width, height, x, y, fill, coverage);
+            }
+        }
+    }
+}
+
+/// Parse `transcribing N/M` into a 0..=1 fraction. Single-chunk and bare
+/// `transcribing` return None so the HUD keeps the indeterminate spinner.
+fn parse_chunk_meter(stage: &str) -> Option<f32> {
+    let rest = stage.strip_prefix("transcribing ")?;
+    let (chunk, total) = rest.split_once('/')?;
+    let chunk: u32 = chunk.parse().ok()?;
+    let total: u32 = total.parse().ok()?;
+    if total <= 1 || chunk == 0 {
+        return None;
+    }
+    Some((chunk as f32 / total as f32).clamp(0.0, 1.0))
 }
 
 fn circle(
@@ -1714,7 +1852,8 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         acquire_lock_on, breathe, capsule_blend, ease_out_back, ease_out_cubic, fit_text_measured,
-        format_elapsed, mix_rgb, pulse, spinner, ChipKind, BREATHE_MIN,
+        format_elapsed, mix_rgb, parse_chunk_meter, pill, pill_meter, pulse, spinner, ChipKind,
+        BREATHE_MIN,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1837,6 +1976,51 @@ mod tests {
         // First character already exceeds the budget: drop it and keep only
         // the ellipsis — never admit text beyond the declared width.
         assert_eq!(fit_text_measured(measure, "longword", 5.0), "…");
+    }
+
+    #[test]
+    fn parse_chunk_meter_only_for_multi_chunk_stages() {
+        assert_eq!(parse_chunk_meter("transcribing"), None);
+        assert_eq!(parse_chunk_meter("transcribing 1/1"), None);
+        assert_eq!(parse_chunk_meter("cleaning"), None);
+        assert_eq!(parse_chunk_meter("transcribing 1/4"), Some(0.25));
+        assert_eq!(parse_chunk_meter("transcribing 2/5"), Some(0.4));
+        assert_eq!(parse_chunk_meter("transcribing 5/5"), Some(1.0));
+        assert_eq!(parse_chunk_meter("transcribing 0/3"), None);
+    }
+
+    #[test]
+    fn pill_meter_lights_left_side_only() {
+        let mut canvas = [0u8; 80 * 40 * 4];
+        pill(
+            &mut canvas,
+            80,
+            40,
+            40.0,
+            20.0,
+            30.0,
+            12.0,
+            [20, 20, 20, 255],
+            1.0,
+        );
+        pill_meter(
+            &mut canvas,
+            80,
+            40,
+            40.0,
+            20.0,
+            30.0,
+            12.0,
+            0.5,
+            [200, 100, 40, 255],
+            1.0,
+        );
+        let left = canvas[(20 * 80 + 20) as usize * 4];
+        let right = canvas[(20 * 80 + 55) as usize * 4];
+        assert!(
+            left > right,
+            "meter must light the left half more than the right (left={left} right={right})"
+        );
     }
 
     fn alpha_at(canvas: &[u8], width: u32, x: u32, y: u32) -> u8 {
