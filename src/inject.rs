@@ -3,10 +3,124 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+/// Busiest budget any single injection helper may take before it is killed.
+///
+/// Applied identically to `wtype`, `ydotool`, `wl-copy`, and the paste-shortcut
+/// keypress so one policy governs every backend. The reason this is bounded is
+/// that the daemon must stay responsive: injection runs on the processing path,
+/// and a wedged helper must never stall transcription or the daemon's worker
+/// thread indefinitely. Five seconds is well past any legitimate paste of a long
+/// transcript while leaving headroom against a hung child.
+const INJECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait for `child` within `timeout`; on timeout kill and reap it, returning an
+/// error so the caller can fall back to the next backend, never blocking forever.
+fn wait_child_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().context("polling inject helper status")? {
+            Some(status) => return Ok(status),
+            None => {
+                if Instant::now() >= deadline {
+                    // Reap the zombie so we never leak a wedged helper behind us.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    bail!(
+                        "inject helper exceeded {}s budget (daemon must stay responsive)",
+                        timeout.as_secs()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+/// Spawn `command` and wait for it within `timeout`, returning its exit status.
+///
+/// Used by the process-boundary tests with fake helpers on `PATH`; backends call
+/// [`wait_child`] which applies the shared [`INJECT_TIMEOUT`] policy.
+fn run_bounded(command: &mut Command, timeout: Duration) -> Result<ExitStatus> {
+    let mut child = command.spawn().context("starting injection helper")?;
+    wait_child_bounded(&mut child, timeout)
+}
+
+/// Write all of `bytes` into `child`'s stdin within `timeout`.
+///
+/// The write is bounded for exactly the same reason [`wait_child_bounded`] is:
+/// a helper that never reads its input leaves the kernel pipe buffer full, so
+/// a blocking `write_all` would stall the daemon's processing path without any
+/// bound. Setting the pipe write end non-blocking and polling it against the
+/// same deadline means a wedged, non-reading child is killed and reaped instead
+/// of blocking forever. On success or on a normal error the local `stdin` is
+/// dropped here, closing the pipe so the helper sees EOF (as before).
+fn write_stdin_bounded(child: &mut Child, bytes: &[u8], timeout: Duration) -> Result<()> {
+    let Some(mut stdin) = child.stdin.take() else {
+        return Ok(());
+    };
+    set_nonblocking(&stdin)?;
+    let deadline = Instant::now() + timeout;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if Instant::now() >= deadline {
+            // Reap the zombie so we never leak a wedged helper behind us.
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "inject helper did not drain stdin within {}s (daemon must stay responsive)",
+                timeout.as_secs()
+            );
+        }
+        match stdin.write(&bytes[offset..]) {
+            Ok(written) if written > 0 => offset += written,
+            Ok(_) => {
+                // A zero-length write means nothing further can be sent.
+                break;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                // Pipe full because the child is not draining it; wait briefly
+                // and retry up to the deadline rather than blocking forever.
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("writing text to helper stdin");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Mark the write end of `stream`'s pipe as non-blocking so a full pipe cannot
+/// block the writer; the caller polls it against a deadline instead.
+fn set_nonblocking(stream: &impl AsRawFd) -> Result<()> {
+    let fd = stream.as_raw_fd();
+    // SAFETY: fcntl(_, F_GETFL/F_SETFL) operates on an owned fd and does not
+    // touch memory we do not control; the kernel reports failure via the return.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        bail!(
+            "reading stdin pipe flags (errno {})",
+            std::io::Error::last_os_error()
+        );
+    }
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc == -1 {
+        bail!(
+            "setting stdin pipe non-blocking (errno {})",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
+}
 
 /// Select how text is inserted into the focused Wayland application.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -237,79 +351,71 @@ fn normalize_for_typing(text: &str) -> String {
 }
 
 fn run_wtype(text: &str) -> Result<()> {
-    let output = Command::new("wtype")
-        .arg("--")
-        .arg(text)
-        .stdin(Stdio::null())
+    let status = run_bounded(
+        Command::new("wtype")
+            .arg("--")
+            .arg(text)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        INJECT_TIMEOUT,
+    )
+    .context("running wtype")?;
+    if !status.success() {
+        bail!("wtype exited with status {}", status);
+    }
+    Ok(())
+}
+
+/// Spawn `command` with a piped stdin, write `text` into it, then wait for the
+/// child to exit — with **both** the write and the wait bounded by `timeout`.
+///
+/// Shared by `ydotool` and `wl-copy`, the two backends that feed the helper its
+/// payload over stdin. Bounding the write matters as much as bounding the wait:
+/// a helper that never reads leaves the pipe full, and without a bound the
+/// write alone would stall the daemon forever before the wait ever ran.
+fn run_writer_backend(
+    command: &mut Command,
+    text: &str,
+    name: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let mut child = command
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .output()
-        .context("running wtype")?;
-    if !output.status.success() {
-        bail!("wtype exited with status {}", output.status);
+        .spawn()
+        .with_context(|| format!("starting {name}"))?;
+
+    write_stdin_bounded(&mut child, text.as_bytes(), timeout)
+        .with_context(|| format!("writing text to {name}"))?;
+
+    let status =
+        wait_child_bounded(&mut child, timeout).with_context(|| format!("waiting for {name}"))?;
+    if !status.success() {
+        bail!("{name} exited with status {}", status);
     }
     Ok(())
 }
 
 fn run_ydotool(text: &str) -> Result<()> {
-    let mut child = Command::new("ydotool")
-        .args(["type", "--file", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("starting ydotool")?;
-
-    let write_result = child
-        .stdin
-        .take()
-        .context("opening ydotool stdin")
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(text.as_bytes())
-                .context("writing text to ydotool")
-        });
-    if let Err(error) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-
-    let output = child.wait_with_output().context("waiting for ydotool")?;
-    if !output.status.success() {
-        bail!("ydotool exited with status {}", output.status);
-    }
-    Ok(())
+    // ydotool reads the transcript over stdin (`--file -`).
+    run_writer_backend(
+        Command::new("ydotool").args(["type", "--file", "-"]),
+        text,
+        "ydotool",
+        INJECT_TIMEOUT,
+    )
 }
 
 fn run_clipboard(text: &str) -> Result<()> {
-    let mut child = Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("starting wl-copy")?;
-
-    let write_result = child
-        .stdin
-        .take()
-        .context("opening wl-copy stdin")
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(text.as_bytes())
-                .context("writing text to wl-copy")
-        });
-    if let Err(error) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-
-    let output = child.wait_with_output().context("waiting for wl-copy")?;
-    if !output.status.success() {
-        bail!("wl-copy exited with status {}", output.status);
-    }
-    Ok(())
+    // wl-copy reads the clipboard payload over stdin.
+    run_writer_backend(
+        &mut Command::new("wl-copy"),
+        text,
+        "wl-copy",
+        INJECT_TIMEOUT,
+    )
 }
 
 /// Copy the text, then send one Ctrl+V to the focused app. Nothing is typed
@@ -325,27 +431,31 @@ fn run_paste(text: &str) -> Result<()> {
 /// Emit a Ctrl+V keypress through wtype (or a ydotool key sequence).
 fn send_paste_shortcut() -> Result<()> {
     if executable_in_path("wtype") {
-        let output = Command::new("wtype")
-            .args(["-M", "ctrl", "-k", "v"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .context("sending paste shortcut with wtype")?;
-        if output.status.success() {
+        let status = run_bounded(
+            Command::new("wtype")
+                .args(["-M", "ctrl", "-k", "v"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+            INJECT_TIMEOUT,
+        )
+        .context("sending paste shortcut with wtype")?;
+        if status.success() {
             return Ok(());
         }
     }
     if executable_in_path("ydotool") && ydotool_socket_exists() {
         // 29 = LeftCtrl, 47 = V; down V, up V, up Ctrl.
-        let output = Command::new("ydotool")
-            .args(["key", "29:1", "47:1", "47:0", "29:0"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .context("sending paste shortcut with ydotool")?;
-        if output.status.success() {
+        let status = run_bounded(
+            Command::new("ydotool")
+                .args(["key", "29:1", "47:1", "47:0", "29:0"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+            INJECT_TIMEOUT,
+        )
+        .context("sending paste shortcut with ydotool")?;
+        if status.success() {
             return Ok(());
         }
     }
@@ -355,10 +465,25 @@ fn send_paste_shortcut() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        allows_clipboard_fallback, backend_order, normalize_for_typing, ydotool_socket_candidates,
-        AvailableBackends, Backend, InjectionMode,
+        allows_clipboard_fallback, backend_order, normalize_for_typing, run_bounded,
+        run_writer_backend, ydotool_socket_candidates, AvailableBackends, Backend, InjectionMode,
     };
-    use std::path::PathBuf;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// Write an executable `name` into `dir` whose body is `body`, so tests can
+    /// put a deterministic fake helper on `PATH` (a real subprocess boundary).
+    fn write_fake_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
 
     #[test]
     fn auto_order_prefers_paste_then_typing_then_clipboard() {
@@ -538,5 +663,82 @@ mod tests {
         assert_eq!(normalize_for_typing("end\n"), "end ");
         assert_eq!(normalize_for_typing("\n"), " ");
         assert_eq!(normalize_for_typing(""), "");
+    }
+
+    #[test]
+    fn sleeping_fake_helper_on_path_times_out() {
+        // Process-boundary proof that a wedged helper cannot stall the daemon:
+        // a real child process that sleeps far past the budget is killed and
+        // reported as a timeout rather than blocking forever.
+        let dir = std::env::temp_dir().join(format!(
+            "cantrip-inject-fake-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_fake_executable(&dir, "cantrip-inject-fake", "#!/bin/sh\nsleep 30\n");
+
+        let budget = Duration::from_millis(200);
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        let mut cmd = Command::new("cantrip-inject-fake");
+        // Fake resolved via PATH so the spawn boundary is a real subprocess.
+        cmd.env("PATH", format!("{}:{}", dir.display(), path_var));
+
+        let started = Instant::now();
+        let result = run_bounded(&mut cmd, budget);
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "expected the sleeping fake to time out");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout was not actually bounded: took {elapsed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn input_writing_backend_times_out_when_helper_never_reads() {
+        // Process-boundary proof for the *stdin-writing* backends (ydotool and
+        // wl-copy), the path the previous no-stdin test did not cover. A real
+        // child that never reads leaves the pipe buffer full; forwarding a
+        // payload bigger than that buffer must time out (kill + reap) rather
+        // than block the daemon on the write forever.
+        let dir = std::env::temp_dir().join(format!(
+            "cantrip-inject-fake-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_fake_executable(&dir, "cantrip-inject-reader-fake", "#!/bin/sh\nsleep 30\n");
+
+        let budget = Duration::from_millis(200);
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        let mut cmd = Command::new("cantrip-inject-reader-fake");
+        // Resolved via PATH so the spawn boundary is a real subprocess.
+        cmd.env("PATH", format!("{}:{}", dir.display(), path_var));
+
+        // Larger than the kernel pipe buffer (usually 64 KiB) so the write end
+        // genuinely fills if the child never reads.
+        let payload = "x".repeat(1 << 20);
+
+        let started = Instant::now();
+        let result = run_writer_backend(&mut cmd, &payload, "fake-reader", budget);
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected the non-reading sleeping fake to time out"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "write phase was not actually bounded: took {elapsed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
