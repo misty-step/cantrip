@@ -27,7 +27,8 @@ enabled = true            # false = pass the raw transcript straight through
 endpoint = "http://localhost:11434/v1"    # OpenAI-compatible endpoint
 model = "qwen3:8b"        # any model your endpoint serves
 timeout_ms = 30000
-passes = 2              # cleanup rounds: a second pass re-reads and fixes residuals
+passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
+min_chars = 40            # skip cleanup under this length; 0 = never skip
 instructions = """Fix speech recognition errors, such as dropped letters,
 missing spaces between words, and truncated acronyms. Remove filler words,
 false starts, and repeated words. Add correct punctuation, capitalization,
@@ -63,19 +64,23 @@ the `instructions` text, so it is safe to experiment from the config alone:
 - **Disfluency removal.** The default instructions permit deleting filler
   words, false starts, and repetitions. Earlier wording that said "never
   remove any word" is what let "um"/"uh"/repeats survive.
-- **`passes`.** The cleanup runs `passes` rounds in a chain (default 2). The
+- **`passes`.** The cleanup runs `passes` rounds in a chain (default 1). The
   first round uses `instructions`; every later round is a focused proofread
   pass that re-reads the output and fixes residual speech-recognition errors
   the earlier round left (e.g. a truncated acronym like `AP` for `API`).
-  A single pass of a small model reliably misses a few errors on longer
-  dictations, so 2 is the quality default; set 1 for minimum latency.
+  One pass is enough for modern instruct models; set 2 only if you still see
+  residual ASR errors and accept roughly double cleanup latency.
+- **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
+  many characters (default 40). Short commands skip the cloud round-trip.
+  Set `0` to always run cleanup when enabled.
 - **Local.** Default endpoint is Ollama at `localhost:11434`.
-  `qwen3:8b` is the gauntlet recommendation (free, fast, neutral on accuracy);
-  any `ollama list` model works.
+  `qwen3:8b` is the free local recommendation; any `ollama list` model works.
 - **Cloud.** Point the endpoint at any OpenAI-compatible provider and set
-  `api_key_id`. A precedent from the gauntlet: OpenRouter routing of
-  `qwen/qwen3-14b` / `qwen/qwen3-30b-a3b-instruct-2507` (the latter is the
-  only postproc model in the matrix that improved mean WER).
+  `api_key_id`. On OpenRouter (2026-08-07 messy-dictation bench),
+  `poolside/laguna-s-2.1` led on speed and quality (~0.7 s mean); 
+  `google/gemini-3.5-flash-lite` was close when privacy policy allows it.
+  `qwen/qwen3-30b-a3b-instruct-2507` remains a solid quality baseline but is
+  several times slower.
 - A postproc failure never drops a dictation: the raw transcript is used.
 
 ## `vocabulary`

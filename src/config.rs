@@ -34,6 +34,9 @@ pub struct PostprocConfig {
     pub api_key_id: Option<String>,
     pub timeout_ms: u64,
     pub passes: u8,
+    /// Skip cleanup when the raw transcript has fewer than this many chars.
+    /// `0` disables the skip. Default 40 covers short commands without a cloud round-trip.
+    pub min_chars: usize,
     pub instructions: String,
 }
 
@@ -68,7 +71,10 @@ impl Default for PostprocConfig {
             model: String::new(),
             api_key_id: None,
             timeout_ms: 30_000,
-            passes: 2,
+            // One cleanup round is enough for modern instruct models; a second
+            // pass doubles cloud latency for little gain on residual errors.
+            passes: 1,
+            min_chars: 40,
             instructions: "Fix speech recognition errors, such as dropped letters, missing spaces between words, and truncated acronyms. Remove filler words, false starts, and repeated words. Add correct punctuation, capitalization, and spelling. Keep the speaker's exact meaning. Output only the corrected text."
                 .to_owned(),
         }
@@ -102,6 +108,12 @@ impl Config {
             bail!(
                 "postproc.passes must be between 1 and 3, got {}",
                 self.postproc.passes
+            );
+        }
+        if self.postproc.min_chars > 10_000 {
+            bail!(
+                "postproc.min_chars must be at most 10000, got {}",
+                self.postproc.min_chars
             );
         }
         if self.stt.endpoint.is_none() {
@@ -145,7 +157,8 @@ mod tests {
         assert_eq!(config.postproc.model, "llama3");
         assert_eq!(config.postproc.endpoint, "http://localhost:11434/v1");
         assert_eq!(config.postproc.timeout_ms, 30_000);
-        assert_eq!(config.postproc.passes, 2);
+        assert_eq!(config.postproc.passes, 1);
+        assert_eq!(config.postproc.min_chars, 40);
         assert_eq!(config.postproc.api_key_id, None);
         assert_eq!(
             config.postproc.instructions,
@@ -183,6 +196,21 @@ mod tests {
         assert!(error
             .to_string()
             .contains("postproc.passes must be between 1 and 3"));
+    }
+
+    #[test]
+    fn validation_rejects_huge_min_chars() {
+        let config = Config {
+            postproc: PostprocConfig {
+                min_chars: 10_001,
+                ..PostprocConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config.validate().expect_err("huge min_chars must fail");
+        assert!(error
+            .to_string()
+            .contains("postproc.min_chars must be at most 10000"));
     }
 
     #[test]

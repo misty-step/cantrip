@@ -255,6 +255,8 @@ endpoint = "http://localhost:11434/v1"
 model = ""                # required when enabled
 # api_key_id = "openai"   # keyring entry; omit for local endpoints
 timeout_ms = 30000
+passes = 1                # cleanup rounds; 2 adds a proofread pass
+min_chars = 40            # skip cleanup under this length; 0 = never skip
 instructions = ""         # optional extra style guidance
 # Per-dictation override (two hotkeys): `cantrip toggle --postproc clean|raw`
 # forces cleanup on/off for that capture, regardless of `enabled` above.

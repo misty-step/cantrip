@@ -52,3 +52,12 @@ and pointed at localhost.
 list feeds the postproc prompt and the cloud-STT `prompt` field (ADR 0005).
 transcribe-rs exposes no Parakeet hotword biasing, so local STT gets
 vocabulary correction only via postproc.
+
+## Latency controls (2026-08-07)
+
+Default cleanup is one pass. A second pass doubles cloud round-trips and did
+not improve the messy-dictation bench over one pass of a strong model.
+
+`postproc.min_chars` (default 40) skips cleanup for short transcripts so brief
+commands avoid a network hop. `0` disables the skip. The skip is logged as
+char counts only (`skipped_short`), never transcript text.

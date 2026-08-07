@@ -18,6 +18,8 @@ pub enum PostprocStatus {
     Applied { ms: u128 },
     /// Cleanup failed; the raw transcript is preserved.
     Failed,
+    /// Enabled, but the transcript was under `min_chars`.
+    SkippedShort { chars: usize },
 }
 
 /// Which sub-stage of a job is running right now, observable live.
@@ -75,7 +77,8 @@ pub type TranscriberCache = Option<(String, Transcriber)>;
 /// `stt.endpoint` is set, which selects an OpenAI-compatible cloud.
 ///
 /// A post-processing failure never drops the dictation: the raw text is
-/// returned with `PostprocStatus::Failed`.
+/// returned with `PostprocStatus::Failed`. Short transcripts under
+/// `postproc.min_chars` skip cleanup and return the raw text.
 pub fn run(
     cache: &mut TranscriberCache,
     wav: &Path,
@@ -92,22 +95,37 @@ pub fn run(
 
     let (text, postproc, partial, keep_wav) = match transcription {
         Ok(LocalOk { text, partial }) if !text.trim().is_empty() && postproc_cfg.enabled => {
-            on_stage(Stage::CleaningUp);
-            let postproc_started = Instant::now();
-            match resolve_api_key(postproc_cfg.api_key_id.as_deref())
-                .and_then(|key| postproc::refine(&text, postproc_cfg, vocabulary, key.as_deref()))
-            {
-                Ok(refined) => (
-                    Ok(refined),
-                    PostprocStatus::Applied {
-                        ms: postproc_started.elapsed().as_millis(),
-                    },
+            let chars = text.chars().count();
+            if postproc_cfg.min_chars > 0 && chars < postproc_cfg.min_chars {
+                tracing::info!(
+                    "[Postproc] skipped_short chars={} min_chars={}",
+                    chars,
+                    postproc_cfg.min_chars
+                );
+                (
+                    Ok(text),
+                    PostprocStatus::SkippedShort { chars },
                     partial,
                     false,
-                ),
-                Err(error) => {
-                    tracing::warn!("[Postproc] cleanup failed error={error:#}");
-                    (Ok(text), PostprocStatus::Failed, partial, false)
+                )
+            } else {
+                on_stage(Stage::CleaningUp);
+                let postproc_started = Instant::now();
+                match resolve_api_key(postproc_cfg.api_key_id.as_deref()).and_then(|key| {
+                    postproc::refine(&text, postproc_cfg, vocabulary, key.as_deref())
+                }) {
+                    Ok(refined) => (
+                        Ok(refined),
+                        PostprocStatus::Applied {
+                            ms: postproc_started.elapsed().as_millis(),
+                        },
+                        partial,
+                        false,
+                    ),
+                    Err(error) => {
+                        tracing::warn!("[Postproc] cleanup failed error={error:#}");
+                        (Ok(text), PostprocStatus::Failed, partial, false)
+                    }
                 }
             }
         }

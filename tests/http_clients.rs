@@ -86,6 +86,7 @@ fn postproc_config(endpoint: String) -> PostprocConfig {
         api_key_id: None,
         timeout_ms: 5_000,
         passes: 2,
+        min_chars: 0,
         instructions: "Keep numerals as digits.".to_owned(),
     }
 }

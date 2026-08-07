@@ -855,7 +855,7 @@ fn handle_worker_result(
     let postproc_failed = matches!(&postproc, PostprocStatus::Failed);
     let postproc_ms = match postproc {
         PostprocStatus::Applied { ms } => Some(ms),
-        PostprocStatus::Off | PostprocStatus::Failed => None,
+        PostprocStatus::Off | PostprocStatus::Failed | PostprocStatus::SkippedShort { .. } => None,
     };
 
     match transcript {

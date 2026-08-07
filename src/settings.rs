@@ -42,6 +42,7 @@ struct Editable {
     pp_key: String,
     pp_timeout: u64,
     pp_passes: u8,
+    pp_min_chars: usize,
     pp_instructions: String,
 }
 
@@ -61,6 +62,7 @@ impl Editable {
             pp_key: cfg.postproc.api_key_id.clone().unwrap_or_default(),
             pp_timeout: cfg.postproc.timeout_ms,
             pp_passes: cfg.postproc.passes,
+            pp_min_chars: cfg.postproc.min_chars,
             pp_instructions: cfg.postproc.instructions.clone(),
         }
     }
@@ -89,6 +91,7 @@ impl Editable {
                 api_key_id: non_empty(self.pp_key.trim()),
                 timeout_ms: self.pp_timeout,
                 passes: self.pp_passes.clamp(1, 3),
+                min_chars: self.pp_min_chars,
                 instructions: self.pp_instructions.clone(),
             },
         }
@@ -451,7 +454,23 @@ impl SettingsApp {
                             .clamp_existing_to_range(false),
                     );
                     ui.label(
-                        egui::RichText::new("2 = one extra proofread pass for residual errors")
+                        egui::RichText::new("1 = one cleanup round; 2 adds a proofread pass")
+                            .weak()
+                            .small(),
+                    );
+                });
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Min chars").weak());
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::DragValue::new(&mut self.edit.pp_min_chars)
+                            .speed(1.0)
+                            .range(0..=10_000)
+                            .clamp_existing_to_range(false),
+                    );
+                    ui.label(
+                        egui::RichText::new("skip cleanup under this length (0 = never skip)")
                             .weak()
                             .small(),
                     );
@@ -612,6 +631,11 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
         postproc,
         "passes",
         toml_edit::value(config.postproc.passes as i64),
+    );
+    set_preserving_decor(
+        postproc,
+        "min_chars",
+        toml_edit::value(config.postproc.min_chars as i64),
     );
     set_preserving_decor(
         postproc,
@@ -824,7 +848,8 @@ mod tests {
                 model: "qwen3:8b".to_owned(),
                 api_key_id: None,
                 timeout_ms: 30_000,
-                passes: 2,
+                passes: 1,
+                min_chars: 40,
                 instructions: "Remove filler words.".to_owned(),
             },
         }
@@ -851,7 +876,8 @@ mod tests {
             pp_model: String::new(),
             pp_key: String::new(),
             pp_timeout: 10_000,
-            pp_passes: 2,
+            pp_passes: 1,
+            pp_min_chars: 40,
             pp_instructions: String::new(),
         };
         let config = edit.to_config();
