@@ -8,6 +8,7 @@ use crate::ipc::{Command, Reply};
 use crate::models;
 use crate::paths;
 use crate::pipeline::{self, PostprocStatus};
+use crate::stt;
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -120,7 +121,6 @@ impl Drop for RecordingCleanup {
         }
     }
 }
-
 /// Run the cantrip daemon until it receives SIGINT, SIGTERM, or a fatal error.
 pub fn run(config: Config, preload: bool) -> Result<()> {
     SHUTDOWN.store(false, Ordering::SeqCst);
@@ -912,11 +912,12 @@ fn handle_worker_result(
             }
         }
         Err(error) => {
+            let notice = stt::classify_failure(&error);
             tracing::warn!(
-                "[STT] transcription failed stt_ms={} error={error}",
+                "[STT] transcription failed stt_ms={} notice={notice} error={error}",
                 stt_elapsed.as_millis()
             );
-            *last_outcome = LastOutcome::notice("Transcription failed");
+            *last_outcome = LastOutcome::notice(notice);
         }
     }
     *state = State::Idle;

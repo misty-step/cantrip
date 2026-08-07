@@ -46,6 +46,11 @@ pub fn hud_lock_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("hud.lock"))
 }
 
+/// `$XDG_RUNTIME_DIR/cantrip/daemon.log` — durable operator-facing log.
+pub fn daemon_log_path() -> Result<PathBuf> {
+    Ok(runtime_dir()?.join("daemon.log"))
+}
+
 /// Create a directory (and parents) if missing, then return it.
 pub fn ensure_dir(dir: PathBuf) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

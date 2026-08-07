@@ -1,19 +1,37 @@
 //! Parakeet speech-to-text through the documented `transcribe-rs` API.
+//!
+//! Long dictations are split with energy-adaptive chunking before inference.
+//! A single Parakeet encoder pass crashes past a few minutes of audio
+//! (ONNX self-attention broadcast failure); chunking keeps each pass inside
+//! a known-safe window.
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
+use transcribe_rs::onnx::parakeet::ParakeetModel;
 use transcribe_rs::onnx::Quantization;
+use transcribe_rs::transcriber::{EnergyAdaptiveChunked, EnergyAdaptiveConfig, Transcriber as _};
+use transcribe_rs::TranscribeOptions;
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 const MULTIPART_BOUNDARY: &str = "cantrip-audio-boundary";
+const SAMPLE_RATE: f32 = 16_000.0;
+/// Target chunk length for local Parakeet. Longer single-pass audio has
+/// crashed the ONNX encoder (~400s failed; ~180s previously worked). Stay
+/// well under that cliff with energy-based splits near this target.
+const LOCAL_CHUNK_SECS: f32 = 30.0;
+/// Search window around the target for a low-energy split point.
+const LOCAL_CHUNK_SEARCH_SECS: f32 = 3.0;
+/// Minimum residual kept as its own chunk (shorter tails are dropped by the
+/// energy-adaptive strategy's min_chunk_secs=0 default — keep a small floor).
+const LOCAL_MIN_CHUNK_SECS: f32 = 0.5;
 
 pub struct Transcriber {
     model: ParakeetModel,
     model_dir: PathBuf,
 }
+
 impl Transcriber {
     pub fn load(model_dir: &Path) -> Result<Self> {
         let started = Instant::now();
@@ -26,6 +44,7 @@ impl Transcriber {
             model_dir: model_path,
         })
     }
+
     pub fn transcribe_wav(&mut self, wav: &Path) -> Result<String> {
         let wav_path = wav.to_path_buf();
         let samples = transcribe_rs::audio::read_wav_samples(&wav_path).with_context(|| {
@@ -35,30 +54,51 @@ impl Transcriber {
                 self.model_dir.display()
             )
         })?;
+        let audio_seconds = samples.len() as f64 / f64::from(SAMPLE_RATE);
         let started = Instant::now();
-        let result = self
-            .model
-            .transcribe_with(
-                &samples,
-                &ParakeetParams {
-                    ..Default::default()
-                },
-            )
+        let text = self
+            .transcribe_samples(&samples)
             .with_context(|| {
                 format!(
                     "transcribing WAV {} with Parakeet model {}",
                     wav.display(),
                     self.model_dir.display()
                 )
-            })?;
-        let text = result.text.trim().to_owned();
+            })?
+            .trim()
+            .to_owned();
         tracing::info!(
-            "[STT] audio_seconds={:.3} inference_ms={} output_char_count={}",
-            samples.len() as f64 / 16_000.0,
+            "[STT] audio_seconds={audio_seconds:.3} inference_ms={} output_char_count={}",
             started.elapsed().as_millis(),
             text.chars().count()
         );
         Ok(text)
+    }
+
+    /// Run energy-adaptive chunked inference so long dictations stay under
+    /// the Parakeet encoder limit. Short audio still runs as one chunk.
+    fn transcribe_samples(&mut self, samples: &[f32]) -> Result<String> {
+        let config = EnergyAdaptiveConfig {
+            target_chunk_secs: LOCAL_CHUNK_SECS,
+            search_window_secs: LOCAL_CHUNK_SEARCH_SECS,
+            // Chunker owns padding; disable the SpeechModel default pad so
+            // silence is not applied twice.
+            padding_secs: 0.25,
+            min_chunk_secs: LOCAL_MIN_CHUNK_SECS,
+            frame_size: 480,
+            merge_separator: " ".into(),
+        };
+        let options = TranscribeOptions {
+            language: Some("en".to_owned()),
+            translate: false,
+            leading_silence_ms: Some(0),
+            trailing_silence_ms: Some(0),
+        };
+        let mut chunker = EnergyAdaptiveChunked::new(config, options);
+        let result = chunker
+            .transcribe(&mut self.model, samples)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(result.text)
     }
 }
 
@@ -105,6 +145,28 @@ pub fn transcribe_remote(
         text.chars().count()
     );
     Ok(text)
+}
+
+/// Classify a local STT failure into a short operator-facing notice.
+/// Never includes transcript content — status codes and structural causes only.
+pub fn classify_failure(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("broadcast")
+        || lower.contains("axis ==")
+        || lower.contains("attempting to broadcast")
+    {
+        return "Audio too long for the model";
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return "Transcription timed out";
+    }
+    if lower.contains("http ") {
+        return "Transcription service error";
+    }
+    if lower.contains("no such file") || lower.contains("reading wav") {
+        return "Recording unreadable";
+    }
+    "Transcription failed"
 }
 
 fn build_multipart_body(wav_bytes: &[u8], model: &str, vocabulary: &[String]) -> Vec<u8> {
@@ -164,5 +226,40 @@ mod tests {
         ));
         assert!(body.windows(wav.len()).any(|window| window == wav));
         assert!(body.ends_with(b"\r\n--cantrip-audio-boundary--\r\n"));
+    }
+
+    #[test]
+    fn classify_failure_maps_known_causes() {
+        assert_eq!(
+            classify_failure(
+                "inference error: Attempting to broadcast an axis by a dimension other than 1. 77 by 5077"
+            ),
+            "Audio too long for the model"
+        );
+        assert_eq!(
+            classify_failure("remote transcription endpoint returned HTTP 403"),
+            "Transcription service error"
+        );
+        assert_eq!(
+            classify_failure("client request timed out"),
+            "Transcription timed out"
+        );
+        assert_eq!(
+            classify_failure("reading WAV /tmp/x.wav failed"),
+            "Recording unreadable"
+        );
+        assert_eq!(classify_failure("something else"), "Transcription failed");
+    }
+
+    #[test]
+    fn local_chunk_constants_stay_under_known_cliff() {
+        // The live failure was ~406s single-pass. Keep the target well below
+        // the longest successful single-pass observed in production (~180s).
+        const {
+            assert!(LOCAL_CHUNK_SECS <= 60.0);
+            assert!(LOCAL_CHUNK_SEARCH_SECS > 0.0);
+            assert!(LOCAL_MIN_CHUNK_SECS > 0.0);
+            assert!(LOCAL_MIN_CHUNK_SECS < LOCAL_CHUNK_SECS);
+        }
     }
 }

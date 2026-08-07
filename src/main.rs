@@ -2,9 +2,10 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::env;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::{Arc, Mutex};
 
 use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
@@ -105,23 +106,91 @@ enum KeyCommand {
     Rm { id: String },
     Status { id: String },
 }
-
 fn main() {
-    init_tracing();
-    if let Err(error) = run() {
+    let cli = Cli::parse();
+    init_tracing(matches!(cli.command, CliCommand::Daemon { .. }));
+    if let Err(error) = run(cli) {
         eprintln!("error: {error:#}");
         std::process::exit(1);
     }
 }
 
-fn init_tracing() {
+fn init_tracing(dual_sink: bool) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort=warn,transcribe_rs=warn"));
+    // Daemon sessions tee into the runtime log so a long dictation failure
+    // is still visible after a detached hub session or a reboot.
+    if dual_sink {
+        if let Ok(file) = open_runtime_log() {
+            let tee = TeeWriter::new(file);
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_writer(tee)
+                .try_init();
+            return;
+        }
+    }
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn open_runtime_log() -> Result<fs::File> {
+    let dir = paths::ensure_dir(paths::runtime_dir()?).context("creating runtime directory")?;
+    let path = dir.join("daemon.log");
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening runtime log {}", path.display()))
+}
+
+/// Write each tracing line to stderr and the runtime log file.
+#[derive(Clone)]
+struct TeeWriter {
+    file: Arc<Mutex<fs::File>>,
+}
+
+impl TeeWriter {
+    fn new(file: fs::File) -> Self {
+        Self {
+            file: Arc::new(Mutex::new(file)),
+        }
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TeeWriter {
+    type Writer = TeeHandle;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TeeHandle {
+            file: Arc::clone(&self.file),
+        }
+    }
+}
+
+struct TeeHandle {
+    file: Arc<Mutex<fs::File>>,
+}
+
+impl Write for TeeHandle {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Best-effort file write: a full disk must not silence stderr.
+        if let Ok(mut file) = self.file.lock() {
+            let _ = file.write_all(buf);
+            let _ = file.flush();
+        }
+        io::stderr().write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Ok(mut file) = self.file.lock() {
+            let _ = file.flush();
+        }
+        io::stderr().flush()
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         CliCommand::Daemon { preload } => {
             let config = Config::load().context("loading configuration")?;
