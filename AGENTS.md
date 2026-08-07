@@ -2,6 +2,8 @@
 
 Cantrip is a local-first Linux dictation app: one Rust crate, binary `cantrip`.
 
+Product north star: [`VISION.md`](VISION.md). Read it before inventing scope.
+
 ## Layout
 
 - `src/main.rs` — clap CLI (daemon + client subcommands)
