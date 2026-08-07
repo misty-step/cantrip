@@ -12,7 +12,7 @@ use crate::stt;
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -73,6 +73,7 @@ struct WorkerResult {
     result: std::result::Result<String, String>,
     stt_elapsed: Duration,
     postproc: PostprocStatus,
+    partial: bool,
 }
 
 /// The daemon's most recent terminal outcome, surfaced on status replies so
@@ -342,10 +343,25 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 &postproc,
                 &report_stage,
             );
+            if outcome.keep_wav {
+                if let Err(error) = persist_failed_wav(&wav.0) {
+                    tracing::warn!("[Daemon] could not keep failed WAV: {error:#}");
+                }
+            } else {
+                clear_failed_wav();
+            }
+            if let Ok(text) = outcome.text.as_ref() {
+                if !text.trim().is_empty() {
+                    if let Err(error) = persist_last_transcript(text) {
+                        tracing::warn!("[Daemon] could not save last transcript: {error:#}");
+                    }
+                }
+            }
             let worker_result = WorkerResult {
                 result: outcome.text,
                 stt_elapsed: outcome.stt_elapsed,
                 postproc: outcome.postproc,
+                partial: outcome.partial,
             };
             let chars = worker_result
                 .result
@@ -486,7 +502,7 @@ fn handle_connection(
 fn status_reply(state: &State, last_outcome: &LastOutcome) -> Reply {
     let (elapsed, stage) = match state {
         State::Recording { started, .. } => (Some(started.elapsed().as_secs()), None),
-        State::Processing { stage, .. } => (None, Some(stage.as_str().to_owned())),
+        State::Processing { stage, .. } => (None, Some(stage.as_str())),
         State::Idle => (None, None),
     };
     Reply {
@@ -556,6 +572,8 @@ fn execute(
         },
         Command::Cancel => cancel_recording(state, last_outcome),
         Command::Status => status_reply(state, last_outcome),
+        Command::Last => replay_last(state, config, last_outcome),
+        Command::Recover => recover_failed(state, config, job_tx, last_outcome),
         Command::Ping => Reply {
             ok: true,
             state: state.name().to_owned(),
@@ -709,7 +727,7 @@ fn stop_recording(
     }
     *state = State::Processing {
         started: Instant::now(),
-        stage: pipeline::Stage::Transcribing,
+        stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
     };
     tracing::info!("[Daemon] state recording -> processing record_secs={record_secs:.3}");
     Reply {
@@ -832,6 +850,7 @@ fn handle_worker_result(
         result: transcript,
         stt_elapsed,
         postproc,
+        partial,
     } = result;
     let postproc_failed = matches!(&postproc, PostprocStatus::Failed);
     let postproc_ms = match postproc {
@@ -855,20 +874,27 @@ fn handle_worker_result(
             } else {
                 ""
             };
+            let partial_suffix = if partial {
+                " (partial — later audio failed)"
+            } else {
+                ""
+            };
             match inject::inject(&text, config.injection) {
                 Ok(outcome) => {
                     let inject_ms = inject_started.elapsed().as_millis();
                     let total_ms = processing_started.elapsed().as_millis();
                     let message = match outcome {
                         InjectionOutcome::Typed(tool) => {
-                            format!("Typed {chars} chars ({tool}){cleanup_suffix}")
+                            format!("Typed {chars} chars ({tool}){cleanup_suffix}{partial_suffix}")
                         }
                         InjectionOutcome::Pasted => {
-                            format!("Pasted {chars} chars (clipboard + Ctrl+V){cleanup_suffix}")
+                            format!(
+                                "Pasted {chars} chars (clipboard + Ctrl+V){cleanup_suffix}{partial_suffix}"
+                            )
                         }
                         InjectionOutcome::Clipboard => {
                             format!(
-                                "Copied to clipboard — press Ctrl+V ({chars} chars){cleanup_suffix}"
+                                "Copied to clipboard — press Ctrl+V ({chars} chars){cleanup_suffix}{partial_suffix}"
                             )
                         }
                     };
@@ -890,7 +916,7 @@ fn handle_worker_result(
                                 "[Inject] clipboard fallback chars={chars} total_ms={total_ms}"
                             );
                             *last_outcome = LastOutcome::success(format!(
-                                "Copied to clipboard ({chars} chars){cleanup_suffix}"
+                                "Copied to clipboard ({chars} chars){cleanup_suffix}{partial_suffix}"
                             ));
                         }
                         Err(fallback_error) => {
@@ -952,6 +978,225 @@ fn shutdown_state(state: &mut State) {
             tracing::warn!("[Capture] shutdown cancellation failed: {error:#}");
         }
     }
+}
+
+fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -> Reply {
+    if !matches!(state, State::Idle) {
+        return busy_reply(state);
+    }
+    match read_last_transcript() {
+        Ok(text) if text.trim().is_empty() => {
+            *last_outcome = LastOutcome::notice("No saved transcript");
+            Reply {
+                ok: false,
+                state: state.name().to_owned(),
+                message: Some("no saved transcript".to_owned()),
+                elapsed: None,
+                stage: None,
+                last: last_outcome.message.clone(),
+                last_ok: last_outcome.ok,
+            }
+        }
+        Ok(text) => {
+            let chars = text.chars().count();
+            match inject::inject(&text, config.injection) {
+                Ok(outcome) => {
+                    let message = match outcome {
+                        InjectionOutcome::Typed(tool) => format!("Replayed {chars} chars ({tool})"),
+                        InjectionOutcome::Pasted => {
+                            format!("Replayed {chars} chars (clipboard + Ctrl+V)")
+                        }
+                        InjectionOutcome::Clipboard => {
+                            format!("Replayed to clipboard — press Ctrl+V ({chars} chars)")
+                        }
+                    };
+                    tracing::info!("[Inject] replayed last transcript chars={chars}");
+                    *last_outcome = LastOutcome::success(message.clone());
+                    Reply {
+                        ok: true,
+                        state: state.name().to_owned(),
+                        message: Some(message),
+                        elapsed: None,
+                        stage: None,
+                        last: last_outcome.message.clone(),
+                        last_ok: last_outcome.ok,
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("[Inject] replay failed chars={chars} error={error:#}");
+                    *last_outcome = LastOutcome::notice("Replay failed");
+                    Reply {
+                        ok: false,
+                        state: state.name().to_owned(),
+                        message: Some(format!("replay failed: {error:#}")),
+                        elapsed: None,
+                        stage: None,
+                        last: last_outcome.message.clone(),
+                        last_ok: last_outcome.ok,
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            *last_outcome = LastOutcome::notice("No saved transcript");
+            Reply {
+                ok: false,
+                state: state.name().to_owned(),
+                message: Some(format!("no saved transcript: {error:#}")),
+                elapsed: None,
+                stage: None,
+                last: last_outcome.message.clone(),
+                last_ok: last_outcome.ok,
+            }
+        }
+    }
+}
+
+fn recover_failed(
+    state: &mut State,
+    config: &Config,
+    job_tx: &Sender<Job>,
+    last_outcome: &mut LastOutcome,
+) -> Reply {
+    if !matches!(state, State::Idle) {
+        return busy_reply(state);
+    }
+    let path = match paths::last_failed_wav_path() {
+        Ok(path) if path.is_file() => path,
+        Ok(_) => {
+            *last_outcome = LastOutcome::notice("No failed recording to recover");
+            return Reply {
+                ok: false,
+                state: state.name().to_owned(),
+                message: Some("no failed recording to recover".to_owned()),
+                elapsed: None,
+                stage: None,
+                last: last_outcome.message.clone(),
+                last_ok: last_outcome.ok,
+            };
+        }
+        Err(error) => {
+            *last_outcome = LastOutcome::notice("No failed recording to recover");
+            return Reply {
+                ok: false,
+                state: state.name().to_owned(),
+                message: Some(format!("no failed recording: {error:#}")),
+                elapsed: None,
+                stage: None,
+                last: last_outcome.message.clone(),
+                last_ok: last_outcome.ok,
+            };
+        }
+    };
+    // Copy into a fresh runtime WAV so the worker's cleanup still applies.
+    let runtime = match paths::runtime_dir().and_then(paths::ensure_dir) {
+        Ok(dir) => dir,
+        Err(error) => {
+            return Reply {
+                ok: false,
+                state: state.name().to_owned(),
+                message: Some(format!("runtime dir unavailable: {error:#}")),
+                elapsed: None,
+                stage: None,
+                last: None,
+                last_ok: None,
+            };
+        }
+    };
+    let wav = runtime.join(format!("recover-{}.wav", unix_millis()));
+    if let Err(error) = fs::copy(&path, &wav) {
+        return Reply {
+            ok: false,
+            state: state.name().to_owned(),
+            message: Some(format!("copying failed WAV failed: {error}")),
+            elapsed: None,
+            stage: None,
+            last: None,
+            last_ok: None,
+        };
+    }
+    let job = Job {
+        wav: wav.clone(),
+        stt: config.stt.clone(),
+        vocabulary: config.vocabulary.clone(),
+        postproc: config.postproc.clone(),
+    };
+    if job_tx.send(job).is_err() {
+        let _ = capture::remove_recording(&wav);
+        *last_outcome = LastOutcome::notice("Transcription failed");
+        return Reply {
+            ok: false,
+            state: state.name().to_owned(),
+            message: Some("transcription worker unavailable".to_owned()),
+            elapsed: None,
+            stage: None,
+            last: None,
+            last_ok: None,
+        };
+    }
+    *state = State::Processing {
+        started: Instant::now(),
+        stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
+    };
+    tracing::info!("[Daemon] state idle -> processing (recover failed WAV)");
+    Reply {
+        ok: true,
+        state: state.name().to_owned(),
+        message: Some("recovering".to_owned()),
+        elapsed: None,
+        stage: Some("transcribing".to_owned()),
+        last: None,
+        last_ok: None,
+    }
+}
+
+fn persist_last_transcript(text: &str) -> Result<()> {
+    let dir = paths::ensure_dir(paths::state_dir()?)?;
+    let _ = dir;
+    let path = paths::last_transcript_path()?;
+    write_owner_file(&path, text.as_bytes())
+}
+
+fn persist_failed_wav(src: &Path) -> Result<()> {
+    let path = paths::last_failed_wav_path()?;
+    if let Some(parent) = path.parent() {
+        paths::ensure_dir(parent.to_path_buf())?;
+    }
+    fs::copy(src, &path)
+        .with_context(|| format!("copying failed WAV {} -> {}", src.display(), path.display()))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("setting permissions on {}", path.display()))?;
+    tracing::info!("[Daemon] kept failed WAV for recover");
+    Ok(())
+}
+
+fn clear_failed_wav() {
+    if let Ok(path) = paths::last_failed_wav_path() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn write_owner_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        paths::ensure_dir(parent.to_path_buf())?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("setting permissions on {}", path.display()))?;
+    Ok(())
+}
+
+fn read_last_transcript() -> Result<String> {
+    let path = paths::last_transcript_path()?;
+    fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
 }
 
 fn unix_millis() -> u128 {

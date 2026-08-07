@@ -50,6 +50,10 @@ detach or reboot.
 
 - Five-minute (and longer) local dictations should produce text again,
   with a small join seam risk at chunk boundaries.
+- Multi-chunk STT reports `transcribing N/M` on status and the HUD label.
+- If a later chunk fails, earlier text is still injected as a partial
+  result (notice suffix). A full STT failure keeps the WAV for
+  `cantrip recover`. Successful text is saved for `cantrip last`.
 - Operators can run `cantrip status` and read `last:` for a cause, and
   inspect `~/.local/state/cantrip/daemon.log` for the full structural error.
 - The 30s target is conservative relative to the longest known-good

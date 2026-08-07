@@ -60,6 +60,16 @@ pub fn daemon_log_path() -> Result<PathBuf> {
     Ok(state_dir()?.join("daemon.log"))
 }
 
+/// Last delivered (or partial) transcript text. Owner-only; never logged.
+pub fn last_transcript_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("last-transcript.txt"))
+}
+
+/// Last WAV that failed STT entirely. Kept for `cantrip recover`.
+pub fn last_failed_wav_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("last-failed.wav"))
+}
+
 /// Create a directory (and parents) if missing, then return it.
 pub fn ensure_dir(dir: PathBuf) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;

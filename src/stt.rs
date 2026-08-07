@@ -21,9 +21,45 @@ const SAMPLE_RATE: f32 = 16_000.0;
 const LOCAL_CHUNK_SECS: f32 = 30.0;
 /// Search window around the target for a low-energy split point.
 const LOCAL_CHUNK_SEARCH_SECS: f32 = 3.0;
-/// Minimum residual kept as its own chunk (shorter tails are dropped by the
-/// energy-adaptive strategy's min_chunk_secs=0 default — keep a small floor).
+/// Minimum residual kept as its own chunk.
 const LOCAL_MIN_CHUNK_SECS: f32 = 0.5;
+
+/// Progress of a multi-chunk local transcription (1-based index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChunkProgress {
+    pub index: u32,
+    pub total: u32,
+}
+
+impl ChunkProgress {
+    pub fn label(self) -> String {
+        format!("Transcribing… {}/{}", self.index, self.total)
+    }
+}
+
+/// Local STT outcome: full text, or partial text when a later chunk failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalTranscript {
+    Complete(String),
+    /// Chunks before the failure produced text; remaining audio was skipped.
+    Partial {
+        text: String,
+        failed_at: u32,
+        total: u32,
+    },
+}
+
+impl LocalTranscript {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Complete(text) | Self::Partial { text, .. } => text,
+        }
+    }
+
+    pub fn is_partial(&self) -> bool {
+        matches!(self, Self::Partial { .. })
+    }
+}
 
 pub struct Transcriber {
     model: ParakeetModel,
@@ -43,9 +79,12 @@ impl Transcriber {
         })
     }
 
-    pub fn transcribe_wav(&mut self, wav: &Path) -> Result<String> {
-        let wav_path = wav.to_path_buf();
-        let samples = transcribe_rs::audio::read_wav_samples(&wav_path).with_context(|| {
+    pub fn transcribe_wav(
+        &mut self,
+        wav: &Path,
+        mut on_progress: impl FnMut(ChunkProgress),
+    ) -> Result<LocalTranscript> {
+        let samples = transcribe_rs::audio::read_wav_samples(wav).with_context(|| {
             format!(
                 "reading WAV {} with Parakeet model {}",
                 wav.display(),
@@ -54,63 +93,76 @@ impl Transcriber {
         })?;
         let audio_seconds = samples.len() as f64 / f64::from(SAMPLE_RATE);
         let started = Instant::now();
-        let text = self
-            .transcribe_samples(&samples)
+        let outcome = self
+            .transcribe_samples(&samples, &mut on_progress)
             .with_context(|| {
                 format!(
                     "transcribing WAV {} with Parakeet model {}",
                     wav.display(),
                     self.model_dir.display()
                 )
-            })?
-            .trim()
-            .to_owned();
+            })?;
         tracing::info!(
-            "[STT] audio_seconds={audio_seconds:.3} inference_ms={} output_char_count={}",
+            "[STT] audio_seconds={audio_seconds:.3} inference_ms={} output_char_count={} partial={}",
             started.elapsed().as_millis(),
-            text.chars().count()
+            outcome.text().chars().count(),
+            outcome.is_partial()
         );
-        Ok(text)
+        Ok(outcome)
     }
 
     /// Split long audio into energy-adaptive chunks so each Parakeet pass
     /// stays under the encoder cliff. Short audio still runs as one pass.
-    /// Implemented here (not via transcribe-rs chunkers) so dependency
-    /// `log::info` of chunk text cannot leak transcript content.
-    fn transcribe_samples(&mut self, samples: &[f32]) -> Result<String> {
-        let chunk_len = (LOCAL_CHUNK_SECS * SAMPLE_RATE) as usize;
-        let min_len = (LOCAL_MIN_CHUNK_SECS * SAMPLE_RATE) as usize;
-        if samples.len() <= chunk_len {
-            return self.transcribe_chunk(samples);
+    /// On a mid-stream chunk failure, return any text already produced.
+    fn transcribe_samples(
+        &mut self,
+        samples: &[f32],
+        on_progress: &mut impl FnMut(ChunkProgress),
+    ) -> Result<LocalTranscript> {
+        let ranges = plan_chunks(samples);
+        let total = ranges.len() as u32;
+        if total == 0 {
+            return Ok(LocalTranscript::Complete(String::new()));
         }
 
         let mut parts = Vec::new();
-        let mut start = 0;
-        let mut chunk_index = 0_u32;
-        while start < samples.len() {
-            let remaining = samples.len() - start;
-            let end = if remaining <= chunk_len {
-                samples.len()
-            } else {
-                let target = start + chunk_len;
-                let split = low_energy_split(samples, target, LOCAL_CHUNK_SEARCH_SECS);
-                split.max(start + min_len).min(samples.len())
-            };
+        for (index, &(start, end)) in ranges.iter().enumerate() {
             let chunk = &samples[start..end];
+            let progress = ChunkProgress {
+                index: (index as u32) + 1,
+                total,
+            };
+            on_progress(progress);
             tracing::info!(
-                "[STT] chunk={} start_s={:.2} duration_s={:.2}",
-                chunk_index,
+                "[STT] chunk={}/{} start_s={:.2} duration_s={:.2}",
+                progress.index,
+                progress.total,
                 start as f32 / SAMPLE_RATE,
                 chunk.len() as f32 / SAMPLE_RATE
             );
-            let text = self.transcribe_chunk(chunk)?;
-            if !text.is_empty() {
-                parts.push(text);
+            match self.transcribe_chunk(chunk) {
+                Ok(text) => {
+                    if !text.is_empty() {
+                        parts.push(text);
+                    }
+                }
+                Err(error) if !parts.is_empty() => {
+                    tracing::warn!(
+                        "[STT] chunk {}/{} failed after partial text chars={} error={error:#}",
+                        progress.index,
+                        progress.total,
+                        parts.iter().map(|p| p.chars().count()).sum::<usize>()
+                    );
+                    return Ok(LocalTranscript::Partial {
+                        text: parts.join(" "),
+                        failed_at: progress.index,
+                        total: progress.total,
+                    });
+                }
+                Err(error) => return Err(error),
             }
-            chunk_index += 1;
-            start = end;
         }
-        Ok(parts.join(" "))
+        Ok(LocalTranscript::Complete(parts.join(" ")))
     }
 
     fn transcribe_chunk(&mut self, samples: &[f32]) -> Result<String> {
@@ -125,6 +177,34 @@ impl Transcriber {
             .map_err(|error| anyhow::anyhow!("{error}"))?;
         Ok(result.text.trim().to_owned())
     }
+}
+
+/// Plan inclusive-exclusive sample ranges for energy-adaptive chunks.
+fn plan_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
+    let chunk_len = (LOCAL_CHUNK_SECS * SAMPLE_RATE) as usize;
+    let min_len = (LOCAL_MIN_CHUNK_SECS * SAMPLE_RATE) as usize;
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    if samples.len() <= chunk_len {
+        return vec![(0, samples.len())];
+    }
+
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < samples.len() {
+        let remaining = samples.len() - start;
+        let end = if remaining <= chunk_len {
+            samples.len()
+        } else {
+            let target = start + chunk_len;
+            let split = low_energy_split(samples, target, LOCAL_CHUNK_SEARCH_SECS);
+            split.max(start + min_len).min(samples.len())
+        };
+        ranges.push((start, end));
+        start = end;
+    }
+    ranges
 }
 
 /// Find a low-energy frame near `target` to avoid splitting mid-word.
@@ -309,6 +389,36 @@ mod tests {
         assert!(
             (14_500..=19_500).contains(&split),
             "split {split} should land in the quiet window"
+        );
+    }
+
+    #[test]
+    fn plan_chunks_splits_long_audio_and_keeps_short_as_one() {
+        let short = vec![0.1_f32; 8_000]; // 0.5s
+        assert_eq!(plan_chunks(&short), vec![(0, 8_000)]);
+
+        let long = vec![0.1_f32; 160_000]; // 10s < 30s target still one chunk
+        assert_eq!(plan_chunks(&long), vec![(0, 160_000)]);
+
+        let very_long = vec![0.1_f32; 960_000]; // 60s -> two ~30s chunks
+        let ranges = plan_chunks(&very_long);
+        assert!(
+            ranges.len() >= 2,
+            "expected multiple chunks, got {ranges:?}"
+        );
+        assert_eq!(ranges.first().map(|r| r.0), Some(0));
+        assert_eq!(ranges.last().map(|r| r.1), Some(very_long.len()));
+        // Contiguous coverage with no gaps.
+        for window in ranges.windows(2) {
+            assert_eq!(window[0].1, window[1].0);
+        }
+    }
+
+    #[test]
+    fn chunk_progress_label_is_operator_facing() {
+        assert_eq!(
+            ChunkProgress { index: 2, total: 5 }.label(),
+            "Transcribing… 2/5"
         );
     }
 }

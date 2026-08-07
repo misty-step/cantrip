@@ -20,6 +20,10 @@ pub enum Command {
     Stop,
     Cancel,
     Status,
+    /// Re-inject the last saved transcript (paste/clipboard).
+    Last,
+    /// Re-run STT on the last fully-failed WAV, if kept.
+    Recover,
     Ping,
     Reload,
 }
@@ -44,6 +48,8 @@ impl Command {
             "stop" => Some(Self::Stop),
             "cancel" => Some(Self::Cancel),
             "status" => Some(Self::Status),
+            "last" => Some(Self::Last),
+            "recover" => Some(Self::Recover),
             "ping" => Some(Self::Ping),
             "reload" => Some(Self::Reload),
             _ => None,
@@ -69,6 +75,8 @@ impl Command {
             Self::Stop => "stop",
             Self::Cancel => "cancel",
             Self::Status => "status",
+            Self::Last => "last",
+            Self::Recover => "recover",
             Self::Ping => "ping",
             Self::Reload => "reload",
         }
@@ -84,7 +92,7 @@ pub struct Reply {
     #[serde(default)]
     pub elapsed: Option<u64>,
     /// Processing sub-stage, present while state is "processing":
-    /// "transcribing" | "cleaning".
+    /// "transcribing", "transcribing N/M", or "cleaning".
     #[serde(default)]
     pub stage: Option<String>,
     /// Most recent terminal message (Typed N chars, Heard nothing,

@@ -620,12 +620,15 @@ impl HudState {
                 1.0,
             )),
             UiState::Processing { stage } => {
-                let (label, kind) = if stage == "cleaning" {
-                    ("Cleaning…", ChipKind::Cleaning)
+                let (label, kind) = if stage == "cleaning" || stage.starts_with("cleaning") {
+                    ("Cleaning…".to_owned(), ChipKind::Cleaning)
+                } else if let Some(rest) = stage.strip_prefix("transcribing ") {
+                    // "transcribing 2/5" from the daemon stage field.
+                    (format!("Transcribing… {rest}"), ChipKind::Transcribing)
                 } else {
-                    ("Transcribing…", ChipKind::Transcribing)
+                    ("Transcribing…".to_owned(), ChipKind::Transcribing)
                 };
-                Some((label.to_owned(), None, kind, 1.0))
+                Some((label, None, kind, 1.0))
             }
         };
         let Some((label, detail, kind, fade)) = content else {

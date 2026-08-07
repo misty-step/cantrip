@@ -64,6 +64,10 @@ enum CliCommand {
     Stop,
     Cancel,
     Status,
+    /// Re-inject the last saved transcript.
+    Last,
+    /// Re-run STT on the last fully-failed recording, if one was kept.
+    Recover,
     Ping,
     /// Re-read the config file in the running daemon.
     Reload,
@@ -217,6 +221,8 @@ fn run(cli: Cli) -> Result<()> {
         CliCommand::Stop => send_command(Command::Stop),
         CliCommand::Cancel => send_command(Command::Cancel),
         CliCommand::Status => send_command(Command::Status),
+        CliCommand::Last => send_command(Command::Last),
+        CliCommand::Recover => send_command(Command::Recover),
         CliCommand::Reload => send_command(Command::Reload),
         CliCommand::Config { command } => run_config(command),
         CliCommand::Key { command } => run_key(command),
@@ -398,6 +404,20 @@ fn send_command(command: Command) -> Result<()> {
     }
     if let Some(last) = &reply.last {
         println!("last: {last}");
+    }
+    if reply.last_ok == Some(false) {
+        if paths::last_transcript_path()
+            .ok()
+            .is_some_and(|path| path.is_file())
+        {
+            println!("hint: cantrip last   # re-paste the last saved transcript");
+        }
+        if paths::last_failed_wav_path()
+            .ok()
+            .is_some_and(|path| path.is_file())
+        {
+            println!("hint: cantrip recover   # retry the last failed recording");
+        }
     }
     if !reply.ok {
         anyhow::bail!("daemon rejected the command");
