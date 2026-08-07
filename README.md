@@ -30,7 +30,7 @@ that, for text.
   `ydotool`, and `clipboard` mode only copies.
 
 ```
-trigger ──> capture (pw-record) ──> STT (local, default) ──> postproc (Ollama) ──> inject ──> notification
+trigger ──> capture (pw-record) ──> STT (local, default) ──> postproc (Ollama) ──> inject
              16 kHz mono s16          parakeet | cloud    qwen3:8b | ...   paste | wtype | clip
 ```
 
