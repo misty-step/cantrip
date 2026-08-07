@@ -38,11 +38,11 @@ The HUD renders one fixed 320×40 borderless capsule, top-centre, on the
   screenshot) draws a calm full ring rather than a static open arc that
   could read as an unmeasured partial meter.
 - **Motion**: each working phase is a fixed composition. Continuous motion
-  is the localized breathing pulse on the working glyphs (alpha 0.8–1.0,
-  scale 0.96–1.0), the spinner's turn when indeterminate, the ticking timer,
+  is the localized breathing pulse on the working glyphs (alpha 0.65–1.0,
+  scale 0.94–1.0), the spinner's turn when indeterminate, the ticking timer,
   and — only when the daemon reports multi-chunk STT — a timed left-to-right
-  capsule fill that always starts empty and eases toward each measured `N/M`
-  fraction (~480 ms). No unmeasured decorative fill. State changes ease over ~260 ms: pill pop-in (scale + alpha), accent
+  capsule fill that always starts empty, eases toward each measured `N/M`
+  fraction (~360 ms ease-in-out), and completes to full through Cleaning. No unmeasured decorative fill. State changes ease over ~260 ms: pill pop-in (scale + alpha), accent
   and base-fill crossfade, the fresh glyph scales in (ease-out-back), and the
   stage word drifts up ~3 px. Outcome flashes are static compositions for
   ~2.5 s.

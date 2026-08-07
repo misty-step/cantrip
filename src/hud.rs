@@ -11,9 +11,10 @@
 //! monospace mm:ss counter at the right while recording. Listening is a
 //! pulsing dot. Transcribing and cleaning keep the indeterminate spinner.
 //! Multi-chunk transcription also draws a real left-to-right fill that
-//! eases from empty toward each `transcribing N/M` fraction (single-chunk
-//! stays spinner-only — no fake meter). Continuous motion is the localized
-//! breathing pulse, spinner turn, timed meter ease when determinate, the
+//! eases from empty toward each `transcribing N/M` fraction and completes
+//! to full through Cleaning (single-chunk stays spinner-only — no fake
+//! meter). Continuous motion is the localized breathing pulse, spinner
+//! turn, timed ease-in-out meter when determinate, the
 //! ticking elapsed timer, and the ~2.5s outcome flashes. State changes
 //! ease over ~260ms. A reduced-motion desktop freezes pulse/entry motion,
 //! snaps the meter, draws the spinner as a calm static ring, and keeps
@@ -54,14 +55,19 @@ use crate::ipc::{self, Command, Reply};
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Render tick while the chip is visible; IPC polling stays at POLL_INTERVAL.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// Higher cadence while the chunk meter is easing so the fill reads smooth
+/// on 60 Hz displays (~16 ms ≈ 60 fps).
+const METER_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const RESULT_FLASH: Duration = Duration::from_millis(2_500);
 /// Duration of the eased transition run on every visual state change.
 const TRANSITION: Duration = Duration::from_millis(260);
-/// Minimum wall time to ease the chunk meter from the previous display
-/// value to a new N/M target. Chunk inference is often <300 ms, so a
-/// per-frame multiplicative approach looks like a snap; a timed ease
-/// always shows a full empty→target fill.
-const METER_EASE: Duration = Duration::from_millis(480);
+/// Wall time to ease the chunk meter between targets. Chunk inference is
+/// often <300 ms, so a timed ease always shows motion. Uses ease-in-out
+/// for a steadier native feel than ease-out (which front-loads then lags).
+const METER_EASE: Duration = Duration::from_millis(360);
+/// Extra hold after the bar reaches full while Cleaning so a fast 2-chunk
+/// take does not wipe the fill the instant STT ends.
+const METER_COMPLETE_HOLD: Duration = Duration::from_millis(180);
 /// Tail of the result flash spent fading out, inside the RESULT_FLASH window.
 const FLASH_FADE_TAIL: f32 = 0.25;
 const HUD_HEIGHT: u32 = 56;
@@ -346,6 +352,11 @@ struct HudState {
     meter_to: f32,
     /// When the active meter ease began.
     meter_ease_at: Instant,
+    /// True after the first multi-chunk fraction this run; drives the
+    /// complete-to-full hold through Cleaning.
+    meter_armed: bool,
+    /// Keep showing a full bar until this instant after the ease lands on 1.0.
+    meter_hold_until: Option<Instant>,
     /// Desktop animations disabled (gsettings enable-animations=false):
     /// freezes the breathing pulse and skips entry motion.
     reduced_motion: bool,
@@ -363,6 +374,14 @@ struct HudState {
 }
 
 impl HudState {
+    fn clear_meter(&mut self) {
+        self.meter_display = 0.0;
+        self.meter_from = 0.0;
+        self.meter_to = 0.0;
+        self.meter_armed = false;
+        self.meter_hold_until = None;
+    }
+
     #[allow(clippy::too_many_arguments)] // construction plumbing (registry, pool, surface)
     fn new(
         registry_state: RegistryState,
@@ -402,6 +421,8 @@ impl HudState {
             meter_from: 0.0,
             meter_to: 0.0,
             meter_ease_at: Instant::now(),
+            meter_armed: false,
+            meter_hold_until: None,
             reduced_motion,
             last_render: None,
             configured: false,
@@ -444,16 +465,25 @@ impl HudState {
         self.flash_ok = false;
         self.previous_state = Some(UiStateKind::Idle);
         self.shown_kind = None;
+        self.clear_meter();
         self.hide_surface(" (daemon unavailable)");
     }
 
     /// Frame pacing: animate while the chip is on screen, otherwise idle at
     /// the status poll cadence.
     fn tick_interval(&self) -> Duration {
-        if self.visible {
-            FRAME_INTERVAL
+        if !self.visible {
+            return POLL_INTERVAL;
+        }
+        // Meter ease benefits from ~60 fps; spinner/breathe are fine at 30.
+        let meter_moving = (self.meter_armed && (self.meter_display - self.meter_to).abs() > 0.002)
+            || self
+                .meter_hold_until
+                .is_some_and(|until| Instant::now() < until);
+        if meter_moving {
+            METER_FRAME_INTERVAL
         } else {
-            POLL_INTERVAL
+            FRAME_INTERVAL
         }
     }
 
@@ -653,7 +683,16 @@ impl HudState {
             )),
             UiState::Processing { stage } => {
                 let (label, kind, meter) = if stage == "cleaning" || stage.starts_with("cleaning") {
-                    ("Cleaning…".to_owned(), ChipKind::Cleaning, None)
+                    // Finish the bar through Cleaning when multi-chunk STT
+                    // armed a meter — never snap-clear mid-ease.
+                    let hold = self.meter_armed
+                        || self.meter_display > 0.001
+                        || self.meter_hold_until.is_some_and(|until| now < until);
+                    (
+                        "Cleaning…".to_owned(),
+                        ChipKind::Cleaning,
+                        if hold { Some(1.0) } else { None },
+                    )
                 } else if let Some(rest) = stage.strip_prefix("transcribing ") {
                     // "transcribing 2/5" from the daemon stage field.
                     (
@@ -669,33 +708,45 @@ impl HudState {
         };
         let Some((label, detail, kind, fade, meter_target)) = content else {
             self.shown_kind = None;
-            self.meter_display = 0.0;
+            self.clear_meter();
             return None;
         };
 
         if self.shown_kind != Some(kind) {
             self.transition_from = self.shown_kind;
             self.transition_at = now;
+            let entering_transcribing = matches!(kind, ChipKind::Transcribing)
+                && !matches!(self.shown_kind, Some(ChipKind::Transcribing));
             self.shown_kind = Some(kind);
-            // Entering a non-metered phase clears the fill. Entering metered
-            // transcription always restarts from empty so the first chunk
-            // never appears pre-filled.
-            self.meter_display = 0.0;
-            self.meter_from = 0.0;
-            self.meter_to = 0.0;
-            self.meter_ease_at = now;
+            // Only reset when a new transcription run begins. Leaving
+            // Transcribing → Cleaning must keep the fill and complete to 1.0.
+            if entering_transcribing {
+                self.meter_display = 0.0;
+                self.meter_from = 0.0;
+                self.meter_to = 0.0;
+                self.meter_ease_at = now;
+                self.meter_armed = false;
+                self.meter_hold_until = None;
+            }
         }
         let meter = match meter_target {
             Some(target) if self.reduced_motion || self.screenshot.is_some() => {
+                let target = target.clamp(0.0, 1.0);
                 self.meter_display = target;
                 self.meter_from = target;
                 self.meter_to = target;
+                if target > 0.0 {
+                    self.meter_armed = true;
+                }
                 Some(target)
             }
             Some(target) => {
                 let target = target.clamp(0.0, 1.0);
-                // New target (or first multi-chunk frame): start a timed ease
-                // from the current display value — from 0 on first entry.
+                if target > 0.0 {
+                    self.meter_armed = true;
+                }
+                // New target: timed ease from the current display value.
+                // First multi-chunk frame starts from empty (reset above).
                 if (target - self.meter_to).abs() > 0.0005 {
                     self.meter_from = self.meter_display;
                     self.meter_to = target;
@@ -704,15 +755,25 @@ impl HudState {
                 let t = (now.duration_since(self.meter_ease_at).as_secs_f32()
                     / METER_EASE.as_secs_f32())
                 .clamp(0.0, 1.0);
-                let eased = self.meter_from + (self.meter_to - self.meter_from) * ease_out_cubic(t);
+                let eased =
+                    self.meter_from + (self.meter_to - self.meter_from) * ease_in_out_cubic(t);
                 self.meter_display = eased.clamp(0.0, 1.0);
+                // After we land on full, hold briefly so Cleaning does not
+                // look empty if postproc is instant.
+                if self.meter_to >= 0.999 && t >= 1.0 && self.meter_hold_until.is_none() {
+                    self.meter_hold_until = Some(now + METER_COMPLETE_HOLD);
+                }
                 Some(self.meter_display)
             }
             None => {
-                self.meter_display = 0.0;
-                self.meter_from = 0.0;
-                self.meter_to = 0.0;
-                None
+                // Outcome flash / non-metered: drop only after any complete hold.
+                if self.meter_hold_until.is_some_and(|until| now < until) {
+                    self.meter_display = 1.0;
+                    Some(1.0)
+                } else {
+                    self.clear_meter();
+                    None
+                }
             }
         };
         let eased = ease_out_cubic(
@@ -1306,6 +1367,15 @@ fn draw_text(
 }
 
 /// Cubic ease-out: fast start, gentle landing. Input is clamped to [0, 1].
+fn ease_in_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
 fn ease_out_cubic(t: f32) -> f32 {
     let u = 1.0 - t.clamp(0.0, 1.0);
     1.0 - u * u * u
@@ -1875,9 +1945,9 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_lock_on, breathe, capsule_blend, ease_out_back, ease_out_cubic, fit_text_measured,
-        format_elapsed, mix_rgb, parse_chunk_meter, pill, pill_meter, pulse, spinner, ChipKind,
-        BREATHE_MIN,
+        acquire_lock_on, breathe, capsule_blend, ease_in_out_cubic, ease_out_back, ease_out_cubic,
+        fit_text_measured, format_elapsed, mix_rgb, parse_chunk_meter, pill, pill_meter, pulse,
+        spinner, ChipKind, BREATHE_MIN,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1913,6 +1983,18 @@ mod tests {
         assert_eq!(format_elapsed(0), "00:00");
         assert_eq!(format_elapsed(12), "00:12");
         assert_eq!(format_elapsed(125), "02:05");
+    }
+
+    #[test]
+    fn ease_in_out_cubic_is_symmetric_and_smooth() {
+        assert!(ease_in_out_cubic(-1.0).abs() < 1e-6);
+        assert!((ease_in_out_cubic(1.0) - 1.0).abs() < 1e-6);
+        assert!((ease_in_out_cubic(0.5) - 0.5).abs() < 1e-5);
+        // Mid slope gentler than ease-out at t=0.25 (less front-loaded).
+        assert!(
+            ease_in_out_cubic(0.25) < ease_out_cubic(0.25),
+            "in-out should lag ease-out early"
+        );
     }
 
     #[test]
