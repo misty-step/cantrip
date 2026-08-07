@@ -76,11 +76,11 @@ the `instructions` text, so it is safe to experiment from the config alone:
 - **Local.** Default endpoint is Ollama at `localhost:11434`.
   `qwen3:8b` is the free local recommendation; any `ollama list` model works.
 - **Cloud.** Point the endpoint at any OpenAI-compatible provider and set
-  `api_key_id`. On OpenRouter (2026-08-07 messy-dictation bench),
-  `poolside/laguna-s-2.1` led on speed and quality (~0.7 s mean); 
-  `google/gemini-3.5-flash-lite` was close when privacy policy allows it.
-  `qwen/qwen3-30b-a3b-instruct-2507` remains a solid quality baseline but is
-  several times slower.
+  `api_key_id`. On OpenRouter (2026-08-07 messy-dictation bench, after account
+  privacy/guardrails allowed Google routes), `google/gemini-2.5-flash-lite`
+  led (~0.66 s mean); `google/gemini-3.5-flash-lite` is a near-tie. Keep
+  `passes = 1`. Older `qwen/qwen3-30b-a3b-instruct-2507` is slower for little
+  cleanup gain.
 - A postproc failure never drops a dictation: the raw transcript is used.
 
 ## `vocabulary`
