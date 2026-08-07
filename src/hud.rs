@@ -524,10 +524,19 @@ impl HudState {
                 // flash uses a short label (Success / notice text).
                 self.flash_text = reply.last.clone();
                 self.flash_ok = reply.last_ok.unwrap_or(false);
+                let chip = if self.flash_ok {
+                    "Success"
+                } else {
+                    self.flash_text.as_deref().unwrap_or("Notice")
+                };
                 tracing::info!(
-                    "[HUD] state=idle result flash ok={} text=\"{}\"",
+                    "[HUD] state=idle result flash ok={} chip=\"{}\" detail_chars={}",
                     self.flash_ok,
-                    self.flash_text.as_deref().unwrap_or("")
+                    chip,
+                    self.flash_text
+                        .as_deref()
+                        .map(|s| s.chars().count())
+                        .unwrap_or(0)
                 );
             }
             self.previous_state = Some(next_kind);
