@@ -9,3 +9,7 @@
 /.scratch
 
 /.omp
+
+# Iron Forest workspace (local ledger, not source)
+.forest/
+/forest

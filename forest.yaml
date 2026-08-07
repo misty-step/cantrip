@@ -1,0 +1,38 @@
+# Cantrip factory composition for Iron Forest.
+# One process per checkout: systemctl --user status forest@cantrip
+repo: misty-step/cantrip
+commit:
+  name: forest
+  email: forest@mistystep.io
+
+checks:
+  - name: fmt
+    run: cargo fmt --check
+  - name: clippy
+    run: cargo clippy --all-targets -- -D warnings
+  - name: test
+    run: cargo test
+
+flows:
+  builder:
+    enabled: true
+    agent: builder
+    interval_seconds: 45
+    require_labels: ["forest:ready"]
+    exclude_labels: ["forest:failed"]
+  verifier:
+    enabled: true
+    agent: verifier
+    interval_seconds: 30
+    merge: squash
+    # Hold auto-merge until child PATH/tooling is proven (iron-forest#166).
+    auto_merge: false
+  fixer:
+    enabled: true
+    agent: builder
+    interval_seconds: 45
+    attempts: 3
+
+projection:
+  enabled: true
+  merge_via_host: false

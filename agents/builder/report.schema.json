@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "builder report",
+  "description": "Output contract for report.json from the Builder lane.",
+  "type": "object",
+  "required": ["summary", "changed_files"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "one paragraph on what changed and why"
+    },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "files added or modified by this change"
+    },
+    "notes": {
+      "type": "string",
+      "description": "anything the Verifier should know; use \"none\" if nothing"
+    }
+  }
+}

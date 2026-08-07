@@ -1,0 +1,33 @@
+# builder: one tracker item to a worktree change and report.json.
+#
+# This declaration defines the runtime, powers, MCP wiring, and output contract.
+# Prompts and skills remain separate files so each run is inspectable.
+description: "The Builder implements one item in a worktree and writes report.json."
+harness: opencode
+mode: primary
+model: openrouter-mint/deepseek-v4-flash-0731
+temperature: 0.2
+# before it could write report.json, and the gate then failed on the missing
+# file rather than naming the real stop. Cost stays bounded by the provider key.
+permission:
+  read: allow
+  edit: allow
+  glob: allow
+  grep: allow
+  list: allow
+  bash: allow
+  lsp: allow
+  todowrite: allow
+  webfetch: deny
+  websearch: deny
+  task: deny
+  skill: deny
+  external_directory: deny
+  question: ask
+# Exa remains declared for shared wiring but disabled for this offline lane.
+mcp:
+  - name: exa
+    type: remote
+    url: http://mint.tail5f5eb4.ts.net:4949/proxy/https/mcp.exa.ai/mcp
+    header: __mint.exa.default__
+    enabled: false
