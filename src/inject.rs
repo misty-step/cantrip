@@ -3,8 +3,9 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -18,11 +19,6 @@ use std::time::{Duration, Instant};
 /// thread indefinitely. Five seconds is well past any legitimate paste of a long
 /// transcript while leaving headroom against a hung child.
 const INJECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Wait for `child` to exit within [`INJECT_TIMEOUT`], killing it if it overruns.
-fn wait_child(child: &mut Child) -> Result<ExitStatus> {
-    wait_child_bounded(child, INJECT_TIMEOUT)
-}
 
 /// Wait for `child` within `timeout`; on timeout kill and reap it, returning an
 /// error so the caller can fall back to the next backend, never blocking forever.
@@ -54,6 +50,76 @@ fn wait_child_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus
 fn run_bounded(command: &mut Command, timeout: Duration) -> Result<ExitStatus> {
     let mut child = command.spawn().context("starting injection helper")?;
     wait_child_bounded(&mut child, timeout)
+}
+
+/// Write all of `bytes` into `child`'s stdin within `timeout`.
+///
+/// The write is bounded for exactly the same reason [`wait_child_bounded`] is:
+/// a helper that never reads its input leaves the kernel pipe buffer full, so
+/// a blocking `write_all` would stall the daemon's processing path without any
+/// bound. Setting the pipe write end non-blocking and polling it against the
+/// same deadline means a wedged, non-reading child is killed and reaped instead
+/// of blocking forever. On success or on a normal error the local `stdin` is
+/// dropped here, closing the pipe so the helper sees EOF (as before).
+fn write_stdin_bounded(child: &mut Child, bytes: &[u8], timeout: Duration) -> Result<()> {
+    let Some(mut stdin) = child.stdin.take() else {
+        return Ok(());
+    };
+    set_nonblocking(&stdin)?;
+    let deadline = Instant::now() + timeout;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if Instant::now() >= deadline {
+            // Reap the zombie so we never leak a wedged helper behind us.
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "inject helper did not drain stdin within {}s (daemon must stay responsive)",
+                timeout.as_secs()
+            );
+        }
+        match stdin.write(&bytes[offset..]) {
+            Ok(written) if written > 0 => offset += written,
+            Ok(_) => {
+                // A zero-length write means nothing further can be sent.
+                break;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                // Pipe full because the child is not draining it; wait briefly
+                // and retry up to the deadline rather than blocking forever.
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error).context("writing text to helper stdin");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Mark the write end of `stream`'s pipe as non-blocking so a full pipe cannot
+/// block the writer; the caller polls it against a deadline instead.
+fn set_nonblocking(stream: &impl AsRawFd) -> Result<()> {
+    let fd = stream.as_raw_fd();
+    // SAFETY: fcntl(_, F_GETFL/F_SETFL) operates on an owned fd and does not
+    // touch memory we do not control; the kernel reports failure via the return.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        bail!(
+            "reading stdin pipe flags (errno {})",
+            std::io::Error::last_os_error()
+        );
+    }
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc == -1 {
+        bail!(
+            "setting stdin pipe non-blocking (errno {})",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
 }
 
 /// Select how text is inserted into the focused Wayland application.
@@ -301,67 +367,55 @@ fn run_wtype(text: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_ydotool(text: &str) -> Result<()> {
-    let mut child = Command::new("ydotool")
-        .args(["type", "--file", "-"])
+/// Spawn `command` with a piped stdin, write `text` into it, then wait for the
+/// child to exit — with **both** the write and the wait bounded by `timeout`.
+///
+/// Shared by `ydotool` and `wl-copy`, the two backends that feed the helper its
+/// payload over stdin. Bounding the write matters as much as bounding the wait:
+/// a helper that never reads leaves the pipe full, and without a bound the
+/// write alone would stall the daemon forever before the wait ever ran.
+fn run_writer_backend(
+    command: &mut Command,
+    text: &str,
+    name: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("starting ydotool")?;
+        .with_context(|| format!("starting {name}"))?;
 
-    let write_result = child
-        .stdin
-        .take()
-        .context("opening ydotool stdin")
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(text.as_bytes())
-                .context("writing text to ydotool")
-        });
-    if let Err(error) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    // stdin is dropped here, closing the pipe; ydotool sees EOF on its input.
+    write_stdin_bounded(&mut child, text.as_bytes(), timeout)
+        .with_context(|| format!("writing text to {name}"))?;
 
-    let status = wait_child(&mut child).context("waiting for ydotool")?;
+    let status =
+        wait_child_bounded(&mut child, timeout).with_context(|| format!("waiting for {name}"))?;
     if !status.success() {
-        bail!("ydotool exited with status {}", status);
+        bail!("{name} exited with status {}", status);
     }
     Ok(())
 }
 
+fn run_ydotool(text: &str) -> Result<()> {
+    // ydotool reads the transcript over stdin (`--file -`).
+    run_writer_backend(
+        Command::new("ydotool").args(["type", "--file", "-"]),
+        text,
+        "ydotool",
+        INJECT_TIMEOUT,
+    )
+}
+
 fn run_clipboard(text: &str) -> Result<()> {
-    let mut child = Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("starting wl-copy")?;
-
-    let write_result = child
-        .stdin
-        .take()
-        .context("opening wl-copy stdin")
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(text.as_bytes())
-                .context("writing text to wl-copy")
-        });
-    if let Err(error) = write_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
-    // stdin is dropped here, closing the pipe; wl-copy sees EOF on its input.
-
-    let status = wait_child(&mut child).context("waiting for wl-copy")?;
-    if !status.success() {
-        bail!("wl-copy exited with status {}", status);
-    }
-    Ok(())
+    // wl-copy reads the clipboard payload over stdin.
+    run_writer_backend(
+        &mut Command::new("wl-copy"),
+        text,
+        "wl-copy",
+        INJECT_TIMEOUT,
+    )
 }
 
 /// Copy the text, then send one Ctrl+V to the focused app. Nothing is typed
@@ -412,7 +466,7 @@ fn send_paste_shortcut() -> Result<()> {
 mod tests {
     use super::{
         allows_clipboard_fallback, backend_order, normalize_for_typing, run_bounded,
-        ydotool_socket_candidates, AvailableBackends, Backend, InjectionMode,
+        run_writer_backend, ydotool_socket_candidates, AvailableBackends, Backend, InjectionMode,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -640,6 +694,49 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "timeout was not actually bounded: took {elapsed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn input_writing_backend_times_out_when_helper_never_reads() {
+        // Process-boundary proof for the *stdin-writing* backends (ydotool and
+        // wl-copy), the path the previous no-stdin test did not cover. A real
+        // child that never reads leaves the pipe buffer full; forwarding a
+        // payload bigger than that buffer must time out (kill + reap) rather
+        // than block the daemon on the write forever.
+        let dir = std::env::temp_dir().join(format!(
+            "cantrip-inject-fake-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        write_fake_executable(&dir, "cantrip-inject-reader-fake", "#!/bin/sh\nsleep 30\n");
+
+        let budget = Duration::from_millis(200);
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        let mut cmd = Command::new("cantrip-inject-reader-fake");
+        // Resolved via PATH so the spawn boundary is a real subprocess.
+        cmd.env("PATH", format!("{}:{}", dir.display(), path_var));
+
+        // Larger than the kernel pipe buffer (usually 64 KiB) so the write end
+        // genuinely fills if the child never reads.
+        let payload = "x".repeat(1 << 20);
+
+        let started = Instant::now();
+        let result = run_writer_backend(&mut cmd, &payload, "fake-reader", budget);
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected the non-reading sleeping fake to time out"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "write phase was not actually bounded: took {elapsed:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
