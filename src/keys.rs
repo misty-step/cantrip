@@ -50,3 +50,43 @@ pub fn exists(id: &str) -> Result<bool> {
         Err(error) => Err(error).with_context(|| format!("checking key '{id}' in OS keyring")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reject_empty_secret() {
+        let result = validate_secret("empty", "");
+        assert!(result.is_err(), "expected rejection for empty secret");
+    }
+
+    #[test]
+    fn reject_whitespace_only_secret() {
+        for secret in [" ", "\t", "\n", " \t\n ", "\u{2003}"] {
+            let result = validate_secret("ws", secret);
+            assert!(result.is_err(), "expected rejection for {secret:?}");
+        }
+    }
+
+    #[test]
+    fn reject_non_ascii_secret() {
+        for secret in ["émoji", "🔑", "caf\u{e9}", "tok\u{2028}en"] {
+            let result = validate_secret("non-ascii", secret);
+            assert!(result.is_err(), "expected rejection for {secret:?}");
+        }
+    }
+
+    #[test]
+    fn accept_normal_token() {
+        assert!(validate_secret("ok", "ghtu_AbC123").is_ok());
+        assert!(validate_secret("ok", "a~zA-Z0-9!#$%&'()*+-./:;<=>?@[\\]^_`{|}").is_ok());
+        assert!(validate_secret("ok", "single").is_ok());
+    }
+
+    #[test]
+    fn error_message_mentions_key_id() {
+        let err = validate_secret("mykey", " ").unwrap_err().to_string();
+        assert!(err.contains("mykey"), "error should name the key: {err}");
+    }
+}
