@@ -7,8 +7,8 @@ harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
 temperature: 0.2
-# before it could write report.json, and the gate then failed on the missing
-# file rather than naming the real stop. Cost stays bounded by the provider key.
+# A stalled provider or tool must release the lane without losing its worktree.
+deadline_seconds: 3600
 permission:
   read: allow
   edit: allow

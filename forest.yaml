@@ -31,6 +31,12 @@ flows:
     agent: builder
     interval_seconds: 45
     attempts: 3
+  manager:
+    enabled: true
+    agent: manager
+    interval_seconds: 60
+    ready_depth: 1
+
 
 projection:
   enabled: true

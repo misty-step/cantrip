@@ -1,0 +1,38 @@
+# manager: one unstarted assignment into the ready queue.
+#
+# This lane judges only the candidate set deterministic code has already filtered:
+# it ranks the items it is offered and returns one pick. It never writes a branch,
+# tag, comment, or merge; the controller applies the one tag. The run directory is
+# a throwaway empty dir, so the agent holds no repository authority at all.
+description: "The Manager picks one unstarted item from a filtered candidate set and reasons for its pick."
+harness: opencode
+mode: primary
+model: openrouter-mint/deepseek-v4-flash-0731
+temperature: 0.2
+# A wall-clock deadline bounds every stall: time-bound only, never a step ceiling.
+# Runs that exceed this are cancelled and recorded as timeout_failed.
+deadline_seconds: 3600
+# The Manager writes only report.json in its throwaway run directory. Every
+# network and repository surface is denied, so it can only propose one pick.
+permission:
+  read: allow
+  edit: allow
+  glob: allow
+  grep: allow
+  list: allow
+  bash: allow
+  lsp: allow
+  webfetch: deny
+  websearch: deny
+  task: deny
+  skill: deny
+  todowrite: deny
+  external_directory: deny
+  question: deny
+# Exa remains declared for shared wiring but disabled for this offline lane.
+mcp:
+  - name: exa
+    type: remote
+    url: http://mint.tail5f5eb4.ts.net:4949/proxy/https/mcp.exa.ai/mcp
+    header: __mint.exa.default__
+    enabled: false
