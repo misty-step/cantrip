@@ -119,6 +119,13 @@ arrangements. Findings and reproduction steps: [`docs/EVALUATION.md`](docs/EVALU
 
 ## Development
 
+The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
+(channel `stable`). Install it with:
+
+```sh
+rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+```
+
 ```sh
 cargo build
 cargo test

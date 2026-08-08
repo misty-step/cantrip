@@ -22,6 +22,9 @@ Product north star: [`VISION.md`](VISION.md). Read it before inventing scope.
 
 ## Commands
 
+- Toolchain pinned in `rust-toolchain.toml` (channel `stable`, rustfmt + clippy
+  components); install: `rustup toolchain install stable --profile minimal
+  --component rustfmt --component clippy`.
 - `cargo build` / `cargo test`
 - `cargo clippy --all-targets -- -D warnings` (CI-enforced)
 - `cargo fmt --check` (CI-enforced)

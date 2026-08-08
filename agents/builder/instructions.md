@@ -22,8 +22,14 @@ Implement one tracker item in the current worktree and write report.json.
 - Do not call GitHub, the network, or package registries. Work offline.
 - If the item is unclear, choose a reasonable interpretation and record it.
 - Prefer tests that defend observable contracts (policy, state transitions).
-- Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`
-  when the toolchain is available; if cargo is missing, note that in report.json.
+- The Rust toolchain is pinned by the repo's `rust-toolchain.toml` (channel
+  `stable`); install it with `rustup toolchain install stable --profile minimal
+  --component rustfmt --component clippy`. When implementing Rust (the normal
+  case here), `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and
+  `cargo test` are **required**, and they must pass. A missing/unusable
+  toolchain is a **failed run**: report a non-success status / failed report,
+  do not ship a "success with note". Only a non-Rust change (docs-only,
+  config-only) may omit the cargo checks.
 
 ## Report
 

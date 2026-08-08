@@ -1,0 +1,6 @@
+# Single source of truth for the Rust toolchain used by CI, local, and forest
+# agents. rustup reads this file on any cargo invocation inside the repo.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
