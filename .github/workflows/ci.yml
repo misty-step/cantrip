@@ -15,9 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Toolchain source of truth is rust-toolchain.toml (channel "stable").
+      # rustup honors it on every cargo invocation below; this step just
+      # pre-installs the matching stable toolchain and its components.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
