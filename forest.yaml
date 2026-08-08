@@ -36,6 +36,7 @@ flows:
     agent: manager
     interval_seconds: 60
     ready_depth: 1
+    exclude_labels: ["parked", "forest:failed", "epic"]
 
 
 projection:

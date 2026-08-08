@@ -13,6 +13,8 @@
 # Iron Forest workspace (local ledger, not source)
 .forest/
 /forest
+/forest.next
+/forest.prev
 
 # Iron Forest renders its agent declaration here per run; opencode installs
 # its provider packages here too. Neither belongs in this repository.
