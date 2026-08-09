@@ -1,9 +1,6 @@
 # Cantrip factory composition for Iron Forest.
 # One process per checkout: systemctl --user status forest@cantrip
 repo: misty-step/cantrip
-commit:
-  name: forest
-  email: forest@mistystep.io
 
 checks:
   - name: fmt

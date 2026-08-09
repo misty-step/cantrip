@@ -5,6 +5,9 @@
 # tag, comment, or merge; the controller applies the one tag. The run directory is
 # a throwaway empty dir, so the agent holds no repository authority at all.
 description: "The Manager picks one unstarted item from a filtered candidate set and reasons for its pick."
+commit:
+  name: "Cantrip Manager"
+  email: "manager@cantrip.invalid"
 harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731

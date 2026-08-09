@@ -3,6 +3,9 @@
 # This declaration defines the runtime, powers, MCP wiring, and output contract.
 # Prompts and skills remain separate files so each run is inspectable.
 description: "The Builder implements one item in a worktree and writes report.json."
+commit:
+  name: "Cantrip Builder"
+  email: "builder@cantrip.invalid"
 harness: opencode
 mode: primary
 model: openrouter-mint/deepseek-v4-flash-0731
