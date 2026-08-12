@@ -172,7 +172,7 @@ fn refine_two_passes_chains_output_and_sends_verify_prompt() {
     assert_eq!(pass1["messages"][1]["content"], first);
     let system1 = pass1["messages"][0]["content"].as_str().unwrap();
     assert!(
-        system1.contains("Correct speech recognition errors"),
+        system1.contains("dictation transcript cleaner"),
         "pass 1 uses the cleanup prompt"
     );
 

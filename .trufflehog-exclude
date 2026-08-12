@@ -1,4 +1,5 @@
-target/
-eval/results/
-.git/
-.opencode/
+^\.git/
+^target/
+^\.opencode/
+^eval/results/
+^\.forest/
