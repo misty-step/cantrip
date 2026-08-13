@@ -92,9 +92,9 @@ fn postproc_config(endpoint: String) -> PostprocConfig {
 }
 
 #[test]
-fn refine_round_trip_sends_contract_request_and_strips_think() {
+fn refine_round_trip_sends_contract_request_and_strips_model_wrappers() {
     let response = ok_json(
-        r#"{"choices":[{"message":{"content":"<think>internal chain</think>Hello, Cantrip world."}}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9,"cost":0.0012,"completion_tokens_details":{"reasoning_tokens":1},"prompt_tokens_details":{"cached_tokens":3}}}"#,
+        r#"{"choices":[{"message":{"content":"<think>internal chain</think>Clean transcript:\nHello, Cantrip world."}}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9,"cost":0.0012,"completion_tokens_details":{"reasoning_tokens":1},"prompt_tokens_details":{"cached_tokens":3}}}"#,
     );
     let (endpoint, server) = mock_server(response);
     let mut cfg = postproc_config(endpoint);
@@ -134,7 +134,7 @@ fn refine_round_trip_sends_contract_request_and_strips_think() {
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(
         body["messages"][1]["content"],
-        "Source:\nhello cantrip world\nClean transcript:"
+        "Source:\nhello cantrip world"
     );
 }
 

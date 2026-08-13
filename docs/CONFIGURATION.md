@@ -75,10 +75,10 @@ contract, so keep it short and avoid redefining the task.
 - **Local.** Default endpoint is Ollama at `localhost:11434`.
   `qwen3:8b` is the free local recommendation; any `ollama list` model works.
 - **Cloud.** Point the endpoint at any OpenAI-compatible provider and set
-  `api_key_id`. The 2026-08-13 behavior matrix selected
-  `google/gemini-3.6-flash` through OpenRouter. It kept all 21 role-sensitive
-  cases as transcript text, averaged 2.9 seconds, and cost about $0.003 per
-  cleanup. Keep `passes = 1`.
+  `api_key_id`. The primary operator uses `google/gemini-3.7-flash` through
+  OpenRouter with `passes = 1`. The last completed behavior matrix selected
+  Gemini 3.6 Flash: it kept all 21 role-sensitive cases as transcript text,
+  averaged 2.9 seconds, and cost about $0.003 per cleanup.
 - A postproc failure never drops a dictation: the raw transcript is used.
 
 ## Transcript history

@@ -704,38 +704,6 @@ fn percent_encode(s: &str) -> String {
 // Post-processing (chat completions)
 // ---------------------------------------------------------------------------
 
-/// Strip ` thinking…response` blocks from a model reply. Mirrors production
-/// `postproc.rs` so eval and the daemon score the same cleaned surface.
-fn strip_think_blocks(text: &str) -> String {
-    const OPEN: &str = " thinking";
-    const CLOSE: &str = " response";
-    let mut result = String::with_capacity(text.len());
-    let mut cursor = 0;
-    while let Some(relative_start) = text[cursor..].find(OPEN) {
-        let start = cursor + relative_start;
-        result.push_str(&text[cursor..start]);
-        let content_start = start + OPEN.len();
-        let Some(relative_end) = text[content_start..].find(CLOSE) else {
-            cursor = text.len();
-            break;
-        };
-        cursor = content_start + relative_end + CLOSE.len();
-    }
-    if cursor < text.len() {
-        result.push_str(&text[cursor..]);
-    }
-    result.trim().to_owned()
-}
-
-/// Clean a reply and fail loudly if nothing usable remains.
-fn clean_content(content: &str) -> Result<String> {
-    let cleaned = strip_think_blocks(content);
-    if cleaned.is_empty() {
-        bail!("postproc returned empty text");
-    }
-    Ok(cleaned)
-}
-
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     #[serde(default)]
@@ -771,7 +739,7 @@ fn postproc_call(
 ) -> Result<(String, ChatUsage, u128)> {
     let user = postproc::build_user_prompt(transcript);
     if let Some(base) = &lane.ollama_base {
-        return ollama_postproc(agent, base, lane, &user, instructions);
+        return ollama_postproc(agent, base, lane, &user, transcript, instructions);
     }
     let url = proxied(&format!(
         "{}/chat/completions",
@@ -818,7 +786,7 @@ fn postproc_call(
         .first()
         .map(|c| c.message.content.as_str())
         .unwrap_or_default();
-    let content = clean_content(raw)
+    let content = postproc::normalize_response(raw, transcript)
         .with_context(|| format!("postproc '{}' returned empty content", lane.id))?;
     let usage = parsed.usage.unwrap_or(ChatUsage {
         prompt_tokens: 0,
@@ -834,6 +802,7 @@ fn ollama_postproc(
     base: &str,
     lane: &PostprocLane,
     user: &str,
+    transcript: &str,
     instructions: &str,
 ) -> Result<(String, ChatUsage, u128)> {
     let url = format!("{}/api/chat", base.trim_end_matches('/'));
@@ -877,7 +846,7 @@ fn ollama_postproc(
             serde_json::from_str(&raw).map_err(|e| anyhow!("bad ollama chat response: {e}"))
         })?;
     let latency = start.elapsed().as_millis();
-    let content = clean_content(&parsed.message.content)
+    let content = postproc::normalize_response(&parsed.message.content, transcript)
         .with_context(|| format!("postproc '{}' returned empty content", lane.id))?;
     let usage = ChatUsage {
         prompt_tokens: parsed.prompt_eval_count,
@@ -1884,21 +1853,6 @@ type PprRow = (String, f64, f64, f64, f64, f64, usize, usize);
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn think_blocks_are_stripped() {
-        assert_eq!(
-            strip_think_blocks("before thinkingreason responseafter"),
-            "beforeafter"
-        );
-        assert_eq!(
-            strip_think_blocks("  thinkingreason response\nCorrected"),
-            "Corrected"
-        );
-        assert_eq!(strip_think_blocks("Corrected thinkingreason"), "Corrected");
-        assert_eq!(strip_think_blocks("no tags here"), "no tags here");
-        assert!(clean_content("  thinkingonly \n response").is_err());
-    }
 
     #[test]
     fn degenerate_classifies_growth() {
