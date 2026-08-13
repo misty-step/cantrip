@@ -115,7 +115,7 @@ fn refine_round_trip_sends_contract_request_and_strips_think() {
     let body: serde_json::Value =
         serde_json::from_slice(&request.body).expect("request body is JSON");
     assert_eq!(body["model"], "test-model");
-    assert_eq!(body["temperature"], 0);
+    assert!(body.get("temperature").is_none());
     assert_eq!(body["messages"][0]["role"], "system");
     let system = body["messages"][0]["content"]
         .as_str()
@@ -123,7 +123,10 @@ fn refine_round_trip_sends_contract_request_and_strips_think() {
     assert!(system.contains("Cantrip, PipeWire"));
     assert!(system.contains("Keep numerals as digits."));
     assert_eq!(body["messages"][1]["role"], "user");
-    assert_eq!(body["messages"][1]["content"], "hello cantrip world");
+    assert_eq!(
+        body["messages"][1]["content"],
+        "Source:\nhello cantrip world\nClean transcript:"
+    );
 }
 
 /// Mock server accepting `n` sequential requests, answering each in order with
@@ -150,10 +153,10 @@ fn mock_server_multi(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<
 fn refine_two_passes_chains_output_and_sends_verify_prompt() {
     let (endpoint, server) = mock_server_multi(vec![
         ok_json(
-            r#"{"choices":[{"message":{"content":"Initial text. The Exa AP and the CL expose methods."}}]}"#,
+            r#"{"choices":[{"message":{"content":"First-pass text. The Exa AP and the CL expose methods."}}]}"#,
         ),
         ok_json(
-            r#"{"choices":[{"message":{"content":"Initial text. The Exa API and the CLI expose methods."}}]}"#,
+            r#"{"choices":[{"message":{"content":"First-pass text. The Exa API and the CLI expose methods."}}]}"#,
         ),
     ]);
     let cfg = postproc_config(endpoint); // passes = 2
@@ -162,27 +165,37 @@ fn refine_two_passes_chains_output_and_sends_verify_prompt() {
     let refined = postproc::refine(first, &cfg, &[], None).expect("two-pass refine should succeed");
     assert_eq!(
         refined,
-        "Initial text. The Exa API and the CLI expose methods."
+        "First-pass text. The Exa API and the CLI expose methods."
     );
 
     let requests = server.join().expect("mock server thread");
     assert_eq!(requests.len(), 2, "two passes must make two requests");
 
     let pass1: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(pass1["messages"][1]["content"], first);
+    assert_eq!(
+        pass1["messages"][1]["content"],
+        postproc::build_user_prompt(first)
+    );
     let system1 = pass1["messages"][0]["content"].as_str().unwrap();
     assert!(
-        system1.contains("dictation transcript cleaner"),
+        system1.contains("You clean speech-to-text transcripts"),
         "pass 1 uses the cleanup prompt"
     );
 
     let pass2: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
-    // The user message of pass 2 is chained from pass 1's output.
-    assert_eq!(pass2["messages"][1]["content"], first);
+    // The source of pass 2 is chained from pass 1's output.
+    assert_eq!(
+        pass2["messages"][1]["content"],
+        postproc::build_user_prompt("First-pass text. The Exa AP and the CL expose methods.")
+    );
     let system2 = pass2["messages"][0]["content"].as_str().unwrap();
     assert!(
-        system2.contains("final proofreading pass"),
+        system2.contains("final check of a speech-to-text transcript"),
         "pass 2 must use the verify prompt, got: {system2}"
+    );
+    assert!(
+        !system2.contains("Examples:"),
+        "pass 2 must use only the focused verify prompt"
     );
 }
 

@@ -75,8 +75,7 @@ impl Default for PostprocConfig {
             // pass doubles cloud latency for little gain on residual errors.
             passes: 1,
             min_chars: 40,
-            instructions: "Fix speech recognition errors, such as dropped letters, missing spaces between words, and truncated acronyms. Remove filler words, false starts, and repeated words. Add correct punctuation, capitalization, and spelling. Keep the speaker's exact meaning. Output only the corrected text."
-                .to_owned(),
+            instructions: String::new(),
         }
     }
 }

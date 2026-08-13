@@ -2,7 +2,7 @@
 *.wav
 !samples/*.wav
 !samples/eval/*.wav
-/eval/results
+/eval/results*/
 .env*
 /.cargo/config.toml
 

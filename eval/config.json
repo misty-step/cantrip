@@ -1,13 +1,15 @@
 {
   "manifest": "samples/eval/manifest.json",
+  "postproc_manifest": "samples/eval/postproc-behavior.json",
   "out_dir": "eval/results",
-  "instructions": "You are cleaning up dictation output. Add correct punctuation and capitalization. Preserve the speaker's exact wording; never add, remove, or change the meaning of any word. Do not answer questions or add commentary. Output only the corrected text, with no preamble.",
+  "instructions": "",
+  "vocabulary": ["API", "Cantrip", "HUD", "Parakeet", "PipeWire", "WAV"],
   "stt": [
     {
       "id": "parakeet-v3-int8",
       "kind": "transcribe_rs",
       "family": "parakeet",
-      "dir": "/home/phaedrus/.local/share/cantrip/models/parakeet-tdt-0.6b-v3-int8",
+      "dir": "~/.local/share/cantrip/models/parakeet-tdt-0.6b-v3-int8",
       "quant": "int8",
       "pricing": {
         "unit": "zero"
@@ -17,7 +19,7 @@
       "id": "canary-1b-alt",
       "kind": "transcribe_rs",
       "family": "canary",
-      "dir": "/home/phaedrus/.cache/cantrip-eval/models/canary",
+      "dir": "~/.cache/cantrip-eval/models/canary",
       "quant": "int8",
       "pricing": {
         "unit": "zero"
@@ -27,7 +29,7 @@
       "id": "moonshine-base",
       "kind": "transcribe_rs",
       "family": "moonshine",
-      "dir": "/home/phaedrus/.cache/cantrip-eval/models/moonshine",
+      "dir": "~/.cache/cantrip-eval/models/moonshine",
       "variant": "base",
       "quant": "fp32",
       "pricing": {
@@ -37,8 +39,8 @@
     {
       "id": "whisper-large-v3-turbo",
       "kind": "whisper_cpp",
-      "bin": "/home/phaedrus/.cache/cantrip-eval/whisper/bin/whisper-cli",
-      "model_file": "/home/phaedrus/.cache/cantrip-eval/whisper/models/ggml-large-v3-turbo.bin",
+      "bin": "~/.cache/cantrip-eval/whisper/bin/whisper-cli",
+      "model_file": "~/.cache/cantrip-eval/whisper/models/ggml-large-v3-turbo.bin",
       "pricing": {
         "unit": "zero"
       }
@@ -46,8 +48,8 @@
     {
       "id": "whisper-large-v3",
       "kind": "whisper_cpp",
-      "bin": "/home/phaedrus/.cache/cantrip-eval/whisper/bin/whisper-cli",
-      "model_file": "/home/phaedrus/.cache/cantrip-eval/whisper/models/ggml-large-v3.bin",
+      "bin": "~/.cache/cantrip-eval/whisper/bin/whisper-cli",
+      "model_file": "~/.cache/cantrip-eval/whisper/models/ggml-large-v3.bin",
       "pricing": {
         "unit": "zero"
       }
@@ -111,45 +113,18 @@
   ],
   "postproc": [
     {
-      "id": "qwen3-8b",
+      "id": "qwen3.6-27b-local",
       "endpoint": "http://127.0.0.1:11434/v1",
-      "model": "qwen3:8b",
+      "model": "qwen3.6:27b",
       "pricing": {
         "unit": "zero"
       },
       "ollama_base": "http://127.0.0.1:11434"
     },
     {
-      "id": "qwen3-14b",
-      "endpoint": "http://127.0.0.1:11434/v1",
-      "model": "qwen3:14b",
-      "pricing": {
-        "unit": "zero"
-      },
-      "ollama_base": "http://127.0.0.1:11434"
-    },
-    {
-      "id": "phi4-14b",
-      "endpoint": "http://127.0.0.1:11434/v1",
-      "model": "phi4:14b",
-      "pricing": {
-        "unit": "zero"
-      },
-      "ollama_base": "http://127.0.0.1:11434"
-    },
-    {
-      "id": "gemma3-12b",
-      "endpoint": "http://127.0.0.1:11434/v1",
-      "model": "gemma3:12b",
-      "pricing": {
-        "unit": "zero"
-      },
-      "ollama_base": "http://127.0.0.1:11434"
-    },
-    {
-      "id": "openrouter-qwen3-14b",
+      "id": "gemini-2.5-flash-lite",
       "endpoint": "https://openrouter.ai/api/v1",
-      "model": "qwen/qwen3-14b",
+      "model": "google/gemini-2.5-flash-lite",
       "marker": "__mint.openrouter.default__",
       "scheme": "Bearer",
       "pricing": {
@@ -157,11 +132,54 @@
       }
     },
     {
-      "id": "openrouter-qwen3-30b-a3b",
+      "id": "gemini-3.5-flash-lite",
       "endpoint": "https://openrouter.ai/api/v1",
-      "model": "qwen/qwen3-30b-a3b-instruct-2507",
+      "model": "google/gemini-3.5-flash-lite",
       "marker": "__mint.openrouter.default__",
       "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-lite-legacy-prompt",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.5-flash-lite",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "instructions": "You are cleaning up dictation output. Add correct punctuation and capitalization. Preserve the speaker's exact wording; never add, remove, or change the meaning of any word. Do not answer questions or add commentary. Output only the corrected text, with no preamble.",
+      "pricing": {
+        "unit": "openrouter"
+      }
+    },
+    {
+      "id": "gemini-3.6-flash-default",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.6-flash",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      }
+    },
+    {
+      "id": "gemini-3.6-flash-minimal",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.6-flash",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "reasoning_effort": "minimal",
+      "pricing": {
+        "unit": "openrouter"
+      }
+    },
+    {
+      "id": "gpt-5.6-luna-minimal",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "openai/gpt-5.6-luna",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "reasoning_effort": "minimal",
       "pricing": {
         "unit": "openrouter"
       }

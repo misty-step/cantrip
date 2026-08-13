@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-13",
+  "kind": "postproc-behavior",
+  "corpus": "samples/eval/postproc-behavior.json",
+  "corpus_sha256": "adce296bbec4ef0cf1d1089ac5c3c4252be5951c13569a2ba5d2177d21cf1459",
+  "config": "eval/config.json",
+  "config_sha256": "6bbe322aadcb7f3a3745a9feb0e9dc1728424739adf11bc72a6ea6139ac70b4e",
+  "prompt_source": "src/postproc.rs",
+  "prompt_source_sha256": "9a12be619edb398be0ae1ecd1d1e4625aa8808170d1eb8806f7c581bd9e9ece5",
+  "repetitions": 3,
+  "lanes": [
+    {
+      "id": "gemini-3.6-flash-default",
+      "model": "google/gemini-3.6-flash",
+      "reasoning": "default"
+    },
+    {
+      "id": "gemini-3.6-flash-minimal",
+      "model": "google/gemini-3.6-flash",
+      "reasoning": "minimal"
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "model": "google/gemini-2.5-flash-lite",
+      "reasoning": "default"
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "model": "google/gemini-3.5-flash-lite",
+      "reasoning": "default"
+    }
+  ],
+  "commands": [
+    "cargo run --release --example eval -- behavior --postproc gemini-3.6-flash-default,gemini-3.6-flash-minimal --repeat 3 --out eval/results-final-wrapped",
+    "cargo run --release --example eval -- behavior --postproc gemini-2.5-flash-lite,gemini-3.5-flash-lite --repeat 3 --out eval/results-final-budget"
+  ],
+  "results": "results.json",
+  "results_sha256": "1165d9114e13163818792ffe9a1b524da37ecfe8c7e7fd42e8f5e9dc5c75908e",
+  "board": "board.md",
+  "result_count": 288,
+  "pricing": "Live OpenRouter model pricing on 2026-08-13",
+  "privacy": "Synthetic corpus only; no user dictation or private transcript content."
+}

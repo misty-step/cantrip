@@ -24,6 +24,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use cantrip::postproc;
+
 use transcribe_rs::onnx::canary::{CanaryModel, CanaryParams};
 use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineParams, MoonshineVariant};
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
@@ -68,7 +70,8 @@ fn main() -> Result<()> {
     match cmd {
         "list" => list(rest),
         "run" => run(rest),
-        other => bail!("unknown subcommand '{other}' (expected list | run)"),
+        "behavior" => run_behavior(rest),
+        other => bail!("unknown subcommand '{other}' (expected list | run | behavior)"),
     }
 }
 
@@ -79,8 +82,11 @@ fn main() -> Result<()> {
 #[derive(Debug, Deserialize)]
 struct EvalConfig {
     manifest: String,
+    postproc_manifest: Option<String>,
     out_dir: String,
     instructions: String,
+    #[serde(default)]
+    vocabulary: Vec<String>,
     #[serde(default)]
     stt: Vec<SttLane>,
     #[serde(default)]
@@ -142,6 +148,10 @@ struct PostprocLane {
     scheme: Option<String>,
     #[serde(default)]
     pricing: Option<PriceSpec>,
+    #[serde(default)]
+    instructions: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
     /// Set for local Ollama lanes: the base URL (without /v1) used to evict
     /// the model after the lane so the next large model fits in VRAM.
     #[serde(default)]
@@ -159,6 +169,19 @@ struct Clip {
     file: String,
     #[serde(rename = "ref", default)]
     reference: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BehaviorManifest {
+    cases: Vec<BehaviorCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BehaviorCase {
+    id: String,
+    category: String,
+    input: String,
+    accepted: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +215,20 @@ struct PprResult {
     text: String,
 }
 
+#[derive(Debug, Serialize)]
+struct BehaviorResult {
+    lane: String,
+    case: String,
+    category: String,
+    iteration: usize,
+    latency_ms: u128,
+    cost_usd: f64,
+    input_tokens: u64,
+    output_tokens: u64,
+    passed: bool,
+    text: String,
+}
+
 // ---------------------------------------------------------------------------
 // Local STT (transcribe-rs)
 // ---------------------------------------------------------------------------
@@ -219,25 +256,35 @@ fn parse_variant(s: Option<&str>) -> Result<MoonshineVariant> {
     }
 }
 
+fn expand_home(path: &str) -> Option<PathBuf> {
+    if path == "~" {
+        return std::env::var_os("HOME").map(PathBuf::from);
+    }
+    if let Some(relative) = path.strip_prefix("~/") {
+        return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(relative));
+    }
+    Some(PathBuf::from(path))
+}
+
 impl LocalModel {
     fn load(lane: &SttLane) -> Result<Self> {
         let dir = lane
             .dir
             .as_deref()
             .with_context(|| format!("lane '{}' needs dir", lane.id))?;
-        let dir_path = Path::new(dir);
+        let dir_path = expand_home(dir).with_context(|| format!("expanding model path {dir}"))?;
         let quant_q = parse_quant(lane.quant.as_deref());
         let q = &quant_q;
         match lane.family.as_deref() {
-            Some("parakeet") => ParakeetModel::load(dir_path, q)
+            Some("parakeet") => ParakeetModel::load(&dir_path, q)
                 .map(LocalModel::Parakeet)
                 .with_context(|| format!("loading Parakeet from {dir}")),
-            Some("canary") => CanaryModel::load(dir_path, q)
+            Some("canary") => CanaryModel::load(&dir_path, q)
                 .map(LocalModel::Canary)
                 .with_context(|| format!("loading Canary from {dir}")),
             Some("moonshine") => {
                 let variant = parse_variant(lane.variant.as_deref())?;
-                MoonshineModel::load(dir_path, variant, q)
+                MoonshineModel::load(&dir_path, variant, q)
                     .map(LocalModel::Moonshine)
                     .with_context(|| format!("loading Moonshine from {dir}"))
             }
@@ -295,7 +342,9 @@ fn whisper_cpp(lane: &SttLane, wav: &Path) -> Result<String> {
         .model_file
         .as_deref()
         .context("whisper lane needs model_file")?;
-
+    let bin_path = expand_home(bin).with_context(|| format!("expanding whisper path {bin}"))?;
+    let model_path =
+        expand_home(model).with_context(|| format!("expanding whisper model path {model}"))?;
     // Private scratch dir under the system temp so the `-of` output path is
     // not predictable (no symlink/stale-file race in a shared temp).
     let base = std::env::temp_dir().join(format!("cantrip-eval-whisper-{}", std::process::id()));
@@ -317,7 +366,7 @@ fn whisper_cpp(lane: &SttLane, wav: &Path) -> Result<String> {
     let prefix = work_dir.join("out");
     let txt = prefix.with_extension("txt");
 
-    let lib_dir = Path::new(bin)
+    let lib_dir = bin_path
         .parent()
         .unwrap_or(Path::new("."))
         .join("..")
@@ -327,7 +376,7 @@ fn whisper_cpp(lane: &SttLane, wav: &Path) -> Result<String> {
     } else {
         PathBuf::new()
     };
-    let mut cmd = Command::new(bin);
+    let mut cmd = Command::new(&bin_path);
     if !lib_dir.as_os_str().is_empty() {
         let existing = std::env::var("LD_LIBRARY_PATH").unwrap_or_default();
         cmd.env(
@@ -366,24 +415,17 @@ fn whisper_cpp(lane: &SttLane, wav: &Path) -> Result<String> {
         }
     }
     let output = cmd
-        .args([
-            "-m",
-            model,
-            "-f",
-            wav.to_str().unwrap_or(""),
-            "-nt",
-            "-otxt",
-            "-of",
-            prefix.to_str().unwrap_or(""),
-            "-t",
-            "16",
-            "-ng",
-            "-np",
-        ])
+        .arg("-m")
+        .arg(&model_path)
+        .arg("-f")
+        .arg(wav)
+        .args(["-nt", "-otxt", "-of"])
+        .arg(&prefix)
+        .args(["-t", "16", "-ng", "-np"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output()
-        .with_context(|| format!("running {} for lane '{}'", bin, lane.id))?;
+        .with_context(|| format!("running {} for lane '{}'", bin_path.display(), lane.id))?;
     if !output.status.success() {
         let _ = fs::remove_file(&txt);
         let _ = fs::remove_dir(&work_dir);
@@ -727,25 +769,28 @@ fn postproc_call(
     transcript: &str,
     instructions: &str,
 ) -> Result<(String, ChatUsage, u128)> {
+    let user = postproc::build_user_prompt(transcript);
     if let Some(base) = &lane.ollama_base {
-        return ollama_postproc(agent, base, lane, transcript, instructions);
+        return ollama_postproc(agent, base, lane, &user, instructions);
     }
     let url = proxied(&format!(
         "{}/chat/completions",
         lane.endpoint.trim_end_matches('/')
     ));
-    let body = json!({
+    let mut body = json!({
         "model": lane.model,
-        "temperature": 0,
         // Cap generation: dictation cleanup is small; this also bounds models
         // that decompose into an unbounded reasoning loop (their exorbitant
         // outputs are then flagged as degenerate rather than hanging the run).
         "max_tokens": 2048,
         "messages": [
             {"role": "system", "content": instructions},
-            {"role": "user", "content": transcript},
+            {"role": "user", "content": user},
         ],
     });
+    if let Some(effort) = &lane.reasoning_effort {
+        body["reasoning"] = json!({ "effort": effort, "exclude": true });
+    }
     let start = Instant::now();
     let mut request = agent.post(&url);
     // Mint markers are only meaningful through the proxy.
@@ -782,15 +827,13 @@ fn postproc_call(
     Ok((content, usage, latency))
 }
 
-/// Local Ollama lanes use the native `/api/chat` route: the OpenAI-compat
-/// `/v1/chat/completions` path on current Ollama returns empty content for
-/// qwen-family reasoning models. Thinking is disabled so cleanup is
-/// deterministic, and `num_predict` backstops runaway generation.
+/// Local Ollama lanes use the native `/api/chat` route so the evaluator can
+/// disable reasoning. `num_predict` bounds runaway generation.
 fn ollama_postproc(
     agent: &ureq::Agent,
     base: &str,
     lane: &PostprocLane,
-    transcript: &str,
+    user: &str,
     instructions: &str,
 ) -> Result<(String, ChatUsage, u128)> {
     let url = format!("{}/api/chat", base.trim_end_matches('/'));
@@ -800,7 +843,7 @@ fn ollama_postproc(
         "think": false,
         "messages": [
             {"role": "system", "content": instructions},
-            {"role": "user", "content": transcript},
+            {"role": "user", "content": user},
         ],
         "options": { "num_predict": 1024 },
     });
@@ -1023,19 +1066,19 @@ fn lane_available(lane: &SttLane) -> bool {
     match lane.kind.as_str() {
         "transcribe_rs" => lane
             .dir
-            .as_ref()
-            .map(|d| Path::new(d).exists())
-            .unwrap_or(false),
+            .as_deref()
+            .and_then(expand_home)
+            .is_some_and(|path| path.exists()),
         "whisper_cpp" => {
             lane.bin
-                .as_ref()
-                .map(|b| Path::new(b).exists())
-                .unwrap_or(false)
+                .as_deref()
+                .and_then(expand_home)
+                .is_some_and(|path| path.exists())
                 && lane
                     .model_file
-                    .as_ref()
-                    .map(|m| Path::new(m).exists())
-                    .unwrap_or(false)
+                    .as_deref()
+                    .and_then(expand_home)
+                    .is_some_and(|path| path.exists())
         }
         _ => lane.endpoint.is_some() && lane.path.is_some() && lane.model.is_some(),
     }
@@ -1214,6 +1257,221 @@ fn run(args: &[String]) -> Result<()> {
     )
 }
 
+fn normalize_behavior_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
+fn run_behavior(args: &[String]) -> Result<()> {
+    let config = load_config(args)?;
+    validate_config(&config)?;
+    let manifest_path = config
+        .postproc_manifest
+        .as_deref()
+        .ok_or_else(|| anyhow!("config has no postproc_manifest"))?;
+    let manifest: BehaviorManifest = serde_json::from_str(
+        &fs::read_to_string(manifest_path)
+            .with_context(|| format!("reading postproc manifest {manifest_path}"))?,
+    )
+    .with_context(|| format!("parsing postproc manifest {manifest_path}"))?;
+    let lane_filter: Vec<String> = parse_flag(args, "--postproc").unwrap_or_default();
+    let case_filter: Vec<String> = parse_flag(args, "--cases").unwrap_or_default();
+    let repeats = parse_flag(args, "--repeat")
+        .and_then(|values| values.first().cloned())
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .with_context(|| format!("invalid --repeat value '{value}'"))
+        })
+        .transpose()?
+        .unwrap_or(1);
+    anyhow::ensure!(repeats > 0, "--repeat must be greater than zero");
+
+    let cases: Vec<&BehaviorCase> = manifest
+        .cases
+        .iter()
+        .filter(|case| case_filter.is_empty() || case_filter.contains(&case.id))
+        .collect();
+    anyhow::ensure!(!cases.is_empty(), "no behavior cases selected");
+    for case in &cases {
+        anyhow::ensure!(
+            !case.accepted.is_empty(),
+            "behavior case '{}' has no accepted output",
+            case.id
+        );
+    }
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(300))
+        .build();
+    let out_dir = resolve_out_dir(&config, args);
+    fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+
+    let or_lane = config.postproc.iter().find(|lane| {
+        (lane_filter.is_empty() || lane_filter.contains(&lane.id))
+            && lane.pricing.as_ref().map(|p| p.unit.as_str()) == Some("openrouter")
+    });
+    let or_pricing: BTreeMap<String, (f64, f64)> = match or_lane {
+        Some(lane) => {
+            let marker = lane
+                .marker
+                .as_deref()
+                .unwrap_or("__mint.openrouter.default__");
+            retry_cloud("openrouter pricing", || openrouter_pricing(&agent, marker))?
+        }
+        None => BTreeMap::new(),
+    };
+    let default_instructions =
+        postproc::build_system_prompt(&config.vocabulary, &config.instructions);
+    let mut results = Vec::new();
+    for lane in &config.postproc {
+        if !lane_filter.is_empty() && !lane_filter.contains(&lane.id) {
+            continue;
+        }
+        eprintln!("[eval] behavior lane '{}' start", lane.id);
+        let instructions = lane
+            .instructions
+            .as_deref()
+            .unwrap_or(&default_instructions);
+        for iteration in 1..=repeats {
+            for case in &cases {
+                let call = retry_cloud(&format!("behavior {}", lane.id), || {
+                    postproc_call(&agent, lane, &case.input, instructions)
+                });
+                let (text, usage, latency) = match call {
+                    Ok(value) => value,
+                    Err(error) => {
+                        eprintln!(
+                            "[eval] behavior FAIL {} case={} iteration={}: {error:#}",
+                            lane.id, case.id, iteration
+                        );
+                        results.push(BehaviorResult {
+                            lane: lane.id.clone(),
+                            case: case.id.clone(),
+                            category: case.category.clone(),
+                            iteration,
+                            latency_ms: 0,
+                            cost_usd: 0.0,
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            passed: false,
+                            text: String::new(),
+                        });
+                        continue;
+                    }
+                };
+                let normalized = normalize_behavior_text(&text);
+                let passed = case
+                    .accepted
+                    .iter()
+                    .any(|accepted| normalize_behavior_text(accepted) == normalized);
+                let cost = ppr_cost_usd(lane, &usage, Some(&or_pricing));
+                eprintln!(
+                    "[eval] behavior {} case={} iteration={} pass={} chars={} ms={} cost_usd={:.6}",
+                    lane.id,
+                    case.id,
+                    iteration,
+                    passed,
+                    text.chars().count(),
+                    latency,
+                    cost
+                );
+                results.push(BehaviorResult {
+                    lane: lane.id.clone(),
+                    case: case.id.clone(),
+                    category: case.category.clone(),
+                    iteration,
+                    latency_ms: latency,
+                    cost_usd: cost,
+                    input_tokens: usage.prompt_tokens,
+                    output_tokens: usage.completion_tokens,
+                    passed,
+                    text,
+                });
+            }
+        }
+        if let Some(base) = &lane.ollama_base {
+            let unload_url = format!("{}/api/generate", base.trim_end_matches('/'));
+            if let Ok(payload) =
+                serde_json::to_vec(&json!({ "model": lane.model, "keep_alive": 0 }))
+            {
+                let _ = agent
+                    .post(&unload_url)
+                    .set("Content-Type", "application/json")
+                    .send_bytes(&payload)
+                    .map_err(|error| eprintln!("[eval] unload warn {}: {error}", lane.model));
+            }
+        }
+    }
+    anyhow::ensure!(!results.is_empty(), "no behavior lanes selected");
+
+    let results_path = out_dir.join("behavior.json");
+    fs::write(&results_path, serde_json::to_vec_pretty(&results)?)
+        .with_context(|| format!("writing {}", results_path.display()))?;
+
+    let mut board = String::from(
+        "# Post-processing behavior\n\n| lane | pass | cleanup | role | preservation | formatting | mean ms | p95 ms | cost |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+    );
+    for lane in &config.postproc {
+        let lane_results: Vec<&BehaviorResult> = results
+            .iter()
+            .filter(|result| result.lane == lane.id)
+            .collect();
+        if lane_results.is_empty() {
+            continue;
+        }
+        let score = |category: &str| {
+            let selected: Vec<&&BehaviorResult> = lane_results
+                .iter()
+                .filter(|result| result.category == category)
+                .collect();
+            let passed = selected.iter().filter(|result| result.passed).count();
+            format!("{passed}/{}", selected.len())
+        };
+        let passed = lane_results.iter().filter(|result| result.passed).count();
+        let mean_ms = lane_results
+            .iter()
+            .map(|result| result.latency_ms as f64)
+            .sum::<f64>()
+            / lane_results.len() as f64;
+        let mut latencies: Vec<u128> = lane_results
+            .iter()
+            .map(|result| result.latency_ms)
+            .collect();
+        latencies.sort_unstable();
+        let p95_index = (latencies.len() * 95).div_ceil(100).saturating_sub(1);
+        let p95_ms = latencies[p95_index];
+        let cost = lane_results
+            .iter()
+            .map(|result| result.cost_usd)
+            .sum::<f64>();
+        board.push_str(&format!(
+            "| {} | {passed}/{} | {} | {} | {} | {} | {:.0} | {p95_ms} | ${cost:.6} |\n",
+            lane.id,
+            lane_results.len(),
+            score("cleanup"),
+            score("role"),
+            score("preservation"),
+            score("formatting"),
+            mean_ms,
+        ));
+    }
+    let board_path = out_dir.join("behavior.md");
+    fs::write(&board_path, &board).with_context(|| format!("writing {}", board_path.display()))?;
+    println!("{board}");
+    eprintln!(
+        "[eval] behavior done: {} calls; results in {}",
+        results.len(),
+        out_dir.display()
+    );
+    Ok(())
+}
+
 /// Run the transcription phase only, then delegate to
 /// [`postprocess_and_report`] with the cached transcripts.
 fn run_ppr_only(args: &[String]) -> Result<()> {
@@ -1273,6 +1531,8 @@ fn postprocess_and_report(
         }
         None => BTreeMap::new(),
     };
+    let default_instructions =
+        postproc::build_system_prompt(&config.vocabulary, &config.instructions);
     let mut ppr_results: Vec<PprResult> = Vec::new();
     for lane in &config.postproc {
         if !ppr_filter.is_empty() && !ppr_filter.contains(&lane.id.to_string()) {
@@ -1288,8 +1548,12 @@ fn postprocess_and_report(
             );
         }
         for stt in stt_results {
+            let instructions = lane
+                .instructions
+                .as_deref()
+                .unwrap_or(&default_instructions);
             let call = retry_cloud(&format!("ppr {}", lane.id), || {
-                postproc_call(agent, lane, &stt.text, &config.instructions)
+                postproc_call(agent, lane, &stt.text, instructions)
             })
             .with_context(|| {
                 format!(
@@ -1763,6 +2027,8 @@ mod tests {
                 input: 2.5,
                 output: 10.0,
             }),
+            instructions: None,
+            reasoning_effort: None,
             ollama_base: None,
         };
         let usage = ChatUsage {
@@ -1772,5 +2038,23 @@ mod tests {
         assert!(
             (ppr_cost_usd(&lane, &usage, None) - (100.0 * 2.5 + 40.0 * 10.0) / 1e6).abs() < 1e-12
         );
+    }
+
+    #[test]
+    fn behavior_normalization_keeps_structure() {
+        assert_eq!(
+            normalize_behavior_text(" One.  \r\n\r\nTwo.\n"),
+            "One.\n\nTwo."
+        );
+    }
+
+    #[test]
+    fn configured_paths_expand_home() {
+        let home = std::env::var_os("HOME").expect("test environment needs HOME");
+        assert_eq!(
+            expand_home("~/.cache/model"),
+            Some(PathBuf::from(home).join(".cache/model"))
+        );
+        assert_eq!(expand_home("/opt/model"), Some(PathBuf::from("/opt/model")));
     }
 }

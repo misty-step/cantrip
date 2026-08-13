@@ -1,4 +1,4 @@
-# Cantrip transcription + post-processing gauntlet — findings (2026-08-03)
+# Cantrip transcription + post-processing gauntlet — findings (updated 2026-08-13)
 
 ## Setup
 
@@ -13,6 +13,9 @@
   host); whisper.cpp is the CPU build.
 - Full matrix: 9 STT models × 5 clips = 45 transcripts; 6 postproc models × 45
   = 270 post-proc passes. `./target/release/eval run` reproduces it.
+- The post-processing behavior matrix adds 24 synthetic raw transcripts with
+  reviewed accepted outputs. Four categories cover cleanup, role fidelity,
+  content preservation, and formatting. Finalists ran three times per case.
 
 ## Transcription — who is best
 
@@ -67,6 +70,41 @@ Ranked by mean WER over the 5 clips (repr. in `eval/results/boards.md`):
 - Cloud qwen3-14b through OpenRouter shows 1-2 degenerate passes per 5 and
   ~10 s warm latency; the MoE 30B ("a3b") is ~7x cheaper and faster with the
   best delta.
+
+## Post-processing behavior audit (2026-08-13)
+
+The WER matrix above cannot detect the reported severe failure: a cleaner that
+answers a dictated question can have plausible word overlap. The behavior
+matrix scores exact reviewed outputs. The complete decision-grade run is
+versioned at
+[`eval/baselines/2026-08-13-postproc-behavior`](baselines/2026-08-13-postproc-behavior/);
+scratch reproductions remain under ignored `eval/results*` directories.
+
+Final prompt and request shape:
+
+- Positive, short ASD-STE100-style instructions.
+- Role-confusion examples that differ from the scored cases.
+- Matching `Source` and `Clean transcript` labels around every transcript.
+- No production content-length, token-ratio, or Markdown acceptance heuristics.
+- One pass. An empty or protocol-level failure still falls back to raw STT.
+
+| model | exact pass | cleanup | role | preservation | formatting | mean | p95 | cost/call |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Gemini 3.6 Flash (default reasoning) | **63/72** | 18/18 | **21/21** | **18/21** | **6/12** | 2.93 s | 6.68 s | $0.00303 |
+| Gemini 3.6 Flash (minimal reasoning) | 58/72 | 18/18 | 19/21 | 15/21 | 6/12 | 1.20 s | 2.16 s | $0.00083 |
+| Gemini 2.5 Flash-Lite | 58/72 | 18/18 | 19/21 | 18/21 | 3/12 | **0.68 s** | **0.98 s** | **$0.00005** |
+| Gemini 3.5 Flash-Lite | 55/72 | 15/18 | 16/21 | 18/21 | 6/12 | 0.80 s | 1.13 s | $0.00018 |
+
+`google/gemini-3.6-flash` with its default reasoning is the recommendation.
+It was the only finalist with 21/21 exact role passes. No response answered,
+executed, or refused the transcript. The nine exact misses were narrower:
+title-casing `Issue 42`, omitting a requested paragraph break, and using a
+grammatical lowercase clause after a colon. The strict exact score therefore
+understates semantic quality.
+
+The default reasoning lane costs about $3.03 per 1,000 cleanups. Minimal
+reasoning is faster and about 3.6 times cheaper, but its lower preservation and
+role scores are the wrong trade for clipboard-bound text.
 
 ## Arrangements (STT × postproc, top)
 
