@@ -92,8 +92,14 @@ directory is:
 ```
 
 `$XDG_STATE_HOME` replaces `~/.local/state` when set. Each immutable JSON file
-contains the raw transcript, the post-processed transcript when cleanup
-succeeded, source, models, cleanup status, prompt version, and timing metadata.
+links the raw and post-processed transcript under one session id. It also records
+the completion timestamp, source, audio duration, total pipeline latency, STT
+model/backend/latency, cleanup model/status/latency/prompt version, and available
+token and billing usage. Local STT has zero API cost. Cloud STT cost is omitted
+until its compatible response reports it. Post-processing
+`reported_cost_usd` is stored only when the provider returns the charge; Cantrip
+does not estimate cost from prices that can change later.
+
 The directory is mode `0700`; files are mode `0600` and published atomically.
 An archive write failure is reported but never drops a valid dictation.
 

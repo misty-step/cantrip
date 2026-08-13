@@ -119,6 +119,14 @@ pub fn run(
     source: Source,
     on_stage: impl FnMut(Stage),
 ) -> Outcome {
+    let pipeline_started = Instant::now();
+    let audio_duration_ms = match stt::wav_duration_ms(wav) {
+        Ok(duration) => Some(duration),
+        Err(error) => {
+            tracing::warn!("[STT] WAV duration unavailable error={error:#}");
+            None
+        }
+    };
     let mut on_stage = on_stage;
     let stt_started = Instant::now();
     on_stage(Stage::Transcribing { chunk: 1, total: 1 });
@@ -139,7 +147,7 @@ pub fn run(
         }
     };
 
-    let (postproc, processed) = if !raw.trim().is_empty() && postproc_cfg.enabled {
+    let (postproc, processed, postproc_usage) = if !raw.trim().is_empty() && postproc_cfg.enabled {
         let chars = raw.chars().count();
         if !should_run_postproc(postproc_cfg, chars) {
             tracing::info!(
@@ -147,7 +155,7 @@ pub fn run(
                 chars,
                 postproc_cfg.min_chars
             );
-            (PostprocStatus::SkippedShort { chars }, None)
+            (PostprocStatus::SkippedShort { chars }, None, None)
         } else {
             on_stage(Stage::CleaningUp);
             let postproc_started = Instant::now();
@@ -158,7 +166,8 @@ pub fn run(
                     PostprocStatus::Applied {
                         ms: postproc_started.elapsed().as_millis(),
                     },
-                    Some(refined),
+                    Some(refined.text),
+                    refined.usage,
                 ),
                 Err(error) => {
                     tracing::warn!("[Postproc] cleanup failed error={error:#}");
@@ -167,12 +176,13 @@ pub fn run(
                             ms: postproc_started.elapsed().as_millis(),
                         },
                         None,
+                        None,
                     )
                 }
             }
         }
     } else {
-        (PostprocStatus::Off, None)
+        (PostprocStatus::Off, None, None)
     };
 
     let attempted_postproc = matches!(
@@ -187,9 +197,12 @@ pub fn run(
         source: source.as_str(),
         raw_transcript: &raw,
         postprocessed_transcript: processed.as_deref(),
+        audio_duration_ms,
+        pipeline_elapsed_ms: duration_ms(pipeline_started.elapsed().as_millis()),
         stt_model: &stt_cfg.model,
         stt_remote: stt_cfg.endpoint.is_some(),
         stt_elapsed_ms: duration_ms(stt_elapsed.as_millis()),
+        stt_api_cost_usd: stt_cfg.endpoint.is_none().then_some(0.0),
         partial,
         postproc_status: match &postproc {
             PostprocStatus::Off => "off",
@@ -204,6 +217,18 @@ pub fn run(
         postproc_instructions: attempted_postproc
             .then_some(postproc_cfg.instructions.as_str())
             .filter(|instructions| !instructions.is_empty()),
+        postproc_prompt_tokens: postproc_usage.as_ref().map(|usage| usage.prompt_tokens),
+        postproc_completion_tokens: postproc_usage.as_ref().map(|usage| usage.completion_tokens),
+        postproc_total_tokens: postproc_usage.as_ref().map(|usage| usage.total_tokens),
+        postproc_reasoning_tokens: postproc_usage.as_ref().map(|usage| usage.reasoning_tokens),
+        postproc_cached_tokens: postproc_usage.as_ref().map(|usage| usage.cached_tokens),
+        postproc_reported_cost_usd: postproc_usage
+            .as_ref()
+            .and_then(|usage| usage.reported_cost_usd),
+        postproc_usage_requests: postproc_usage.as_ref().map(|usage| usage.requests),
+        postproc_usage_responses: postproc_usage
+            .as_ref()
+            .map(|usage| usage.responses_with_usage),
     }) {
         Ok(path) => ArchiveStatus::Saved(path),
         Err(error) => ArchiveStatus::Failed(format!("{error:#}")),

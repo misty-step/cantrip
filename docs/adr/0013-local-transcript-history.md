@@ -28,18 +28,26 @@ the existing single failed-WAV recovery copy.
 
 Each record contains:
 
-- a schema version, session id, Unix timestamp, and source (`dictation`, `recover`,
-  or `transcribe`);
-- STT model, local/cloud backend class, latency, and partial-result flag;
-- post-processing status, model, latency, pass count, prompt version, and custom
-  instructions when a cleanup was attempted;
-- the raw transcript and, only after successful cleanup, the post-processed
-  transcript.
+- a schema version, session id, completion timestamp, and source (`dictation`,
+  `recover`, or `transcribe`);
+- audio duration and total STT-plus-cleanup pipeline latency;
+- STT model, local/cloud backend class, latency, partial-result flag, and API
+  cost (`0` for local inference; omitted when a cloud backend does not report it);
+- post-processing status, model, latency, pass count, prompt version, custom
+  instructions, token usage, and provider-reported API cost when available;
+- the raw and post-processed transcript together in the same record. The latter
+  is present only after successful cleanup.
 
 Records use sortable unique filenames. Writes go to a new owner-only temporary file,
 are synced, and are atomically renamed. The archive directory is verified as a
 non-symlink directory owned by the current user and forced to mode `0700`; records
 use mode `0600`.
+
+Schema 2 adds audio duration, pipeline latency, token usage, and cost. Cost is
+never reconstructed from mutable pricing tables: `reported_cost_usd` is present
+only when the compatible provider returns an authoritative per-request charge.
+Token counts may be available without cost. Multi-pass cleanup aggregates usage
+and reports a cost only when every pass supplies one.
 
 An archive failure never discards or blocks a valid dictation. The daemon reports the
 failure without transcript content and continues delivery. Full STT failures have no

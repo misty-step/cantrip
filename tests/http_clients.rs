@@ -94,7 +94,7 @@ fn postproc_config(endpoint: String) -> PostprocConfig {
 #[test]
 fn refine_round_trip_sends_contract_request_and_strips_think() {
     let response = ok_json(
-        r#"{"choices":[{"message":{"content":"<think>internal chain</think>Hello, Cantrip world."}}],"usage":{"total_tokens":9}}"#,
+        r#"{"choices":[{"message":{"content":"<think>internal chain</think>Hello, Cantrip world."}}],"usage":{"prompt_tokens":7,"completion_tokens":2,"total_tokens":9,"cost":0.0012,"completion_tokens_details":{"reasoning_tokens":1},"prompt_tokens_details":{"cached_tokens":3}}}"#,
     );
     let (endpoint, server) = mock_server(response);
     let mut cfg = postproc_config(endpoint);
@@ -105,7 +105,16 @@ fn refine_round_trip_sends_contract_request_and_strips_think() {
 
     let refined = postproc::refine("hello cantrip world", &cfg, &vocabulary, Some("sk-test"))
         .expect("refine should succeed");
-    assert_eq!(refined, "Hello, Cantrip world.");
+    assert_eq!(refined.text, "Hello, Cantrip world.");
+    let usage = refined.usage.expect("provider usage should survive");
+    assert_eq!(usage.prompt_tokens, 7);
+    assert_eq!(usage.completion_tokens, 2);
+    assert_eq!(usage.total_tokens, 9);
+    assert_eq!(usage.reasoning_tokens, 1);
+    assert_eq!(usage.cached_tokens, 3);
+    assert_eq!(usage.requests, 1);
+    assert_eq!(usage.responses_with_usage, 1);
+    assert_eq!(usage.reported_cost_usd, Some(0.0012));
 
     let request = server.join().expect("mock server thread");
     assert_eq!(request.request_line, "POST /chat/completions HTTP/1.1");
@@ -164,7 +173,7 @@ fn refine_two_passes_chains_output_and_sends_verify_prompt() {
 
     let refined = postproc::refine(first, &cfg, &[], None).expect("two-pass refine should succeed");
     assert_eq!(
-        refined,
+        refined.text,
         "First-pass text. The Exa API and the CLI expose methods."
     );
 

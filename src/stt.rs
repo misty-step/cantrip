@@ -6,7 +6,8 @@
 //! a known-safe window.
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
@@ -230,6 +231,84 @@ fn low_energy_split(samples: &[f32], target: usize, search_secs: f32) -> usize {
     best
 }
 
+/// Read the duration from a RIFF/WAVE file without decoding or allocating its
+/// audio payload. Unknown/non-RIFF inputs return an error while transcription
+/// remains free to report its own format diagnostics.
+pub fn wav_duration_ms(path: &Path) -> Result<u64> {
+    let mut file = File::open(path).with_context(|| format!("opening WAV {}", path.display()))?;
+    wav_duration_ms_from(&mut file)
+        .with_context(|| format!("reading WAV duration {}", path.display()))
+}
+
+fn wav_duration_ms_from(reader: &mut (impl Read + Seek)) -> Result<u64> {
+    let mut header = [0_u8; 12];
+    reader
+        .read_exact(&mut header)
+        .context("reading RIFF header")?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        anyhow::bail!("not a RIFF/WAVE file");
+    }
+
+    let mut byte_rate = None;
+    let mut data_bytes = None;
+    loop {
+        let mut chunk = [0_u8; 8];
+        match reader.read_exact(&mut chunk) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(error) => return Err(error).context("reading WAV chunk header"),
+        }
+        let size = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as u64;
+        match &chunk[0..4] {
+            b"fmt " => {
+                if size < 12 {
+                    anyhow::bail!("WAV fmt chunk is too short");
+                }
+                let mut format = [0_u8; 12];
+                reader
+                    .read_exact(&mut format)
+                    .context("reading WAV fmt chunk")?;
+                byte_rate =
+                    Some(u32::from_le_bytes([format[8], format[9], format[10], format[11]]) as u64);
+                reader
+                    .seek(SeekFrom::Current(
+                        i64::try_from(size - 12).context("WAV chunk too large")?,
+                    ))
+                    .context("skipping WAV fmt extension")?;
+            }
+            b"data" => {
+                data_bytes = Some(size);
+                reader
+                    .seek(SeekFrom::Current(
+                        i64::try_from(size).context("WAV data too large")?,
+                    ))
+                    .context("skipping WAV data")?;
+            }
+            _ => {
+                reader
+                    .seek(SeekFrom::Current(
+                        i64::try_from(size).context("WAV chunk too large")?,
+                    ))
+                    .context("skipping WAV chunk")?;
+            }
+        }
+        if size % 2 == 1 {
+            reader
+                .seek(SeekFrom::Current(1))
+                .context("skipping WAV chunk padding")?;
+        }
+        if byte_rate.is_some() && data_bytes.is_some() {
+            break;
+        }
+    }
+
+    let byte_rate = byte_rate
+        .filter(|rate| *rate > 0)
+        .context("WAV has no byte rate")?;
+    let data_bytes = data_bytes.context("WAV has no data chunk")?;
+    Ok(data_bytes.saturating_mul(1_000) / byte_rate)
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteTranscriptionResponse {
     text: String,
@@ -353,6 +432,28 @@ mod tests {
         ));
         assert!(body.windows(wav.len()).any(|window| window == wav));
         assert!(body.ends_with(b"\r\n--cantrip-audio-boundary--\r\n"));
+    }
+
+    #[test]
+    fn wav_duration_uses_data_size_and_byte_rate() {
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&32_036_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&16_000_u32.to_le_bytes());
+        wav.extend_from_slice(&32_000_u32.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&32_000_u32.to_le_bytes());
+
+        assert_eq!(
+            wav_duration_ms_from(&mut std::io::Cursor::new(wav)).unwrap(),
+            1_000
+        );
     }
 
     #[test]
