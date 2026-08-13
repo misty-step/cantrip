@@ -7,6 +7,8 @@
 //! character counts. Log tags use brackets: `[Daemon]`, `[Capture]`, `[STT]`,
 //! `[Postproc]`, `[Inject]`, `[Models]`, `[HUD]`.
 
+mod archive;
+
 pub mod capture;
 pub mod config;
 pub mod daemon;

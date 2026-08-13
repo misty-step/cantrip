@@ -34,11 +34,7 @@ model = "qwen3:8b"        # any model your endpoint serves
 timeout_ms = 30000
 passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
 min_chars = 40            # skip cleanup under this length; 0 = never skip
-instructions = """Fix speech recognition errors, such as dropped letters,
-missing spaces between words, and truncated acronyms. Remove filler words,
-false starts, and repeated words. Add correct punctuation, capitalization,
-and spelling. Keep the speaker's exact meaning. Output only the corrected
-text."""
+instructions = ""         # optional extra style guidance
 ```
 
 ## `[stt]` — transcription
@@ -63,30 +59,56 @@ cloud model (~WER 0.065 at ~$0.0003/clip).
 
 ## `[postproc]` — cleanup
 
-Gives you the biggest perceived-quality lever. The whole cleanup behavior is
-the `instructions` text, so it is safe to experiment from the config alone:
+The built-in prompt defines conservative transcript cleanup. Use
+`instructions` only for extra style guidance. It is appended to the fixed
+contract, so keep it short and avoid redefining the task.
 
-- **Disfluency removal.** The default instructions permit deleting filler
-  words, false starts, and repetitions. Earlier wording that said "never
-  remove any word" is what let "um"/"uh"/repeats survive.
-- **`passes`.** The cleanup runs `passes` rounds in a chain (default 1). The
-  first round uses `instructions`; every later round is a focused proofread
-  pass that re-reads the output and fixes residual speech-recognition errors
-  the earlier round left (e.g. a truncated acronym like `AP` for `API`).
-  One pass is enough for modern instruct models; set 2 only if you still see
-  residual ASR errors and accept roughly double cleanup latency.
+- **Disfluency removal.** The built-in prompt removes filler sounds, false
+  starts, and repeated words.
+- **`passes`.** The cleanup runs `passes` rounds in a chain (default 1). Each
+  later round is a focused proofread for residual speech-recognition errors,
+  such as a truncated acronym. One pass avoids compounded drift and latency.
+  Use 2 only after evaluating it on your own dictation corpus.
 - **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
   many characters (default 40). Short commands skip the cloud round-trip.
   Set `0` to always run cleanup when enabled.
 - **Local.** Default endpoint is Ollama at `localhost:11434`.
   `qwen3:8b` is the free local recommendation; any `ollama list` model works.
 - **Cloud.** Point the endpoint at any OpenAI-compatible provider and set
-  `api_key_id`. On OpenRouter (2026-08-07 messy-dictation bench, after account
-  privacy/guardrails allowed Google routes), `google/gemini-2.5-flash-lite`
-  led (~0.66 s mean); `google/gemini-3.5-flash-lite` is a near-tie. Keep
-  `passes = 1`. Older `qwen/qwen3-30b-a3b-instruct-2507` is slower for little
-  cleanup gain.
+  `api_key_id`. The 2026-08-13 behavior matrix selected
+  `google/gemini-3.6-flash` through OpenRouter. It kept all 21 role-sensitive
+  cases as transcript text, averaged 2.9 seconds, and cost about $0.003 per
+  cleanup. Keep `passes = 1`.
 - A postproc failure never drops a dictation: the raw transcript is used.
+
+## Transcript history
+
+Every successful STT result is archived locally, including empty and partial
+results and results from `cantrip transcribe` or `cantrip recover`. The default
+directory is:
+
+```text
+~/.local/state/cantrip/transcripts/
+```
+
+`$XDG_STATE_HOME` replaces `~/.local/state` when set. Each immutable JSON file
+contains the raw transcript, the post-processed transcript when cleanup
+succeeded, source, models, cleanup status, prompt version, and timing metadata.
+The directory is mode `0700`; files are mode `0600` and published atomically.
+An archive write failure is reported but never drops a valid dictation.
+
+This is sensitive plaintext history, retained until you delete it. It is not
+written to operational logs, uploaded, indexed, summarized, or committed by
+Cantrip. Review backup and home-directory sync policies before relying on it.
+
+For example, inspect raw and cleaned pairs locally with `jq`:
+
+```sh
+history=${XDG_STATE_HOME:-$HOME/.local/state}/cantrip/transcripts
+jq -s 'map(select(.postproc.status == "applied") |
+  {session_id, raw_transcript, postprocessed_transcript, postproc})' \
+  \"$history\"/*.json
+```
 
 ## `vocabulary`
 

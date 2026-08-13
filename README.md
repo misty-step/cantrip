@@ -106,8 +106,12 @@ documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 - Audio and transcripts never leave the machine in the default local lanes.
 - Recordings live in `$XDG_RUNTIME_DIR/cantrip` (tmpfs, per-user 0700) and are
   deleted after processing, success or failure.
-- Logs contain character counts only — never transcript content. The single
-  exemption is `cantrip transcribe` stdout.
+- Every successful STT result is saved locally as an owner-only JSON record in
+  `$XDG_STATE_HOME/cantrip/transcripts` (normally
+  `~/.local/state/cantrip/transcripts`). This history contains sensitive text;
+  it is never uploaded or committed automatically.
+- Operational logs contain character counts only — never transcript content.
+  The single stdout exemption is `cantrip transcribe`.
 - Clipboard mode overwrites the clipboard and does not restore the previous
   contents (restoring is racy on Wayland).
 

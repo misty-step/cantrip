@@ -65,6 +65,11 @@ pub fn last_transcript_path() -> Result<PathBuf> {
     Ok(state_dir()?.join("last-transcript.txt"))
 }
 
+/// `$XDG_STATE_HOME/cantrip/transcripts/` — owner-private transcript history.
+pub fn transcript_history_dir() -> Result<PathBuf> {
+    Ok(state_dir()?.join("transcripts"))
+}
+
 /// Last WAV that failed STT entirely. Kept for `cantrip recover`.
 pub fn last_failed_wav_path() -> Result<PathBuf> {
     Ok(state_dir()?.join("last-failed.wav"))

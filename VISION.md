@@ -26,7 +26,8 @@ habit is safe, honest enough that the status surface never lies about progress.
 
 Desktop input utility. Local STT (Parakeet ONNX) is the default lane. Optional
 OpenAI-compatible cloud STT and cleanup are escapes, not the identity. Keys live
-in the OS keyring. Transcripts are not logged (character counts only).
+in the OS keyring. Transcript content is absent from operational logs; an
+owner-private local history supports recovery and evaluation.
 
 ## Fundamentals (keep true when code changes)
 
@@ -34,8 +35,8 @@ in the OS keyring. Transcripts are not logged (character counts only).
 2. **Paste-first delivery.** Paragraphs survive; type mode never touches the clipboard.
 3. **Honest HUD.** Static phases; determinate fill only from measured multi-chunk STT.
 4. **Small process model.** No async runtime; std threads + mpsc; one warm worker.
-5. **Operator repair.** Failed audio and last transcript remain recoverable without
-   support theater.
+5. **Operator evidence.** Failed audio, the last transcript, and owner-private
+   transcript history remain locally available without support theater.
 6. **Secrets out of the tree.** No API keys in files, logs, or git.
 
 ## Standards

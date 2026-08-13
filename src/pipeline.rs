@@ -1,12 +1,13 @@
 //! One WAV file through the full dictation backend: STT then optional
 //! post-processing. Shared by the daemon worker and `cantrip transcribe`.
 
+use crate::archive;
 use crate::config::{PostprocConfig, SttConfig};
 use crate::models;
 use crate::postproc;
 use crate::stt::{self, Transcriber};
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Result of the optional post-processing pass on a transcript.
@@ -16,10 +17,37 @@ pub enum PostprocStatus {
     Off,
     /// LLM cleanup succeeded, taking `ms`.
     Applied { ms: u128 },
-    /// Cleanup failed; the raw transcript is preserved.
-    Failed,
+    /// Cleanup failed after `ms`; the raw transcript is preserved.
+    Failed { ms: u128 },
     /// Enabled, but the transcript was under `min_chars`.
     SkippedShort { chars: usize },
+}
+
+/// Entry point that produced a transcript history record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Dictation,
+    Recover,
+    Transcribe,
+}
+
+impl Source {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dictation => "dictation",
+            Self::Recover => "recover",
+            Self::Transcribe => "transcribe",
+        }
+    }
+}
+
+/// Result of saving the owner-private transcript history record.
+#[derive(Debug)]
+pub enum ArchiveStatus {
+    Saved(PathBuf),
+    Failed(String),
+    /// STT failed, so there was no transcript to archive.
+    NotApplicable,
 }
 
 /// Which sub-stage of a job is running right now, observable live.
@@ -56,6 +84,7 @@ pub struct Outcome {
     pub partial: bool,
     /// Keep the WAV on disk for operator recovery (full STT failure).
     pub keep_wav: bool,
+    pub archive: ArchiveStatus,
 }
 
 /// Cache of the loaded local transcriber, keyed by model name. Keep one
@@ -87,6 +116,7 @@ pub fn run(
     stt_cfg: &SttConfig,
     vocabulary: &[String],
     postproc_cfg: &PostprocConfig,
+    source: Source,
     on_stage: impl FnMut(Stage),
 ) -> Outcome {
     let mut on_stage = on_stage;
@@ -95,53 +125,102 @@ pub fn run(
     let transcription = transcribe(cache, wav, stt_cfg, vocabulary, &mut on_stage);
     let stt_elapsed = stt_started.elapsed();
 
-    let (text, postproc, partial, keep_wav) = match transcription {
-        Ok(LocalOk { text, partial }) if !text.trim().is_empty() && postproc_cfg.enabled => {
-            let chars = text.chars().count();
-            if !should_run_postproc(postproc_cfg, chars) {
-                tracing::info!(
-                    "[Postproc] skipped_short chars={} min_chars={}",
-                    chars,
-                    postproc_cfg.min_chars
-                );
-                (
-                    Ok(text),
-                    PostprocStatus::SkippedShort { chars },
-                    partial,
-                    false,
-                )
-            } else {
-                on_stage(Stage::CleaningUp);
-                let postproc_started = Instant::now();
-                match resolve_api_key(postproc_cfg.api_key_id.as_deref()).and_then(|key| {
-                    postproc::refine(&text, postproc_cfg, vocabulary, key.as_deref())
-                }) {
-                    Ok(refined) => (
-                        Ok(refined),
-                        PostprocStatus::Applied {
+    let LocalOk { text: raw, partial } = match transcription {
+        Ok(transcription) => transcription,
+        Err(error) => {
+            return Outcome {
+                text: Err(error),
+                stt_elapsed,
+                postproc: PostprocStatus::Off,
+                partial: false,
+                keep_wav: true,
+                archive: ArchiveStatus::NotApplicable,
+            };
+        }
+    };
+
+    let (postproc, processed) = if !raw.trim().is_empty() && postproc_cfg.enabled {
+        let chars = raw.chars().count();
+        if !should_run_postproc(postproc_cfg, chars) {
+            tracing::info!(
+                "[Postproc] skipped_short chars={} min_chars={}",
+                chars,
+                postproc_cfg.min_chars
+            );
+            (PostprocStatus::SkippedShort { chars }, None)
+        } else {
+            on_stage(Stage::CleaningUp);
+            let postproc_started = Instant::now();
+            match resolve_api_key(postproc_cfg.api_key_id.as_deref())
+                .and_then(|key| postproc::refine(&raw, postproc_cfg, vocabulary, key.as_deref()))
+            {
+                Ok(refined) => (
+                    PostprocStatus::Applied {
+                        ms: postproc_started.elapsed().as_millis(),
+                    },
+                    Some(refined),
+                ),
+                Err(error) => {
+                    tracing::warn!("[Postproc] cleanup failed error={error:#}");
+                    (
+                        PostprocStatus::Failed {
                             ms: postproc_started.elapsed().as_millis(),
                         },
-                        partial,
-                        false,
-                    ),
-                    Err(error) => {
-                        tracing::warn!("[Postproc] cleanup failed error={error:#}");
-                        (Ok(text), PostprocStatus::Failed, partial, false)
-                    }
+                        None,
+                    )
                 }
             }
         }
-        Ok(LocalOk { text, partial }) => (Ok(text), PostprocStatus::Off, partial, false),
-        Err(error) => (Err(error), PostprocStatus::Off, false, true),
+    } else {
+        (PostprocStatus::Off, None)
+    };
+
+    let attempted_postproc = matches!(
+        &postproc,
+        PostprocStatus::Applied { .. } | PostprocStatus::Failed { .. }
+    );
+    let postproc_elapsed_ms = match &postproc {
+        PostprocStatus::Applied { ms } | PostprocStatus::Failed { ms } => Some(duration_ms(*ms)),
+        PostprocStatus::Off | PostprocStatus::SkippedShort { .. } => None,
+    };
+    let archive = match archive::save(archive::Entry {
+        source: source.as_str(),
+        raw_transcript: &raw,
+        postprocessed_transcript: processed.as_deref(),
+        stt_model: &stt_cfg.model,
+        stt_remote: stt_cfg.endpoint.is_some(),
+        stt_elapsed_ms: duration_ms(stt_elapsed.as_millis()),
+        partial,
+        postproc_status: match &postproc {
+            PostprocStatus::Off => "off",
+            PostprocStatus::Applied { .. } => "applied",
+            PostprocStatus::Failed { .. } => "failed",
+            PostprocStatus::SkippedShort { .. } => "skipped_short",
+        },
+        postproc_model: attempted_postproc.then_some(postproc_cfg.model.as_str()),
+        postproc_elapsed_ms,
+        postproc_passes: attempted_postproc.then_some(postproc_cfg.passes.max(1)),
+        postproc_prompt_version: attempted_postproc.then_some(postproc::PROMPT_VERSION),
+        postproc_instructions: attempted_postproc
+            .then_some(postproc_cfg.instructions.as_str())
+            .filter(|instructions| !instructions.is_empty()),
+    }) {
+        Ok(path) => ArchiveStatus::Saved(path),
+        Err(error) => ArchiveStatus::Failed(format!("{error:#}")),
     };
 
     Outcome {
-        text,
+        text: Ok(processed.unwrap_or(raw)),
         stt_elapsed,
         postproc,
         partial,
-        keep_wav,
+        keep_wav: false,
+        archive,
     }
+}
+
+fn duration_ms(ms: u128) -> u64 {
+    u64::try_from(ms).unwrap_or(u64::MAX)
 }
 
 struct LocalOk {

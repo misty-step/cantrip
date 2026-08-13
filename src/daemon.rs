@@ -67,6 +67,7 @@ struct Job {
     stt: SttConfig,
     vocabulary: Vec<String>,
     postproc: PostprocConfig,
+    source: pipeline::Source,
 }
 
 struct WorkerResult {
@@ -333,6 +334,7 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 stt,
                 vocabulary,
                 postproc,
+                source,
             } = job;
             let wav = RecordingCleanup(wav);
             let outcome = pipeline::run(
@@ -341,8 +343,18 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 &stt,
                 &vocabulary,
                 &postproc,
+                source,
                 &report_stage,
             );
+            match &outcome.archive {
+                pipeline::ArchiveStatus::Saved(path) => {
+                    tracing::info!("[Daemon] archived transcript path={}", path.display());
+                }
+                pipeline::ArchiveStatus::Failed(error) => {
+                    tracing::warn!("[Daemon] transcript archive failed error={error}");
+                }
+                pipeline::ArchiveStatus::NotApplicable => {}
+            }
             if outcome.keep_wav {
                 if let Err(error) = persist_failed_wav(&wav.0) {
                     tracing::warn!("[Daemon] could not keep failed WAV: {error:#}");
@@ -709,6 +721,7 @@ fn stop_recording(
         stt: config.stt.clone(),
         vocabulary: config.vocabulary.clone(),
         postproc: postproc_cfg,
+        source: pipeline::Source::Dictation,
     };
     if job_tx.send(job).is_err() {
         if let Err(error) = capture::remove_recording(&wav) {
@@ -852,10 +865,10 @@ fn handle_worker_result(
         postproc,
         partial,
     } = result;
-    let postproc_failed = matches!(&postproc, PostprocStatus::Failed);
+    let postproc_failed = matches!(&postproc, PostprocStatus::Failed { .. });
     let postproc_ms = match postproc {
-        PostprocStatus::Applied { ms } => Some(ms),
-        PostprocStatus::Off | PostprocStatus::Failed | PostprocStatus::SkippedShort { .. } => None,
+        PostprocStatus::Applied { ms } | PostprocStatus::Failed { ms } => Some(ms),
+        PostprocStatus::Off | PostprocStatus::SkippedShort { .. } => None,
     };
 
     match transcript {
@@ -1121,6 +1134,7 @@ fn recover_failed(
         stt: config.stt.clone(),
         vocabulary: config.vocabulary.clone(),
         postproc: config.postproc.clone(),
+        source: pipeline::Source::Recover,
     };
     if job_tx.send(job).is_err() {
         let _ = capture::remove_recording(&wav);

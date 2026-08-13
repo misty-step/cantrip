@@ -441,11 +441,15 @@ fn transcribe_file(wav: &std::path::Path) -> Result<()> {
         &config.stt,
         &config.vocabulary,
         &config.postproc,
+        pipeline::Source::Transcribe,
         |_| {},
     );
+    if let pipeline::ArchiveStatus::Failed(error) = &outcome.archive {
+        eprintln!("warning: transcript archive failed: {error}");
+    }
     match &outcome.text {
         Ok(text) => {
-            if outcome.postproc == pipeline::PostprocStatus::Failed {
+            if matches!(outcome.postproc, pipeline::PostprocStatus::Failed { .. }) {
                 eprintln!("post-processing failed; showing the raw transcript");
             }
             println!("{text}");
