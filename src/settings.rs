@@ -122,12 +122,61 @@ struct StatusMsg {
     ok: bool,
 }
 
+enum EditableConfigLoad {
+    Ready {
+        config: Box<Config>,
+        text: String,
+        warning: Option<StatusMsg>,
+    },
+    Blocked {
+        message: String,
+    },
+}
+
+/// Load the real file for the structured editor without weakening the strict
+/// `Config::load` path used by the daemon. Parsed values remain editable when
+/// validation fails; unreadable or malformed TOML is never replaced.
+fn load_editable_config(path: &Path) -> EditableConfigLoad {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return EditableConfigLoad::Blocked {
+                message: format!(
+                    "Cannot read config; file was not changed: {error}. Inspect it with: cantrip config edit"
+                ),
+            };
+        }
+    };
+    let config = match toml::from_str::<Config>(&text) {
+        Ok(config) => config,
+        Err(error) => {
+            return EditableConfigLoad::Blocked {
+                message: format!(
+                    "Cannot parse config; file was not changed: {error}. Repair it with: cantrip config edit"
+                ),
+            };
+        }
+    };
+    let warning = config.validate().err().map(|error| StatusMsg {
+        text: format!(
+            "Configuration needs repair: {error:#}. Correct the values, then Save & reload daemon"
+        ),
+        ok: false,
+    });
+    EditableConfigLoad::Ready {
+        config: Box::new(config),
+        text,
+        warning,
+    }
+}
+
 struct SettingsApp {
     edit: Editable,
     config_path: PathBuf,
     status: Option<StatusMsg>,
-    /// False when the config could not be loaded; the Save button is then
-    /// disabled so a default-filled form can never overwrite the user file.
+    /// False when the file is unreadable or malformed; structured saving is
+    /// disabled so defaults can never overwrite configuration we could not parse.
     loaded_ok: bool,
     /// Raw file text as loaded, used to refuse clobbering concurrent edits.
     loaded_text: String,
@@ -147,14 +196,18 @@ impl SettingsApp {
         config_path: PathBuf,
     ) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
-        let loaded_text = fs::read_to_string(&config_path).unwrap_or_default();
-        let (edit, loaded_ok, status) = match Config::load() {
-            Ok(cfg) => (Editable::from_config(&cfg), true, None),
-            Err(error) => (
+        let (edit, loaded_ok, loaded_text, status) = match load_editable_config(&config_path) {
+            EditableConfigLoad::Ready {
+                config,
+                text,
+                warning,
+            } => (Editable::from_config(&config), true, text, warning),
+            EditableConfigLoad::Blocked { message } => (
                 Editable::from_config(&Config::default()),
                 false,
+                String::new(),
                 Some(StatusMsg {
-                    text: format!("Failed to load config (saving disabled): {error:#}"),
+                    text: message,
                     ok: false,
                 }),
             ),
@@ -486,19 +539,26 @@ impl SettingsApp {
     }
 
     fn reload_from_disk(&mut self) {
-        match Config::load() {
-            Ok(cfg) => {
-                self.edit = Editable::from_config(&cfg);
+        match load_editable_config(&self.config_path) {
+            EditableConfigLoad::Ready {
+                config,
+                text,
+                warning,
+            } => {
+                self.edit = Editable::from_config(&config);
                 self.loaded_ok = true;
-                self.loaded_text = fs::read_to_string(&self.config_path).unwrap_or_default();
-                self.status = Some(StatusMsg {
-                    text: "Reloaded from disk".to_owned(),
-                    ok: true,
+                self.loaded_text = text;
+                self.status = warning.or_else(|| {
+                    Some(StatusMsg {
+                        text: "Reloaded from disk".to_owned(),
+                        ok: true,
+                    })
                 });
             }
-            Err(error) => {
+            EditableConfigLoad::Blocked { message } => {
+                self.loaded_ok = false;
                 self.status = Some(StatusMsg {
-                    text: format!("Reload failed: {error:#}"),
+                    text: message,
                     ok: false,
                 });
             }
@@ -995,5 +1055,100 @@ mod tests {
         fs::write(&path, "this is [ not toml").expect("write fixture");
         assert!(save_config_preserving(&path, &sample_config()).is_err());
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn parsed_invalid_config_keeps_real_values_editable() {
+        let path = std::env::temp_dir().join(format!(
+            "cantrip-settings-invalid-{}.toml",
+            std::process::id()
+        ));
+        let text = "injection = \"type\"\n[stt]\nmodel = \"retired-model\"\n";
+        fs::write(&path, text).expect("write fixture");
+
+        match load_editable_config(&path) {
+            EditableConfigLoad::Ready {
+                config,
+                text: loaded_text,
+                warning: Some(warning),
+            } => {
+                assert_eq!(config.injection, InjectionMode::Type);
+                assert_eq!(config.stt.model, "retired-model");
+                assert_eq!(loaded_text, text);
+                assert!(warning.text.contains("Configuration needs repair"));
+                assert!(warning.text.contains("retired-model"));
+            }
+            _ => panic!("parsed validation failure must remain editable"),
+        }
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn malformed_config_is_blocked_without_changing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "cantrip-settings-malformed-{}.toml",
+            std::process::id()
+        ));
+        let text = b"injection = [not valid TOML";
+        fs::write(&path, text).expect("write fixture");
+
+        match load_editable_config(&path) {
+            EditableConfigLoad::Blocked { message } => {
+                assert!(message.contains("file was not changed"));
+                assert!(message.contains("cantrip config edit"));
+            }
+            EditableConfigLoad::Ready { .. } => {
+                panic!("malformed config must disable structured saving")
+            }
+        }
+        assert_eq!(fs::read(&path).expect("read fixture"), text);
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn corrected_validation_failure_saves_and_reloads() {
+        let path = std::env::temp_dir().join(format!(
+            "cantrip-settings-repair-{}.toml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "# keep me\ninjection = \"type\"\n[stt]\nmodel = \"retired-model\"\n",
+        )
+        .expect("write fixture");
+
+        let mut config = match load_editable_config(&path) {
+            EditableConfigLoad::Ready {
+                config,
+                warning: Some(_),
+                ..
+            } => config,
+            _ => panic!("fixture must be a parsed validation failure"),
+        };
+        config.stt.model = "parakeet-tdt-0.6b-v3-int8".to_owned();
+        config.validate().expect("correction must validate");
+        save_config_preserving(&path, &config).expect("save corrected config");
+
+        match load_editable_config(&path) {
+            EditableConfigLoad::Ready {
+                config,
+                warning: None,
+                ..
+            } => {
+                assert_eq!(config.injection, InjectionMode::Type);
+                assert_eq!(config.stt.model, "parakeet-tdt-0.6b-v3-int8");
+            }
+            _ => panic!("corrected config must reload without a warning"),
+        }
+        assert!(
+            fs::read_to_string(&path)
+                .expect("read corrected config")
+                .contains("# keep me"),
+            "repair must preserve existing comments"
+        );
+
+        fs::remove_file(path).ok();
     }
 }
