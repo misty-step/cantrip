@@ -48,6 +48,7 @@ use wayland_client::{
 };
 
 use crate::ipc::{self, AudioWaveform, StatusSnapshot, AUDIO_WAVEFORM_BINS};
+use crate::pipeline::Stage;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Render tick while the chip is visible; IPC polling stays at POLL_INTERVAL.
@@ -783,27 +784,10 @@ impl HudState {
                 audio_waveform.map(|_| waveform_frame),
             )),
             UiState::Processing { stage } => {
-                let (label, kind, meter) = if stage == "cleaning" || stage.starts_with("cleaning") {
-                    // Finish the bar through Cleaning when multi-chunk STT
-                    // armed a meter — never snap-clear mid-ease.
-                    let hold = self.meter_armed
-                        || self.meter_display > 0.001
-                        || self.meter_hold_until.is_some_and(|until| now < until);
-                    (
-                        "Cleaning…".to_owned(),
-                        ChipKind::Cleaning,
-                        if hold { Some(1.0) } else { None },
-                    )
-                } else if let Some(rest) = stage.strip_prefix("transcribing ") {
-                    // "transcribing 2/5" from the daemon stage field.
-                    (
-                        format!("Transcribing… {rest}"),
-                        ChipKind::Transcribing,
-                        parse_chunk_meter(stage),
-                    )
-                } else {
-                    ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
-                };
+                let keep_meter = self.meter_armed
+                    || self.meter_display > 0.001
+                    || self.meter_hold_until.is_some_and(|until| now < until);
+                let (label, kind, meter) = processing_chip_content(stage, keep_meter);
                 Some((label, None, kind, 1.0, meter, None))
             }
         };
@@ -1179,7 +1163,7 @@ enum UiState {
         audio_silent: bool,
     },
     Processing {
-        stage: String,
+        stage: Stage,
     },
 }
 
@@ -1207,7 +1191,9 @@ impl UiState {
                 audio_silent: true, ..
             } => UiStateKind::NoSignal,
             Self::Recording { .. } => UiStateKind::Recording,
-            Self::Processing { stage } if stage == "cleaning" => UiStateKind::Cleaning,
+            Self::Processing {
+                stage: Stage::CleaningUp,
+            } => UiStateKind::Cleaning,
             Self::Processing { .. } => UiStateKind::Transcribing,
         }
     }
@@ -1632,19 +1618,29 @@ fn pill_meter(
         }
     }
 }
-
-/// Parse `transcribing N/M` into a 0..=1 fraction. Single-chunk and bare
-/// `transcribing` return None so the HUD keeps the indeterminate spinner.
-fn parse_chunk_meter(stage: &str) -> Option<f32> {
-    let rest = stage.strip_prefix("transcribing ")?;
-    let (chunk, total) = rest.split_once('/')?;
-    let chunk: u32 = chunk.parse().ok()?;
-    let total: u32 = total.parse().ok()?;
-    if total <= 1 || chunk == 0 {
-        return None;
+/// Map typed processing state to the HUD's static content and measured meter
+/// target. `keep_meter` carries an armed multi-chunk fill through Cleaning.
+fn processing_chip_content(stage: &Stage, keep_meter: bool) -> (String, ChipKind, Option<f32>) {
+    match stage {
+        Stage::CleaningUp => (
+            "Cleaning…".to_owned(),
+            ChipKind::Cleaning,
+            keep_meter.then_some(1.0),
+        ),
+        Stage::Transcribing { .. } | Stage::Unknown(_) => {
+            if let Some((chunk, total)) = stage.measured_progress() {
+                (
+                    format!("Transcribing… {chunk}/{total}"),
+                    ChipKind::Transcribing,
+                    Some(chunk as f32 / total as f32),
+                )
+            } else {
+                ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
+            }
+        }
     }
-    Some((chunk as f32 / total as f32).clamp(0.0, 1.0))
 }
+
 fn interpolate_waveform(
     from: [[f32; 2]; AUDIO_WAVEFORM_BINS],
     to: [[f32; 2]; AUDIO_WAVEFORM_BINS],
@@ -2103,11 +2099,12 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         acquire_lock_on, breathe, capsule_blend, ease_in_out_cubic, ease_out_back, ease_out_cubic,
-        fit_text_measured, format_elapsed, input_waveform, interpolate_waveform, mix_rgb,
-        parse_chunk_meter, pill, pill_meter, pulse, spinner, ChipKind, UiState, BREATHE_MIN,
-        SCREENSHOT_WAVEFORM,
+        fit_text_measured, format_elapsed, input_waveform, interpolate_waveform, mix_rgb, pill,
+        pill_meter, processing_chip_content, pulse, spinner, ChipKind, UiState, UiStateKind,
+        BREATHE_MIN, SCREENSHOT_WAVEFORM,
     };
     use crate::ipc::{AudioSignal, StatusSnapshot, AUDIO_WAVEFORM_BINS};
+    use crate::pipeline::Stage;
     use std::fs;
     use std::path::PathBuf;
 
@@ -2348,14 +2345,67 @@ mod tests {
     }
 
     #[test]
-    fn parse_chunk_meter_only_for_multi_chunk_stages() {
-        assert_eq!(parse_chunk_meter("transcribing"), None);
-        assert_eq!(parse_chunk_meter("transcribing 1/1"), None);
-        assert_eq!(parse_chunk_meter("cleaning"), None);
-        assert_eq!(parse_chunk_meter("transcribing 1/4"), Some(0.25));
-        assert_eq!(parse_chunk_meter("transcribing 2/5"), Some(0.4));
-        assert_eq!(parse_chunk_meter("transcribing 5/5"), Some(1.0));
-        assert_eq!(parse_chunk_meter("transcribing 0/3"), None);
+    fn processing_status_keeps_typed_stage_and_safe_kind() {
+        let progress = StatusSnapshot::Processing {
+            stage: Stage::Transcribing { chunk: 2, total: 5 },
+            outcome: None,
+        };
+        assert_eq!(
+            UiState::from_status(&progress),
+            UiState::Processing {
+                stage: Stage::Transcribing { chunk: 2, total: 5 },
+            }
+        );
+        assert_eq!(
+            UiState::from_status(&progress).kind(),
+            UiStateKind::Transcribing
+        );
+
+        let cleaning = StatusSnapshot::Processing {
+            stage: Stage::CleaningUp,
+            outcome: None,
+        };
+        assert_eq!(
+            UiState::from_status(&cleaning).kind(),
+            UiStateKind::Cleaning
+        );
+
+        let future = StatusSnapshot::Processing {
+            stage: Stage::Unknown("aligning".to_owned()),
+            outcome: None,
+        };
+        assert_eq!(
+            UiState::from_status(&future).kind(),
+            UiStateKind::Transcribing
+        );
+    }
+
+    #[test]
+    fn processing_chip_uses_only_typed_measured_progress() {
+        assert_eq!(
+            processing_chip_content(&Stage::Transcribing { chunk: 2, total: 5 }, false),
+            (
+                "Transcribing… 2/5".to_owned(),
+                ChipKind::Transcribing,
+                Some(0.4)
+            )
+        );
+        assert_eq!(
+            processing_chip_content(&Stage::Transcribing { chunk: 1, total: 1 }, false),
+            ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
+        );
+        assert_eq!(
+            processing_chip_content(&Stage::Unknown("aligning".to_owned()), false),
+            ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
+        );
+        assert_eq!(
+            processing_chip_content(&Stage::CleaningUp, false),
+            ("Cleaning…".to_owned(), ChipKind::Cleaning, None)
+        );
+        assert_eq!(
+            processing_chip_content(&Stage::CleaningUp, true),
+            ("Cleaning…".to_owned(), ChipKind::Cleaning, Some(1.0))
+        );
     }
 
     #[test]

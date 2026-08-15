@@ -7,6 +7,7 @@ use crate::models;
 use crate::postproc;
 use crate::stt::{self, Transcriber};
 use anyhow::{Context, Result};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -59,16 +60,57 @@ pub enum Stage {
         total: u32,
     },
     CleaningUp,
+    /// A stage added by a newer daemon or a malformed stage from the wire.
+    Unknown(String),
 }
 
 impl Stage {
-    pub fn as_str(&self) -> String {
+    /// Return validated measured chunk progress. Single-chunk transcription is
+    /// intentionally indeterminate on the HUD.
+    pub fn measured_progress(&self) -> Option<(u32, u32)> {
+        match self {
+            Self::Transcribing { chunk, total }
+                if *total > 1 && *chunk >= 1 && *chunk <= *total =>
+            {
+                Some((*chunk, *total))
+            }
+            Self::Transcribing { .. } | Self::CleaningUp | Self::Unknown(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for Stage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transcribing { chunk, total } if *total > 1 => {
-                format!("transcribing {chunk}/{total}")
+                write!(formatter, "transcribing {chunk}/{total}")
             }
-            Self::Transcribing { .. } => "transcribing".to_owned(),
-            Self::CleaningUp => "cleaning".to_owned(),
+            Self::Transcribing { .. } => formatter.write_str("transcribing"),
+            Self::CleaningUp => formatter.write_str("cleaning"),
+            Self::Unknown(stage) => formatter.write_str(stage),
+        }
+    }
+}
+
+impl From<String> for Stage {
+    fn from(stage: String) -> Self {
+        match stage.as_str() {
+            "transcribing" => Self::Transcribing { chunk: 1, total: 1 },
+            "cleaning" => Self::CleaningUp,
+            _ => {
+                if let Some((chunk, total)) = stage
+                    .strip_prefix("transcribing ")
+                    .and_then(|progress| progress.split_once('/'))
+                    .and_then(|(chunk, total)| {
+                        Some((chunk.parse::<u32>().ok()?, total.parse::<u32>().ok()?))
+                    })
+                    .filter(|(chunk, total)| *chunk >= 1 && *chunk <= *total)
+                {
+                    Self::Transcribing { chunk, total }
+                } else {
+                    Self::Unknown(stage)
+                }
+            }
         }
     }
 }
@@ -322,16 +364,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stage_as_str_matches_daemon_hud_contract() {
+    fn measured_progress_requires_valid_multi_chunk_bounds() {
         assert_eq!(
-            Stage::Transcribing { chunk: 1, total: 1 }.as_str(),
-            "transcribing"
+            Stage::Transcribing { chunk: 1, total: 4 }.measured_progress(),
+            Some((1, 4))
         );
         assert_eq!(
-            Stage::Transcribing { chunk: 2, total: 5 }.as_str(),
-            "transcribing 2/5"
+            Stage::Transcribing { chunk: 1, total: 1 }.measured_progress(),
+            None
         );
-        assert_eq!(Stage::CleaningUp.as_str(), "cleaning");
+        assert_eq!(
+            Stage::Transcribing { chunk: 0, total: 3 }.measured_progress(),
+            None
+        );
+        assert_eq!(
+            Stage::Transcribing { chunk: 4, total: 3 }.measured_progress(),
+            None
+        );
+        assert_eq!(Stage::CleaningUp.measured_progress(), None);
+        assert_eq!(
+            Stage::Unknown("future".to_owned()).measured_progress(),
+            None
+        );
     }
 
     #[test]
