@@ -540,7 +540,7 @@ impl SettingsApp {
             return;
         }
         self.loaded_text = fs::read_to_string(&self.config_path).unwrap_or_default();
-        match ipc::send(ipc::Command::Reload) {
+        match ipc::send_command(ipc::Command::Reload) {
             Ok(reply) if reply.ok => {
                 self.status = Some(StatusMsg {
                     text: "Saved and daemon reloaded".to_owned(),
@@ -769,10 +769,10 @@ impl eframe::App for SettingsApp {
         self.frames += 1;
         if self.last_poll.elapsed() >= DAEMON_POLL {
             self.last_poll = Instant::now();
-            match ipc::send(ipc::Command::Status) {
-                Ok(reply) => {
+            match ipc::status() {
+                Ok(status) => {
                     self.daemon_online = true;
-                    self.daemon_state = reply.state;
+                    self.daemon_state = status.state_name().to_owned();
                 }
                 Err(_) => {
                     self.daemon_online = false;
