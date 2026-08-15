@@ -532,7 +532,7 @@ fn status_reply(state: &State, last_outcome: &LastOutcome) -> WireReply {
             }),
             None,
         ),
-        State::Processing { stage, .. } => (None, None, Some(stage.as_str())),
+        State::Processing { stage, .. } => (None, None, Some(stage)),
         State::Idle => (None, None, None),
     };
     WireReply::status(state.name(), elapsed, signal, stage, last_outcome.to_ipc())
@@ -1032,13 +1032,15 @@ fn recover_failed(
             Some("transcription worker unavailable".to_owned()),
         );
     }
+    let stage = pipeline::Stage::Transcribing { chunk: 1, total: 1 };
+    let reply =
+        WireReply::command(true, "processing", Some("recovering".to_owned())).with_stage(&stage);
     *state = State::Processing {
         started: Instant::now(),
-        stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
+        stage,
     };
     tracing::info!("[Daemon] state idle -> processing (recover failed WAV)");
-    WireReply::command(true, state.name(), Some("recovering".to_owned()))
-        .with_stage("transcribing".to_owned())
+    reply
 }
 
 fn persist_last_transcript(text: &str) -> Result<()> {

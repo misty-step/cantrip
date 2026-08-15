@@ -32,12 +32,6 @@ pub struct ChunkProgress {
     pub total: u32,
 }
 
-impl ChunkProgress {
-    pub fn label(self) -> String {
-        format!("Transcribing… {}/{}", self.index, self.total)
-    }
-}
-
 /// Local STT outcome: full text, or partial text when a later chunk failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalTranscript {
@@ -513,13 +507,5 @@ mod tests {
         for window in ranges.windows(2) {
             assert_eq!(window[0].1, window[1].0);
         }
-    }
-
-    #[test]
-    fn chunk_progress_label_is_operator_facing() {
-        assert_eq!(
-            ChunkProgress { index: 2, total: 5 }.label(),
-            "Transcribing… 2/5"
-        );
     }
 }

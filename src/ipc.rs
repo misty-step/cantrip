@@ -2,6 +2,7 @@
 
 pub use crate::capture::AUDIO_WAVEFORM_BINS;
 use crate::paths;
+use crate::pipeline::Stage;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -147,7 +148,7 @@ pub struct CommandReply {
     pub ok: bool,
     pub state: StateKind,
     pub message: Option<String>,
-    pub stage: Option<String>,
+    pub stage: Option<Stage>,
     pub outcome: Option<TerminalOutcome>,
 }
 
@@ -162,7 +163,7 @@ pub enum StatusSnapshot {
         outcome: Option<TerminalOutcome>,
     },
     Processing {
-        stage: String,
+        stage: Stage,
         outcome: Option<TerminalOutcome>,
     },
     Unknown {
@@ -232,7 +233,7 @@ impl WireReply {
         state: &str,
         elapsed: Option<u64>,
         signal: Option<AudioSignal>,
-        stage: Option<String>,
+        stage: Option<&Stage>,
         outcome: Option<TerminalOutcome>,
     ) -> Self {
         let (audio_level, audio_silent, audio_waveform) = match signal {
@@ -255,14 +256,14 @@ impl WireReply {
             audio_level,
             audio_silent,
             audio_waveform,
-            stage,
+            stage: stage.map(ToString::to_string),
             last,
             last_ok,
         }
     }
 
-    pub(crate) fn with_stage(mut self, stage: String) -> Self {
-        self.stage = Some(stage);
+    pub(crate) fn with_stage(mut self, stage: &Stage) -> Self {
+        self.stage = Some(stage.to_string());
         self
     }
 
@@ -279,7 +280,7 @@ impl WireReply {
             ok: self.ok,
             state: self.state.into(),
             message: self.message,
-            stage: self.stage,
+            stage: self.stage.map(Stage::from),
             outcome: terminal_outcome(self.last, self.last_ok),
         }
     }
@@ -311,7 +312,10 @@ impl WireReply {
                 })
             }
             "processing" => Ok(StatusSnapshot::Processing {
-                stage: self.stage.unwrap_or_else(|| "transcribing".to_owned()),
+                stage: self
+                    .stage
+                    .map(Stage::from)
+                    .unwrap_or(Stage::Transcribing { chunk: 1, total: 1 }),
                 outcome,
             }),
             _ => Ok(StatusSnapshot::Unknown {
@@ -467,28 +471,97 @@ mod tests {
     }
 
     #[test]
-    fn processing_status_preserves_stage_and_legacy_default() {
-        let explicit: WireReply = serde_json::from_str(
-            r#"{"ok":true,"state":"processing","message":null,"stage":"cleaning"}"#,
-        )
-        .expect("processing status should parse");
-        assert_eq!(
-            explicit.into_status().expect("status should convert"),
-            StatusSnapshot::Processing {
-                stage: "cleaning".to_owned(),
-                outcome: None,
-            }
-        );
+    fn processing_status_preserves_typed_stage_across_the_json_boundary() {
+        let outbound = [
+            (Stage::Transcribing { chunk: 1, total: 1 }, "transcribing"),
+            (
+                Stage::Transcribing { chunk: 2, total: 5 },
+                "transcribing 2/5",
+            ),
+            (Stage::CleaningUp, "cleaning"),
+            (Stage::Unknown("calibrating".to_owned()), "calibrating"),
+        ];
+        for (stage, expected) in outbound {
+            let json = serde_json::to_value(WireReply::status(
+                "processing",
+                None,
+                None,
+                Some(&stage),
+                None,
+            ))
+            .expect("status should serialize");
+            assert_eq!(json["stage"], expected);
+        }
 
-        let legacy: WireReply =
-            serde_json::from_str(r#"{"ok":true,"state":"processing","message":null}"#)
-                .expect("legacy processing status should parse");
-        assert_eq!(
-            legacy.into_status().expect("legacy status should convert"),
-            StatusSnapshot::Processing {
-                stage: "transcribing".to_owned(),
-                outcome: None,
+        let inbound = [
+            (
+                Some("transcribing"),
+                Stage::Transcribing { chunk: 1, total: 1 },
+            ),
+            (
+                Some("transcribing 1/1"),
+                Stage::Transcribing { chunk: 1, total: 1 },
+            ),
+            (
+                Some("transcribing 2/5"),
+                Stage::Transcribing { chunk: 2, total: 5 },
+            ),
+            (Some("cleaning"), Stage::CleaningUp),
+            (
+                Some("transcribing 0/3"),
+                Stage::Unknown("transcribing 0/3".to_owned()),
+            ),
+            (
+                Some("transcribing 4/3"),
+                Stage::Unknown("transcribing 4/3".to_owned()),
+            ),
+            (
+                Some("transcribing 1/0"),
+                Stage::Unknown("transcribing 1/0".to_owned()),
+            ),
+            (
+                Some("transcribing nope"),
+                Stage::Unknown("transcribing nope".to_owned()),
+            ),
+            (
+                Some("calibrating"),
+                Stage::Unknown("calibrating".to_owned()),
+            ),
+            (None, Stage::Transcribing { chunk: 1, total: 1 }),
+        ];
+
+        for (wire_stage, expected) in inbound {
+            let mut json = serde_json::json!({"ok": true, "state": "processing", "message": null});
+            if let Some(stage) = wire_stage {
+                json.as_object_mut()
+                    .expect("fixture should be an object")
+                    .insert(
+                        "stage".to_owned(),
+                        serde_json::Value::String(stage.to_owned()),
+                    );
             }
+            let wire: WireReply =
+                serde_json::from_value(json).expect("status fixture should deserialize");
+            assert_eq!(
+                wire.into_status().expect("status should convert"),
+                StatusSnapshot::Processing {
+                    stage: expected,
+                    outcome: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn command_stage_preserves_recover_wire_and_typed_views() {
+        let stage = Stage::Transcribing { chunk: 1, total: 1 };
+        let wire = WireReply::command(true, "processing", Some("recovering".to_owned()))
+            .with_stage(&stage);
+        let json = serde_json::to_value(&wire).expect("command reply should serialize");
+        assert_eq!(json["stage"], "transcribing");
+        assert_eq!(
+            wire.into_command().stage,
+            Some(Stage::Transcribing { chunk: 1, total: 1 })
         );
     }
 
