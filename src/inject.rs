@@ -274,6 +274,29 @@ fn backend_order(mode: InjectionMode, available: AvailableBackends) -> Vec<Backe
     }
 }
 
+/// Names of the backends the injection policy would try for a known tool set.
+///
+/// `ydotool_ready` means both the executable and a daemon socket are present.
+/// The doctor command uses this wrapper around the same order as [`inject`].
+pub fn planned_backend_names(
+    mode: InjectionMode,
+    wtype: bool,
+    ydotool_ready: bool,
+    wl_copy: bool,
+) -> Vec<&'static str> {
+    backend_order(
+        mode,
+        AvailableBackends {
+            wtype,
+            ydotool: ydotool_ready,
+            wl_copy,
+        },
+    )
+    .into_iter()
+    .map(Backend::name)
+    .collect()
+}
+
 /// True when `name` resolves to an executable file on `PATH`.
 /// `pub` (not `pub(crate)`): the `cantrip` binary is a separate crate.
 pub fn executable_in_path(name: &str) -> bool {

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
 
+use cantrip::inject::{self, InjectionMode};
 use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
 use cantrip::{config::Config, daemon, hud, keys, paths, pipeline, settings};
@@ -89,6 +90,7 @@ enum CliCommand {
         #[command(subcommand)]
         command: ModelsCommand,
     },
+    /// Diagnose effective configuration and runtime prerequisites.
     Doctor,
 }
 
@@ -502,42 +504,210 @@ fn model_status() -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DoctorTools {
+    pw_record: bool,
+    wtype: bool,
+    ydotool: bool,
+    ydotool_socket: bool,
+    wl_copy: bool,
+}
+
 fn doctor() -> Result<()> {
-    println!("pw-record: {}", availability("pw-record"));
-    println!("wtype: {}", availability("wtype"));
-    println!("ydotool: {}", availability("ydotool"));
-    println!("wl-copy: {}", availability("wl-copy"));
-    match ydotool_socket() {
-        Some(path) => println!("ydotool socket: {}", path.display()),
-        None => println!("ydotool socket: not found"),
+    let tools = DoctorTools {
+        pw_record: inject::executable_in_path("pw-record"),
+        wtype: inject::executable_in_path("wtype"),
+        ydotool: inject::executable_in_path("ydotool"),
+        ydotool_socket: inject::find_ydotool_socket().is_some(),
+        wl_copy: inject::executable_in_path("wl-copy"),
+    };
+    let config_path = paths::config_file().context("locating config file")?;
+    let config_exists = config_path.exists();
+    let config = Config::load();
+
+    match &config {
+        Ok(_) if config_exists => println!("config: ready"),
+        Ok(_) => println!("config: defaults in use — run: cantrip config init"),
+        Err(_) => {
+            println!("config: blocked — invalid or unreadable; run: cantrip config edit")
+        }
     }
-    match models::installed(&PARAKEET_V3_INT8) {
-        Ok(Some(path)) => println!("model: installed ({})", path.display()),
-        Ok(None) => println!("model: not installed"),
-        Err(error) => println!("model: error ({error:#})"),
+    println!("{}", capture_diagnosis(config.as_ref().ok(), tools));
+
+    if let Ok(config) = &config {
+        println!("{}", stt_diagnosis(config));
+        println!("{}", cleanup_diagnosis(config));
+        println!("{}", injection_diagnosis(config.injection, tools));
+    } else {
+        println!("stt: blocked — fix config first");
+        println!("cleanup: blocked — fix config first");
+        println!("injection: blocked — fix config first");
     }
+    let wayland = env::var_os("WAYLAND_DISPLAY").is_some()
+        || env::var("XDG_SESSION_TYPE").is_ok_and(|value| value == "wayland");
+    if wayland {
+        println!(
+            "hud: Wayland session detected; layer-shell support is checked when the HUD starts"
+        );
+    } else {
+        println!("hud: blocked — run Cantrip from a Wayland session");
+    }
+
     match ipc::send_command(Command::Ping) {
         Ok(reply) if reply.ok => println!("daemon: reachable ({})", reply.state.as_str()),
-        Ok(reply) => println!("daemon: replied not ok ({})", reply.state.as_str()),
-        Err(error) => println!("daemon: unreachable ({error:#})"),
+        _ => println!("daemon: not running — run: cantrip daemon"),
     }
-    println!(
-        "XDG_CURRENT_DESKTOP: {}",
-        env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unset".to_owned())
-    );
     Ok(())
 }
 
-fn availability(name: &str) -> &'static str {
-    if cantrip::inject::executable_in_path(name) {
-        "found"
+fn capture_diagnosis(config: Option<&Config>, tools: DoctorTools) -> String {
+    let source = match config.and_then(|config| config.audio_source.as_ref()) {
+        Some(_) => "configured source",
+        None if config.is_some() => "default input",
+        None => "source unknown until config is valid",
+    };
+    if tools.pw_record {
+        format!("capture: ready (pw-record; {source})")
     } else {
-        "not found"
+        format!("capture: blocked (pw-record missing; {source}) — install PipeWire")
     }
 }
 
-fn ydotool_socket() -> Option<PathBuf> {
-    cantrip::inject::find_ydotool_socket()
+fn stt_diagnosis(config: &Config) -> String {
+    if let Some(endpoint) = &config.stt.endpoint {
+        return format!(
+            "stt: remote configured (model={}; endpoint={}; credential={})",
+            config.stt.model,
+            endpoint_origin(endpoint),
+            credential_status(config.stt.api_key_id.as_deref())
+        );
+    }
+
+    let spec = match models::require(&config.stt.model) {
+        Ok(spec) => spec,
+        Err(_) => {
+            return format!(
+                "stt: blocked (unknown local model={}) — run: cantrip config edit",
+                config.stt.model
+            );
+        }
+    };
+    match models::installed(spec) {
+        Ok(Some(_)) => format!("stt: local ready (model={})", config.stt.model),
+        Ok(None) => format!(
+            "stt: blocked (local model={} not installed) — run: cantrip models pull",
+            config.stt.model
+        ),
+        Err(_) => format!(
+            "stt: blocked (could not inspect local model={}) — run: cantrip models status",
+            config.stt.model
+        ),
+    }
+}
+
+fn cleanup_diagnosis(config: &Config) -> String {
+    if !config.postproc.enabled {
+        return "cleanup: disabled (raw transcript is delivered)".to_owned();
+    }
+    if config.postproc.endpoint.trim().is_empty() {
+        return "cleanup: blocked (endpoint is empty) — run: cantrip settings".to_owned();
+    }
+    if config.postproc.timeout_ms == 0 {
+        return "cleanup: blocked (timeout_ms is zero) — run: cantrip settings".to_owned();
+    }
+    let endpoint = endpoint_origin(&config.postproc.endpoint);
+    let lane = endpoint_lane(&endpoint);
+    format!(
+        "cleanup: {lane} configured (model={}; endpoint={}; credential={}; min_chars={})",
+        config.postproc.model,
+        endpoint,
+        credential_status(config.postproc.api_key_id.as_deref()),
+        config.postproc.min_chars
+    )
+}
+
+fn injection_diagnosis(mode: InjectionMode, tools: DoctorTools) -> String {
+    let ydotool_ready = tools.ydotool && tools.ydotool_socket;
+    let order = inject::planned_backend_names(mode, tools.wtype, ydotool_ready, tools.wl_copy);
+    let ready = match mode {
+        InjectionMode::Auto => tools.wtype || ydotool_ready || tools.wl_copy,
+        InjectionMode::Paste => tools.wl_copy && (tools.wtype || ydotool_ready),
+        InjectionMode::Type => tools.wtype || ydotool_ready,
+        InjectionMode::Clipboard => tools.wl_copy,
+    };
+    let mode = injection_mode_name(mode);
+    let order = if order.is_empty() {
+        "none".to_owned()
+    } else {
+        order.join(" -> ")
+    };
+    if ready {
+        format!("injection: ready (mode={mode}; order={order})")
+    } else {
+        let action = match mode {
+            "paste" => "install wl-clipboard and wtype, or change injection mode",
+            "type" => "install wtype or ydotool with its daemon",
+            "clipboard" => "install wl-clipboard",
+            _ => "install wl-clipboard or wtype",
+        };
+        format!("injection: blocked (mode={mode}; order={order}) — {action}")
+    }
+}
+
+fn injection_mode_name(mode: InjectionMode) -> &'static str {
+    match mode {
+        InjectionMode::Auto => "auto",
+        InjectionMode::Paste => "paste",
+        InjectionMode::Type => "type",
+        InjectionMode::Clipboard => "clipboard",
+    }
+}
+
+fn credential_status(id: Option<&str>) -> &'static str {
+    if id.is_some_and(|id| !id.trim().is_empty()) {
+        "keyring id configured"
+    } else {
+        "none"
+    }
+}
+
+/// Show only a URL origin. Userinfo, path, query, and fragment can contain
+/// credentials or tenant identifiers and never belong in diagnostic output.
+fn endpoint_origin(endpoint: &str) -> String {
+    let Some((scheme, remainder)) = endpoint.trim().split_once("://") else {
+        return "configured endpoint (address hidden)".to_owned();
+    };
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    if scheme.is_empty() || authority.is_empty() {
+        "configured endpoint (address hidden)".to_owned()
+    } else {
+        format!("{scheme}://{authority}")
+    }
+}
+
+fn endpoint_lane(origin: &str) -> &'static str {
+    let authority = origin
+        .split_once("://")
+        .map(|(_, authority)| authority)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if authority == "localhost"
+        || authority.starts_with("localhost:")
+        || authority == "127.0.0.1"
+        || authority.starts_with("127.0.0.1:")
+        || authority == "[::1]"
+        || authority.starts_with("[::1]:")
+    {
+        "local"
+    } else {
+        "remote"
+    }
 }
 
 #[cfg(test)]
@@ -548,5 +718,95 @@ mod tests {
     #[test]
     fn clap_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn endpoint_diagnostics_drop_sensitive_url_components() {
+        let origin = endpoint_origin(
+            "https://user:password@api.example.test/v1/private?api_key=secret#tenant",
+        );
+        assert_eq!(origin, "https://api.example.test");
+        assert!(!origin.contains("user"));
+        assert!(!origin.contains("password"));
+        assert!(!origin.contains("secret"));
+        assert!(!origin.contains("tenant"));
+    }
+
+    #[test]
+    fn remote_stt_diagnosis_reports_lane_without_credential_details() {
+        let config = Config {
+            stt: cantrip::config::SttConfig {
+                model: "speech-model".to_owned(),
+                endpoint: Some("https://user:secret@api.example.test/v1?key=hidden".to_owned()),
+                api_key_id: Some("private-key-name".to_owned()),
+            },
+            ..Config::default()
+        };
+        let line = stt_diagnosis(&config);
+        assert_eq!(
+            line,
+            "stt: remote configured (model=speech-model; endpoint=https://api.example.test; credential=keyring id configured)"
+        );
+        assert!(!line.contains("secret"));
+        assert!(!line.contains("hidden"));
+        assert!(!line.contains("private-key-name"));
+    }
+
+    #[test]
+    fn cleanup_diagnosis_reports_lane_and_rejects_empty_endpoint() {
+        let mut config = Config {
+            postproc: cantrip::config::PostprocConfig {
+                enabled: true,
+                endpoint: "http://localhost:11434/v1".to_owned(),
+                model: "qwen3:8b".to_owned(),
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            cleanup_diagnosis(&config),
+            "cleanup: local configured (model=qwen3:8b; endpoint=http://localhost:11434; credential=none; min_chars=40)"
+        );
+
+        config.postproc.endpoint.clear();
+        assert_eq!(
+            cleanup_diagnosis(&config),
+            "cleanup: blocked (endpoint is empty) — run: cantrip settings"
+        );
+    }
+    #[test]
+    fn injection_diagnosis_uses_execution_backend_order() {
+        let line = injection_diagnosis(
+            InjectionMode::Auto,
+            DoctorTools {
+                pw_record: true,
+                wtype: true,
+                ydotool: true,
+                ydotool_socket: false,
+                wl_copy: true,
+            },
+        );
+        assert_eq!(
+            line,
+            "injection: ready (mode=auto; order=paste -> wtype -> clipboard)"
+        );
+    }
+
+    #[test]
+    fn injection_diagnosis_explains_strict_mode_blocker() {
+        let line = injection_diagnosis(
+            InjectionMode::Paste,
+            DoctorTools {
+                pw_record: true,
+                wtype: false,
+                ydotool: false,
+                ydotool_socket: false,
+                wl_copy: true,
+            },
+        );
+        assert_eq!(
+            line,
+            "injection: blocked (mode=paste; order=none) — install wl-clipboard and wtype, or change injection mode"
+        );
     }
 }
