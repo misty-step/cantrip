@@ -1,6 +1,6 @@
 //! The cantrip daemon and its socket-driven state machine.
 
-use crate::capture::{self, Recorder};
+use crate::capture::{self, InputSignal, Recorder};
 use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::hud;
 use crate::inject::{self, InjectionMode, InjectionOutcome};
@@ -29,6 +29,9 @@ const HUD_SUPERVISE_INTERVAL: Duration = Duration::from_secs(5);
 /// Minimum gap between HUD spawn attempts, so a broken HUD (for example a
 /// headless session with no Wayland) cannot cause a respawn hot loop.
 const HUD_SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
+/// Fixed daemon-owned sampling window. Status clients only read the cached
+/// result, so HUD and settings polling cannot consume each other's samples.
+const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -41,6 +44,8 @@ enum State {
     Recording {
         recorder: Recorder,
         started: Instant,
+        signal: Option<InputSignal>,
+        next_signal_sample: Instant,
         /// Per-capture post-processing override (Some(true)=clean,
         /// Some(false)=raw, None=follow config). Applied when this capture
         /// is stopped and dispatched to the worker.
@@ -406,6 +411,7 @@ fn serve(
     loop {
         drain_stage(&mut state, stage_rx);
         drain_worker_results(&mut state, &config, result_rx, &mut last_outcome)?;
+        refresh_recording_signal(&mut state);
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
         }
@@ -501,6 +507,9 @@ fn handle_connection(
             state: state.name().to_owned(),
             message: Some("unknown command".to_owned()),
             elapsed: None,
+            audio_level: None,
+            audio_silent: None,
+            audio_waveform: None,
             stage: None,
             last: None,
             last_ok: None,
@@ -512,20 +521,49 @@ fn handle_connection(
 }
 
 fn status_reply(state: &State, last_outcome: &LastOutcome) -> Reply {
-    let (elapsed, stage) = match state {
-        State::Recording { started, .. } => (Some(started.elapsed().as_secs()), None),
-        State::Processing { stage, .. } => (None, Some(stage.as_str())),
-        State::Idle => (None, None),
+    let (elapsed, audio_level, audio_silent, audio_waveform, stage) = match state {
+        State::Recording {
+            started, signal, ..
+        } => (
+            Some(started.elapsed().as_secs()),
+            signal.map(|value| value.level),
+            signal.map(|value| value.silent),
+            signal.map(|value| value.waveform),
+            None,
+        ),
+        State::Processing { stage, .. } => (None, None, None, None, Some(stage.as_str())),
+        State::Idle => (None, None, None, None, None),
     };
     Reply {
         ok: true,
         state: state.name().to_owned(),
         message: None,
         elapsed,
+        audio_level,
+        audio_silent,
+        audio_waveform,
         stage,
         last: last_outcome.message.clone(),
         last_ok: last_outcome.ok,
     }
+}
+
+fn refresh_recording_signal(state: &mut State) {
+    let State::Recording {
+        recorder,
+        signal,
+        next_signal_sample,
+        ..
+    } = state
+    else {
+        return;
+    };
+    let now = Instant::now();
+    if now < *next_signal_sample {
+        return;
+    }
+    *signal = recorder.input_signal();
+    *next_signal_sample = now + SIGNAL_SAMPLE_INTERVAL;
 }
 
 fn write_client_error(stream: &mut UnixStream, state: &State, message: &str) -> Result<()> {
@@ -534,6 +572,9 @@ fn write_client_error(stream: &mut UnixStream, state: &State, message: &str) -> 
         state: state.name().to_owned(),
         message: Some(message.to_owned()),
         elapsed: None,
+        audio_level: None,
+        audio_silent: None,
+        audio_waveform: None,
         stage: None,
         last: None,
         last_ok: None,
@@ -564,6 +605,9 @@ fn execute(
                 state: state.name().to_owned(),
                 message: Some("busy".to_owned()),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: None,
                 last_ok: None,
@@ -576,6 +620,9 @@ fn execute(
                 state: state.name().to_owned(),
                 message: Some("not recording".to_owned()),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: None,
                 last_ok: None,
@@ -591,6 +638,9 @@ fn execute(
             state: state.name().to_owned(),
             message: Some("pong".to_owned()),
             elapsed: None,
+            audio_level: None,
+            audio_silent: None,
+            audio_waveform: None,
             stage: None,
             last: None,
             last_ok: None,
@@ -604,6 +654,9 @@ fn execute(
                     state: state.name().to_owned(),
                     message: Some("reloaded".to_owned()),
                     elapsed: None,
+                    audio_level: None,
+                    audio_silent: None,
+                    audio_waveform: None,
                     stage: None,
                     last: None,
                     last_ok: None,
@@ -614,6 +667,9 @@ fn execute(
                 state: state.name().to_owned(),
                 message: Some(format!("{error:#}")),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: None,
                 last_ok: None,
@@ -633,24 +689,23 @@ fn start_recording(
     // "cleanup failed — raw text", so reject it up front with a clear error.
     if postproc_override == Some(true) && config.postproc.model.trim().is_empty() {
         *last_outcome = LastOutcome::notice("Post-processing requested but no model set");
-        return Reply {
-            ok: false,
-            state: state.name().to_owned(),
-            message: Some(
-                "post-processing requested but [postproc].model is not set — add a model or drop --postproc clean".to_owned(),
-            ),
-            elapsed: None,
-            stage: None,
-            last: None,
-            last_ok: None,
-        };
+        return Reply { ok: false,
+        state: state.name().to_owned(),
+        message: Some(
+            "post-processing requested but [postproc].model is not set — add a model or drop --postproc clean".to_owned(),
+        ), elapsed: None, audio_level: None, audio_silent: None, audio_waveform: None, stage: None,
+        last: None,
+        last_ok: None, };
     }
     let wav = runtime_dir.join(format!("rec-{}.wav", unix_millis()));
     match Recorder::start(&wav, config.audio_source.as_deref()) {
         Ok(recorder) => {
+            let started = Instant::now();
             *state = State::Recording {
                 recorder,
-                started: Instant::now(),
+                started,
+                signal: None,
+                next_signal_sample: started,
                 postproc: postproc_override,
             };
             *last_outcome = LastOutcome::default();
@@ -660,6 +715,9 @@ fn start_recording(
                 state: state.name().to_owned(),
                 message: Some("recording".to_owned()),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: None,
                 last_ok: None,
@@ -672,6 +730,9 @@ fn start_recording(
                 state: state.name().to_owned(),
                 message: Some(format!("starting recording failed: {error:#}")),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: None,
                 last_ok: None,
@@ -690,6 +751,7 @@ fn stop_recording(
         recorder,
         started,
         postproc,
+        ..
     } = std::mem::replace(state, State::Idle)
     else {
         unreachable!("stop_recording called outside recording state");
@@ -705,6 +767,9 @@ fn stop_recording(
                 state: state.name().to_owned(),
                 message: Some(format!("stopping recording failed: {error:#}")),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: None,
                 last_ok: None,
@@ -733,6 +798,9 @@ fn stop_recording(
             state: state.name().to_owned(),
             message: Some("transcription worker unavailable".to_owned()),
             elapsed: None,
+            audio_level: None,
+            audio_silent: None,
+            audio_waveform: None,
             stage: None,
             last: None,
             last_ok: None,
@@ -748,6 +816,9 @@ fn stop_recording(
         state: state.name().to_owned(),
         message: Some("processing".to_owned()),
         elapsed: None,
+        audio_level: None,
+        audio_silent: None,
+        audio_waveform: None,
         stage: None,
         last: None,
         last_ok: None,
@@ -766,6 +837,9 @@ fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> Reply 
                     state: state.name().to_owned(),
                     message: Some("cancelled".to_owned()),
                     elapsed: None,
+                    audio_level: None,
+                    audio_silent: None,
+                    audio_waveform: None,
                     stage: None,
                     last: None,
                     last_ok: None,
@@ -778,6 +852,9 @@ fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> Reply 
                     state: state.name().to_owned(),
                     message: Some(format!("cancelling recording failed: {error:#}")),
                     elapsed: None,
+                    audio_level: None,
+                    audio_silent: None,
+                    audio_waveform: None,
                     stage: None,
                     last: None,
                     last_ok: None,
@@ -794,6 +871,9 @@ fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> Reply 
                     state: state.name().to_owned(),
                     message: Some("nothing to cancel".to_owned()),
                     elapsed: None,
+                    audio_level: None,
+                    audio_silent: None,
+                    audio_waveform: None,
                     stage: None,
                     last: None,
                     last_ok: None,
@@ -809,6 +889,9 @@ fn busy_reply(state: &State) -> Reply {
         state: state.name().to_owned(),
         message: Some("busy: processing".to_owned()),
         elapsed: None,
+        audio_level: None,
+        audio_silent: None,
+        audio_waveform: None,
         stage: None,
         last: None,
         last_ok: None,
@@ -1006,6 +1089,9 @@ fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -
                 state: state.name().to_owned(),
                 message: Some("no saved transcript".to_owned()),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: last_outcome.message.clone(),
                 last_ok: last_outcome.ok,
@@ -1031,6 +1117,9 @@ fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -
                         state: state.name().to_owned(),
                         message: Some(message),
                         elapsed: None,
+                        audio_level: None,
+                        audio_silent: None,
+                        audio_waveform: None,
                         stage: None,
                         last: last_outcome.message.clone(),
                         last_ok: last_outcome.ok,
@@ -1044,6 +1133,9 @@ fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -
                         state: state.name().to_owned(),
                         message: Some(format!("replay failed: {error:#}")),
                         elapsed: None,
+                        audio_level: None,
+                        audio_silent: None,
+                        audio_waveform: None,
                         stage: None,
                         last: last_outcome.message.clone(),
                         last_ok: last_outcome.ok,
@@ -1058,6 +1150,9 @@ fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -
                 state: state.name().to_owned(),
                 message: Some(format!("no saved transcript: {error:#}")),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: last_outcome.message.clone(),
                 last_ok: last_outcome.ok,
@@ -1084,6 +1179,9 @@ fn recover_failed(
                 state: state.name().to_owned(),
                 message: Some("no failed recording to recover".to_owned()),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: last_outcome.message.clone(),
                 last_ok: last_outcome.ok,
@@ -1096,6 +1194,9 @@ fn recover_failed(
                 state: state.name().to_owned(),
                 message: Some(format!("no failed recording: {error:#}")),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: last_outcome.message.clone(),
                 last_ok: last_outcome.ok,
@@ -1111,6 +1212,9 @@ fn recover_failed(
                 state: state.name().to_owned(),
                 message: Some(format!("runtime dir unavailable: {error:#}")),
                 elapsed: None,
+                audio_level: None,
+                audio_silent: None,
+                audio_waveform: None,
                 stage: None,
                 last: None,
                 last_ok: None,
@@ -1124,6 +1228,9 @@ fn recover_failed(
             state: state.name().to_owned(),
             message: Some(format!("copying failed WAV failed: {error}")),
             elapsed: None,
+            audio_level: None,
+            audio_silent: None,
+            audio_waveform: None,
             stage: None,
             last: None,
             last_ok: None,
@@ -1144,6 +1251,9 @@ fn recover_failed(
             state: state.name().to_owned(),
             message: Some("transcription worker unavailable".to_owned()),
             elapsed: None,
+            audio_level: None,
+            audio_silent: None,
+            audio_waveform: None,
             stage: None,
             last: None,
             last_ok: None,
@@ -1159,6 +1269,9 @@ fn recover_failed(
         state: state.name().to_owned(),
         message: Some("recovering".to_owned()),
         elapsed: None,
+        audio_level: None,
+        audio_silent: None,
+        audio_waveform: None,
         stage: Some("transcribing".to_owned()),
         last: None,
         last_ok: None,

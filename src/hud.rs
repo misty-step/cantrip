@@ -3,22 +3,19 @@
 //! The HUD is a read-only mirror of the daemon. It polls the existing status
 //! command and never sends a command which can change daemon state.
 //!
-//! Visual design ("Warm Minimal", ADR 0010): a fixed 320×40 borderless
+//! Visual design ("Warm Minimal", ADR 0010/0014): a fixed 320×40 borderless
 //! capsule, top-centre, filled with an opaque blend of the near-black floor
-//! and a whisper of the state accent — the whole pill reads the mode. A
-//! quiet UI-font label ("Listening…", "Cleaning…") sits centered as the
-//! visual anchor, with a small state glyph in a 28px zone at the left and a
-//! monospace mm:ss counter at the right while recording. Listening is a
-//! pulsing dot. Transcribing and cleaning keep the indeterminate spinner.
-//! Multi-chunk transcription also draws a real left-to-right fill that
-//! eases from empty toward each `transcribing N/M` fraction and completes
-//! to full through Cleaning (single-chunk stays spinner-only — no fake
-//! meter). Continuous motion is the localized breathing pulse, spinner
-//! turn, timed ease-in-out meter when determinate, the
-//! ticking elapsed timer, and the ~2.5s outcome flashes. State changes
-//! ease over ~260ms. A reduced-motion desktop freezes pulse/entry motion,
-//! snaps the meter, draws the spinner as a calm static ring, and keeps
-//! the elapsed timer ticking (it is data, not animation).
+//! and a whisper of the state accent. A quiet UI-font label sits centered,
+//! with a measured input waveform at the left and a monospace timer at the
+//! right while recording. The waveform is the daemon-owned min/max PCM
+//! envelope for the latest 200 ms window, eased only between measured frames;
+//! it never loops or invents motion. Sustained near-digital silence collapses
+//! the trace to a flat amber line and changes the label to "No mic signal".
+//! Transcribing and
+//! cleaning keep the indeterminate spinner. Multi-chunk transcription alone
+//! draws a real left-to-right progress fill. Reduced motion snaps waveform and
+//! state changes directly to measured frames, freezes the spinner as a calm
+//! ring, and keeps the elapsed timer ticking because it is data.
 
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use anyhow::{Context, Result};
@@ -50,13 +47,13 @@ use wayland_client::{
     Connection, EventQueue, QueueHandle,
 };
 
-use crate::ipc::{self, Command, Reply};
+use crate::ipc::{self, AudioWaveform, Command, Reply, AUDIO_WAVEFORM_BINS};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Render tick while the chip is visible; IPC polling stays at POLL_INTERVAL.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
-/// Higher cadence while the chunk meter is easing so the fill reads smooth
-/// on 60 Hz displays (~16 ms ≈ 60 fps).
+/// Higher cadence while measured waveform or chunk-meter values are easing
+/// (~16 ms ≈ 60 fps).
 const METER_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const RESULT_FLASH: Duration = Duration::from_millis(2_500);
 /// Duration of the eased transition run on every visual state change.
@@ -65,6 +62,9 @@ const TRANSITION: Duration = Duration::from_millis(260);
 /// often <300 ms, so a timed ease always shows motion. Uses ease-in-out
 /// for a steadier native feel than ease-out (which front-loads then lags).
 const METER_EASE: Duration = Duration::from_millis(360);
+/// Short interpolation between measured 200 ms waveform frames. This smooths
+/// the raster transition without inventing any unmeasured oscillation.
+const WAVEFORM_EASE: Duration = Duration::from_millis(140);
 /// Extra hold after the bar reaches full while Cleaning so a fast 2-chunk
 /// take does not wipe the fill the instant STT ends.
 const METER_COMPLETE_HOLD: Duration = Duration::from_millis(180);
@@ -74,6 +74,19 @@ const HUD_HEIGHT: u32 = 56;
 const FALLBACK_WIDTH: u32 = 420;
 const MAX_WIDTH: u32 = 900;
 const FONT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const SCREENSHOT_WAVEFORM: AudioWaveform = [
+    [-18, 22],
+    [-35, 41],
+    [-64, 72],
+    [-48, 55],
+    [-86, 94],
+    [-61, 68],
+    [-29, 36],
+    [-70, 78],
+    [-45, 51],
+    [-25, 33],
+    [-12, 18],
+];
 
 // Layout, in design units (pixels at pop-in scale 1.0). The capsule is a
 // fixed geometry ("Warm Minimal", ADR 0010): it never resizes with content.
@@ -94,6 +107,8 @@ const DETAIL_SIZE: f32 = 13.0;
 const SENT_TINT: f32 = 0.45;
 /// Faint tint for the Notice flash: the capsule "drains" warm.
 const NOTICE_TINT: f32 = 0.06;
+/// Stronger tint for a sustained no-input warning during active recording.
+const NO_SIGNAL_TINT: f32 = 0.22;
 
 // Palette: near-black floor, near-white text, one warm accent per state.
 const FLOOR: [u8; 3] = [14, 14, 17];
@@ -357,6 +372,10 @@ struct HudState {
     meter_armed: bool,
     /// Keep showing a full bar until this instant after the ease lands on 1.0.
     meter_hold_until: Option<Instant>,
+    /// Measured envelope at the start and end of the current short visual ease.
+    waveform_from: [[f32; 2]; AUDIO_WAVEFORM_BINS],
+    waveform_to: [[f32; 2]; AUDIO_WAVEFORM_BINS],
+    waveform_ease_at: Instant,
     /// Desktop animations disabled (gsettings enable-animations=false):
     /// freezes the breathing pulse and skips entry motion.
     reduced_motion: bool,
@@ -381,6 +400,38 @@ impl HudState {
         self.meter_armed = false;
         self.meter_hold_until = None;
     }
+    fn clear_waveform(&mut self, now: Instant) {
+        self.waveform_from = [[0.0; 2]; AUDIO_WAVEFORM_BINS];
+        self.waveform_to = [[0.0; 2]; AUDIO_WAVEFORM_BINS];
+        self.waveform_ease_at = now;
+    }
+
+    fn waveform_frame(&self, now: Instant) -> AudioWaveform {
+        let t = if self.reduced_motion || self.screenshot.is_some() {
+            1.0
+        } else {
+            (now.duration_since(self.waveform_ease_at).as_secs_f32() / WAVEFORM_EASE.as_secs_f32())
+                .clamp(0.0, 1.0)
+        };
+        interpolate_waveform(self.waveform_from, self.waveform_to, ease_in_out_cubic(t))
+    }
+
+    fn set_waveform_target(&mut self, target: AudioWaveform, now: Instant) {
+        let target = target.map(|bin| bin.map(f32::from));
+        if self.waveform_to == target {
+            return;
+        }
+        self.waveform_from = self.waveform_frame(now).map(|bin| bin.map(f32::from));
+        self.waveform_to = target;
+        self.waveform_ease_at = now;
+    }
+
+    fn waveform_moving(&self, now: Instant) -> bool {
+        !self.reduced_motion
+            && self.screenshot.is_none()
+            && self.waveform_from != self.waveform_to
+            && now.duration_since(self.waveform_ease_at) < WAVEFORM_EASE
+    }
 
     #[allow(clippy::too_many_arguments)] // construction plumbing (registry, pool, surface)
     fn new(
@@ -396,7 +447,11 @@ impl HudState {
         // Screenshot mode skips daemon polling so the frame is stable and
         // offline; `view` renders the requested state deterministically.
         let state = if screenshot.is_some() {
-            UiState::Recording { elapsed: 7 }
+            UiState::Recording {
+                elapsed: 7,
+                audio_waveform: Some(SCREENSHOT_WAVEFORM),
+                audio_silent: false,
+            }
         } else {
             UiState::Idle
         };
@@ -423,6 +478,9 @@ impl HudState {
             meter_ease_at: Instant::now(),
             meter_armed: false,
             meter_hold_until: None,
+            waveform_from: [[0.0; 2]; AUDIO_WAVEFORM_BINS],
+            waveform_to: [[0.0; 2]; AUDIO_WAVEFORM_BINS],
+            waveform_ease_at: Instant::now(),
             reduced_motion,
             last_render: None,
             configured: false,
@@ -466,6 +524,7 @@ impl HudState {
         self.previous_state = Some(UiStateKind::Idle);
         self.shown_kind = None;
         self.clear_meter();
+        self.clear_waveform(Instant::now());
         self.hide_surface(" (daemon unavailable)");
     }
 
@@ -475,12 +534,10 @@ impl HudState {
         if !self.visible {
             return POLL_INTERVAL;
         }
-        // Meter ease benefits from ~60 fps; spinner/breathe are fine at 30.
+        let now = Instant::now();
         let meter_moving = (self.meter_armed && (self.meter_display - self.meter_to).abs() > 0.002)
-            || self
-                .meter_hold_until
-                .is_some_and(|until| Instant::now() < until);
-        if meter_moving {
+            || self.meter_hold_until.is_some_and(|until| now < until);
+        if meter_moving || self.waveform_moving(now) {
             METER_FRAME_INTERVAL
         } else {
             FRAME_INTERVAL
@@ -542,13 +599,26 @@ impl HudState {
     }
 
     fn apply_reply(&mut self, reply: &Reply, now: Instant) {
+        if reply.state == "recording" {
+            if let Some(waveform) = reply.audio_waveform {
+                self.set_waveform_target(waveform, now);
+            }
+        } else {
+            self.clear_waveform(now);
+        }
         let next_state = UiState::from_reply(reply);
         let next_kind = next_state.kind();
         if self.previous_state != Some(next_kind) {
             match &next_state {
                 UiState::Idle => tracing::info!("[HUD] state=idle"),
-                UiState::Recording { elapsed } => {
-                    tracing::info!("[HUD] state=recording elapsed={elapsed}s")
+                UiState::Recording {
+                    elapsed,
+                    audio_silent,
+                    ..
+                } => {
+                    tracing::info!(
+                        "[HUD] state=recording elapsed={elapsed}s audio_silent={audio_silent}"
+                    )
                 }
                 UiState::Processing { stage } => {
                     tracing::info!("[HUD] state=processing stage={stage}")
@@ -631,13 +701,27 @@ impl HudState {
                     "Listening…".to_owned(),
                     Some(format_elapsed(7)),
                     ChipKind::Recording,
+                    Some(SCREENSHOT_WAVEFORM),
                 ),
-                ScreenshotState::Transcribing => {
-                    ("Transcribing…".to_owned(), None, ChipKind::Transcribing)
+                ScreenshotState::NoSignal => (
+                    "No mic signal".to_owned(),
+                    Some(format_elapsed(7)),
+                    ChipKind::NoSignal,
+                    Some([[0, 0]; AUDIO_WAVEFORM_BINS]),
+                ),
+                ScreenshotState::Transcribing => (
+                    "Transcribing…".to_owned(),
+                    None,
+                    ChipKind::Transcribing,
+                    None,
+                ),
+                ScreenshotState::Cleaning => {
+                    ("Cleaning…".to_owned(), None, ChipKind::Cleaning, None)
                 }
-                ScreenshotState::Cleaning => ("Cleaning…".to_owned(), None, ChipKind::Cleaning),
-                ScreenshotState::Sent => ("Success".to_owned(), None, ChipKind::Sent),
-                ScreenshotState::Notice => ("Heard nothing".to_owned(), None, ChipKind::Notice),
+                ScreenshotState::Sent => ("Success".to_owned(), None, ChipKind::Sent, None),
+                ScreenshotState::Notice => {
+                    ("Heard nothing".to_owned(), None, ChipKind::Notice, None)
+                }
             };
             self.shown_kind = Some(content.2);
             return Some(ChipView {
@@ -649,8 +733,10 @@ impl HudState {
                 fade: 1.0,
                 phase: 0.0,
                 meter: None,
+                waveform: content.3,
             });
         }
+        let waveform_frame = self.waveform_frame(now);
         let content = match &self.state {
             UiState::Idle => match self.flash_until {
                 Some(until) if now < until => {
@@ -670,16 +756,29 @@ impl HudState {
                     };
                     let remaining = until.duration_since(now).as_secs_f32();
                     let fade = ease_out_cubic(remaining / FLASH_FADE_TAIL);
-                    Some((label, None, kind, fade, None))
+                    Some((label, None, kind, fade, None, None))
                 }
                 _ => None,
             },
-            UiState::Recording { elapsed } => Some((
-                "Listening…".to_owned(),
+            UiState::Recording {
+                elapsed,
+                audio_waveform,
+                audio_silent,
+            } => Some((
+                if *audio_silent {
+                    "No mic signal".to_owned()
+                } else {
+                    "Listening…".to_owned()
+                },
                 Some(format_elapsed(*elapsed)),
-                ChipKind::Recording,
+                if *audio_silent {
+                    ChipKind::NoSignal
+                } else {
+                    ChipKind::Recording
+                },
                 1.0,
                 None,
+                audio_waveform.map(|_| waveform_frame),
             )),
             UiState::Processing { stage } => {
                 let (label, kind, meter) = if stage == "cleaning" || stage.starts_with("cleaning") {
@@ -703,10 +802,10 @@ impl HudState {
                 } else {
                     ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
                 };
-                Some((label, None, kind, 1.0, meter))
+                Some((label, None, kind, 1.0, meter, None))
             }
         };
-        let Some((label, detail, kind, fade, meter_target)) = content else {
+        let Some((label, detail, kind, fade, meter_target, waveform)) = content else {
             self.shown_kind = None;
             self.clear_meter();
             return None;
@@ -806,6 +905,7 @@ impl HudState {
             fade,
             phase,
             meter,
+            waveform,
         })
     }
 
@@ -909,8 +1009,8 @@ impl HudState {
         let content_alpha = visibility * swap;
         let glyph_x = left + GLYPH_CENTER_X * scale_factor;
         let accent_solid = [accent[0], accent[1], accent[2], 255];
-        // Working states breathe (alpha/scale, localized to the glyph);
-        // flashes are static compositions. Reduced motion freezes both.
+        // The measured waveform owns recording motion. Processing glyphs keep
+        // their localized breathing pulse; outcome flashes remain static.
         let (breathe_alpha, breathe_scale) = breathe(view.phase, self.reduced_motion);
         // Every state change eases the fresh glyph in from 62% scale
         // (ease-out-back, ~260ms). Reduced motion and screenshot mode run
@@ -921,14 +1021,15 @@ impl HudState {
         // could be misread as a partially-filled meter).
         let spinner_animated = !(self.reduced_motion || self.screenshot.is_some());
         match view.kind {
-            ChipKind::Recording => circle(
+            ChipKind::Recording | ChipKind::NoSignal => input_waveform(
                 canvas,
                 width,
                 height,
                 glyph_x,
                 center_y,
-                4.2 * scale_factor * breathe_scale * glyph_in,
-                scale_alpha(accent_solid, content_alpha * breathe_alpha),
+                view.waveform.unwrap_or([[0, 0]; AUDIO_WAVEFORM_BINS]),
+                scale_factor * glyph_in,
+                scale_alpha(accent_solid, content_alpha),
             ),
             ChipKind::Transcribing | ChipKind::Cleaning => spinner(
                 canvas,
@@ -1070,8 +1171,14 @@ impl HudState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum UiState {
     Idle,
-    Recording { elapsed: u64 },
-    Processing { stage: String },
+    Recording {
+        elapsed: u64,
+        audio_waveform: Option<AudioWaveform>,
+        audio_silent: bool,
+    },
+    Processing {
+        stage: String,
+    },
 }
 
 impl UiState {
@@ -1079,6 +1186,8 @@ impl UiState {
         match reply.state.as_str() {
             "recording" => Self::Recording {
                 elapsed: reply.elapsed.unwrap_or_default(),
+                audio_waveform: reply.audio_waveform,
+                audio_silent: reply.audio_silent.unwrap_or(false),
             },
             "processing" => Self::Processing {
                 stage: reply.stage.as_deref().unwrap_or("transcribing").to_owned(),
@@ -1090,6 +1199,9 @@ impl UiState {
     fn kind(&self) -> UiStateKind {
         match self {
             Self::Idle => UiStateKind::Idle,
+            Self::Recording {
+                audio_silent: true, ..
+            } => UiStateKind::NoSignal,
             Self::Recording { .. } => UiStateKind::Recording,
             Self::Processing { stage } if stage == "cleaning" => UiStateKind::Cleaning,
             Self::Processing { .. } => UiStateKind::Transcribing,
@@ -1101,6 +1213,7 @@ impl UiState {
 enum UiStateKind {
     Idle,
     Recording,
+    NoSignal,
     Transcribing,
     Cleaning,
 }
@@ -1110,6 +1223,7 @@ enum ChipKind {
     Sent,
     Notice,
     Recording,
+    NoSignal,
     Transcribing,
     Cleaning,
 }
@@ -1120,6 +1234,7 @@ enum ChipKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ScreenshotState {
     Recording,
+    NoSignal,
     Transcribing,
     Cleaning,
     Sent,
@@ -1142,6 +1257,8 @@ struct ChipView {
     phase: f32,
     /// Determinate capsule fill 0..=1 from multi-chunk STT; None = no meter.
     meter: Option<f32>,
+    /// Measured chronological min/max PCM envelope for the latest window.
+    waveform: Option<AudioWaveform>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1153,19 +1270,16 @@ struct RenderKey {
     fade: u8,
     phase: u16,
     meter: u8,
+    waveform: AudioWaveform,
     width: u32,
     height: u32,
 }
 
 impl RenderKey {
     fn from_view(view: &ChipView, width: u32, height: u32) -> Self {
-        // Continuous motion only exists for these kinds; a result flash is
-        // static once its transition and fade are settled. Meter quantize
-        // forces redraws while the fill eases toward the latest chunk.
-        let animated = matches!(
-            view.kind,
-            ChipKind::Recording | ChipKind::Transcribing | ChipKind::Cleaning
-        );
+        // Recording redraws only when its measured waveform or state changes.
+        // Processing keeps continuous phase motion for the spinner.
+        let animated = matches!(view.kind, ChipKind::Transcribing | ChipKind::Cleaning);
         Self {
             label: view.label.clone(),
             detail: view.detail.clone(),
@@ -1181,6 +1295,7 @@ impl RenderKey {
                 .meter
                 .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
                 .unwrap_or(0),
+            waveform: view.waveform.unwrap_or([[0, 0]; AUDIO_WAVEFORM_BINS]),
             width,
             height,
         }
@@ -1421,6 +1536,7 @@ fn scale_alpha(color: [u8; 4], factor: f32) -> [u8; 4] {
 fn accent_color(kind: ChipKind) -> [u8; 3] {
     match kind {
         ChipKind::Recording => [255, 106, 92],    // warm coral
+        ChipKind::NoSignal => [255, 178, 92],     // warning amber
         ChipKind::Transcribing => [255, 186, 74], // amber
         ChipKind::Cleaning => [190, 142, 255],    // violet
         ChipKind::Sent => [116, 220, 150],        // soft green
@@ -1525,30 +1641,66 @@ fn parse_chunk_meter(stage: &str) -> Option<f32> {
     }
     Some((chunk as f32 / total as f32).clamp(0.0, 1.0))
 }
+fn interpolate_waveform(
+    from: [[f32; 2]; AUDIO_WAVEFORM_BINS],
+    to: [[f32; 2]; AUDIO_WAVEFORM_BINS],
+    t: f32,
+) -> AudioWaveform {
+    let t = t.clamp(0.0, 1.0);
+    std::array::from_fn(|index| {
+        std::array::from_fn(|edge| {
+            (from[index][edge] + (to[index][edge] - from[index][edge]) * t)
+                .round()
+                .clamp(-100.0, 100.0) as i8
+        })
+    })
+}
 
-fn circle(
+/// True downsampled PCM waveform. Each chronological bin draws the measured
+/// minimum-to-maximum sample span from the latest 200 ms capture window.
+#[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
+fn input_waveform(
     canvas: &mut [u8],
     width: u32,
     height: u32,
     center_x: f32,
     center_y: f32,
-    radius: f32,
+    waveform: AudioWaveform,
+    scale: f32,
     color: [u8; 4],
 ) {
-    let min_x = (center_x - radius - 1.0).max(0.0) as u32;
-    let max_x = (center_x + radius + 1.0).min(width as f32) as u32;
-    let min_y = (center_y - radius - 1.0).max(0.0) as u32;
-    let max_y = (center_y + radius + 1.0).min(height as f32) as u32;
-    for y in min_y..max_y {
-        for x in min_x..max_x {
-            let dx = x as f32 + 0.5 - center_x;
-            let dy = y as f32 + 0.5 - center_y;
-            let distance = (dx * dx + dy * dy).sqrt();
-            let coverage = (radius + 0.75 - distance).clamp(0.0, 1.0);
-            if coverage > 0.0 {
-                blend_pixel(canvas, width, height, x, y, color, coverage);
-            }
-        }
+    let half_width = 10.5 * scale;
+    segment(
+        canvas,
+        width,
+        height,
+        center_x - half_width,
+        center_y,
+        center_x + half_width,
+        center_y,
+        0.8 * scale,
+        scale_alpha(color, 0.22),
+    );
+    if waveform.iter().all(|bin| *bin == [0, 0]) {
+        return;
+    }
+
+    let spacing = half_width * 2.0 / (AUDIO_WAVEFORM_BINS - 1) as f32;
+    for (index, [minimum, maximum]) in waveform.into_iter().enumerate() {
+        let x = center_x - half_width + index as f32 * spacing;
+        let top = center_y - maximum as f32 / 100.0 * 7.0 * scale;
+        let bottom = center_y - minimum as f32 / 100.0 * 7.0 * scale;
+        segment(
+            canvas,
+            width,
+            height,
+            x,
+            top,
+            x,
+            bottom,
+            1.25 * scale,
+            color,
+        );
     }
 }
 
@@ -1759,6 +1911,7 @@ fn breathe(phase: f32, reduced_motion: bool) -> (f32, f32) {
 fn capsule_blend(kind: ChipKind) -> [u8; 3] {
     let ratio = match kind {
         ChipKind::Recording => 0.15,
+        ChipKind::NoSignal => NO_SIGNAL_TINT,
         ChipKind::Transcribing | ChipKind::Cleaning => 0.13,
         ChipKind::Sent => SENT_TINT,
         ChipKind::Notice => NOTICE_TINT,
@@ -1946,9 +2099,11 @@ fn find_any_font(root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::{
         acquire_lock_on, breathe, capsule_blend, ease_in_out_cubic, ease_out_back, ease_out_cubic,
-        fit_text_measured, format_elapsed, mix_rgb, parse_chunk_meter, pill, pill_meter, pulse,
-        spinner, ChipKind, BREATHE_MIN,
+        fit_text_measured, format_elapsed, input_waveform, interpolate_waveform, mix_rgb,
+        parse_chunk_meter, pill, pill_meter, pulse, spinner, ChipKind, UiState, BREATHE_MIN,
+        SCREENSHOT_WAVEFORM,
     };
+    use crate::ipc::{Reply, AUDIO_WAVEFORM_BINS};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2045,8 +2200,10 @@ mod tests {
     #[test]
     fn capsule_blend_matches_warm_minimal_tint_blends() {
         // Floor #0e0e11 mixed with the state accent at the locked ratios:
-        // recording 0.15, transcribing/cleaning 0.13, sent 0.45, notice 0.06.
+        // recording 0.15, no-signal 0.22, transcribing/cleaning 0.13,
+        // sent 0.45, notice 0.06.
         assert_eq!(capsule_blend(ChipKind::Recording), [50, 28, 28]);
+        assert_eq!(capsule_blend(ChipKind::NoSignal), [67, 50, 34]);
         assert_eq!(capsule_blend(ChipKind::Transcribing), [45, 36, 24]);
         assert_eq!(capsule_blend(ChipKind::Cleaning), [37, 31, 48]);
         assert_eq!(capsule_blend(ChipKind::Sent), [60, 107, 77]);
@@ -2082,6 +2239,99 @@ mod tests {
         // First character already exceeds the budget: drop it and keep only
         // the ellipsis — never admit text beyond the declared width.
         assert_eq!(fit_text_measured(measure, "longword", 5.0), "…");
+    }
+
+    #[test]
+    fn recording_reply_carries_waveform_and_warning_into_hud_state() {
+        let waveform = SCREENSHOT_WAVEFORM;
+        let active = Reply {
+            ok: true,
+            state: "recording".to_owned(),
+            message: None,
+            elapsed: Some(12),
+            audio_level: Some(72),
+            audio_silent: Some(false),
+            audio_waveform: Some(waveform),
+            stage: None,
+            last: None,
+            last_ok: None,
+        };
+        assert_eq!(
+            UiState::from_reply(&active),
+            UiState::Recording {
+                elapsed: 12,
+                audio_waveform: Some(waveform),
+                audio_silent: false,
+            }
+        );
+
+        let silent = Reply {
+            audio_level: Some(0),
+            audio_silent: Some(true),
+            audio_waveform: Some([[0, 0]; AUDIO_WAVEFORM_BINS]),
+            ..active
+        };
+        let state = UiState::from_reply(&silent);
+        assert!(matches!(
+            state,
+            UiState::Recording {
+                audio_silent: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn waveform_interpolation_stays_between_measured_frames() {
+        let from = [[0.0; 2]; AUDIO_WAVEFORM_BINS];
+        let to = SCREENSHOT_WAVEFORM.map(|bin| bin.map(f32::from));
+        assert_eq!(
+            interpolate_waveform(from, to, 0.0),
+            [[0, 0]; AUDIO_WAVEFORM_BINS]
+        );
+        let midpoint = interpolate_waveform(from, to, 0.5);
+        for (midpoint, target) in midpoint.into_iter().zip(SCREENSHOT_WAVEFORM) {
+            for edge in 0..2 {
+                assert!((i16::from(midpoint[edge]) * 2 - i16::from(target[edge])).abs() <= 1);
+            }
+        }
+        assert_eq!(interpolate_waveform(from, to, 1.0), SCREENSHOT_WAVEFORM);
+    }
+
+    #[test]
+    fn input_waveform_visibly_distinguishes_silence_and_signal() {
+        let mut silent = [0_u8; 32 * 32 * 4];
+        input_waveform(
+            &mut silent,
+            32,
+            32,
+            16.0,
+            16.0,
+            [[0, 0]; AUDIO_WAVEFORM_BINS],
+            1.0,
+            [255, 128, 64, 255],
+        );
+        let mut active = [0_u8; 32 * 32 * 4];
+        input_waveform(
+            &mut active,
+            32,
+            32,
+            16.0,
+            16.0,
+            SCREENSHOT_WAVEFORM,
+            1.0,
+            [255, 128, 64, 255],
+        );
+        let alpha_sum = |canvas: &[u8]| -> u32 {
+            canvas
+                .chunks_exact(4)
+                .map(|pixel| u32::from(pixel[3]))
+                .sum()
+        };
+        assert!(
+            alpha_sum(&active) > alpha_sum(&silent) * 3,
+            "measured signal must produce a visibly larger waveform"
+        );
     }
 
     #[test]

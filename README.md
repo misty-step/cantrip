@@ -19,8 +19,12 @@ that, for text.
   replace the local models (see `docs/CONFIGURATION.md`). API keys live in
   the OS keyring, never in files.
 - **Layer-shell status HUD.** A small always-on-top capsule shows live state
-  with a centered stage word, breathing glyph, and timer. Multi-chunk STT
-  eases a real left-to-right fill from empty toward each `N/M` fraction;
+  with a centered stage word and timer. During capture, a measured waveform
+  shows the min/max PCM envelope from each new 200 ms input window and eases
+  only between those real frames. Three seconds of near-digital silence
+  flattens the trace and changes the capsule to **No mic signal** without
+  canceling the take.
+  Multi-chunk STT eases a real left-to-right fill toward each `N/M` fraction;
   single-chunk stays on the spinner. Delivered text flashes **Success**.
   Pure Rust, no GTK.
 - **Atomic paste-first injection.** The default pastes the finished text

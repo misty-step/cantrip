@@ -402,6 +402,19 @@ fn send_command(command: Command) -> Result<()> {
     if let Some(elapsed) = reply.elapsed {
         println!("elapsed: {elapsed}s");
     }
+    if let Some(level) = reply.audio_level {
+        println!("audio-level: {level}%");
+    }
+    if let Some(silent) = reply.audio_silent {
+        println!("audio-silent: {silent}");
+    }
+    if let Some(waveform) = reply.audio_waveform {
+        print!("audio-waveform:");
+        for [minimum, maximum] in waveform {
+            print!(" {minimum}:{maximum}");
+        }
+        println!();
+    }
     if let Some(stage) = reply.stage {
         println!("stage: {stage}");
     }

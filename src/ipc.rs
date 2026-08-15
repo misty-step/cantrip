@@ -1,11 +1,13 @@
 //! One-line command and reply protocol over the daemon Unix socket.
 
+pub use crate::capture::AUDIO_WAVEFORM_BINS;
 use crate::paths;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
+pub type AudioWaveform = [[i8; 2]; AUDIO_WAVEFORM_BINS];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -91,6 +93,20 @@ pub struct Reply {
     /// Recording elapsed seconds, present while state is "recording".
     #[serde(default)]
     pub elapsed: Option<u64>,
+    /// Peak level for the newest recording samples, logarithmically mapped to
+    /// 0..=100. Absent outside recording or when live WAV monitoring is not
+    /// available.
+    #[serde(default)]
+    pub audio_level: Option<u8>,
+    /// Whether the recording has remained near digital silence for at least
+    /// three seconds. Absent outside recording or when monitoring is unknown.
+    #[serde(default)]
+    pub audio_silent: Option<bool>,
+    /// Chronological min/max PCM envelope bins for the latest daemon-owned
+    /// sample window. Each `[minimum, maximum]` pair uses a logarithmic
+    /// -100..=100 scale.
+    #[serde(default)]
+    pub audio_waveform: Option<AudioWaveform>,
     /// Processing sub-stage, present while state is "processing":
     /// "transcribing", "transcribing N/M", or "cleaning".
     #[serde(default)]
@@ -171,12 +187,27 @@ mod tests {
     fn reply_json_round_trip() {
         let reply = Reply {
             ok: true,
-            state: "processing".to_owned(),
-            message: Some("queued".to_owned()),
+            state: "recording".to_owned(),
+            message: Some("recording".to_owned()),
             elapsed: Some(3),
-            stage: Some("cleaning".to_owned()),
-            last: Some("Typed 42 chars".to_owned()),
-            last_ok: Some(true),
+            audio_level: Some(72),
+            audio_silent: Some(false),
+            audio_waveform: Some([
+                [-18, 22],
+                [-35, 41],
+                [-64, 72],
+                [-48, 55],
+                [-86, 94],
+                [-61, 68],
+                [-29, 36],
+                [-70, 78],
+                [-45, 51],
+                [-25, 33],
+                [-12, 18],
+            ]),
+            stage: None,
+            last: None,
+            last_ok: None,
         };
         let json = serde_json::to_string(&reply).expect("reply should serialize");
         let decoded: Reply = serde_json::from_str(&json).expect("reply should deserialize");
