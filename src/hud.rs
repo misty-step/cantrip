@@ -47,7 +47,7 @@ use wayland_client::{
     Connection, EventQueue, QueueHandle,
 };
 
-use crate::ipc::{self, AudioWaveform, Command, Reply, AUDIO_WAVEFORM_BINS};
+use crate::ipc::{self, AudioWaveform, StatusSnapshot, AUDIO_WAVEFORM_BINS};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Render tick while the chip is visible; IPC polling stays at POLL_INTERVAL.
@@ -496,13 +496,13 @@ impl HudState {
     }
 
     fn poll_status(&mut self) {
-        match ipc::send(Command::Status) {
-            Ok(reply) => {
+        match ipc::status() {
+            Ok(status) => {
                 if !self.daemon_available {
                     tracing::info!("[HUD] daemon status stream available");
                     self.daemon_available = true;
                 }
-                self.apply_reply(&reply, Instant::now());
+                self.apply_status(&status, Instant::now());
             }
             Err(error) => {
                 if self.daemon_available {
@@ -598,15 +598,17 @@ impl HudState {
         Ok(())
     }
 
-    fn apply_reply(&mut self, reply: &Reply, now: Instant) {
-        if reply.state == "recording" {
-            if let Some(waveform) = reply.audio_waveform {
-                self.set_waveform_target(waveform, now);
-            }
-        } else {
+    fn apply_status(&mut self, status: &StatusSnapshot, now: Instant) {
+        if let StatusSnapshot::Recording {
+            signal: Some(signal),
+            ..
+        } = status
+        {
+            self.set_waveform_target(signal.waveform, now);
+        } else if !matches!(status, StatusSnapshot::Recording { .. }) {
             self.clear_waveform(now);
         }
-        let next_state = UiState::from_reply(reply);
+        let next_state = UiState::from_status(status);
         let next_kind = next_state.kind();
         if self.previous_state != Some(next_kind) {
             match &next_state {
@@ -633,8 +635,8 @@ impl HudState {
                 self.flash_until = Some(now + RESULT_FLASH);
                 // Keep the daemon terminal message for logs/status; the chip
                 // flash uses a short label (Success / notice text).
-                self.flash_text = reply.last.clone();
-                self.flash_ok = reply.last_ok.unwrap_or(false);
+                self.flash_text = status.outcome().map(|outcome| outcome.message.clone());
+                self.flash_ok = status.outcome().is_some_and(|outcome| outcome.ok);
                 let chip = if self.flash_ok {
                     "Success"
                 } else {
@@ -1182,17 +1184,19 @@ enum UiState {
 }
 
 impl UiState {
-    fn from_reply(reply: &Reply) -> Self {
-        match reply.state.as_str() {
-            "recording" => Self::Recording {
-                elapsed: reply.elapsed.unwrap_or_default(),
-                audio_waveform: reply.audio_waveform,
-                audio_silent: reply.audio_silent.unwrap_or(false),
+    fn from_status(status: &StatusSnapshot) -> Self {
+        match status {
+            StatusSnapshot::Recording {
+                elapsed, signal, ..
+            } => Self::Recording {
+                elapsed: *elapsed,
+                audio_waveform: signal.map(|signal| signal.waveform),
+                audio_silent: signal.is_some_and(|signal| signal.silent),
             },
-            "processing" => Self::Processing {
-                stage: reply.stage.as_deref().unwrap_or("transcribing").to_owned(),
+            StatusSnapshot::Processing { stage, .. } => Self::Processing {
+                stage: stage.clone(),
             },
-            _ => Self::Idle,
+            StatusSnapshot::Idle { .. } | StatusSnapshot::Unknown { .. } => Self::Idle,
         }
     }
 
@@ -2103,7 +2107,7 @@ mod tests {
         parse_chunk_meter, pill, pill_meter, pulse, spinner, ChipKind, UiState, BREATHE_MIN,
         SCREENSHOT_WAVEFORM,
     };
-    use crate::ipc::{Reply, AUDIO_WAVEFORM_BINS};
+    use crate::ipc::{AudioSignal, StatusSnapshot, AUDIO_WAVEFORM_BINS};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2242,22 +2246,19 @@ mod tests {
     }
 
     #[test]
-    fn recording_reply_carries_waveform_and_warning_into_hud_state() {
+    fn recording_status_carries_waveform_and_warning_into_hud_state() {
         let waveform = SCREENSHOT_WAVEFORM;
-        let active = Reply {
-            ok: true,
-            state: "recording".to_owned(),
-            message: None,
-            elapsed: Some(12),
-            audio_level: Some(72),
-            audio_silent: Some(false),
-            audio_waveform: Some(waveform),
-            stage: None,
-            last: None,
-            last_ok: None,
+        let active = StatusSnapshot::Recording {
+            elapsed: 12,
+            signal: Some(AudioSignal {
+                level: 72,
+                silent: false,
+                waveform,
+            }),
+            outcome: None,
         };
         assert_eq!(
-            UiState::from_reply(&active),
+            UiState::from_status(&active),
             UiState::Recording {
                 elapsed: 12,
                 audio_waveform: Some(waveform),
@@ -2265,13 +2266,16 @@ mod tests {
             }
         );
 
-        let silent = Reply {
-            audio_level: Some(0),
-            audio_silent: Some(true),
-            audio_waveform: Some([[0, 0]; AUDIO_WAVEFORM_BINS]),
-            ..active
+        let silent = StatusSnapshot::Recording {
+            elapsed: 12,
+            signal: Some(AudioSignal {
+                level: 0,
+                silent: true,
+                waveform: [[0, 0]; AUDIO_WAVEFORM_BINS],
+            }),
+            outcome: None,
         };
-        let state = UiState::from_reply(&silent);
+        let state = UiState::from_status(&silent);
         assert!(matches!(
             state,
             UiState::Recording {
@@ -2279,6 +2283,15 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn unknown_daemon_status_is_safe_for_an_older_hud() {
+        let status = StatusSnapshot::Unknown {
+            state: "calibrating".to_owned(),
+            outcome: None,
+        };
+        assert_eq!(UiState::from_status(&status), UiState::Idle);
     }
 
     #[test]

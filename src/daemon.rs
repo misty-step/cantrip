@@ -4,7 +4,7 @@ use crate::capture::{self, InputSignal, Recorder};
 use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::hud;
 use crate::inject::{self, InjectionMode, InjectionOutcome};
-use crate::ipc::{Command, Reply};
+use crate::ipc::{AudioSignal, Command, Request, TerminalOutcome, WireReply};
 use crate::models;
 use crate::paths;
 use crate::pipeline::{self, PostprocStatus};
@@ -104,6 +104,13 @@ impl LastOutcome {
             message: Some(message.into()),
             ok: Some(false),
         }
+    }
+
+    fn to_ipc(&self) -> Option<TerminalOutcome> {
+        self.message.clone().map(|message| TerminalOutcome {
+            message,
+            ok: self.ok.unwrap_or(false),
+        })
     }
 }
 
@@ -500,52 +507,35 @@ fn handle_connection(
     }
 
     let command_line = String::from_utf8_lossy(&command_line);
-    let reply = match Command::parse(&command_line) {
-        Some(command) => execute(command, state, config, runtime_dir, job_tx, last_outcome),
-        None => Reply {
-            ok: false,
-            state: state.name().to_owned(),
-            message: Some("unknown command".to_owned()),
-            elapsed: None,
-            audio_level: None,
-            audio_silent: None,
-            audio_waveform: None,
-            stage: None,
-            last: None,
-            last_ok: None,
-        },
+    let reply = match Request::parse(&command_line) {
+        Some(Request::Command(command)) => {
+            execute(command, state, config, runtime_dir, job_tx, last_outcome)
+        }
+        Some(Request::Status) => status_reply(state, last_outcome),
+        None => WireReply::command(false, state.name(), Some("unknown command".to_owned())),
     };
     let json = serde_json::to_string(&reply).context("serializing daemon reply")?;
     writeln!(stream, "{json}").context("writing daemon reply")?;
     Ok(())
 }
 
-fn status_reply(state: &State, last_outcome: &LastOutcome) -> Reply {
-    let (elapsed, audio_level, audio_silent, audio_waveform, stage) = match state {
+fn status_reply(state: &State, last_outcome: &LastOutcome) -> WireReply {
+    let (elapsed, signal, stage) = match state {
         State::Recording {
             started, signal, ..
         } => (
             Some(started.elapsed().as_secs()),
-            signal.map(|value| value.level),
-            signal.map(|value| value.silent),
-            signal.map(|value| value.waveform),
+            signal.map(|value| AudioSignal {
+                level: value.level,
+                silent: value.silent,
+                waveform: value.waveform,
+            }),
             None,
         ),
-        State::Processing { stage, .. } => (None, None, None, None, Some(stage.as_str())),
-        State::Idle => (None, None, None, None, None),
+        State::Processing { stage, .. } => (None, None, Some(stage.as_str())),
+        State::Idle => (None, None, None),
     };
-    Reply {
-        ok: true,
-        state: state.name().to_owned(),
-        message: None,
-        elapsed,
-        audio_level,
-        audio_silent,
-        audio_waveform,
-        stage,
-        last: last_outcome.message.clone(),
-        last_ok: last_outcome.ok,
-    }
+    WireReply::status(state.name(), elapsed, signal, stage, last_outcome.to_ipc())
 }
 
 fn refresh_recording_signal(state: &mut State) {
@@ -567,18 +557,7 @@ fn refresh_recording_signal(state: &mut State) {
 }
 
 fn write_client_error(stream: &mut UnixStream, state: &State, message: &str) -> Result<()> {
-    let reply = Reply {
-        ok: false,
-        state: state.name().to_owned(),
-        message: Some(message.to_owned()),
-        elapsed: None,
-        audio_level: None,
-        audio_silent: None,
-        audio_waveform: None,
-        stage: None,
-        last: None,
-        last_ok: None,
-    };
+    let reply = WireReply::command(false, state.name(), Some(message.to_owned()));
     let json = serde_json::to_string(&reply).context("serializing client error reply")?;
     writeln!(stream, "{json}").context("writing client error reply")?;
     Ok(())
@@ -591,7 +570,7 @@ fn execute(
     runtime_dir: &Path,
     job_tx: &Sender<Job>,
     last_outcome: &mut LastOutcome,
-) -> Reply {
+) -> WireReply {
     match command {
         Command::Toggle { postproc } => match state {
             State::Idle => start_recording(state, config, runtime_dir, last_outcome, postproc),
@@ -600,80 +579,26 @@ fn execute(
         },
         Command::Start { postproc } => match state {
             State::Idle => start_recording(state, config, runtime_dir, last_outcome, postproc),
-            _ => Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some("busy".to_owned()),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: None,
-                last_ok: None,
-            },
+            _ => WireReply::command(false, state.name(), Some("busy".to_owned())),
         },
         Command::Stop => match state {
             State::Recording { .. } => stop_recording(state, config, job_tx, last_outcome),
-            State::Idle => Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some("not recording".to_owned()),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: None,
-                last_ok: None,
-            },
+            State::Idle => {
+                WireReply::command(false, state.name(), Some("not recording".to_owned()))
+            }
             State::Processing { .. } => busy_reply(state),
         },
         Command::Cancel => cancel_recording(state, last_outcome),
-        Command::Status => status_reply(state, last_outcome),
         Command::Last => replay_last(state, config, last_outcome),
         Command::Recover => recover_failed(state, config, job_tx, last_outcome),
-        Command::Ping => Reply {
-            ok: true,
-            state: state.name().to_owned(),
-            message: Some("pong".to_owned()),
-            elapsed: None,
-            audio_level: None,
-            audio_silent: None,
-            audio_waveform: None,
-            stage: None,
-            last: None,
-            last_ok: None,
-        },
+        Command::Ping => WireReply::command(true, state.name(), Some("pong".to_owned())),
         Command::Reload => match Config::load() {
             Ok(new_config) => {
                 *config = new_config;
                 tracing::info!("[Daemon] config reloaded");
-                Reply {
-                    ok: true,
-                    state: state.name().to_owned(),
-                    message: Some("reloaded".to_owned()),
-                    elapsed: None,
-                    audio_level: None,
-                    audio_silent: None,
-                    audio_waveform: None,
-                    stage: None,
-                    last: None,
-                    last_ok: None,
-                }
+                WireReply::command(true, state.name(), Some("reloaded".to_owned()))
             }
-            Err(error) => Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some(format!("{error:#}")),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: None,
-                last_ok: None,
-            },
+            Err(error) => WireReply::command(false, state.name(), Some(format!("{error:#}"))),
         },
     }
 }
@@ -684,18 +609,14 @@ fn start_recording(
     runtime_dir: &Path,
     last_outcome: &mut LastOutcome,
     postproc_override: Option<bool>,
-) -> Reply {
+) -> WireReply {
     // Forcing cleanup when no model is configured would silently degrade to
     // "cleanup failed — raw text", so reject it up front with a clear error.
     if postproc_override == Some(true) && config.postproc.model.trim().is_empty() {
         *last_outcome = LastOutcome::notice("Post-processing requested but no model set");
-        return Reply { ok: false,
-        state: state.name().to_owned(),
-        message: Some(
+        return WireReply::command(false, state.name(), Some(
             "post-processing requested but [postproc].model is not set — add a model or drop --postproc clean".to_owned(),
-        ), elapsed: None, audio_level: None, audio_silent: None, audio_waveform: None, stage: None,
-        last: None,
-        last_ok: None, };
+        ));
     }
     let wav = runtime_dir.join(format!("rec-{}.wav", unix_millis()));
     match Recorder::start(&wav, config.audio_source.as_deref()) {
@@ -710,33 +631,15 @@ fn start_recording(
             };
             *last_outcome = LastOutcome::default();
             tracing::info!("[Daemon] state idle -> recording");
-            Reply {
-                ok: true,
-                state: state.name().to_owned(),
-                message: Some("recording".to_owned()),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: None,
-                last_ok: None,
-            }
+            WireReply::command(true, state.name(), Some("recording".to_owned()))
         }
         Err(error) => {
             *last_outcome = LastOutcome::notice("Starting recording failed");
-            Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some(format!("starting recording failed: {error:#}")),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: None,
-                last_ok: None,
-            }
+            WireReply::command(
+                false,
+                state.name(),
+                Some(format!("starting recording failed: {error:#}")),
+            )
         }
     }
 }
@@ -746,7 +649,7 @@ fn stop_recording(
     config: &Config,
     job_tx: &Sender<Job>,
     last_outcome: &mut LastOutcome,
-) -> Reply {
+) -> WireReply {
     let State::Recording {
         recorder,
         started,
@@ -762,18 +665,11 @@ fn stop_recording(
         Ok(wav) => wav,
         Err(error) => {
             *last_outcome = LastOutcome::notice("Recording failed");
-            return Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some(format!("stopping recording failed: {error:#}")),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: None,
-                last_ok: None,
-            };
+            return WireReply::command(
+                false,
+                state.name(),
+                Some(format!("stopping recording failed: {error:#}")),
+            );
         }
     };
     // Apply this capture's override (None = follow config) to the worker job.
@@ -793,72 +689,36 @@ fn stop_recording(
             tracing::warn!("[Capture] recording cleanup failed: {error:#}");
         }
         *last_outcome = LastOutcome::notice("Transcription failed");
-        return Reply {
-            ok: false,
-            state: state.name().to_owned(),
-            message: Some("transcription worker unavailable".to_owned()),
-            elapsed: None,
-            audio_level: None,
-            audio_silent: None,
-            audio_waveform: None,
-            stage: None,
-            last: None,
-            last_ok: None,
-        };
+        return WireReply::command(
+            false,
+            state.name(),
+            Some("transcription worker unavailable".to_owned()),
+        );
     }
     *state = State::Processing {
         started: Instant::now(),
         stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
     };
     tracing::info!("[Daemon] state recording -> processing record_secs={record_secs:.3}");
-    Reply {
-        ok: true,
-        state: state.name().to_owned(),
-        message: Some("processing".to_owned()),
-        elapsed: None,
-        audio_level: None,
-        audio_silent: None,
-        audio_waveform: None,
-        stage: None,
-        last: None,
-        last_ok: None,
-    }
+    WireReply::command(true, state.name(), Some("processing".to_owned()))
 }
 
-fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> Reply {
+fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> WireReply {
     let previous = std::mem::replace(state, State::Idle);
     match previous {
         State::Recording { recorder, .. } => match recorder.cancel() {
             Ok(()) => {
                 tracing::info!("[Daemon] state recording -> idle (cancelled)");
                 *last_outcome = LastOutcome::notice("Cancelled");
-                Reply {
-                    ok: true,
-                    state: state.name().to_owned(),
-                    message: Some("cancelled".to_owned()),
-                    elapsed: None,
-                    audio_level: None,
-                    audio_silent: None,
-                    audio_waveform: None,
-                    stage: None,
-                    last: None,
-                    last_ok: None,
-                }
+                WireReply::command(true, state.name(), Some("cancelled".to_owned()))
             }
             Err(error) => {
                 *last_outcome = LastOutcome::notice("Cancelling failed");
-                Reply {
-                    ok: false,
-                    state: state.name().to_owned(),
-                    message: Some(format!("cancelling recording failed: {error:#}")),
-                    elapsed: None,
-                    audio_level: None,
-                    audio_silent: None,
-                    audio_waveform: None,
-                    stage: None,
-                    last: None,
-                    last_ok: None,
-                }
+                WireReply::command(
+                    false,
+                    state.name(),
+                    Some(format!("cancelling recording failed: {error:#}")),
+                )
             }
         },
         other => {
@@ -866,36 +726,14 @@ fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> Reply 
             if matches!(state, State::Processing { .. }) {
                 busy_reply(state)
             } else {
-                Reply {
-                    ok: false,
-                    state: state.name().to_owned(),
-                    message: Some("nothing to cancel".to_owned()),
-                    elapsed: None,
-                    audio_level: None,
-                    audio_silent: None,
-                    audio_waveform: None,
-                    stage: None,
-                    last: None,
-                    last_ok: None,
-                }
+                WireReply::command(false, state.name(), Some("nothing to cancel".to_owned()))
             }
         }
     }
 }
 
-fn busy_reply(state: &State) -> Reply {
-    Reply {
-        ok: false,
-        state: state.name().to_owned(),
-        message: Some("busy: processing".to_owned()),
-        elapsed: None,
-        audio_level: None,
-        audio_silent: None,
-        audio_waveform: None,
-        stage: None,
-        last: None,
-        last_ok: None,
-    }
+fn busy_reply(state: &State) -> WireReply {
+    WireReply::command(false, state.name(), Some("busy: processing".to_owned()))
 }
 
 fn drain_stage(state: &mut State, stage_rx: &Receiver<pipeline::Stage>) {
@@ -1077,25 +915,15 @@ fn shutdown_state(state: &mut State) {
     }
 }
 
-fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -> Reply {
+fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -> WireReply {
     if !matches!(state, State::Idle) {
         return busy_reply(state);
     }
     match read_last_transcript() {
         Ok(text) if text.trim().is_empty() => {
             *last_outcome = LastOutcome::notice("No saved transcript");
-            Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some("no saved transcript".to_owned()),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: last_outcome.message.clone(),
-                last_ok: last_outcome.ok,
-            }
+            WireReply::command(false, state.name(), Some("no saved transcript".to_owned()))
+                .with_outcome(last_outcome.to_ipc())
         }
         Ok(text) => {
             let chars = text.chars().count();
@@ -1112,51 +940,29 @@ fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -
                     };
                     tracing::info!("[Inject] replayed last transcript chars={chars}");
                     *last_outcome = LastOutcome::success(message.clone());
-                    Reply {
-                        ok: true,
-                        state: state.name().to_owned(),
-                        message: Some(message),
-                        elapsed: None,
-                        audio_level: None,
-                        audio_silent: None,
-                        audio_waveform: None,
-                        stage: None,
-                        last: last_outcome.message.clone(),
-                        last_ok: last_outcome.ok,
-                    }
+                    WireReply::command(true, state.name(), Some(message))
+                        .with_outcome(last_outcome.to_ipc())
                 }
                 Err(error) => {
                     tracing::warn!("[Inject] replay failed chars={chars} error={error:#}");
                     *last_outcome = LastOutcome::notice("Replay failed");
-                    Reply {
-                        ok: false,
-                        state: state.name().to_owned(),
-                        message: Some(format!("replay failed: {error:#}")),
-                        elapsed: None,
-                        audio_level: None,
-                        audio_silent: None,
-                        audio_waveform: None,
-                        stage: None,
-                        last: last_outcome.message.clone(),
-                        last_ok: last_outcome.ok,
-                    }
+                    WireReply::command(
+                        false,
+                        state.name(),
+                        Some(format!("replay failed: {error:#}")),
+                    )
+                    .with_outcome(last_outcome.to_ipc())
                 }
             }
         }
         Err(error) => {
             *last_outcome = LastOutcome::notice("No saved transcript");
-            Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some(format!("no saved transcript: {error:#}")),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: last_outcome.message.clone(),
-                last_ok: last_outcome.ok,
-            }
+            WireReply::command(
+                false,
+                state.name(),
+                Some(format!("no saved transcript: {error:#}")),
+            )
+            .with_outcome(last_outcome.to_ipc())
         }
     }
 }
@@ -1166,7 +972,7 @@ fn recover_failed(
     config: &Config,
     job_tx: &Sender<Job>,
     last_outcome: &mut LastOutcome,
-) -> Reply {
+) -> WireReply {
     if !matches!(state, State::Idle) {
         return busy_reply(state);
     }
@@ -1174,67 +980,41 @@ fn recover_failed(
         Ok(path) if path.is_file() => path,
         Ok(_) => {
             *last_outcome = LastOutcome::notice("No failed recording to recover");
-            return Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some("no failed recording to recover".to_owned()),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: last_outcome.message.clone(),
-                last_ok: last_outcome.ok,
-            };
+            return WireReply::command(
+                false,
+                state.name(),
+                Some("no failed recording to recover".to_owned()),
+            )
+            .with_outcome(last_outcome.to_ipc());
         }
         Err(error) => {
             *last_outcome = LastOutcome::notice("No failed recording to recover");
-            return Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some(format!("no failed recording: {error:#}")),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: last_outcome.message.clone(),
-                last_ok: last_outcome.ok,
-            };
+            return WireReply::command(
+                false,
+                state.name(),
+                Some(format!("no failed recording: {error:#}")),
+            )
+            .with_outcome(last_outcome.to_ipc());
         }
     };
     // Copy into a fresh runtime WAV so the worker's cleanup still applies.
     let runtime = match paths::runtime_dir().and_then(paths::ensure_dir) {
         Ok(dir) => dir,
         Err(error) => {
-            return Reply {
-                ok: false,
-                state: state.name().to_owned(),
-                message: Some(format!("runtime dir unavailable: {error:#}")),
-                elapsed: None,
-                audio_level: None,
-                audio_silent: None,
-                audio_waveform: None,
-                stage: None,
-                last: None,
-                last_ok: None,
-            };
+            return WireReply::command(
+                false,
+                state.name(),
+                Some(format!("runtime dir unavailable: {error:#}")),
+            );
         }
     };
     let wav = runtime.join(format!("recover-{}.wav", unix_millis()));
     if let Err(error) = fs::copy(&path, &wav) {
-        return Reply {
-            ok: false,
-            state: state.name().to_owned(),
-            message: Some(format!("copying failed WAV failed: {error}")),
-            elapsed: None,
-            audio_level: None,
-            audio_silent: None,
-            audio_waveform: None,
-            stage: None,
-            last: None,
-            last_ok: None,
-        };
+        return WireReply::command(
+            false,
+            state.name(),
+            Some(format!("copying failed WAV failed: {error}")),
+        );
     }
     let job = Job {
         wav: wav.clone(),
@@ -1246,36 +1026,19 @@ fn recover_failed(
     if job_tx.send(job).is_err() {
         let _ = capture::remove_recording(&wav);
         *last_outcome = LastOutcome::notice("Transcription failed");
-        return Reply {
-            ok: false,
-            state: state.name().to_owned(),
-            message: Some("transcription worker unavailable".to_owned()),
-            elapsed: None,
-            audio_level: None,
-            audio_silent: None,
-            audio_waveform: None,
-            stage: None,
-            last: None,
-            last_ok: None,
-        };
+        return WireReply::command(
+            false,
+            state.name(),
+            Some("transcription worker unavailable".to_owned()),
+        );
     }
     *state = State::Processing {
         started: Instant::now(),
         stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
     };
     tracing::info!("[Daemon] state idle -> processing (recover failed WAV)");
-    Reply {
-        ok: true,
-        state: state.name().to_owned(),
-        message: Some("recovering".to_owned()),
-        elapsed: None,
-        audio_level: None,
-        audio_silent: None,
-        audio_waveform: None,
-        stage: Some("transcribing".to_owned()),
-        last: None,
-        last_ok: None,
-    }
+    WireReply::command(true, state.name(), Some("recovering".to_owned()))
+        .with_stage("transcribing".to_owned())
 }
 
 fn persist_last_transcript(text: &str) -> Result<()> {
@@ -1354,9 +1117,10 @@ mod tests {
             started: Instant::now(),
             stage: pipeline::Stage::CleaningUp,
         });
-        assert!(!reply.ok);
-        assert_eq!(reply.state, "processing");
-        assert_eq!(reply.message.as_deref(), Some("busy: processing"));
+        let json = serde_json::to_value(reply).expect("busy reply should serialize");
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["state"], "processing");
+        assert_eq!(json["message"], "busy: processing");
     }
 
     #[test]

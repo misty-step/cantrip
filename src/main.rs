@@ -221,7 +221,7 @@ fn run(cli: Cli) -> Result<()> {
         }),
         CliCommand::Stop => send_command(Command::Stop),
         CliCommand::Cancel => send_command(Command::Cancel),
-        CliCommand::Status => send_command(Command::Status),
+        CliCommand::Status => print_status(),
         CliCommand::Last => send_command(Command::Last),
         CliCommand::Recover => send_command(Command::Recover),
         CliCommand::Reload => send_command(Command::Reload),
@@ -394,34 +394,52 @@ fn read_secret(id: &str) -> Result<String> {
 }
 
 fn send_command(command: Command) -> Result<()> {
-    let reply = ipc::send(command)?;
-    println!("state: {}", reply.state);
+    let reply = ipc::send_command(command)?;
+    println!("state: {}", reply.state.as_str());
     if let Some(message) = &reply.message {
         println!("message: {message}");
-    }
-    if let Some(elapsed) = reply.elapsed {
-        println!("elapsed: {elapsed}s");
-    }
-    if let Some(level) = reply.audio_level {
-        println!("audio-level: {level}%");
-    }
-    if let Some(silent) = reply.audio_silent {
-        println!("audio-silent: {silent}");
-    }
-    if let Some(waveform) = reply.audio_waveform {
-        print!("audio-waveform:");
-        for [minimum, maximum] in waveform {
-            print!(" {minimum}:{maximum}");
-        }
-        println!();
     }
     if let Some(stage) = reply.stage {
         println!("stage: {stage}");
     }
-    if let Some(last) = &reply.last {
-        println!("last: {last}");
+    print_outcome(reply.outcome.as_ref());
+    if !reply.ok {
+        anyhow::bail!("daemon rejected the command");
     }
-    if reply.last_ok == Some(false) {
+    Ok(())
+}
+
+fn print_status() -> Result<()> {
+    let status = ipc::status()?;
+    println!("state: {}", status.state_name());
+    match &status {
+        ipc::StatusSnapshot::Recording {
+            elapsed, signal, ..
+        } => {
+            println!("elapsed: {elapsed}s");
+            if let Some(signal) = signal {
+                println!("audio-level: {}%", signal.level);
+                println!("audio-silent: {}", signal.silent);
+                print!("audio-waveform:");
+                for [minimum, maximum] in signal.waveform {
+                    print!(" {minimum}:{maximum}");
+                }
+                println!();
+            }
+        }
+        ipc::StatusSnapshot::Processing { stage, .. } => println!("stage: {stage}"),
+        ipc::StatusSnapshot::Idle { .. } | ipc::StatusSnapshot::Unknown { .. } => {}
+    }
+    print_outcome(status.outcome());
+    Ok(())
+}
+
+fn print_outcome(outcome: Option<&ipc::TerminalOutcome>) {
+    let Some(outcome) = outcome else {
+        return;
+    };
+    println!("last: {}", outcome.message);
+    if !outcome.ok {
         if paths::last_transcript_path()
             .ok()
             .is_some_and(|path| path.is_file())
@@ -435,10 +453,6 @@ fn send_command(command: Command) -> Result<()> {
             println!("hint: cantrip recover   # retry the last failed recording");
         }
     }
-    if !reply.ok {
-        anyhow::bail!("daemon rejected the command");
-    }
-    Ok(())
 }
 
 fn transcribe_file(wav: &std::path::Path) -> Result<()> {
@@ -502,9 +516,9 @@ fn doctor() -> Result<()> {
         Ok(None) => println!("model: not installed"),
         Err(error) => println!("model: error ({error:#})"),
     }
-    match ipc::send(Command::Ping) {
-        Ok(reply) if reply.ok => println!("daemon: reachable ({})", reply.state),
-        Ok(reply) => println!("daemon: replied not ok ({})", reply.state),
+    match ipc::send_command(Command::Ping) {
+        Ok(reply) if reply.ok => println!("daemon: reachable ({})", reply.state.as_str()),
+        Ok(reply) => println!("daemon: replied not ok ({})", reply.state.as_str()),
         Err(error) => println!("daemon: unreachable ({error:#})"),
     }
     println!(
