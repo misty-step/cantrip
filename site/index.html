@@ -69,11 +69,12 @@
     <section id="install" class="install">
       <h2>Quickstart</h2>
       <pre><code>cargo build --release
-./target/release/cantrip models pull
 ./target/release/cantrip config init
-./target/release/cantrip daemon &amp;
-./target/release/cantrip toggle</code></pre>
-      <p class="fine">Needs PipeWire, Wayland layer-shell, and <code>wl-clipboard</code>. See the full <a href="../docs/CONFIGURATION.md">configuration guide</a>.</p>
+./target/release/cantrip doctor
+./target/release/cantrip models pull  # when requested
+./target/release/cantrip daemon
+./target/release/cantrip toggle       # press again to stop</code></pre>
+      <p class="fine">Run the daemon in a dedicated terminal for the first session. Follow every <code>doctor</code> action, then bind one COSMIC custom shortcut to the absolute path of <code>cantrip toggle</code>. See the full <a href="../docs/CONFIGURATION.md">configuration guide</a>.</p>
     </section>
   </main>
 

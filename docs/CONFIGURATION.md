@@ -7,6 +7,12 @@ Cantrip reads one TOML file. `cantrip config path` prints its location
 and adjust the common settings; its Save button writes the file back
 (with comments preserved) and reloads the running daemon.
 
+Settings can repair a file that parses as TOML but fails Cantrip validation:
+it loads the actual values, explains the validation error, and enables Save
+after correction. If the TOML syntax is malformed or the file cannot be read,
+Settings never replaces it with defaults; it directs you to `cantrip config
+edit` and keeps structured saving disabled until the file parses.
+
 Changes apply immediately, no restart needed. The Save button (or `cantrip
 reload`, for edits made directly to the file with `config edit`) makes the
 daemon re-read the config in place. Each stage picks up the newest values at
@@ -14,6 +20,9 @@ its own boundary: `[stt]`, `vocabulary`, and `[postproc]` when a recording
 stops, `injection` when the corrected text comes back, and `audio_source` on
 the next recording. The one setting that genuinely needs a daemon restart is
 `keep_warm`, which only governs model preload at startup.
+
+This example opts into local cleanup. Fresh defaults use
+`[postproc].enabled = false` and an empty cleanup model.
 
 ```toml
 injection = "auto"        # auto | paste | type | clipboard — how corrected text is delivered

@@ -10,11 +10,10 @@ that, for text.
   int8 ONNX [Parakeet TDT 0.6B v3](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)
   model via [transcribe-rs](https://github.com/cjpais/transcribe-rs) runs on
   CPU in ~250 ms for short dictations.
-- **Local post-processing.** The raw transcript passes through a small
-  language model (default `qwen3:8b` on local Ollama) that removes spoken
-  disfluencies — "um", "uh", false starts, repeated words — and adds
-  punctuation and capitalization, then the corrected text is typed at your
-  cursor.
+- **Optional transcript cleanup.** Cleanup is disabled by default. When enabled,
+  the raw transcript can pass through a small language model—such as
+  `qwen3:8b` on local Ollama—to remove spoken disfluencies and add punctuation
+  and capitalization before delivery.
 - **Optional cloud lanes.** Any OpenAI-compatible STT or chat endpoint can
   replace the local models (see `docs/CONFIGURATION.md`). API keys live in
   the OS keyring, never in files.
@@ -55,23 +54,31 @@ sudo apt install wtype        # or: sudo apt install ydotool
 ```sh
 cargo build --release
 
-# 1. First-time model download (~460 MB) and environment check
-./target/release/cantrip models pull
-./target/release/cantrip doctor
-
-# 2. Initialize config at ~/.config/cantrip/config.toml
+# 1. Create the annotated default config.
 ./target/release/cantrip config init
 
-# 3. Bring up the daemon (it keeps the STT model warm and runs the HUD itself)
-./target/release/cantrip daemon &
+# 2. Inspect the effective capture, STT, cleanup, injection, HUD, and daemon
+# paths. Follow each reported action; the local default will request the model.
+./target/release/cantrip doctor
+./target/release/cantrip models pull   # when doctor requests it
 
-# 4. Dictate — bind this to a key in your compositor
-./target/release/cantrip toggle       # press once to start, once to stop
+# 3. Run the daemon in a dedicated terminal for this first session.
+./target/release/cantrip daemon
+
+# 4. In another terminal, dictate once and confirm the Success capsule.
+./target/release/cantrip toggle        # start
+./target/release/cantrip toggle        # stop, transcribe, and deliver
 ```
 
-If the postprocessor is enabled (set `model = "qwen3:8b"` and ensure Ollama is
-running: `ollama pull qwen3:8b`), the corrected text lands at your cursor.
-`cantrip cancel` discards a recording without injecting.
+On COSMIC, first test the two `toggle` calls above. Then add one custom keyboard
+shortcut whose command is the absolute path to `cantrip toggle`; press it once
+to start and once to stop. Compositors that support separate key-down and
+key-up commands can bind `cantrip start` and `cantrip stop` instead.
+
+Run `cantrip doctor` again after changing config or installing a prerequisite.
+If cleanup is enabled, ensure its configured endpoint is running and its
+keyring credential id, when needed, was stored with `cantrip key set`.
+`cantrip cancel` discards the active recording without injecting.
 
 ## CLI
 
@@ -87,6 +94,8 @@ running: `ollama pull qwen3:8b`), the corrected text lands at your cursor.
 | `cantrip config show` / `edit` / `init` / `path` | Inspect and edit configuration |
 | `cantrip key set` / `rm` / `status <id>` | Store and manage keyring credential ids |
 | `cantrip doctor` | Environment report |
+| `cantrip last` / `recover` | Re-deliver the last transcript / re-run STT on the last fully failed WAV |
+| `cantrip reload` | Re-read configuration in the running daemon |
 
 Two hotkeys, one with cleanup and one without: `toggle` and `start` take
 `--postproc clean|raw` to force transcript cleanup on or off for that
@@ -108,13 +117,16 @@ documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 ## Privacy
 
 - Audio and transcripts never leave the machine in the default local lanes.
-- Recordings live in `$XDG_RUNTIME_DIR/cantrip` (tmpfs, per-user 0700) and are
-  deleted after processing, success or failure.
+- In-flight recordings live in `$XDG_RUNTIME_DIR/cantrip` (tmpfs, per-user
+  `0700`) and are deleted after processing. If STT fails completely, Cantrip
+  may retain one owner-only copy at
+  `~/.local/state/cantrip/last-failed.wav` for `cantrip recover`; the next full
+  failure replaces it.
 - Every successful STT result is saved locally as an owner-only JSON record in
   `$XDG_STATE_HOME/cantrip/transcripts` (normally
   `~/.local/state/cantrip/transcripts`). This history contains sensitive text;
   it is never uploaded or committed automatically.
-- Operational logs contain character counts only — never transcript content.
+- Operational logs contain character counts only—never transcript content.
   The single stdout exemption is `cantrip transcribe`.
 - Clipboard mode overwrites the clipboard and does not restore the previous
   contents (restoring is racy on Wayland).
