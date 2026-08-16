@@ -1,7 +1,8 @@
-# Cantrip factory composition for Iron Forest.
-# One process per checkout: systemctl --user status forest@cantrip
 repo: misty-step/cantrip
-
+agents:
+  builder:  { poll: "forest poll builder",  interval: 300 }
+  verifier: { poll: "forest poll verifier", interval: 120 }
+  fixer:    { poll: "forest poll fixer",    interval: 300 }
 checks:
   - name: fmt
     run: cargo fmt --check
@@ -9,33 +10,3 @@ checks:
     run: cargo clippy --all-targets -- -D warnings
   - name: test
     run: cargo test
-
-flows:
-  builder:
-    enabled: true
-    agent: builder
-    interval_seconds: 45
-    require_labels: ["forest:ready"]
-    exclude_labels: ["forest:failed"]
-  verifier:
-    enabled: true
-    agent: verifier
-    interval_seconds: 30
-    merge: squash
-    auto_merge: true
-  fixer:
-    enabled: true
-    agent: builder
-    interval_seconds: 45
-    attempts: 3
-  manager:
-    enabled: true
-    agent: manager
-    interval_seconds: 60
-    ready_depth: 1
-    exclude_labels: ["parked", "forest:failed", "epic"]
-
-
-projection:
-  enabled: true
-  merge_via_host: false
