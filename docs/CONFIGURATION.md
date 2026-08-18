@@ -133,10 +133,10 @@ you dictate often.
 
 ## `injection`
 
-- `auto` – the default: copy to the Wayland clipboard and send one `Ctrl+V`
+- `auto` – the default: copy to the Wayland clipboard and send one `Ctrl+Shift+V`
   (paragraph breaks are preserved), falling back to `wtype` typing, then
   `ydotool`, then clipboard-only if any backend or shortcut is unavailable.
-- `paste` – copy and `Ctrl+V` only, no typing fallback; paragraph breaks are
+- `paste` – copy and `Ctrl+Shift+V` only, no typing fallback; paragraph breaks are
   preserved.
 - `type` – type directly (never touches the clipboard; newlines are flattened
   to spaces because typing them would send a Return key, which submits in
@@ -146,5 +146,6 @@ you dictate often.
 Pasted or copied text stays on the clipboard, so you can paste it again by
 hand. Injection is atomic: nothing is typed into a live window until the whole
 text is ready, and the single paste keypress cannot be interrupted by losing
-focus mid-composition like long typing streams can. Dictating into a terminal
-is the one case for `type` (`Ctrl+V` is not paste there).
+focus mid-composition like long typing streams can. The paste chord is
+`Ctrl+Shift+V` so a terminal or TUI (OMP, Herdr) does not intercept `Ctrl+V`
+as its own empty host-clipboard paste.

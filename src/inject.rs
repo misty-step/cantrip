@@ -20,6 +20,16 @@ use std::time::{Duration, Instant};
 /// transcript while leaving headroom against a hung child.
 const INJECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Terminal-safe paste chord. `Ctrl+V` is intercepted by TUIs (OMP shows
+/// "Clipboard is empty" and reads a host clipboard that is empty in remote
+/// Herdr/SSH sessions). `Ctrl+Shift+V` is the compositor/terminal paste, so
+/// the Wayland selection `wl-copy` just wrote is what lands in the focused app.
+const PASTE_WTYPE_ARGS: &[&str] = &[
+    "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl",
+];
+/// 29 = LeftCtrl, 42 = LeftShift, 47 = V.
+const PASTE_YDOTOOL_ARGS: &[&str] = &["key", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"];
+
 /// Wait for `child` within `timeout`; on timeout kill and reap it, returning an
 /// error so the caller can fall back to the next backend, never blocking forever.
 fn wait_child_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {
@@ -128,7 +138,7 @@ fn set_nonblocking(stream: &impl AsRawFd) -> Result<()> {
 pub enum InjectionMode {
     #[default]
     Auto,
-    /// Copy, then send one Ctrl+V to the focused app (paragraph-safe).
+    /// Copy, then send one Ctrl+Shift+V to the focused app (paragraph-safe).
     Paste,
     Type,
     Clipboard,
@@ -138,7 +148,7 @@ pub enum InjectionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InjectionOutcome {
     Typed(&'static str),
-    /// Copied to the clipboard and pasted with a single Ctrl+V.
+    /// Copied to the clipboard and pasted with a single Ctrl+Shift+V.
     Pasted,
     Clipboard,
 }
@@ -441,8 +451,8 @@ fn run_clipboard(text: &str) -> Result<()> {
     )
 }
 
-/// Copy the text, then send one Ctrl+V to the focused app. Nothing is typed
-/// into a live window, so losing focus mid-composition is harmless: the
+/// Copy the text, then send one Ctrl+Shift+V to the focused app. Nothing is
+/// typed into a live window, so losing focus mid-composition is harmless: the
 /// clipboard was fully written before the single paste keypress. The text
 /// stays on the clipboard (wl-copy keeps holding the selection) for the
 /// user to paste again by hand.
@@ -451,12 +461,12 @@ fn run_paste(text: &str) -> Result<()> {
     send_paste_shortcut()
 }
 
-/// Emit a Ctrl+V keypress through wtype (or a ydotool key sequence).
+/// Emit a Ctrl+Shift+V keypress through wtype (or a ydotool key sequence).
 fn send_paste_shortcut() -> Result<()> {
     if executable_in_path("wtype") {
         let status = run_bounded(
             Command::new("wtype")
-                .args(["-M", "ctrl", "-k", "v"])
+                .args(PASTE_WTYPE_ARGS)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
@@ -468,10 +478,9 @@ fn send_paste_shortcut() -> Result<()> {
         }
     }
     if executable_in_path("ydotool") && ydotool_socket_exists() {
-        // 29 = LeftCtrl, 47 = V; down V, up V, up Ctrl.
         let status = run_bounded(
             Command::new("ydotool")
-                .args(["key", "29:1", "47:1", "47:0", "29:0"])
+                .args(PASTE_YDOTOOL_ARGS)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
@@ -490,11 +499,24 @@ mod tests {
     use super::{
         allows_clipboard_fallback, backend_order, normalize_for_typing, run_bounded,
         run_writer_backend, ydotool_socket_candidates, AvailableBackends, Backend, InjectionMode,
+        PASTE_WTYPE_ARGS, PASTE_YDOTOOL_ARGS,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn paste_shortcut_is_ctrl_shift_v() {
+        assert_eq!(
+            PASTE_WTYPE_ARGS,
+            ["-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"]
+        );
+        assert_eq!(
+            PASTE_YDOTOOL_ARGS,
+            ["key", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"]
+        );
+    }
 
     /// Write an executable `name` into `dir` whose body is `body`, so tests can
     /// put a deterministic fake helper on `PATH` (a real subprocess boundary).

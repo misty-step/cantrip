@@ -27,7 +27,7 @@ that, for text.
   single-chunk stays on the spinner. Delivered text flashes **Success**.
   Pure Rust, no GTK.
 - **Atomic paste-first injection.** The default pastes the finished text
-  from the clipboard (`wl-copy` then one `Ctrl+V`), so paragraph breaks
+  from the clipboard (`wl-copy` then one `Ctrl+Shift+V`), so paragraph breaks
   survive and a focus change mid-dictation cannot interrupt delivery.
   `type` mode (never touching the clipboard) still types via `wtype` or
   `ydotool`, and `clipboard` mode only copies.

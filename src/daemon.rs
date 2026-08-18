@@ -823,12 +823,12 @@ fn handle_worker_result(
                         }
                         InjectionOutcome::Pasted => {
                             format!(
-                                "Pasted {chars} chars (clipboard + Ctrl+V){cleanup_suffix}{partial_suffix}"
+                                "Pasted {chars} chars (clipboard + Ctrl+Shift+V){cleanup_suffix}{partial_suffix}"
                             )
                         }
                         InjectionOutcome::Clipboard => {
                             format!(
-                                "Copied to clipboard — press Ctrl+V ({chars} chars){cleanup_suffix}{partial_suffix}"
+                                "Copied to clipboard — press Ctrl+Shift+V ({chars} chars){cleanup_suffix}{partial_suffix}"
                             )
                         }
                     };
@@ -932,10 +932,10 @@ fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -
                     let message = match outcome {
                         InjectionOutcome::Typed(tool) => format!("Replayed {chars} chars ({tool})"),
                         InjectionOutcome::Pasted => {
-                            format!("Replayed {chars} chars (clipboard + Ctrl+V)")
+                            format!("Replayed {chars} chars (clipboard + Ctrl+Shift+V)")
                         }
                         InjectionOutcome::Clipboard => {
-                            format!("Replayed to clipboard — press Ctrl+V ({chars} chars)")
+                            format!("Replayed to clipboard — press Ctrl+Shift+V ({chars} chars)")
                         }
                     };
                     tracing::info!("[Inject] replayed last transcript chars={chars}");
