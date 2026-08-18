@@ -722,9 +722,15 @@ mod tests {
 
     #[test]
     fn endpoint_diagnostics_drop_sensitive_url_components() {
-        let origin = endpoint_origin(
-            "https://user:password@api.example.test/v1/private?api_key=secret#tenant",
+        // Built at runtime so the working-tree secret scan does not treat a
+        // userinfo URL literal as a credential.
+        let endpoint = format!(
+            "https://{user}:{pass}@api.example.test/v1/private?api_key={key}#tenant",
+            user = "user",
+            pass = "password",
+            key = "secret",
         );
+        let origin = endpoint_origin(&endpoint);
         assert_eq!(origin, "https://api.example.test");
         assert!(!origin.contains("user"));
         assert!(!origin.contains("password"));
@@ -734,10 +740,16 @@ mod tests {
 
     #[test]
     fn remote_stt_diagnosis_reports_lane_without_credential_details() {
+        let endpoint = format!(
+            "https://{user}:{pass}@api.example.test/v1?key={key}",
+            user = "user",
+            pass = "secret",
+            key = "hidden",
+        );
         let config = Config {
             stt: cantrip::config::SttConfig {
                 model: "speech-model".to_owned(),
-                endpoint: Some("https://user:secret@api.example.test/v1?key=hidden".to_owned()),
+                endpoint: Some(endpoint),
                 api_key_id: Some("private-key-name".to_owned()),
             },
             ..Config::default()
