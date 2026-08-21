@@ -8,13 +8,14 @@ echo "── pre-push: cargo test"
 cargo test
 
 echo "── pre-push: secret scan (trufflehog, working tree)"
-if command -v trufflehog >/dev/null 2>&1; then
-    # --fail makes trufflehog exit non-zero when anything is found; without it
-    # the scan always exits 0 and this gate would prove nothing.
-    trufflehog filesystem . --exclude-paths .trufflehog-exclude --fail >/dev/null 2>&1 || {
-        echo "✗ working tree contains a secret (trufflehog). Refusing to push."
-        exit 1
-    }
-else
-    echo "⚠ trufflehog not installed; skipping scan. Install: https://github.com/trufflesecurity/trufflehog"
+if ! command -v trufflehog >/dev/null 2>&1; then
+    echo "✗ trufflehog is required for the working-tree secret scan but was not found on PATH." >&2
+    echo "  Install with: go install github.com/trufflesecurity/trufflehog/v3@latest" >&2
+    exit 1
 fi
+# --fail makes trufflehog exit non-zero when anything is found; without it
+# the scan always exits 0 and this gate would prove nothing.
+trufflehog filesystem . --exclude-paths .trufflehog-exclude --fail >/dev/null 2>&1 || {
+    echo "✗ working tree contains a secret (trufflehog). Refusing to push." >&2
+    exit 1
+}

@@ -154,8 +154,9 @@ cargo fmt --check
 ```
 
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
-  `.githooks/install.sh`. Requires `gitleaks` (staged scan) and `trufflehog`
-  (working-tree scan) on `PATH`.
+  `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`
+  must be on `PATH`; the pre-commit and pre-push hooks fail closed when either
+  scanner is missing instead of skipping the scan.
 - **CI** (`.github/workflows/ci.yml`): fmt, clippy `-D warnings`, tests, and a
   TruffleHog + Gitleaks secret scan on every push/PR.
 - Architecture decisions: [`docs/adr/`](docs/adr/). Log tags: `[Daemon]`

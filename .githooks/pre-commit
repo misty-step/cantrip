@@ -11,11 +11,12 @@ echo "── pre-commit: cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets -- -D warnings
 
 echo "── pre-commit: staged secret scan (gitleaks)"
-if command -v gitleaks >/dev/null 2>&1; then
-    gitleaks protect --staged --no-banner 2>/dev/null || {
-        echo "✗ staged changes contain a detected secret (gitleaks). Refusing to commit."
-        exit 1
-    }
-else
-    echo "⚠ gitleaks not installed; skipping staged scan. Install: https://github.com/gitleaks/gitleaks"
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "✗ gitleaks is required for the staged secret scan but was not found on PATH." >&2
+    echo "  Install with: go install github.com/gitleaks/gitleaks/v8@latest" >&2
+    exit 1
 fi
+gitleaks protect --staged --no-banner 2>/dev/null || {
+    echo "✗ staged changes contain a detected secret (gitleaks). Refusing to commit." >&2
+    exit 1
+}
