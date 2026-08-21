@@ -3,7 +3,7 @@
 use crate::capture::{self, InputSignal};
 use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::hud;
-use crate::inject::{self, InjectionMode, InjectionOutcome};
+use crate::inject::{self, InjectionOutcome};
 use crate::ipc::{AudioSignal, Command, Request, TerminalOutcome, WireReply};
 use crate::models;
 use crate::paths;
@@ -884,33 +884,6 @@ fn handle_worker_result(
                     tracing::info!("[Inject] injected chars={chars} total_ms={total_ms}");
                     *last_outcome = LastOutcome::success(message);
                 }
-                Err(error) if inject::allows_clipboard_fallback(config.injection) => {
-                    // Auto only: Type must never touch the clipboard; Paste is strict.
-                    tracing::warn!(
-                        "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
-                        stt_elapsed.as_millis()
-                    );
-                    match inject::inject(&text, InjectionMode::Clipboard) {
-                        Ok(_) => {
-                            let inject_ms = inject_started.elapsed().as_millis();
-                            let total_ms = processing_started.elapsed().as_millis();
-                            log_processing_idle(stt_elapsed, inject_ms, chars, postproc_ms);
-                            tracing::info!(
-                                "[Inject] clipboard fallback chars={chars} total_ms={total_ms}"
-                            );
-                            *last_outcome = LastOutcome::success(format!(
-                                "Copied to clipboard ({chars} chars){cleanup_suffix}{partial_suffix}"
-                            ));
-                        }
-                        Err(fallback_error) => {
-                            tracing::warn!(
-                                "[Inject] clipboard fallback failed chars={chars} stt_ms={} error={fallback_error:#}",
-                                stt_elapsed.as_millis()
-                            );
-                            *last_outcome = LastOutcome::notice("Saved — run: cantrip last");
-                        }
-                    }
-                }
                 Err(error) => {
                     tracing::warn!(
                         "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
@@ -1148,7 +1121,6 @@ fn unix_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inject::{allows_clipboard_fallback, InjectionMode};
 
     struct FakeRecorder {
         signal: Option<InputSignal>,
@@ -1399,14 +1371,6 @@ mod tests {
         assert_eq!(json["ok"], false);
         assert_eq!(json["state"], "processing");
         assert_eq!(json["message"], "busy: processing");
-    }
-
-    #[test]
-    fn injection_clipboard_fallback_matches_product_contract() {
-        // Daemon must only degrade Auto (see handle_worker_result).
-        assert!(allows_clipboard_fallback(InjectionMode::Auto));
-        assert!(!allows_clipboard_fallback(InjectionMode::Type));
-        assert!(!allows_clipboard_fallback(InjectionMode::Paste));
     }
 
     #[test]
