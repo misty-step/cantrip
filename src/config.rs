@@ -115,6 +115,12 @@ impl Config {
                 self.postproc.min_chars
             );
         }
+        if !(1_000..=120_000).contains(&self.postproc.timeout_ms) {
+            bail!(
+                "postproc.timeout_ms must be between 1000 and 120000, got {}",
+                self.postproc.timeout_ms
+            );
+        }
         if let Some(endpoint) = &self.stt.endpoint {
             let endpoint = endpoint.trim();
             if endpoint.is_empty() {
@@ -227,6 +233,52 @@ mod tests {
         assert!(error
             .to_string()
             .contains("postproc.min_chars must be at most 10000"));
+    }
+
+    #[test]
+    fn validation_rejects_zero_timeout_ms() {
+        let config = Config {
+            postproc: PostprocConfig {
+                timeout_ms: 0,
+                ..PostprocConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config.validate().expect_err("timeout_ms = 0 must fail");
+        assert!(error
+            .to_string()
+            .contains("postproc.timeout_ms must be between 1000 and 120000"));
+    }
+
+    #[test]
+    fn validation_rejects_oversized_timeout_ms() {
+        let config = Config {
+            postproc: PostprocConfig {
+                timeout_ms: 120_001,
+                ..PostprocConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("timeout_ms = 120001 must fail");
+        assert!(error
+            .to_string()
+            .contains("postproc.timeout_ms must be between 1000 and 120000"));
+    }
+
+    #[test]
+    fn validation_accepts_timeout_ms_bounds() {
+        for timeout_ms in [1_000, 120_000] {
+            let config = Config {
+                postproc: PostprocConfig {
+                    timeout_ms,
+                    ..PostprocConfig::default()
+                },
+                ..Config::default()
+            };
+            config.validate().expect("timeout_ms bound should validate");
+        }
     }
 
     #[test]
