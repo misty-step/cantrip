@@ -1,0 +1,1 @@
+{"schema":"forest.checks.v1","revision":"c841eb739e34fac98f4b637a3ef15a6ce343aa57","results":[{"name":"fmt","ok":true,"exit":0},{"name":"clippy","ok":true,"exit":0},{"name":"test","ok":true,"exit":0}],"time":"2026-08-21T21:59:35Z"}
