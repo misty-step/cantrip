@@ -1,9 +1,8 @@
 # Rust / Cantrip style
 
-- `cargo fmt` on every changed Rust file before finishing.
-- `clippy --all-targets -- -D warnings` must stay clean.
-- Prefer existing modules: daemon owns state; inject owns delivery; hud is read-only.
-- Do not add an async runtime or a second work ledger.
-- Injection modes: Auto may fall back; Type and Paste must not touch clipboard on failure once that policy is fixed.
+Project commands and invariants live in [`AGENTS.md`](../../../AGENTS.md) — read
+that first. This file only keeps forest-builder style that is not already
+stated there.
+
+- Prefer existing modules: `daemon` owns state, `inject` owns delivery, `hud` is read-only.
 - HUD: no fake progress; multi-chunk fill only from measured `N/M`.
-- Secrets stay in the OS keyring via `cantrip key`, never in files or logs.

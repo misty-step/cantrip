@@ -12,12 +12,14 @@ Product north star: [`VISION.md`](VISION.md). Read it before inventing scope.
 - `src/capture.rs` — `pw-record` child-process recorder
 - `src/stt.rs` — Parakeet via transcribe-rs
 - `src/models.rs` — model download/verify (`~/.local/share/cantrip/models`)
-- `src/inject.rs` — wtype → ydotool → wl-copy chain
+- `src/archive.rs` — owner-private local transcript history records
+- `src/inject.rs` — paste-first injection (clipboard + `Ctrl+Shift+V`), with `type`/`clipboard` modes
 - `src/config.rs` / `src/paths.rs` — TOML config, XDG paths
 - `src/postproc.rs` — OpenAI-compatible transcript cleanup
 - `src/keys.rs` — OS keyring API key access
 - `src/pipeline.rs` — shared STT + postproc job pipeline (daemon + `transcribe`)
 - `src/hud.rs` — layer-shell status HUD (`cantrip hud`)
+- `src/settings.rs` — egui configuration window (`cantrip settings`)
 - `docs/adr/` — architecture decisions; add an ADR before non-obvious changes
 
 ## Commands
