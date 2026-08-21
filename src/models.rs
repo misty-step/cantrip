@@ -3,6 +3,7 @@
 use crate::paths::{ensure_dir, models_dir};
 use anyhow::{bail, Context, Result};
 use flate2::read::GzDecoder;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ pub struct ModelSpec {
     pub url: &'static str,
     pub dir_name: &'static str,
     pub expect: &'static [&'static str],
+    pub sha256: &'static str,
 }
 
 pub const PARAKEET_V3_INT8: ModelSpec = ModelSpec {
@@ -27,6 +29,7 @@ pub const PARAKEET_V3_INT8: ModelSpec = ModelSpec {
         "nemo128.onnx",
         "vocab.txt",
     ],
+    sha256: "43d37191602727524a7d8c6da0eef11c4ba24320f5b4730f1a2497befc2efa77",
 };
 
 pub const MODEL_NAMES: &[&str] = &["parakeet-tdt-0.6b-v3-int8"];
@@ -110,6 +113,8 @@ pub fn ensure_model(spec: &ModelSpec) -> Result<PathBuf> {
         .with_context(|| format!("flushing model download for {}", spec.name))?;
     drop(archive_file);
 
+    verify_archive(&archive_path, spec)?;
+
     let archive_file = File::open(&archive_path).with_context(|| {
         format!(
             "opening downloaded model archive {}",
@@ -151,6 +156,42 @@ pub fn ensure_model(spec: &ModelSpec) -> Result<PathBuf> {
     };
     tracing::info!("[Models] installed {}", spec.name);
     Ok(dir)
+}
+
+fn sha256_hex(path: &Path) -> Result<String> {
+    let mut file = File::open(path)
+        .with_context(|| format!("opening model archive {} for checksum", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("reading model archive {} for checksum", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    Ok(hex)
+}
+
+fn verify_archive(path: &Path, spec: &ModelSpec) -> Result<()> {
+    let actual = sha256_hex(path)
+        .with_context(|| format!("hashing model archive {} for {}", path.display(), spec.name))?;
+    if actual != spec.sha256 {
+        let _ = fs::remove_file(path);
+        bail!(
+            "model {} archive checksum mismatch: expected sha256 {}, got {}",
+            spec.name,
+            spec.sha256,
+            actual
+        );
+    }
+    Ok(())
 }
 
 fn installed_in(root: &Path, spec: &ModelSpec) -> Result<Option<PathBuf>> {
@@ -265,6 +306,7 @@ mod tests {
             url: "unused-in-installed-test",
             dir_name: "model",
             expect: &["encoder.onnx", "vocab.txt"],
+            sha256: "unused-in-installed-test",
         };
         let dir = root.join(spec.dir_name);
         fs::create_dir_all(&dir).expect("create model directory");
@@ -289,6 +331,77 @@ mod tests {
         );
         assert!(spec("missing-model").is_none());
         assert_eq!(MODEL_NAMES, &["parakeet-tdt-0.6b-v3-int8"]);
+    }
+
+    #[test]
+    fn sha256_matches_known_vectors() {
+        let root = test_root();
+        let path = root.join("archive");
+
+        fs::write(&path, b"abc").expect("write abc archive");
+        assert_eq!(
+            sha256_hex(&path).expect("hash abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        fs::write(&path, b"").expect("write empty archive");
+        assert_eq!(
+            sha256_hex(&path).expect("hash empty"),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn verify_archive_accepts_matching_digest() {
+        let root = test_root();
+        let path = root.join("archive");
+        fs::write(&path, b"abc").expect("write archive");
+        let spec = checksum_test_spec();
+
+        verify_archive(&path, &spec).expect("accept matching digest");
+        assert!(path.exists());
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn verify_archive_deletes_mismatched_archive() {
+        let root = test_root();
+        let path = root.join("archive");
+        fs::write(&path, b"wrong bytes").expect("write mismatched archive");
+        let spec = checksum_test_spec();
+
+        let error = verify_archive(&path, &spec).expect_err("reject mismatched digest");
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert!(!path.exists());
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn verify_archive_deletes_truncated_archive() {
+        let root = test_root();
+        let path = root.join("archive");
+        fs::write(&path, b"ab").expect("write truncated archive");
+        let spec = checksum_test_spec();
+
+        let error = verify_archive(&path, &spec).expect_err("reject truncated archive");
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert!(!path.exists());
+
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    fn checksum_test_spec() -> ModelSpec {
+        ModelSpec {
+            name: "test",
+            url: "unused-in-checksum-test",
+            dir_name: "model",
+            expect: &["encoder.onnx"],
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        }
     }
 
     fn test_root() -> PathBuf {

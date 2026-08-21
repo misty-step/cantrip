@@ -681,6 +681,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "smithay-client-toolkit 0.21.1",
  "tar",
  "toml",
