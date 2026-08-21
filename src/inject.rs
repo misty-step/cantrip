@@ -179,12 +179,6 @@ struct AvailableBackends {
     wl_copy: bool,
 }
 
-/// True when the daemon may retry via clipboard after the primary mode fails.
-/// Only Auto may degrade: Type must never touch the clipboard; Paste is strict.
-pub fn allows_clipboard_fallback(mode: InjectionMode) -> bool {
-    matches!(mode, InjectionMode::Auto)
-}
-
 /// Inject text with the requested backend policy.
 pub fn inject(text: &str, mode: InjectionMode) -> Result<InjectionOutcome> {
     let available = AvailableBackends {
@@ -497,9 +491,9 @@ fn send_paste_shortcut() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        allows_clipboard_fallback, backend_order, normalize_for_typing, run_bounded,
-        run_writer_backend, ydotool_socket_candidates, AvailableBackends, Backend, InjectionMode,
-        PASTE_WTYPE_ARGS, PASTE_YDOTOOL_ARGS,
+        backend_order, normalize_for_typing, run_bounded, run_writer_backend,
+        ydotool_socket_candidates, AvailableBackends, Backend, InjectionMode, PASTE_WTYPE_ARGS,
+        PASTE_YDOTOOL_ARGS,
     };
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -656,14 +650,6 @@ mod tests {
                 .any(|p| p.ends_with(".ydotool_socket") || p.ends_with("ydotoold.socket")),
             "expected known socket basenames: {list:?}"
         );
-    }
-
-    #[test]
-    fn clipboard_fallback_only_for_auto() {
-        assert!(allows_clipboard_fallback(InjectionMode::Auto));
-        assert!(!allows_clipboard_fallback(InjectionMode::Type));
-        assert!(!allows_clipboard_fallback(InjectionMode::Paste));
-        assert!(!allows_clipboard_fallback(InjectionMode::Clipboard));
     }
 
     #[test]
