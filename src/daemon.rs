@@ -1,6 +1,6 @@
 //! The cantrip daemon and its socket-driven state machine.
 
-use crate::capture::{self, InputSignal, Recorder};
+use crate::capture::{self, InputSignal};
 use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::hud;
 use crate::inject::{self, InjectionMode, InjectionOutcome};
@@ -35,6 +35,29 @@ const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// The recorder operations the daemon state machine needs. Production uses
+/// `capture::Recorder`; tests substitute a fake so Idle/Recording/Processing
+/// transitions can be proven without PipeWire hardware.
+trait RecorderBoundary: Send {
+    fn input_signal(&mut self) -> Option<InputSignal>;
+    fn stop(self: Box<Self>) -> Result<PathBuf>;
+    fn cancel(self: Box<Self>) -> Result<()>;
+}
+
+impl RecorderBoundary for capture::Recorder {
+    fn input_signal(&mut self) -> Option<InputSignal> {
+        capture::Recorder::input_signal(self)
+    }
+
+    fn stop(self: Box<Self>) -> Result<PathBuf> {
+        capture::Recorder::stop(*self)
+    }
+
+    fn cancel(self: Box<Self>) -> Result<()> {
+        capture::Recorder::cancel(*self)
+    }
+}
+
 extern "C" fn signal_handler(_signal: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
@@ -42,7 +65,7 @@ extern "C" fn signal_handler(_signal: libc::c_int) {
 enum State {
     Idle,
     Recording {
-        recorder: Recorder,
+        recorder: Box<dyn RecorderBoundary>,
         started: Instant,
         signal: Option<InputSignal>,
         next_signal_sample: Instant,
@@ -580,7 +603,10 @@ fn execute(
         },
         Command::Start { postproc } => match state {
             State::Idle => start_recording(state, config, runtime_dir, last_outcome, postproc),
-            _ => WireReply::command(false, state.name(), Some("busy".to_owned())),
+            State::Processing { .. } => busy_reply(state),
+            State::Recording { .. } => {
+                WireReply::command(false, state.name(), Some("busy".to_owned()))
+            }
         },
         Command::Stop => match state {
             State::Recording { .. } => stop_recording(state, config, job_tx, last_outcome),
@@ -611,6 +637,27 @@ fn start_recording(
     last_outcome: &mut LastOutcome,
     postproc_override: Option<bool>,
 ) -> WireReply {
+    start_recording_with(
+        state,
+        config,
+        runtime_dir,
+        last_outcome,
+        postproc_override,
+        |wav, source| {
+            capture::Recorder::start(wav, source)
+                .map(|recorder| Box::new(recorder) as Box<dyn RecorderBoundary>)
+        },
+    )
+}
+
+fn start_recording_with(
+    state: &mut State,
+    config: &Config,
+    runtime_dir: &Path,
+    last_outcome: &mut LastOutcome,
+    postproc_override: Option<bool>,
+    start: impl FnOnce(&Path, Option<&str>) -> Result<Box<dyn RecorderBoundary>>,
+) -> WireReply {
     // Forcing cleanup when no model is configured would silently degrade to
     // "cleanup failed — raw text", so reject it up front with a clear error.
     if postproc_override == Some(true) && config.postproc.model.trim().is_empty() {
@@ -620,7 +667,7 @@ fn start_recording(
         ));
     }
     let wav = runtime_dir.join(format!("rec-{}.wav", unix_millis()));
-    match Recorder::start(&wav, config.audio_source.as_deref()) {
+    match start(&wav, config.audio_source.as_deref()) {
         Ok(recorder) => {
             let started = Instant::now();
             *state = State::Recording {
@@ -1102,6 +1149,234 @@ fn unix_millis() -> u128 {
 mod tests {
     use super::*;
     use crate::inject::{allows_clipboard_fallback, InjectionMode};
+
+    struct FakeRecorder {
+        signal: Option<InputSignal>,
+        stop_result: Result<PathBuf>,
+        cancel_result: Result<()>,
+    }
+
+    impl RecorderBoundary for FakeRecorder {
+        fn input_signal(&mut self) -> Option<InputSignal> {
+            self.signal
+        }
+
+        fn stop(self: Box<Self>) -> Result<PathBuf> {
+            let this = *self;
+            this.stop_result
+        }
+
+        fn cancel(self: Box<Self>) -> Result<()> {
+            let this = *self;
+            this.cancel_result
+        }
+    }
+
+    fn fake_signal() -> InputSignal {
+        InputSignal {
+            level: 50,
+            silent: false,
+            waveform: [[0, 0]; crate::capture::AUDIO_WAVEFORM_BINS],
+        }
+    }
+
+    fn fake_recorder() -> FakeRecorder {
+        FakeRecorder {
+            signal: Some(fake_signal()),
+            stop_result: Ok(PathBuf::from("/tmp/cantrip-fake-recording.wav")),
+            cancel_result: Ok(()),
+        }
+    }
+
+    fn recording_state(recorder: FakeRecorder) -> State {
+        State::Recording {
+            recorder: Box::new(recorder),
+            started: Instant::now(),
+            signal: None,
+            next_signal_sample: Instant::now(),
+            postproc: None,
+        }
+    }
+
+    fn processing_state() -> State {
+        State::Processing {
+            started: Instant::now(),
+            stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
+        }
+    }
+
+    fn wire(reply: WireReply) -> serde_json::Value {
+        serde_json::to_value(reply).expect("reply should serialize")
+    }
+
+    #[test]
+    fn start_recording_with_fake_recorder_enters_recording() {
+        let mut state = State::Idle;
+        let config = Config::default();
+        let mut last_outcome = LastOutcome::success("stale");
+        let recorder = Box::new(fake_recorder());
+        let reply = start_recording_with(
+            &mut state,
+            &config,
+            Path::new("/tmp"),
+            &mut last_outcome,
+            None,
+            |_wav, _source| Ok(recorder),
+        );
+        let json = wire(reply);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["state"], "recording");
+        assert!(matches!(state, State::Recording { .. }));
+        assert_eq!(last_outcome.message, None);
+        assert_eq!(last_outcome.ok, None);
+    }
+
+    #[test]
+    fn start_recording_with_failing_recorder_stays_idle() {
+        let mut state = State::Idle;
+        let config = Config::default();
+        let mut last_outcome = LastOutcome::default();
+        let reply = start_recording_with(
+            &mut state,
+            &config,
+            Path::new("/tmp"),
+            &mut last_outcome,
+            None,
+            |_wav, _source| Err(anyhow::anyhow!("no PipeWire")),
+        );
+        let json = wire(reply);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["state"], "idle");
+        assert!(matches!(state, State::Idle));
+        assert_eq!(
+            last_outcome.message.as_deref(),
+            Some("Starting recording failed")
+        );
+    }
+
+    #[test]
+    fn stop_recording_dispatches_job_and_enters_processing() {
+        let (job_tx, job_rx) = mpsc::channel::<Job>();
+        let config = Config::default();
+        let wav = PathBuf::from("/tmp/cantrip-fake-recording.wav");
+        let mut state = recording_state(FakeRecorder {
+            stop_result: Ok(wav.clone()),
+            ..fake_recorder()
+        });
+        let mut last_outcome = LastOutcome::default();
+
+        let reply = stop_recording(&mut state, &config, &job_tx, &mut last_outcome);
+
+        let json = wire(reply);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["state"], "processing");
+        assert!(matches!(state, State::Processing { .. }));
+        let job = job_rx.try_recv().expect("job should be dispatched");
+        assert_eq!(job.wav, wav);
+        assert_eq!(job.source, pipeline::Source::Dictation);
+        assert_eq!(last_outcome.message, None);
+    }
+
+    #[test]
+    fn stop_recording_failure_returns_to_idle() {
+        let (job_tx, job_rx) = mpsc::channel::<Job>();
+        let config = Config::default();
+        let mut state = recording_state(FakeRecorder {
+            stop_result: Err(anyhow::anyhow!("pw-record died")),
+            ..fake_recorder()
+        });
+        let mut last_outcome = LastOutcome::default();
+
+        let reply = stop_recording(&mut state, &config, &job_tx, &mut last_outcome);
+
+        let json = wire(reply);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["state"], "idle");
+        assert!(matches!(state, State::Idle));
+        assert!(job_rx.try_recv().is_err(), "no job on recorder failure");
+        assert_eq!(last_outcome.message.as_deref(), Some("Recording failed"));
+    }
+
+    #[test]
+    fn cancel_recording_stops_fake_recorder_and_returns_idle() {
+        let mut state = recording_state(fake_recorder());
+        let mut last_outcome = LastOutcome::default();
+
+        let reply = cancel_recording(&mut state, &mut last_outcome);
+
+        let json = wire(reply);
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["state"], "idle");
+        assert!(matches!(state, State::Idle));
+        assert_eq!(last_outcome.message.as_deref(), Some("Cancelled"));
+    }
+
+    #[test]
+    fn cancel_recording_failure_still_returns_idle() {
+        let mut state = recording_state(FakeRecorder {
+            cancel_result: Err(anyhow::anyhow!("pw-record stuck")),
+            ..fake_recorder()
+        });
+        let mut last_outcome = LastOutcome::default();
+
+        let reply = cancel_recording(&mut state, &mut last_outcome);
+
+        let json = wire(reply);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["state"], "idle");
+        assert!(matches!(state, State::Idle));
+        assert_eq!(last_outcome.message.as_deref(), Some("Cancelling failed"));
+    }
+
+    #[test]
+    fn refresh_recording_signal_surfaces_fake_signal() {
+        let signal = fake_signal();
+        let mut state = recording_state(FakeRecorder {
+            signal: Some(signal),
+            ..fake_recorder()
+        });
+
+        refresh_recording_signal(&mut state);
+
+        match state {
+            State::Recording { signal: actual, .. } => assert_eq!(actual, Some(signal)),
+            State::Processing { .. } => panic!("state should remain recording, got processing"),
+            State::Idle => panic!("state should remain recording, got idle"),
+        }
+    }
+
+    #[test]
+    fn processing_rejects_busy_commands_with_stable_message() {
+        let commands = [
+            Command::Toggle { postproc: None },
+            Command::Start { postproc: None },
+            Command::Stop,
+            Command::Cancel,
+            Command::Last,
+            Command::Recover,
+        ];
+        let (job_tx, _job_rx) = mpsc::channel::<Job>();
+
+        for command in commands {
+            let mut state = processing_state();
+            let mut config = Config::default();
+            let mut last_outcome = LastOutcome::default();
+
+            let reply = execute(
+                command,
+                &mut state,
+                &mut config,
+                Path::new("/tmp"),
+                &job_tx,
+                &mut last_outcome,
+            );
+
+            let json = wire(reply);
+            assert_eq!(json["ok"], false);
+            assert_eq!(json["state"], "processing");
+            assert_eq!(json["message"], "busy: processing");
+        }
+    }
 
     #[test]
     fn last_outcome_success_and_notice_flags() {
