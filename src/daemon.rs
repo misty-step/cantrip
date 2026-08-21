@@ -137,6 +137,7 @@ impl Drop for RecordingCleanup {
 }
 /// Run the cantrip daemon until it receives SIGINT, SIGTERM, or a fatal error.
 pub fn run(config: Config, preload: bool) -> Result<()> {
+    tracing::info!("[Daemon] starting cantrip {}", env!("CARGO_PKG_VERSION"));
     SHUTDOWN.store(false, Ordering::SeqCst);
     install_signal_handlers();
 
