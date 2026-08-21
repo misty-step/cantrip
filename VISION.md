@@ -44,9 +44,10 @@ owner-private local history supports recovery and evaluation.
 - Correctness over novelty. ADRs before non-obvious behavior changes.
 - `cargo fmt`, `clippy -D warnings`, and tests that defend observable contracts.
 - Cold agents read `VISION.md`, then `AGENTS.md`, then ADRs.
-- Iron Forest may work labeled GitHub issues; the product board of record for
-  this repo is **GitHub Issues** (forest Tracker). Powder is org-wide, not the
-  cantrip factory selector.
+- The product board of record is the **Powder ledger** (`misty-step/cantrip`
+  jobs on the Sanctum origin); epic jobs block on their children and are
+  taken only for closeout. GitHub Issues remain a read-only archive of
+  pre-2026-08-21 decisions.
 
 ## Non-goals
 
