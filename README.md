@@ -148,10 +148,12 @@ rustup toolchain install stable --profile minimal --component rustfmt --componen
 
 ```sh
 cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+./scripts/check
 ```
+
+`scripts/check` is the clone-to-green command: it runs `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test`, stopping at the
+first red gate.
 
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`

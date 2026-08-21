@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Repository-owned clone-to-green command.
+#
+# Runs the same three gates CI enforces, in order, and stops at the first red
+# gate:
+#   1. cargo fmt --check
+#   2. cargo clippy --all-targets -- -D warnings
+#   3. cargo test
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "── check: cargo fmt --check"
+cargo fmt --check
+
+echo "── check: cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets -- -D warnings
+
+echo "── check: cargo test"
+cargo test

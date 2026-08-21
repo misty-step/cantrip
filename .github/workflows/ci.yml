@@ -20,9 +20,7 @@ jobs:
       # pre-installs the matching stable toolchain and its components.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: ./scripts/check
 
   secret-scan:
     runs-on: ubuntu-latest

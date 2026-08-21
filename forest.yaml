@@ -4,9 +4,5 @@ agents:
   verifier: { poll: "forest poll verifier", interval: 120 }
   fixer:    { poll: "forest poll fixer",    interval: 300 }
 checks:
-  - name: fmt
-    run: cargo fmt --check
-  - name: clippy
-    run: cargo clippy --all-targets -- -D warnings
-  - name: test
-    run: cargo test
+  - name: check
+    run: ./scripts/check
