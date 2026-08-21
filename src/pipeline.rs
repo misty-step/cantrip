@@ -2,7 +2,7 @@
 //! post-processing. Shared by the daemon worker and `cantrip transcribe`.
 
 use crate::archive;
-use crate::config::{PostprocConfig, SttConfig};
+use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::models;
 use crate::postproc;
 use crate::stt::{self, Transcriber};
@@ -155,12 +155,13 @@ pub fn should_run_postproc(cfg: &PostprocConfig, chars: usize) -> bool {
 pub fn run(
     cache: &mut TranscriberCache,
     wav: &Path,
-    stt_cfg: &SttConfig,
-    vocabulary: &[String],
-    postproc_cfg: &PostprocConfig,
+    config: &Config,
     source: Source,
     on_stage: impl FnMut(Stage),
 ) -> Outcome {
+    let stt_cfg = &config.stt;
+    let vocabulary = &config.vocabulary;
+    let postproc_cfg = &config.postproc;
     let pipeline_started = Instant::now();
     let audio_duration_ms = match stt::wav_duration_ms(wav) {
         Ok(duration) => Some(duration),

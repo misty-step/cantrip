@@ -1,7 +1,7 @@
 //! The cantrip daemon and its socket-driven state machine.
 
 use crate::capture::{self, InputSignal};
-use crate::config::{Config, PostprocConfig, SttConfig};
+use crate::config::Config;
 use crate::hud;
 use crate::inject::{self, InjectionOutcome};
 use crate::ipc::{AudioSignal, Command, Request, TerminalOutcome, WireReply};
@@ -92,9 +92,7 @@ impl State {
 
 struct Job {
     wav: PathBuf,
-    stt: SttConfig,
-    vocabulary: Vec<String>,
-    postproc: PostprocConfig,
+    config: Config,
     source: pipeline::Source,
 }
 
@@ -367,21 +365,11 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
         while let Ok(job) = job_rx.recv() {
             let Job {
                 wav,
-                stt,
-                vocabulary,
-                postproc,
+                config,
                 source,
             } = job;
             let wav = RecordingCleanup(wav);
-            let outcome = pipeline::run(
-                &mut transcriber,
-                &wav.0,
-                &stt,
-                &vocabulary,
-                &postproc,
-                source,
-                &report_stage,
-            );
+            let outcome = pipeline::run(&mut transcriber, &wav.0, &config, source, &report_stage);
             match &outcome.archive {
                 pipeline::ArchiveStatus::Saved(path) => {
                     tracing::info!("[Daemon] archived transcript path={}", path.display());
@@ -721,15 +709,13 @@ fn stop_recording(
         }
     };
     // Apply this capture's override (None = follow config) to the worker job.
-    let mut postproc_cfg = config.postproc.clone();
+    let mut job_config = config.clone();
     if let Some(force) = postproc {
-        postproc_cfg.enabled = force;
+        job_config.postproc.enabled = force;
     }
     let job = Job {
         wav: wav.clone(),
-        stt: config.stt.clone(),
-        vocabulary: config.vocabulary.clone(),
-        postproc: postproc_cfg,
+        config: job_config,
         source: pipeline::Source::Dictation,
     };
     if job_tx.send(job).is_err() {
@@ -1039,9 +1025,7 @@ fn recover_failed(
     }
     let job = Job {
         wav: wav.clone(),
-        stt: config.stt.clone(),
-        vocabulary: config.vocabulary.clone(),
-        postproc: config.postproc.clone(),
+        config: config.clone(),
         source: pipeline::Source::Recover,
     };
     if job_tx.send(job).is_err() {
