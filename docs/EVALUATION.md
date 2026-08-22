@@ -60,7 +60,12 @@ cargo run --release --example eval -- langfuse --out eval/results --dataset my-r
   experiment traces and numeric scores for every result already on disk in
   the selected output directory.
 - `--dataset` is optional; without it the command uses a unique
-  `cantrip-eval-<timestamp>` name.
+  `cantrip-eval-<timestamp>` name. When `--dataset` names an existing dataset,
+  the publish reuses that dataset and upserts items and scores by deterministic
+  id, so a re-run does not create duplicates.
+- Dataset, dataset-item, score, and experiment-trace calls retry HTTP 429 and
+  5xx responses with exponential backoff (three attempts) before the publish
+  fails.
 
 Privacy boundary: dataset inputs and expected outputs are the public clips
 and synthetic behavior cases. Experiment spans carry ids, counts, latency,
