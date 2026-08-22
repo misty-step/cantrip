@@ -3,3 +3,4 @@
 ^\.opencode/
 ^eval/results/
 ^\.forest/
+^\.env$
