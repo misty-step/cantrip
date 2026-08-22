@@ -14,11 +14,11 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::{load_config, parse_flag, resolve_out_dir, validate_config, wer};
 
@@ -26,6 +26,11 @@ use crate::{load_config, parse_flag, resolve_out_dir, validate_config, wer};
 /// endpoints are sibling routes under `/api/public`, so the base is derived
 /// from the configured OTLP trace endpoint rather than configured twice.
 const PUBLIC_API_MARKER: &str = "/api/public";
+
+/// Langfuse rate limits and gateway failures are transient: retry each
+/// publish call with an exponential backoff before failing the whole run.
+const MAX_ATTEMPTS: u32 = 3;
+const BACKOFF_BASE_MS: u64 = 250;
 
 /// One HTTP client for the Langfuse public API. REST calls share the same
 /// Basic auth credential as the daemon's metadata-only OTLP exporter.
@@ -92,12 +97,13 @@ pub fn publish(args: &[String]) -> Result<()> {
 
     let dataset_name = dataset_name(args);
     let client = Client::new(&telemetry, dataset_name.clone())?;
-    let _dataset_id = client.create_dataset()?;
+    client.ensure_dataset()?;
 
     let mut item_count = 0_usize;
     let mut items = BTreeMap::new();
     for clip in &manifest.clips {
         let item_id = client.upload_item(
+            &stt_item_key(&clip.id),
             json!({ "clip": clip.id }),
             json!({ "reference": clip.reference }),
             json!({ "kind": "stt", "file": clip.file }),
@@ -108,6 +114,7 @@ pub fn publish(args: &[String]) -> Result<()> {
     if let Some(behavior_manifest) = &behavior_manifest {
         for case in &behavior_manifest.cases {
             let item_id = client.upload_item(
+                &behavior_item_key(&case.id),
                 json!({ "input": case.input }),
                 json!({ "accepted": case.accepted }),
                 json!({ "kind": "behavior", "category": case.category }),
@@ -199,9 +206,11 @@ fn publish_stt_result(
         "cost_usd": result.cost_usd,
     });
 
+    let run_key = format!("stt:{}:{}", result.lane, result.clip);
     let trace_id = client.publish_run(
         item_id,
         "cantrip-eval-stt",
+        &run_key,
         result.latency_ms,
         &input,
         &output,
@@ -240,9 +249,11 @@ fn publish_ppr_result(
         "cost_usd": result.cost_usd,
     });
 
+    let run_key = format!("ppr:{}:{}:{}", result.lane, result.stt_lane, result.clip);
     let trace_id = client.publish_run(
         item_id,
         "cantrip-eval-ppr",
+        &run_key,
         result.latency_ms,
         &input,
         &output,
@@ -281,9 +292,14 @@ fn publish_behavior_result(
         "cost_usd": result.cost_usd,
     });
 
+    let run_key = format!(
+        "behavior:{}:{}:{}",
+        result.lane, result.case, result.iteration
+    );
     let trace_id = client.publish_run(
         item_id,
         "cantrip-eval-behavior",
+        &run_key,
         result.latency_ms,
         &input,
         &output,
@@ -320,11 +336,13 @@ fn stt_item_key(clip: &str) -> String {
 
 fn dataset_item_body(
     dataset_name: &str,
+    id: &str,
     input: Value,
     expected_output: Value,
     metadata: Value,
 ) -> Value {
     json!({
+        "id": id,
         "datasetName": dataset_name,
         "input": input,
         "expectedOutput": expected_output,
@@ -363,6 +381,89 @@ impl Client {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
 
+    fn get_json(&self, url: &str, action: &str) -> Result<(u16, String)> {
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
+            let response = match self.agent.get(url).set("Authorization", &self.auth).call() {
+                Ok(response) => response,
+                Err(ureq::Error::Status(_, response)) => response,
+                Err(err) => {
+                    return Err(err).with_context(|| format!("{action} (attempt {attempt})"))
+                }
+            };
+            let status = response.status();
+            let raw = response
+                .into_string()
+                .with_context(|| format!("reading {action} response"))?;
+            if retryable(status) && attempt < MAX_ATTEMPTS {
+                std::thread::sleep(backoff(attempt));
+                continue;
+            }
+            return Ok((status, raw));
+        }
+    }
+
+    fn post_json(
+        &self,
+        url: &str,
+        body: &str,
+        extra_headers: &[(&str, &str)],
+        action: &str,
+    ) -> Result<(u16, String)> {
+        let mut attempt = 0_u32;
+        loop {
+            attempt += 1;
+            let mut request = self
+                .agent
+                .post(url)
+                .set("Authorization", &self.auth)
+                .set("Content-Type", "application/json");
+            for (name, value) in extra_headers {
+                request = request.set(name, value);
+            }
+            let response = match request.send_string(body) {
+                Ok(response) => response,
+                Err(ureq::Error::Status(_, response)) => response,
+                Err(err) => {
+                    return Err(err).with_context(|| format!("{action} (attempt {attempt})"))
+                }
+            };
+            let status = response.status();
+            let raw = response
+                .into_string()
+                .with_context(|| format!("reading {action} response"))?;
+            if retryable(status) && attempt < MAX_ATTEMPTS {
+                std::thread::sleep(backoff(attempt));
+                continue;
+            }
+            return Ok((status, raw));
+        }
+    }
+
+    fn get_dataset(&self) -> Result<Option<String>> {
+        let path = format!(
+            "/api/public/v2/datasets/{}",
+            percent_encode_component(&self.dataset_name)
+        );
+        let (status, raw) = self.get_json(&self.rest_url(&path), "reading Langfuse dataset")?;
+        if status == 404 {
+            return Ok(None);
+        }
+        ensure_ok(status, "dataset get")?;
+        let parsed: Value =
+            serde_json::from_str(&raw).with_context(|| "parsing Langfuse dataset response")?;
+        Ok(parsed.get("id").and_then(Value::as_str).map(str::to_owned))
+    }
+
+    fn ensure_dataset(&self) -> Result<()> {
+        if self.get_dataset()?.is_some() {
+            return Ok(());
+        }
+        self.create_dataset()?;
+        Ok(())
+    }
+
     fn create_dataset(&self) -> Result<String> {
         let url = self.rest_url("/api/public/v2/datasets");
         let body = json!({
@@ -370,17 +471,9 @@ impl Client {
             "description": "Cantrip public/synthetic evaluation corpus and runs",
             "metadata": { "source": "cantrip-eval" },
         });
-        let response = self
-            .agent
-            .post(&url)
-            .set("Authorization", &self.auth)
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-            .with_context(|| format!("creating Langfuse dataset '{}'", self.dataset_name))?;
-        ensure_ok(response.status(), "dataset create")?;
-        let raw = response
-            .into_string()
-            .with_context(|| "reading Langfuse dataset create response")?;
+        let (status, raw) =
+            self.post_json(&url, &body.to_string(), &[], "creating Langfuse dataset")?;
+        ensure_ok(status, "dataset create")?;
         let parsed: Value = serde_json::from_str(&raw)
             .with_context(|| "parsing Langfuse dataset create response")?;
         parsed
@@ -390,20 +483,26 @@ impl Client {
             .with_context(|| "Langfuse dataset create response missing id")
     }
 
-    fn upload_item(&self, input: Value, expected_output: Value, metadata: Value) -> Result<String> {
+    fn upload_item(
+        &self,
+        key: &str,
+        input: Value,
+        expected_output: Value,
+        metadata: Value,
+    ) -> Result<String> {
+        let id = stable_id(
+            "cantrip-eval-item",
+            &format!("{}:{}", self.dataset_name, key),
+        );
         let url = self.rest_url("/api/public/dataset-items");
-        let body = dataset_item_body(&self.dataset_name, input, expected_output, metadata);
-        let response = self
-            .agent
-            .post(&url)
-            .set("Authorization", &self.auth)
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-            .with_context(|| "creating Langfuse dataset item")?;
-        ensure_ok(response.status(), "dataset item create")?;
-        let raw = response
-            .into_string()
-            .with_context(|| "reading Langfuse dataset item response")?;
+        let body = dataset_item_body(&self.dataset_name, &id, input, expected_output, metadata);
+        let (status, raw) = self.post_json(
+            &url,
+            &body.to_string(),
+            &[],
+            "creating Langfuse dataset item",
+        )?;
+        ensure_ok(status, "dataset item create")?;
         let parsed: Value =
             serde_json::from_str(&raw).with_context(|| "parsing Langfuse dataset item response")?;
         parsed
@@ -414,46 +513,50 @@ impl Client {
     }
 
     fn post_trace(&self, payload: &Value) -> Result<()> {
-        let response = self
-            .agent
-            .post(&self.otlp_endpoint)
-            .set("Authorization", &self.auth)
-            .set("Content-Type", "application/json")
-            .set("x-langfuse-ingestion-version", "4")
-            .send_string(&payload.to_string())
-            .with_context(|| "exporting Langfuse experiment trace")?;
-        ensure_ok(response.status(), "OTLP trace export")
+        let (status, _) = self.post_json(
+            &self.otlp_endpoint,
+            &payload.to_string(),
+            &[("x-langfuse-ingestion-version", "4")],
+            "exporting Langfuse experiment trace",
+        )?;
+        ensure_ok(status, "OTLP trace export")
     }
 
     fn post_score(&self, trace_id: &str, name: &str, value: Value, comment: &str) -> Result<()> {
         let url = self.rest_url("/api/public/scores");
+        let id = stable_id("cantrip-eval-score", &format!("{trace_id}:{name}"));
         let body = json!({
+            "id": id,
             "traceId": trace_id,
             "name": name,
             "value": value,
             "dataType": "NUMERIC",
             "comment": comment,
         });
-        let response = self
-            .agent
-            .post(&url)
-            .set("Authorization", &self.auth)
-            .set("Content-Type", "application/json")
-            .send_string(&body.to_string())
-            .with_context(|| format!("creating Langfuse score '{name}'"))?;
-        ensure_ok(response.status(), "score create")
+        let (status, _) = self.post_json(
+            &url,
+            &body.to_string(),
+            &[],
+            &format!("creating Langfuse score '{name}'"),
+        )?;
+        ensure_ok(status, "score create")
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn publish_run(
         &self,
         item_id: &str,
         run_name: &str,
+        run_key: &str,
         duration_ms: u128,
         input: &Value,
         output: &Value,
         error: bool,
     ) -> Result<String> {
-        let (trace_id, payload) = experiment_trace(
+        let seed = format!("{run_name}:{run_key}");
+        let trace_id = trace_id_for(&format!("{}:{seed}", self.dataset_name));
+        let payload = experiment_trace(
+            &trace_id,
             item_id,
             run_name,
             &self.dataset_name,
@@ -481,7 +584,9 @@ fn langfuse_base(endpoint: &str) -> Result<String> {
     Ok(base.to_owned())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn experiment_trace(
+    trace_id: &str,
     item_id: &str,
     run_name: &str,
     experiment: &str,
@@ -489,9 +594,8 @@ fn experiment_trace(
     input: &Value,
     output: &Value,
     error: bool,
-) -> (String, Value) {
-    let trace_id = random_hex(16);
-    let span_id = random_hex(8);
+) -> Value {
+    let span_id = &trace_id[..16];
     let end_nanos = system_nanos();
     let start_nanos = end_nanos.saturating_sub(duration_ms.saturating_mul(1_000_000));
     let start_nanos = if start_nanos < end_nanos {
@@ -531,7 +635,7 @@ fn experiment_trace(
             }],
         }]
     });
-    (trace_id, payload)
+    payload
 }
 
 fn attr(key: &str, value: Value) -> Value {
@@ -549,32 +653,46 @@ fn ensure_ok(status: u16, action: &str) -> Result<()> {
     Ok(())
 }
 
+fn retryable(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(BACKOFF_BASE_MS * (1_u64 << attempt.saturating_sub(1)))
+}
+
+fn percent_encode_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+fn sha256_hex(seed: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_bytes());
+    hex(&hasher.finalize())
+}
+
+fn stable_id(prefix: &str, seed: &str) -> String {
+    format!("{prefix}-{}", sha256_hex(seed))
+}
+
+fn trace_id_for(seed: &str) -> String {
+    sha256_hex(seed)[..32].to_owned()
+}
+
 fn system_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
-}
-
-fn random_hex(bytes: usize) -> String {
-    let mut buf = vec![0_u8; bytes];
-    let mut random = match fs::File::open("/dev/urandom") {
-        Ok(random) => random,
-        Err(_) => {
-            let seed = system_nanos() as u64;
-            for (index, byte) in buf.iter_mut().enumerate() {
-                *byte = (seed >> ((index % 8) * 8)) as u8 ^ index as u8;
-            }
-            return hex(&buf);
-        }
-    };
-    if random.read_exact(&mut buf).is_err() {
-        let seed = system_nanos() as u64;
-        for (index, byte) in buf.iter_mut().enumerate() {
-            *byte = (seed >> ((index % 8) * 8)) as u8 ^ index as u8;
-        }
-    }
-    hex(&buf)
 }
 
 fn hex(buf: &[u8]) -> String {
@@ -611,7 +729,7 @@ fn base64(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
 
@@ -656,7 +774,7 @@ mod tests {
             .find(|line| line.to_ascii_lowercase().starts_with("content-length:"))
             .and_then(|line| line.split(':').nth(1))
             .and_then(|value| value.trim().parse().ok())
-            .expect("content-length header");
+            .unwrap_or(0);
         let mut body = vec![0_u8; length];
         reader.read_exact(&mut body).expect("reading request body");
         CapturedRequest {
@@ -688,6 +806,34 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    fn status_json(status_line: &str, body: &str) -> String {
+        format!(
+            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn mock_server_responses(
+        responses: Vec<String>,
+    ) -> (String, thread::JoinHandle<Vec<CapturedRequest>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binding mock server");
+        let addr = listener.local_addr().expect("mock server address");
+        let handle = thread::spawn(move || {
+            let mut captured = Vec::new();
+            for response in responses {
+                let (stream, _) = listener.accept().expect("accepting mock connection");
+                let request = read_request(&stream);
+                let mut stream = stream;
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("writing mock response");
+                captured.push(request);
+            }
+            captured
+        });
+        (format!("http://{addr}"), handle)
+    }
+
     fn telemetry_config(base: &str) -> cantrip::config::TelemetryConfig {
         cantrip::config::TelemetryConfig {
             enabled: true,
@@ -714,10 +860,12 @@ mod tests {
     fn dataset_item_body_shapes_public_corpus_fields() {
         let body = dataset_item_body(
             "cantrip-eval",
+            "cantrip-eval-item-abc123",
             json!({ "clip": "jfk" }),
             json!({ "reference": "ask not what" }),
             json!({ "kind": "stt", "file": "samples/jfk.wav" }),
         );
+        assert_eq!(body["id"], "cantrip-eval-item-abc123");
         assert_eq!(body["datasetName"], "cantrip-eval");
         assert_eq!(body["input"]["clip"], "jfk");
         assert_eq!(body["expectedOutput"]["reference"], "ask not what");
@@ -725,7 +873,9 @@ mod tests {
 
     #[test]
     fn experiment_trace_links_item_and_carries_no_transcript_text() {
-        let (trace_id, payload) = experiment_trace(
+        let trace_id = trace_id_for("trace:cantrip-eval:cantrip-eval-stt:stt:jfk");
+        let payload = experiment_trace(
+            &trace_id,
             "item-123",
             "cantrip-eval-stt",
             "cantrip-eval",
@@ -742,6 +892,7 @@ mod tests {
         let span = &spans[0];
         assert_eq!(span["name"], "cantrip-eval");
         assert_eq!(span["traceId"], trace_id.as_str());
+        assert_eq!(span["spanId"].as_str().map(str::len), Some(16));
         let attributes = span["attributes"].as_array().unwrap();
         let attr_value = |key: &str| -> Value {
             attributes
@@ -786,7 +937,9 @@ mod tests {
     fn post_trace_round_trip_sends_otlp_experiment_attributes() {
         let (base, server) = mock_server(ok_json("{}"));
         let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
-        let (_, payload) = experiment_trace(
+        let trace_id = trace_id_for("trace:cantrip-eval:cantrip-eval-stt:stt:jfk");
+        let payload = experiment_trace(
+            &trace_id,
             "item-1",
             "cantrip-eval-stt",
             "cantrip-eval",
@@ -806,5 +959,103 @@ mod tests {
         let raw = String::from_utf8_lossy(&request.body);
         assert!(raw.contains("langfuse.experiment.name"));
         assert!(raw.contains("langfuse.experiment.item_id"));
+    }
+
+    #[test]
+    fn retryable_covers_429_and_5xx_only() {
+        assert!(retryable(429));
+        assert!(retryable(500));
+        assert!(retryable(503));
+        assert!(!retryable(200));
+        assert!(!retryable(400));
+        assert!(!retryable(404));
+    }
+
+    #[test]
+    fn percent_encode_component_encodes_path_segments() {
+        assert_eq!(percent_encode_component("cantrip-eval"), "cantrip-eval");
+        assert_eq!(percent_encode_component("my run/1"), "my%20run%2F1");
+    }
+
+    #[test]
+    fn get_dataset_returns_none_on_404() {
+        let (base, server) = mock_server(status_json("HTTP/1.1 404 Not Found", "{}"));
+        let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
+        assert_eq!(client.get_dataset().unwrap(), None);
+
+        let request = server.join().expect("mock server thread");
+        assert_eq!(
+            request.request_line,
+            "GET /api/public/v2/datasets/cantrip-eval HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn upload_item_sends_deterministic_id_for_upsert() {
+        let (base, server) = mock_server(ok_json(r#"{"id":"item-1"}"#));
+        let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
+        let key = stt_item_key("jfk");
+        let id = client
+            .upload_item(
+                &key,
+                json!({ "clip": "jfk" }),
+                json!({ "reference": "ask not what" }),
+                json!({ "kind": "stt", "file": "samples/jfk.wav" }),
+            )
+            .unwrap();
+        assert_eq!(id, "item-1");
+
+        let request = server.join().expect("mock server thread");
+        let body = request.body_json();
+        let expected_item_id = stable_id("cantrip-eval-item", &format!("cantrip-eval:{key}"));
+        assert_eq!(body["id"].as_str(), Some(expected_item_id.as_str()));
+        assert_eq!(body["datasetName"], "cantrip-eval");
+    }
+
+    #[test]
+    fn post_score_sends_deterministic_id_for_upsert() {
+        let (base, server) = mock_server(ok_json("{}"));
+        let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
+        client
+            .post_score(
+                "0123456789abcdef0123456789abcdef",
+                "stt.wer",
+                json!(0.2),
+                "lane=local clip=jfk",
+            )
+            .unwrap();
+
+        let request = server.join().expect("mock server thread");
+        let body = request.body_json();
+        let expected_score_id = stable_id(
+            "cantrip-eval-score",
+            "0123456789abcdef0123456789abcdef:stt.wer",
+        );
+        assert_eq!(body["id"].as_str(), Some(expected_score_id.as_str()));
+        assert_eq!(body["dataType"], "NUMERIC");
+    }
+
+    #[test]
+    fn post_trace_retries_429_then_succeeds() {
+        let (base, server) = mock_server_responses(vec![
+            status_json("HTTP/1.1 429 Too Many Requests", "{}"),
+            ok_json("{}"),
+        ]);
+        let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
+        let trace_id = trace_id_for("trace:cantrip-eval:cantrip-eval-stt:stt:jfk");
+        let payload = experiment_trace(
+            &trace_id,
+            "item-1",
+            "cantrip-eval-stt",
+            "cantrip-eval",
+            30,
+            &json!({ "clip": "jfk" }),
+            &json!({ "stt_chars": 9 }),
+            false,
+        );
+        client.post_trace(&payload).unwrap();
+
+        let requests = server.join().expect("mock server thread");
+        assert_eq!(requests.len(), 2);
     }
 }
