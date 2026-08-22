@@ -174,3 +174,8 @@ daemon exports from a background thread after each job settles; a full queue
 or an export failure only logs a warning and never affects dictation.
 `cantrip doctor` reports the telemetry state honestly, including whether the
 keyring entry is present.
+
+The same `[telemetry]` block gates `eval`'s optional Langfuse dataset and
+score publishing (`cargo run --example eval -- langfuse`); that path uses the
+eval harness's own public corpus and never operator dictation. See
+`docs/EVALUATION.md`.

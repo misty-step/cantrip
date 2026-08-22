@@ -41,6 +41,32 @@ changes reviewable without adding approximate content rules to the daemon.
 `behavior` writes full responses to `behavior.json`. Its board reports total
 and category pass counts, mean and p95 latency, and live OpenRouter cost.
 
+## Langfuse publish
+
+`eval` can mirror the already-written result JSONs into a Langfuse dataset
+without changing local scoring or reproducibility. This is the separate
+metadata/data path for traces and datasets: local JSON output remains the
+source of truth.
+
+```sh
+cargo run --release --example eval -- langfuse --out eval/results --dataset my-run
+```
+
+- Reuses the daemon's `[telemetry]` config: `enabled`, OTLP `endpoint`,
+  `public_key`, and the `langfuse` OS-keyring secret. It refuses to run when
+  telemetry is disabled.
+- Creates a Langfuse dataset, uploads the public/synthetic corpus (clip
+  references and synthetic behavior cases), then posts metadata-only
+  experiment traces and numeric scores for every result already on disk in
+  the selected output directory.
+- `--dataset` is optional; without it the command uses a unique
+  `cantrip-eval-<timestamp>` name.
+
+Privacy boundary: dataset inputs and expected outputs are the public clips
+and synthetic behavior cases. Experiment spans carry ids, counts, latency,
+cost, and pass/error flags only — never transcript text, never audio. Daily
+operator dictations never reach this path.
+
 ## Versioned experiments
 
 Evaluation is a first-class product subsystem:

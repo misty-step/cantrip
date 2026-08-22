@@ -12,6 +12,7 @@
 //!   cargo run --release --example eval -- list [--config PATH]
 //!   cargo run --release --example eval -- run [--config PATH] [--stt a,b] [--postproc c,d] [--clips x,y]
 //!   cargo run --release --example eval -- run --ppr-only [--out DIR]
+//!   cargo run --release --example eval -- langfuse [--config PATH] [--out DIR] [--dataset NAME]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
@@ -31,6 +32,7 @@ use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineParams, MoonshineV
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
+mod langfuse;
 mod wer;
 
 const BOUNDARY: &str = "cantrip-eval-boundary-3fa91c";
@@ -71,7 +73,8 @@ fn main() -> Result<()> {
         "list" => list(rest),
         "run" => run(rest),
         "behavior" => run_behavior(rest),
-        other => bail!("unknown subcommand '{other}' (expected list | run | behavior)"),
+        "langfuse" => langfuse::publish(rest),
+        other => bail!("unknown subcommand '{other}' (expected list | run | behavior | langfuse)"),
     }
 }
 
@@ -200,7 +203,7 @@ struct SttResult {
     text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct PprResult {
     lane: String,
     stt_lane: String,
@@ -215,7 +218,7 @@ struct PprResult {
     text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct BehaviorResult {
     lane: String,
     case: String,
