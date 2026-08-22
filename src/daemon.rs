@@ -226,7 +226,7 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
 
     tracing::info!("[Daemon] listening");
     start_hud_supervisor(runtime_dir.clone());
-    let telemetry_reporter = TelemetryReporter::spawn(config.telemetry.clone());
+    let telemetry_reporter = TelemetryReporter::spawn();
     let loop_result = serve(
         &listener,
         config,
@@ -976,9 +976,9 @@ fn handle_worker_result(
             inject_ms: tel_inject_ms,
             delivered: tel_delivered,
             error_class: tel_error_class,
-            total_ms: processing_started.elapsed().as_millis() as u64,
+            total_ms: capture_ms + processing_started.elapsed().as_millis() as u64,
         };
-        telemetry_reporter.report(job);
+        telemetry_reporter.report(&config.telemetry, job);
     }
     *state = State::Idle;
     Ok(())

@@ -64,29 +64,28 @@ pub struct JobTelemetry {
 /// Background exporter. Clone-free by design: hand the single value through
 /// your call graph, call [`TelemetryReporter::report`] after jobs settle, and
 /// [`TelemetryReporter::shutdown`] (or drop) on the way out.
+///
+/// The `TelemetryConfig` travels with each job, so `cantrip reload` applies
+/// immediately: a job settled after a reload exports under the config in
+/// effect at that moment, and a disabled config stops exports outright.
 pub struct TelemetryReporter {
-    tx: Option<SyncSender<JobTelemetry>>,
+    tx: Option<SyncSender<(TelemetryConfig, JobTelemetry)>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl TelemetryReporter {
-    /// Start the exporter thread. Does nothing when telemetry is disabled —
-    /// `report` becomes a no-op and `shutdown` is free.
-    pub fn spawn(config: TelemetryConfig) -> Self {
-        if !config.enabled {
-            return Self {
-                tx: None,
-                handle: None,
-            };
-        }
-        let (tx, rx) = mpsc::sync_channel::<JobTelemetry>(QUEUE_BOUND);
+    /// Start the exporter thread. Always starts; whether anything is exported
+    /// is decided per job by the config queued with it.
+    pub fn spawn() -> Self {
+        let (tx, rx) = mpsc::sync_channel::<(TelemetryConfig, JobTelemetry)>(QUEUE_BOUND);
         let handle = match thread::Builder::new()
             .name("telemetry".into())
             .spawn(move || {
                 // Block for work while the reporter lives; when it is
                 // dropped the channel closes, this loop drains whatever was
                 // queued, and the thread exits. No trace is silently lost
-                while let Ok(job) = rx.recv() {
+                // on a clean shutdown.
+                while let Ok((config, job)) = rx.recv() {
                     if let Err(error) = export(&config, &job) {
                         tracing::warn!("[Telemetry] export failed status-only error={error:#}");
                     }
@@ -111,17 +110,25 @@ impl TelemetryReporter {
         }
     }
 
-    /// Queue one settled job. Never blocks: when the queue is full the trace
-    /// is dropped with a warning rather than stalling the producer.
-    pub fn report(&self, job: JobTelemetry) {
+    /// Queue one settled job under the config in effect right now. Never
+    /// blocks: when the queue is full the trace is dropped with a warning
+    /// rather than stalling the producer. A disabled config is a silent no-op,
+    /// which is what makes `cantrip reload` stop exports immediately.
+    pub fn report(&self, config: &TelemetryConfig, job: JobTelemetry) {
+        if !config.enabled {
+            return;
+        }
         if let Some(tx) = &self.tx {
-            match tx.try_send(job) {
+            match tx.try_send((config.clone(), job)) {
                 Ok(()) => {}
-                Err(mpsc::TrySendError::Full(job)) => {
+                Err(mpsc::TrySendError::Full((_, job))) => {
                     tracing::warn!("[Telemetry] queue full, dropped trace chars={}", job.chars);
                 }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    tracing::warn!("[Telemetry] exporter closed, dropped trace");
+                Err(mpsc::TrySendError::Disconnected((_, job))) => {
+                    tracing::warn!(
+                        "[Telemetry] exporter closed, dropped trace chars={}",
+                        job.chars
+                    );
                 }
             }
         }
@@ -145,7 +152,7 @@ impl Drop for TelemetryReporter {
 }
 
 fn export(config: &TelemetryConfig, job: &JobTelemetry) -> Result<()> {
-    let payload = otlp_payload(job);
+    let payload = otlp_payload(job, system_nanos());
     // No key id configured means no OS-keyring round-trip: tests and
     // disabled setups must never touch the secret service.
     let secret = match &config.api_key_id {
@@ -172,16 +179,31 @@ fn export(config: &TelemetryConfig, job: &JobTelemetry) -> Result<()> {
 }
 
 /// The OTLP/JSON `ExportTraceServiceRequest` for one job: a root
-/// `dictation` span plus one child per attempted stage.
-fn otlp_payload(job: &JobTelemetry) -> Value {
+/// `dictation` span plus one child per attempted stage, laid backwards from
+/// `export_nanos` (the moment of export).
+fn otlp_payload(job: &JobTelemetry, export_nanos: u128) -> Value {
     let trace_id = random_hex(16);
     let root_span_id = random_hex(8);
-    let start_nanos = system_nanos();
-    let capture_end = start_nanos + ms_to_nanos(job.capture_ms);
-    let stt_end = capture_end + ms_to_nanos(job.stt_ms);
-    let cleanup_end = stt_end + ms_to_nanos(job.cleanup_ms.unwrap_or(0));
-    let deliver_nanos = ms_to_nanos(job.inject_ms.unwrap_or(1));
-    let end_nanos = cleanup_end.max(start_nanos + 1) + deliver_nanos;
+    // The job settled before export: anchor the LAST stage's end at export
+    // time and lay every stage backwards, so no observation is ever dated
+    // into the future regardless of how long capture took.
+    let end_nanos = export_nanos;
+    let deliver_end = end_nanos;
+    let deliver_start = deliver_end.saturating_sub(ms_to_nanos(job.inject_ms.unwrap_or(0)));
+    let cleanup_end = if job.inject_ms.is_some() {
+        deliver_start
+    } else {
+        deliver_end
+    };
+    let cleanup_start = cleanup_end.saturating_sub(ms_to_nanos(job.cleanup_ms.unwrap_or(0)));
+    let stt_end = if job.cleanup_ms.is_some() || job.cleanup_state != "off" {
+        cleanup_start
+    } else {
+        cleanup_end
+    };
+    let stt_start = stt_end.saturating_sub(ms_to_nanos(job.stt_ms));
+    let capture_end = stt_start;
+    let start_nanos = capture_end.saturating_sub(ms_to_nanos(job.capture_ms));
 
     let mut spans = vec![span(
         &trace_id,
@@ -457,7 +479,7 @@ mod tests {
 
     #[test]
     fn payload_has_root_and_stage_spans() {
-        let payload = otlp_payload(&sample_job());
+        let payload = otlp_payload(&sample_job(), 1_000_000_000_000);
         let spans = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"];
         assert_eq!(spans.as_array().unwrap().len(), 4);
         assert_eq!(spans[0]["name"], "dictation");
@@ -473,7 +495,7 @@ mod tests {
 
     #[test]
     fn local_stt_is_span_and_cleanup_is_generation() {
-        let payload = otlp_payload(&sample_job());
+        let payload = otlp_payload(&sample_job(), 1_000_000_000_000);
         let spans = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"];
         let types: Vec<&str> = spans.as_array().unwrap().iter().map(type_of).collect();
         assert_eq!(types, vec!["", "span", "generation", ""]);
@@ -491,7 +513,7 @@ mod tests {
 
     #[test]
     fn root_input_output_carry_counts_only() {
-        let payload = otlp_payload(&sample_job());
+        let payload = otlp_payload(&sample_job(), 1_000_000_000_000);
         let spans = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"];
         for span in spans.as_array().unwrap() {
             for key in ["langfuse.observation.input", "langfuse.observation.output"] {
@@ -539,7 +561,7 @@ mod tests {
 
     #[test]
     fn usage_details_land_on_the_generation() {
-        let payload = otlp_payload(&sample_job());
+        let payload = otlp_payload(&sample_job(), 1_000_000_000_000);
         let spans = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"];
         let cleanup = &spans.as_array().unwrap()[2];
         let usage = find_attr(cleanup, "langfuse.observation.usage_details")
@@ -551,28 +573,87 @@ mod tests {
     }
 
     #[test]
-    fn disabled_reporter_never_spawns_a_thread_or_sends() {
-        let reporter = TelemetryReporter::spawn(TelemetryConfig {
-            enabled: false,
-            ..Default::default()
-        });
-        reporter.report(sample_job()); // must be a silent no-op
+    fn report_with_disabled_config_is_a_silent_no_op() {
+        let reporter = TelemetryReporter::spawn();
+        reporter.report(
+            &TelemetryConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            sample_job(),
+        );
         reporter.shutdown();
     }
 
+    #[test]
+    fn spans_lay_backwards_from_export_time() {
+        let export_nanos: u128 = 1_000_000_000_000;
+        let payload = otlp_payload(&sample_job(), export_nanos);
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for span in &spans {
+            let start: u128 = span["startTimeUnixNano"].as_str().unwrap().parse().unwrap();
+            let end: u128 = span["endTimeUnixNano"].as_str().unwrap().parse().unwrap();
+            assert!(start <= export_nanos, "span starts in the future");
+            assert!(end <= export_nanos, "span ends in the future");
+            assert!(start < end);
+            let root_start: u128 = spans[0]["startTimeUnixNano"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let root_end: u128 = spans[0]["endTimeUnixNano"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(
+                start >= root_start && end <= root_end,
+                "child escapes root bounds"
+            );
+        }
+        // The last child ends exactly at export time.
+        let last_end: u128 = spans.last().unwrap()["endTimeUnixNano"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(last_end, export_nanos);
+    }
+
+    #[test]
+    fn long_capture_stays_within_root_bounds() {
+        // Real daemon path: total includes capture. A recording longer than
+        // the processing tail must never push children past the root end.
+        let mut job = sample_job();
+        job.capture_ms = 10_000;
+        job.total_ms = 2_000;
+        let export_nanos: u128 = 1_000_000_000_000;
+        let payload = otlp_payload(&job, export_nanos);
+        let spans = payload["resourceSpans"][0]["scopeSpans"][0]["spans"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for span in &spans {
+            let start: u128 = span["startTimeUnixNano"].as_str().unwrap().parse().unwrap();
+            let end: u128 = span["endTimeUnixNano"].as_str().unwrap().parse().unwrap();
+            assert!(end <= export_nanos, "span dated into the future");
+            assert!(start < end);
+        }
+    }
     #[test]
     fn failed_stt_marks_the_root_span_errored() {
         let mut job = sample_job();
         job.chars = 0;
         job.delivered = None;
         job.error_class = Some("no-mic-signal".into());
-        let payload = otlp_payload(&job);
+        let payload = otlp_payload(&job, 1_000_000_000_000);
         let spans = &payload["resourceSpans"][0]["scopeSpans"][0]["spans"];
         assert_eq!(spans[0]["status"]["code"], 2);
     }
-
     #[test]
-
     fn base64_matches_known_vectors() {
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");

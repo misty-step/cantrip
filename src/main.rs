@@ -545,8 +545,8 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         error_class,
         total_ms: stt_ms + cleanup_ms.unwrap_or(0),
     };
-    let reporter = telemetry::TelemetryReporter::spawn(config.telemetry.clone());
-    reporter.report(job);
+    let reporter = telemetry::TelemetryReporter::spawn();
+    reporter.report(&config.telemetry, job);
     // Dropping via shutdown drains the queue before the process exits:
     // the CLI equivalent of a flush.
     reporter.shutdown();

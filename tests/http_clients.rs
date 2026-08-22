@@ -293,8 +293,8 @@ fn telemetry_round_trip_sends_metadata_only_otlp() {
         total_ms: 1_910,
     };
 
-    let reporter = cantrip::telemetry::TelemetryReporter::spawn(config.clone());
-    reporter.report(job);
+    let reporter = cantrip::telemetry::TelemetryReporter::spawn();
+    reporter.report(&config, job);
     // Shutdown drains the queue and joins the worker: the request must have
     // landed by the time this returns.
     reporter.shutdown();
