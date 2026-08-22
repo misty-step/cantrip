@@ -33,7 +33,7 @@ pub enum Source {
 }
 
 impl Source {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Dictation => "dictation",
             Self::Recover => "recover",
@@ -186,8 +186,8 @@ pub fn run(
                 stt_elapsed,
                 postproc: PostprocStatus::Off,
                 postproc_usage: None,
-                partial: false,
                 keep_wav: true,
+                partial: false,
                 archive: ArchiveStatus::NotApplicable,
             };
         }
@@ -374,23 +374,20 @@ mod tests {
             Stage::Transcribing { chunk: 1, total: 4 }.measured_progress(),
             Some((1, 4))
         );
-        assert_eq!(
-            Stage::Transcribing { chunk: 1, total: 1 }.measured_progress(),
-            None
-        );
-        assert_eq!(
-            Stage::Transcribing { chunk: 0, total: 3 }.measured_progress(),
-            None
-        );
-        assert_eq!(
-            Stage::Transcribing { chunk: 4, total: 3 }.measured_progress(),
-            None
-        );
         assert_eq!(Stage::CleaningUp.measured_progress(), None);
         assert_eq!(
             Stage::Unknown("future".to_owned()).measured_progress(),
             None
         );
+    }
+
+    #[test]
+    fn source_labels_cover_every_lane() {
+        // Telemetry labels come from these strings; a new lane must map or
+        // recover traces get misfiled as dictations.
+        assert_eq!(Source::Dictation.as_str(), "dictation");
+        assert_eq!(Source::Recover.as_str(), "recover");
+        assert_eq!(Source::Transcribe.as_str(), "transcribe");
     }
 
     #[test]

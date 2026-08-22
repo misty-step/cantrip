@@ -108,6 +108,8 @@ struct WorkerResult {
     partial: bool,
     capture_ms: u64,
     postproc_usage: Option<crate::postproc::RefinementUsage>,
+    /// Which pipeline lane produced this result, for telemetry labeling.
+    source: pipeline::Source,
 }
 
 /// The daemon's most recent terminal outcome, surfaced on status replies so
@@ -421,6 +423,7 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 partial: outcome.partial,
                 capture_ms,
                 postproc_usage: outcome.postproc_usage,
+                source,
             };
             let chars = worker_result
                 .result
@@ -861,6 +864,7 @@ fn handle_worker_result(
         partial,
         capture_ms,
         postproc_usage,
+        source,
     } = result;
     let postproc_failed = matches!(&postproc, PostprocStatus::Failed { .. });
     let postproc_ms = match postproc {
@@ -960,7 +964,7 @@ fn handle_worker_result(
             PostprocStatus::Applied { .. } | PostprocStatus::Failed { .. }
         );
         let job = telemetry::JobTelemetry {
-            source: "dictation",
+            source: source.as_str(),
             capture_ms,
             stt_ms: stt_elapsed.as_millis() as u64,
             stt_model: config.stt.model.clone(),
