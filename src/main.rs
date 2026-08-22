@@ -468,9 +468,7 @@ fn transcribe_file(wav: &std::path::Path) -> Result<()> {
     let outcome = pipeline::run(
         &mut cache,
         wav,
-        &config.stt,
-        &config.vocabulary,
-        &config.postproc,
+        &config,
         pipeline::Source::Transcribe,
         |_| {},
     );
