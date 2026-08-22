@@ -145,6 +145,7 @@ impl Config {
                 "postproc.timeout_ms must be between 1000 and 120000, got {}",
                 self.postproc.timeout_ms
             );
+        }
         if self.telemetry.enabled {
             if !self.telemetry.endpoint.starts_with("http://")
                 && !self.telemetry.endpoint.starts_with("https://")
