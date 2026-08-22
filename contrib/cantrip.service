@@ -1,0 +1,11 @@
+[Unit]
+Description=Cantrip dictation daemon
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cantrip daemon
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target

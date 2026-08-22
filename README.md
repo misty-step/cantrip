@@ -62,7 +62,8 @@ cargo build --release
 ./target/release/cantrip doctor
 ./target/release/cantrip models pull   # when doctor requests it
 
-# 3. Run the daemon in a dedicated terminal for this first session.
+# 3. Run the daemon in a dedicated terminal for this first session, or
+# install the user systemd unit below so it survives terminal close and login.
 ./target/release/cantrip daemon
 
 # 4. In another terminal, dictate once and confirm the Success capsule.
@@ -74,6 +75,49 @@ On COSMIC, first test the two `toggle` calls above. Then add one custom keyboard
 shortcut whose command is the absolute path to `cantrip toggle`; press it once
 to start and once to stop. Compositors that support separate key-down and
 key-up commands can bind `cantrip start` and `cantrip stop` instead.
+
+### Keep the daemon running across logins
+
+The first-session terminal is fine for trying Cantrip. For daily driving,
+install the release binary and the committed user systemd unit, then enable it
+so the daemon starts at login and keeps running after the terminal closes:
+
+```sh
+install -Dm755 ./target/release/cantrip ~/.local/bin/cantrip
+mkdir -p ~/.config/systemd/user
+install -m644 contrib/cantrip.service ~/.config/systemd/user/cantrip.service
+systemctl --user daemon-reload
+systemctl --user enable --now cantrip
+cantrip ping
+```
+
+`cantrip ping` should report a reachable daemon with no terminal holding it
+open. The unit runs `%h/.local/bin/cantrip daemon` (see
+`contrib/cantrip.service`). If your binary lives elsewhere, install the unit
+as above but skip the `~/.local/bin` install and point `ExecStart` at your
+binary with a drop-in:
+
+```sh
+mkdir -p ~/.config/systemd/user/cantrip.service.d
+cat > ~/.config/systemd/user/cantrip.service.d/execstart.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/absolute/path/to/cantrip daemon
+EOF
+systemctl --user daemon-reload
+systemctl --user restart cantrip
+```
+
+For the daemon to spawn the HUD in a Wayland session, the user manager needs
+the session display in its environment:
+
+```sh
+systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+```
+
+Inspect startup with `journalctl --user -u cantrip -f`. Stop or disable the
+unit with `systemctl --user disable --now cantrip`; the first-session terminal
+command still works.
 
 Run `cantrip doctor` again after changing config or installing a prerequisite.
 If cleanup is enabled, ensure its configured endpoint is running and its

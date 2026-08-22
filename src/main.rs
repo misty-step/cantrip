@@ -631,11 +631,22 @@ fn doctor() -> Result<()> {
         println!("hud: blocked — run Cantrip from a Wayland session");
     }
 
-    match ipc::send_command(Command::Ping) {
-        Ok(reply) if reply.ok => println!("daemon: reachable ({})", reply.state.as_str()),
-        _ => println!("daemon: not running — run: cantrip daemon"),
-    }
+    let daemon = match ipc::send_command(Command::Ping) {
+        Ok(reply) if reply.ok => daemon_diagnosis(Some(reply.state.as_str())),
+        _ => daemon_diagnosis(None),
+    };
+    println!("{daemon}");
     Ok(())
+}
+
+fn daemon_diagnosis(state: Option<&str>) -> String {
+    match state {
+        Some(state) => format!("daemon: reachable ({state})"),
+        None => {
+            "daemon: not running — run: cantrip daemon (first session) or systemctl --user enable --now cantrip (daily driver)"
+                .to_owned()
+        }
+    }
 }
 
 fn capture_diagnosis(config: Option<&Config>, tools: DoctorTools) -> String {
@@ -864,6 +875,15 @@ mod tests {
             "cleanup: blocked (endpoint is empty) — run: cantrip settings"
         );
     }
+    #[test]
+    fn daemon_diagnosis_names_terminal_and_systemd_paths() {
+        assert_eq!(daemon_diagnosis(Some("idle")), "daemon: reachable (idle)");
+        assert_eq!(
+            daemon_diagnosis(None),
+            "daemon: not running — run: cantrip daemon (first session) or systemctl --user enable --now cantrip (daily driver)"
+        );
+    }
+
     #[test]
     fn injection_diagnosis_uses_execution_backend_order() {
         let line = injection_diagnosis(
