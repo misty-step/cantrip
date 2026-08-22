@@ -15,6 +15,7 @@ pub struct Config {
     pub vocabulary: Vec<String>,
     pub stt: SttConfig,
     pub postproc: PostprocConfig,
+    pub telemetry: TelemetryConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -49,6 +50,30 @@ impl Default for Config {
             vocabulary: Vec::new(),
             stt: SttConfig::default(),
             postproc: PostprocConfig::default(),
+            telemetry: TelemetryConfig::default(),
+        }
+    }
+}
+
+/// Opt-in Langfuse export. Disabled by default; when enabled it must point
+/// at an OTLP endpoint and carry the project's public key (the secret half
+/// lives in the OS keyring under `api_key_id`).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub public_key: String,
+    pub api_key_id: Option<String>,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "https://us.cloud.langfuse.com/api/public/otel/v1/traces".to_owned(),
+            public_key: String::new(),
+            api_key_id: Some("langfuse".to_owned()),
         }
     }
 }
@@ -120,6 +145,15 @@ impl Config {
                 "postproc.timeout_ms must be between 1000 and 120000, got {}",
                 self.postproc.timeout_ms
             );
+        if self.telemetry.enabled {
+            if !self.telemetry.endpoint.starts_with("http://")
+                && !self.telemetry.endpoint.starts_with("https://")
+            {
+                bail!("telemetry.endpoint must be an http(s) OTLP endpoint");
+            }
+            if self.telemetry.public_key.trim().is_empty() {
+                bail!("telemetry.enabled = true requires telemetry.public_key");
+            }
         }
         if let Some(endpoint) = &self.stt.endpoint {
             let endpoint = endpoint.trim();

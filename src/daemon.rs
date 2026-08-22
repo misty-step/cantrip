@@ -9,6 +9,7 @@ use crate::models;
 use crate::paths;
 use crate::pipeline::{self, PostprocStatus};
 use crate::stt;
+use crate::telemetry::{self, TelemetryReporter};
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -96,6 +97,8 @@ struct Job {
     vocabulary: Vec<String>,
     postproc: PostprocConfig,
     source: pipeline::Source,
+    /// Wall time of the recording itself, for the telemetry capture span.
+    capture_ms: u64,
 }
 
 struct WorkerResult {
@@ -103,6 +106,8 @@ struct WorkerResult {
     stt_elapsed: Duration,
     postproc: PostprocStatus,
     partial: bool,
+    capture_ms: u64,
+    postproc_usage: Option<crate::postproc::RefinementUsage>,
 }
 
 /// The daemon's most recent terminal outcome, surfaced on status replies so
@@ -221,6 +226,7 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
 
     tracing::info!("[Daemon] listening");
     start_hud_supervisor(runtime_dir.clone());
+    let telemetry_reporter = TelemetryReporter::spawn(config.telemetry.clone());
     let loop_result = serve(
         &listener,
         config,
@@ -228,11 +234,13 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
         &job_tx,
         &result_rx,
         &stage_rx,
+        &telemetry_reporter,
     );
     drop(job_tx);
     if worker.join().is_err() {
         tracing::warn!("[STT] worker thread exited unexpectedly");
     }
+    telemetry_reporter.shutdown();
     loop_result
 }
 
@@ -371,6 +379,7 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 vocabulary,
                 postproc,
                 source,
+                capture_ms,
             } = job;
             let wav = RecordingCleanup(wav);
             let outcome = pipeline::run(
@@ -410,6 +419,8 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 stt_elapsed: outcome.stt_elapsed,
                 postproc: outcome.postproc,
                 partial: outcome.partial,
+                capture_ms,
+                postproc_usage: outcome.postproc_usage,
             };
             let chars = worker_result
                 .result
@@ -428,7 +439,6 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
         handle: worker,
     }
 }
-
 fn serve(
     listener: &UnixListener,
     mut config: Config,
@@ -436,12 +446,19 @@ fn serve(
     job_tx: &Sender<Job>,
     result_rx: &Receiver<WorkerResult>,
     stage_rx: &Receiver<pipeline::Stage>,
+    telemetry_reporter: &TelemetryReporter,
 ) -> Result<()> {
     let mut state = State::Idle;
     let mut last_outcome = LastOutcome::default();
     loop {
         drain_stage(&mut state, stage_rx);
-        drain_worker_results(&mut state, &config, result_rx, &mut last_outcome)?;
+        drain_worker_results(
+            &mut state,
+            &config,
+            result_rx,
+            &mut last_outcome,
+            telemetry_reporter,
+        )?;
         refresh_recording_signal(&mut state);
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
@@ -471,7 +488,13 @@ fn serve(
 
     if matches!(&state, State::Processing { .. }) {
         match result_rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(result) => handle_worker_result(&mut state, &config, result, &mut last_outcome)?,
+            Ok(result) => handle_worker_result(
+                &mut state,
+                &config,
+                result,
+                &mut last_outcome,
+                telemetry_reporter,
+            )?,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 tracing::warn!("[STT] transcription result timed out during shutdown");
             }
@@ -731,6 +754,7 @@ fn stop_recording(
         vocabulary: config.vocabulary.clone(),
         postproc: postproc_cfg,
         source: pipeline::Source::Dictation,
+        capture_ms: (record_secs * 1000.0) as u64,
     };
     if job_tx.send(job).is_err() {
         if let Err(error) = capture::remove_recording(&wav) {
@@ -802,6 +826,7 @@ fn drain_worker_results(
     config: &Config,
     result_rx: &Receiver<WorkerResult>,
     last_outcome: &mut LastOutcome,
+    telemetry_reporter: &TelemetryReporter,
 ) -> Result<()> {
     loop {
         let result = match result_rx.try_recv() {
@@ -812,7 +837,7 @@ fn drain_worker_results(
                 anyhow::bail!("transcription worker died");
             }
         };
-        handle_worker_result(state, config, result, last_outcome)?;
+        handle_worker_result(state, config, result, last_outcome, telemetry_reporter)?;
     }
 }
 fn handle_worker_result(
@@ -820,6 +845,7 @@ fn handle_worker_result(
     config: &Config,
     result: WorkerResult,
     last_outcome: &mut LastOutcome,
+    telemetry_reporter: &TelemetryReporter,
 ) -> Result<()> {
     let processing_started = match state {
         State::Processing { started, .. } => *started,
@@ -833,6 +859,8 @@ fn handle_worker_result(
         stt_elapsed,
         postproc,
         partial,
+        capture_ms,
+        postproc_usage,
     } = result;
     let postproc_failed = matches!(&postproc, PostprocStatus::Failed { .. });
     let postproc_ms = match postproc {
@@ -840,6 +868,12 @@ fn handle_worker_result(
         PostprocStatus::Off | PostprocStatus::SkippedShort { .. } => None,
     };
 
+    // Telemetry facts, filled in by the branches below and exported once
+    // the job settles. Counts and classes only — never transcript text.
+    let mut tel_chars: usize = 0;
+    let mut tel_delivered: Option<&'static str> = None;
+    let mut tel_inject_ms: Option<u64> = None;
+    let mut tel_error_class: Option<String> = None;
     match transcript {
         Ok(text) if text.trim().is_empty() => {
             tracing::info!(
@@ -850,6 +884,7 @@ fn handle_worker_result(
         }
         Ok(text) => {
             let chars = text.chars().count();
+            tel_chars = chars;
             let inject_started = Instant::now();
             let cleanup_suffix = if postproc_failed {
                 " (cleanup failed — raw text)"
@@ -864,17 +899,25 @@ fn handle_worker_result(
             match inject::inject(&text, config.injection) {
                 Ok(outcome) => {
                     let inject_ms = inject_started.elapsed().as_millis();
+                    tel_inject_ms = Some(inject_ms as u64);
                     let total_ms = processing_started.elapsed().as_millis();
                     let message = match outcome {
                         InjectionOutcome::Typed(tool) => {
+                            tel_delivered = Some(if tool == "wtype" {
+                                "typed-wtype"
+                            } else {
+                                "typed-ydotool"
+                            });
                             format!("Typed {chars} chars ({tool}){cleanup_suffix}{partial_suffix}")
                         }
                         InjectionOutcome::Pasted => {
+                            tel_delivered = Some("pasted");
                             format!(
                                 "Pasted {chars} chars (clipboard + Ctrl+Shift+V){cleanup_suffix}{partial_suffix}"
                             )
                         }
                         InjectionOutcome::Clipboard => {
+                            tel_delivered = Some("clipboard");
                             format!(
                                 "Copied to clipboard — press Ctrl+Shift+V ({chars} chars){cleanup_suffix}{partial_suffix}"
                             )
@@ -890,6 +933,7 @@ fn handle_worker_result(
                         stt_elapsed.as_millis()
                     );
                     *last_outcome = LastOutcome::notice("Saved — run: cantrip last");
+                    tel_error_class = Some("injection-failed".to_owned());
                 }
             }
         }
@@ -900,7 +944,41 @@ fn handle_worker_result(
                 stt_elapsed.as_millis()
             );
             *last_outcome = LastOutcome::notice(format!("{notice} — run: cantrip recover"));
+            tel_error_class = Some(notice.to_owned());
         }
+    }
+
+    if config.telemetry.enabled {
+        let cleanup_state = match &postproc {
+            PostprocStatus::Applied { .. } => "applied",
+            PostprocStatus::Failed { .. } => "failed",
+            PostprocStatus::SkippedShort { .. } => "skipped_short",
+            PostprocStatus::Off => "off",
+        };
+        let cleanup_attempted = matches!(
+            postproc,
+            PostprocStatus::Applied { .. } | PostprocStatus::Failed { .. }
+        );
+        let job = telemetry::JobTelemetry {
+            source: "dictation",
+            capture_ms,
+            stt_ms: stt_elapsed.as_millis() as u64,
+            stt_model: config.stt.model.clone(),
+            stt_remote: config.stt.endpoint.is_some(),
+            chars: tel_chars,
+            partial,
+            cleanup_state,
+            cleanup_ms: postproc_ms.map(|ms| ms as u64),
+            cleanup_model: cleanup_attempted.then(|| config.postproc.model.clone()),
+            tokens_in: postproc_usage.as_ref().map(|usage| usage.prompt_tokens),
+            tokens_out: postproc_usage.as_ref().map(|usage| usage.completion_tokens),
+            tokens_total: postproc_usage.as_ref().map(|usage| usage.total_tokens),
+            inject_ms: tel_inject_ms,
+            delivered: tel_delivered,
+            error_class: tel_error_class,
+            total_ms: processing_started.elapsed().as_millis() as u64,
+        };
+        telemetry_reporter.report(job);
     }
     *state = State::Idle;
     Ok(())
@@ -1043,6 +1121,7 @@ fn recover_failed(
         vocabulary: config.vocabulary.clone(),
         postproc: config.postproc.clone(),
         source: pipeline::Source::Recover,
+        capture_ms: 0,
     };
     if job_tx.send(job).is_err() {
         let _ = capture::remove_recording(&wav);

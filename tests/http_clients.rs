@@ -259,3 +259,67 @@ fn transcribe_remote_round_trip_sends_multipart_wav() {
 
     std::fs::remove_dir_all(&dir).expect("removing temp dir");
 }
+
+/// Telemetry export speaks Langfuse's OTLP/JSON dialect: Basic auth from the
+/// keyring secret, the v4 ingestion header, and a payload that carries only
+/// counts and controlled terms — never transcript text.
+#[test]
+fn telemetry_round_trip_sends_metadata_only_otlp() {
+    let (base, server) = mock_server(ok_json("{}"));
+    let endpoint = format!("{base}/api/public/otel/v1/traces");
+    let config = cantrip::config::TelemetryConfig {
+        enabled: true,
+        endpoint,
+        public_key: "pk-test".to_owned(),
+        api_key_id: None,
+    };
+    let job = cantrip::telemetry::JobTelemetry {
+        source: "dictation",
+        capture_ms: 1_500,
+        stt_ms: 250,
+        stt_model: "parakeet-tdt-0.6b-v3-int8".to_owned(),
+        stt_remote: false,
+        chars: 11,
+        partial: false,
+        cleanup_state: "applied",
+        cleanup_ms: Some(120),
+        cleanup_model: Some("test-model".to_owned()),
+        tokens_in: Some(30),
+        tokens_out: Some(11),
+        tokens_total: Some(41),
+        inject_ms: Some(40),
+        delivered: Some("pasted"),
+        error_class: None,
+        total_ms: 1_910,
+    };
+
+    let reporter = cantrip::telemetry::TelemetryReporter::spawn(config.clone());
+    reporter.report(job);
+    // Shutdown drains the queue and joins the worker: the request must have
+    // landed by the time this returns.
+    reporter.shutdown();
+
+    let request = server.join().expect("mock server thread");
+    assert_eq!(
+        request.request_line,
+        "POST /api/public/otel/v1/traces HTTP/1.1"
+    );
+    assert_eq!(
+        request.header("authorization"),
+        Some("Basic cGstdGVzdDo=") // base64("pk-test:")
+    );
+    assert_eq!(request.header("x-langfuse-ingestion-version"), Some("4"));
+    assert_eq!(request.header("content-type"), Some("application/json"));
+
+    let body = String::from_utf8_lossy(&request.body);
+    assert!(body.contains("\"resourceSpans\""));
+    assert!(body.contains("\"name\":\"dictation\""));
+    assert!(body.contains("\"name\":\"cleanup-transcript\""));
+    assert!(body.contains("langfuse.observation.type"));
+    assert!(body.contains("\"intValue\":120"));
+    assert!(body.contains("\\\"total\\\":41"));
+    // Content-free guarantee: no transcript text field can exist, and no
+    // prose leaks into the wire payload.
+    assert!(!body.contains("transcript text"));
+    assert!(!body.contains("hello cantrip world"));
+}

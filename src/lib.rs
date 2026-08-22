@@ -22,3 +22,4 @@ pub mod pipeline;
 pub mod postproc;
 pub mod settings;
 pub mod stt;
+pub mod telemetry;

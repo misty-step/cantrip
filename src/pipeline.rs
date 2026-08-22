@@ -4,7 +4,7 @@
 use crate::archive;
 use crate::config::{PostprocConfig, SttConfig};
 use crate::models;
-use crate::postproc;
+use crate::postproc::{self, RefinementUsage};
 use crate::stt::{self, Transcriber};
 use anyhow::{Context, Result};
 use std::fmt;
@@ -122,6 +122,9 @@ pub struct Outcome {
     /// Wall time of the STT stage only.
     pub stt_elapsed: Duration,
     pub postproc: PostprocStatus,
+    /// Token usage reported by the cleanup provider, when it ran and
+    /// reported usage.
+    pub postproc_usage: Option<RefinementUsage>,
     /// True when STT returned text from earlier chunks after a later failure.
     pub partial: bool,
     /// Keep the WAV on disk for operator recovery (full STT failure).
@@ -182,6 +185,7 @@ pub fn run(
                 text: Err(error),
                 stt_elapsed,
                 postproc: PostprocStatus::Off,
+                postproc_usage: None,
                 partial: false,
                 keep_wav: true,
                 archive: ArchiveStatus::NotApplicable,
@@ -280,6 +284,7 @@ pub fn run(
         text: Ok(processed.unwrap_or(raw)),
         stt_elapsed,
         postproc,
+        postproc_usage,
         partial,
         keep_wav: false,
         archive,

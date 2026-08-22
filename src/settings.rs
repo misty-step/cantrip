@@ -11,7 +11,7 @@
 //! one frame, then exits. It exists for visual testing on machines without a
 //! screenshot utility.
 
-use crate::config::{Config, PostprocConfig, SttConfig};
+use crate::config::{Config, PostprocConfig, SttConfig, TelemetryConfig};
 use crate::inject::InjectionMode;
 use crate::ipc;
 use crate::paths;
@@ -44,6 +44,9 @@ struct Editable {
     pp_passes: u8,
     pp_min_chars: usize,
     pp_instructions: String,
+    /// Not editable in the window; carried through saves so enabling
+    /// telemetry in the config file survives a settings write.
+    telemetry: TelemetryConfig,
 }
 
 impl Editable {
@@ -64,6 +67,7 @@ impl Editable {
             pp_passes: cfg.postproc.passes,
             pp_min_chars: cfg.postproc.min_chars,
             pp_instructions: cfg.postproc.instructions.clone(),
+            telemetry: cfg.telemetry.clone(),
         }
     }
 
@@ -94,6 +98,7 @@ impl Editable {
                 min_chars: self.pp_min_chars,
                 instructions: self.pp_instructions.clone(),
             },
+            telemetry: self.telemetry.clone(),
         }
     }
 }
@@ -912,6 +917,7 @@ mod tests {
                 min_chars: 40,
                 instructions: "Remove filler words.".to_owned(),
             },
+            telemetry: TelemetryConfig::default(),
         }
     }
 
@@ -939,6 +945,7 @@ mod tests {
             pp_passes: 1,
             pp_min_chars: 40,
             pp_instructions: String::new(),
+            telemetry: TelemetryConfig::default(),
         };
         let config = edit.to_config();
         assert_eq!(config.audio_source, None);

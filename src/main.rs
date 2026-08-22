@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use cantrip::inject::{self, InjectionMode};
 use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
+use cantrip::telemetry;
 use cantrip::{config::Config, daemon, hud, keys, paths, pipeline, settings};
 
 /// Per-dictation post-processing request, overriding [postproc].enabled.
@@ -476,6 +477,7 @@ fn transcribe_file(wav: &std::path::Path) -> Result<()> {
     if let pipeline::ArchiveStatus::Failed(error) = &outcome.archive {
         eprintln!("warning: transcript archive failed: {error}");
     }
+    emit_transcribe_telemetry(&config, &outcome);
     match &outcome.text {
         Ok(text) => {
             if matches!(outcome.postproc, pipeline::PostprocStatus::Failed { .. }) {
@@ -494,6 +496,80 @@ fn pull_model() -> Result<()> {
         models::ensure_model(&PARAKEET_V3_INT8).context("pulling transcription model")?;
     println!("installed: {}", model_dir.display());
     Ok(())
+}
+
+/// Export the one-shot CLI job. Blocking here is fine: `transcribe` is a
+/// foreground command and the export is bounded and content-free.
+fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
+    if !config.telemetry.enabled {
+        return;
+    }
+    let chars = outcome.text.as_ref().map_or(0, |text| text.chars().count());
+    let error_class = outcome.text.as_ref().err().map(|_| "stt-failed".to_owned());
+    let (cleanup_state, cleanup_ms) = match &outcome.postproc {
+        pipeline::PostprocStatus::Applied { ms } => ("applied", Some(*ms as u64)),
+        pipeline::PostprocStatus::Failed { ms } => ("failed", Some(*ms as u64)),
+        pipeline::PostprocStatus::SkippedShort { .. } => ("skipped_short", None),
+        pipeline::PostprocStatus::Off => ("off", None),
+    };
+    let attempted = matches!(
+        outcome.postproc,
+        pipeline::PostprocStatus::Applied { .. } | pipeline::PostprocStatus::Failed { .. }
+    );
+    let stt_ms = outcome.stt_elapsed.as_millis() as u64;
+    let job = telemetry::JobTelemetry {
+        source: "transcribe",
+        capture_ms: 0,
+        stt_ms,
+        stt_model: config.stt.model.clone(),
+        stt_remote: config.stt.endpoint.is_some(),
+        chars,
+        partial: outcome.partial,
+        cleanup_state,
+        cleanup_ms,
+        cleanup_model: attempted.then(|| config.postproc.model.clone()),
+        tokens_in: outcome
+            .postproc_usage
+            .as_ref()
+            .map(|usage| usage.prompt_tokens),
+        tokens_out: outcome
+            .postproc_usage
+            .as_ref()
+            .map(|usage| usage.completion_tokens),
+        tokens_total: outcome
+            .postproc_usage
+            .as_ref()
+            .map(|usage| usage.total_tokens),
+        inject_ms: None,
+        delivered: None,
+        error_class,
+        total_ms: stt_ms + cleanup_ms.unwrap_or(0),
+    };
+    let reporter = telemetry::TelemetryReporter::spawn(config.telemetry.clone());
+    reporter.report(job);
+    // Dropping via shutdown drains the queue before the process exits:
+    // the CLI equivalent of a flush.
+    reporter.shutdown();
+}
+
+fn telemetry_diagnosis(config: &Config) -> String {
+    if !config.telemetry.enabled {
+        return "telemetry: disabled (set [telemetry] enabled = true to opt in)".to_owned();
+    }
+    if config.telemetry.public_key.trim().is_empty() {
+        return "telemetry: blocked (public_key is empty)".to_owned();
+    }
+    let key_id = config.telemetry.api_key_id.as_deref().unwrap_or("langfuse");
+    let credential = if keys::exists(key_id).unwrap_or(false) {
+        "present"
+    } else {
+        "absent — run: cantrip key set langfuse"
+    };
+    format!(
+        "telemetry: enabled (endpoint={}; credential={}; content=counts-only)",
+        endpoint_origin(&config.telemetry.endpoint),
+        credential
+    )
 }
 
 fn model_status() -> Result<()> {
@@ -537,10 +613,12 @@ fn doctor() -> Result<()> {
     if let Ok(config) = &config {
         println!("{}", stt_diagnosis(config));
         println!("{}", cleanup_diagnosis(config));
+        println!("{}", telemetry_diagnosis(config));
         println!("{}", injection_diagnosis(config.injection, tools));
     } else {
         println!("stt: blocked — fix config first");
         println!("cleanup: blocked — fix config first");
+        println!("telemetry: blocked — fix config first");
         println!("injection: blocked — fix config first");
     }
     let wayland = env::var_os("WAYLAND_DISPLAY").is_some()

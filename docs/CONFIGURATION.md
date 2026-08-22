@@ -149,3 +149,26 @@ text is ready, and the single paste keypress cannot be interrupted by losing
 focus mid-composition like long typing streams can. The paste chord is
 `Ctrl+Shift+V` so a terminal or TUI (OMP, Herdr) does not intercept `Ctrl+V`
 as its own empty host-clipboard paste.
+
+## Opt-in telemetry (`[telemetry]`)
+
+Cantrip can export one Langfuse trace per dictation for latency and quality
+analysis. The repo rule has no exception here: traces carry character counts,
+durations, model names, backend names, and error classifications only — never
+transcript text, never audio. Tracing is off by default and adds no network
+traffic until you enable it.
+
+```toml
+[telemetry]
+enabled    = true
+endpoint   = "https://us.cloud.langfuse.com/api/public/otel/v1/traces"
+public_key = "pk-lf-..."            # project public key (not a secret)
+api_key_id = "langfuse"             # keyring entry holding the secret key
+```
+
+Store the secret key with `cantrip key set langfuse` (paste the `sk-lf-...`
+value when prompted). Keys never live in files or git. When enabled, the
+daemon exports from a background thread after each job settles; a full queue
+or an export failure only logs a warning and never affects dictation.
+`cantrip doctor` reports the telemetry state honestly, including whether the
+keyring entry is present.
