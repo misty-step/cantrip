@@ -393,11 +393,17 @@ impl Client {
                 }
             };
             let status = response.status();
+            let retry_after = response.header("retry-after").and_then(parse_retry_after);
             let raw = response
                 .into_string()
                 .with_context(|| format!("reading {action} response"))?;
             if retryable(status) && attempt < MAX_ATTEMPTS {
-                std::thread::sleep(backoff(attempt));
+                let delay = retry_delay(attempt, retry_after);
+                eprintln!(
+                    "[eval] Langfuse {action} returned status {status}; retrying in {}ms (attempt {attempt}/{MAX_ATTEMPTS})",
+                    delay.as_millis()
+                );
+                std::thread::sleep(delay);
                 continue;
             }
             return Ok((status, raw));
@@ -430,11 +436,17 @@ impl Client {
                 }
             };
             let status = response.status();
+            let retry_after = response.header("retry-after").and_then(parse_retry_after);
             let raw = response
                 .into_string()
                 .with_context(|| format!("reading {action} response"))?;
             if retryable(status) && attempt < MAX_ATTEMPTS {
-                std::thread::sleep(backoff(attempt));
+                let delay = retry_delay(attempt, retry_after);
+                eprintln!(
+                    "[eval] Langfuse {action} returned status {status}; retrying in {}ms (attempt {attempt}/{MAX_ATTEMPTS})",
+                    delay.as_millis()
+                );
+                std::thread::sleep(delay);
                 continue;
             }
             return Ok((status, raw));
@@ -659,6 +671,13 @@ fn retryable(status: u16) -> bool {
 
 fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(BACKOFF_BASE_MS * (1_u64 << attempt.saturating_sub(1)))
+}
+fn parse_retry_after(header: &str) -> Option<Duration> {
+    header.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+fn retry_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
+    retry_after.map_or_else(|| backoff(attempt), |server| server.max(backoff(attempt)))
 }
 
 fn percent_encode_component(input: &str) -> String {
@@ -972,6 +991,17 @@ mod tests {
     }
 
     #[test]
+    fn retry_delay_uses_server_hint_without_shortening_exponential_backoff() {
+        assert_eq!(parse_retry_after("3"), Some(Duration::from_secs(3)));
+        assert_eq!(parse_retry_after("not-a-duration"), None);
+        assert_eq!(
+            retry_delay(1, Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        assert_eq!(retry_delay(1, Some(Duration::from_millis(1))), backoff(1));
+    }
+
+    #[test]
     fn percent_encode_component_encodes_path_segments() {
         assert_eq!(percent_encode_component("cantrip-eval"), "cantrip-eval");
         assert_eq!(percent_encode_component("my run/1"), "my%20run%2F1");
@@ -1036,9 +1066,10 @@ mod tests {
     }
 
     #[test]
-    fn post_trace_retries_429_then_succeeds() {
+    fn post_trace_retries_429_and_5xx_before_success() {
         let (base, server) = mock_server_responses(vec![
             status_json("HTTP/1.1 429 Too Many Requests", "{}"),
+            status_json("HTTP/1.1 503 Service Unavailable", "{}"),
             ok_json("{}"),
         ]);
         let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
@@ -1056,6 +1087,6 @@ mod tests {
         client.post_trace(&payload).unwrap();
 
         let requests = server.join().expect("mock server thread");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
     }
 }
