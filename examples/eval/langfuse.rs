@@ -97,12 +97,13 @@ pub fn publish(args: &[String]) -> Result<()> {
 
     let dataset_name = dataset_name(args);
     let client = Client::new(&telemetry, dataset_name.clone())?;
-    client.ensure_dataset()?;
+    let dataset_id = client.ensure_dataset()?;
 
     let mut item_count = 0_usize;
     let mut items = BTreeMap::new();
     for clip in &manifest.clips {
         let item_id = client.upload_item(
+            &dataset_id,
             &stt_item_key(&clip.id),
             json!({ "clip": clip.id }),
             json!({ "reference": clip.reference }),
@@ -114,6 +115,7 @@ pub fn publish(args: &[String]) -> Result<()> {
     if let Some(behavior_manifest) = &behavior_manifest {
         for case in &behavior_manifest.cases {
             let item_id = client.upload_item(
+                &dataset_id,
                 &behavior_item_key(&case.id),
                 json!({ "input": case.input }),
                 json!({ "accepted": case.accepted }),
@@ -135,7 +137,7 @@ pub fn publish(args: &[String]) -> Result<()> {
         )
         .with_context(|| format!("parsing {}", transcripts.display()))?;
         for result in &results {
-            publish_stt_result(&client, &refs, &items, result)?;
+            publish_stt_result(&client, &dataset_id, &refs, &items, result)?;
             stt_runs += 1;
         }
     }
@@ -147,7 +149,7 @@ pub fn publish(args: &[String]) -> Result<()> {
         )
         .with_context(|| format!("parsing {}", postproc.display()))?;
         for result in &results {
-            publish_ppr_result(&client, &refs, &items, result)?;
+            publish_ppr_result(&client, &dataset_id, &refs, &items, result)?;
             ppr_runs += 1;
         }
     }
@@ -163,7 +165,7 @@ pub fn publish(args: &[String]) -> Result<()> {
         )
         .with_context(|| format!("parsing {}", behavior.display()))?;
         for result in &results {
-            publish_behavior_result(&client, &items, result)?;
+            publish_behavior_result(&client, &dataset_id, &items, result)?;
             behavior_runs += 1;
         }
         if results.is_empty() {
@@ -182,6 +184,7 @@ pub fn publish(args: &[String]) -> Result<()> {
 
 fn publish_stt_result(
     client: &Client,
+    dataset_id: &str,
     refs: &BTreeMap<String, String>,
     items: &BTreeMap<String, String>,
     result: &crate::SttResult,
@@ -206,11 +209,10 @@ fn publish_stt_result(
         "cost_usd": result.cost_usd,
     });
 
-    let run_key = format!("stt:{}:{}", result.lane, result.clip);
     let trace_id = client.publish_run(
+        dataset_id,
         item_id,
         "cantrip-eval-stt",
-        &run_key,
         result.latency_ms,
         &input,
         &output,
@@ -224,6 +226,7 @@ fn publish_stt_result(
 
 fn publish_ppr_result(
     client: &Client,
+    dataset_id: &str,
     refs: &BTreeMap<String, String>,
     items: &BTreeMap<String, String>,
     result: &crate::PprResult,
@@ -249,11 +252,10 @@ fn publish_ppr_result(
         "cost_usd": result.cost_usd,
     });
 
-    let run_key = format!("ppr:{}:{}:{}", result.lane, result.stt_lane, result.clip);
     let trace_id = client.publish_run(
+        dataset_id,
         item_id,
         "cantrip-eval-ppr",
-        &run_key,
         result.latency_ms,
         &input,
         &output,
@@ -270,6 +272,7 @@ fn publish_ppr_result(
 
 fn publish_behavior_result(
     client: &Client,
+    dataset_id: &str,
     items: &BTreeMap<String, String>,
     result: &crate::BehaviorResult,
 ) -> Result<()> {
@@ -292,14 +295,10 @@ fn publish_behavior_result(
         "cost_usd": result.cost_usd,
     });
 
-    let run_key = format!(
-        "behavior:{}:{}:{}",
-        result.lane, result.case, result.iteration
-    );
     let trace_id = client.publish_run(
+        dataset_id,
         item_id,
         "cantrip-eval-behavior",
-        &run_key,
         result.latency_ms,
         &input,
         &output,
@@ -394,18 +393,24 @@ impl Client {
             };
             let status = response.status();
             let retry_after = response.header("retry-after").and_then(parse_retry_after);
+            if retryable(status) {
+                if attempt < MAX_ATTEMPTS {
+                    let delay = retry_delay(attempt, retry_after);
+                    eprintln!(
+                        "[eval] Langfuse {action} returned status {status}; retrying in {}ms (attempt {attempt}/{MAX_ATTEMPTS})",
+                        delay.as_millis()
+                    );
+                    std::thread::sleep(delay);
+                    continue;
+                }
+                return Ok((status, String::new()));
+            }
+            if !(200..300).contains(&status) {
+                return Ok((status, String::new()));
+            }
             let raw = response
                 .into_string()
                 .with_context(|| format!("reading {action} response"))?;
-            if retryable(status) && attempt < MAX_ATTEMPTS {
-                let delay = retry_delay(attempt, retry_after);
-                eprintln!(
-                    "[eval] Langfuse {action} returned status {status}; retrying in {}ms (attempt {attempt}/{MAX_ATTEMPTS})",
-                    delay.as_millis()
-                );
-                std::thread::sleep(delay);
-                continue;
-            }
             return Ok((status, raw));
         }
     }
@@ -437,18 +442,24 @@ impl Client {
             };
             let status = response.status();
             let retry_after = response.header("retry-after").and_then(parse_retry_after);
+            if retryable(status) {
+                if attempt < MAX_ATTEMPTS {
+                    let delay = retry_delay(attempt, retry_after);
+                    eprintln!(
+                        "[eval] Langfuse {action} returned status {status}; retrying in {}ms (attempt {attempt}/{MAX_ATTEMPTS})",
+                        delay.as_millis()
+                    );
+                    std::thread::sleep(delay);
+                    continue;
+                }
+                return Ok((status, String::new()));
+            }
+            if !(200..300).contains(&status) {
+                return Ok((status, String::new()));
+            }
             let raw = response
                 .into_string()
                 .with_context(|| format!("reading {action} response"))?;
-            if retryable(status) && attempt < MAX_ATTEMPTS {
-                let delay = retry_delay(attempt, retry_after);
-                eprintln!(
-                    "[eval] Langfuse {action} returned status {status}; retrying in {}ms (attempt {attempt}/{MAX_ATTEMPTS})",
-                    delay.as_millis()
-                );
-                std::thread::sleep(delay);
-                continue;
-            }
             return Ok((status, raw));
         }
     }
@@ -468,12 +479,11 @@ impl Client {
         Ok(parsed.get("id").and_then(Value::as_str).map(str::to_owned))
     }
 
-    fn ensure_dataset(&self) -> Result<()> {
-        if self.get_dataset()?.is_some() {
-            return Ok(());
+    fn ensure_dataset(&self) -> Result<String> {
+        if let Some(id) = self.get_dataset()? {
+            return Ok(id);
         }
-        self.create_dataset()?;
-        Ok(())
+        self.create_dataset()
     }
 
     fn create_dataset(&self) -> Result<String> {
@@ -497,15 +507,13 @@ impl Client {
 
     fn upload_item(
         &self,
+        dataset_id: &str,
         key: &str,
         input: Value,
         expected_output: Value,
         metadata: Value,
     ) -> Result<String> {
-        let id = stable_id(
-            "cantrip-eval-item",
-            &format!("{}:{}", self.dataset_name, key),
-        );
+        let id = stable_id("cantrip-eval-item", &[dataset_id, key]);
         let url = self.rest_url("/api/public/dataset-items");
         let body = dataset_item_body(&self.dataset_name, &id, input, expected_output, metadata);
         let (status, raw) = self.post_json(
@@ -536,7 +544,7 @@ impl Client {
 
     fn post_score(&self, trace_id: &str, name: &str, value: Value, comment: &str) -> Result<()> {
         let url = self.rest_url("/api/public/scores");
-        let id = stable_id("cantrip-eval-score", &format!("{trace_id}:{name}"));
+        let id = stable_id("cantrip-eval-score", &[trace_id, name]);
         let body = json!({
             "id": id,
             "traceId": trace_id,
@@ -557,16 +565,16 @@ impl Client {
     #[allow(clippy::too_many_arguments)]
     fn publish_run(
         &self,
+        dataset_id: &str,
         item_id: &str,
         run_name: &str,
-        run_key: &str,
         duration_ms: u128,
         input: &Value,
         output: &Value,
         error: bool,
     ) -> Result<String> {
-        let seed = format!("{run_name}:{run_key}");
-        let trace_id = trace_id_for(&format!("{}:{seed}", self.dataset_name));
+        let input_raw = input.to_string();
+        let trace_id = trace_id_for(&[dataset_id, run_name, &input_raw]);
         let payload = experiment_trace(
             &trace_id,
             item_id,
@@ -693,18 +701,21 @@ fn percent_encode_component(input: &str) -> String {
     out
 }
 
-fn sha256_hex(seed: &str) -> String {
+fn hash_parts(namespace: &str, parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(seed.as_bytes());
+    for part in std::iter::once(namespace).chain(parts.iter().copied()) {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
     hex(&hasher.finalize())
 }
 
-fn stable_id(prefix: &str, seed: &str) -> String {
-    format!("{prefix}-{}", sha256_hex(seed))
+fn stable_id(prefix: &str, parts: &[&str]) -> String {
+    format!("{prefix}-{}", hash_parts(prefix, parts))
 }
 
-fn trace_id_for(seed: &str) -> String {
-    sha256_hex(seed)[..32].to_owned()
+fn trace_id_for(parts: &[&str]) -> String {
+    hash_parts("cantrip-eval-trace", parts)[..32].to_owned()
 }
 
 fn system_nanos() -> u128 {
@@ -852,6 +863,9 @@ mod tests {
         });
         (format!("http://{addr}"), handle)
     }
+    fn truncated_status(status_line: &str) -> String {
+        format!("{status_line}\r\nContent-Length: 16\r\nConnection: close\r\n\r\n")
+    }
 
     fn telemetry_config(base: &str) -> cantrip::config::TelemetryConfig {
         cantrip::config::TelemetryConfig {
@@ -892,7 +906,7 @@ mod tests {
 
     #[test]
     fn experiment_trace_links_item_and_carries_no_transcript_text() {
-        let trace_id = trace_id_for("trace:cantrip-eval:cantrip-eval-stt:stt:jfk");
+        let trace_id = trace_id_for(&["dataset-1", "cantrip-eval-stt", r#"{"clip":"jfk"}"#]);
         let payload = experiment_trace(
             &trace_id,
             "item-123",
@@ -956,7 +970,7 @@ mod tests {
     fn post_trace_round_trip_sends_otlp_experiment_attributes() {
         let (base, server) = mock_server(ok_json("{}"));
         let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
-        let trace_id = trace_id_for("trace:cantrip-eval:cantrip-eval-stt:stt:jfk");
+        let trace_id = trace_id_for(&["dataset-1", "cantrip-eval-stt", r#"{"clip":"jfk"}"#]);
         let payload = experiment_trace(
             &trace_id,
             "item-1",
@@ -1002,6 +1016,18 @@ mod tests {
     }
 
     #[test]
+    fn stable_ids_are_unambiguous_for_delimiter_containing_parts() {
+        assert_ne!(
+            trace_id_for(&["dataset", "run", "lane:a", "clip"]),
+            trace_id_for(&["dataset", "run", "lane", "a:clip"])
+        );
+        assert_eq!(
+            trace_id_for(&["dataset", "run", "lane:a", "clip"]),
+            trace_id_for(&["dataset", "run", "lane:a", "clip"])
+        );
+    }
+
+    #[test]
     fn percent_encode_component_encodes_path_segments() {
         assert_eq!(percent_encode_component("cantrip-eval"), "cantrip-eval");
         assert_eq!(percent_encode_component("my run/1"), "my%20run%2F1");
@@ -1021,12 +1047,25 @@ mod tests {
     }
 
     #[test]
+    fn ensure_dataset_returns_existing_dataset_id() {
+        let (base, server) = mock_server(ok_json(r#"{"id":"dataset-42","name":"cantrip-eval"}"#));
+        let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
+        assert_eq!(client.ensure_dataset().unwrap(), "dataset-42");
+        let request = server.join().expect("mock server thread");
+        assert_eq!(
+            request.request_line,
+            "GET /api/public/v2/datasets/cantrip-eval HTTP/1.1"
+        );
+    }
+
+    #[test]
     fn upload_item_sends_deterministic_id_for_upsert() {
         let (base, server) = mock_server(ok_json(r#"{"id":"item-1"}"#));
         let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
         let key = stt_item_key("jfk");
         let id = client
             .upload_item(
+                "dataset-1",
                 &key,
                 json!({ "clip": "jfk" }),
                 json!({ "reference": "ask not what" }),
@@ -1037,7 +1076,7 @@ mod tests {
 
         let request = server.join().expect("mock server thread");
         let body = request.body_json();
-        let expected_item_id = stable_id("cantrip-eval-item", &format!("cantrip-eval:{key}"));
+        let expected_item_id = stable_id("cantrip-eval-item", &["dataset-1", &key]);
         assert_eq!(body["id"].as_str(), Some(expected_item_id.as_str()));
         assert_eq!(body["datasetName"], "cantrip-eval");
     }
@@ -1059,10 +1098,33 @@ mod tests {
         let body = request.body_json();
         let expected_score_id = stable_id(
             "cantrip-eval-score",
-            "0123456789abcdef0123456789abcdef:stt.wer",
+            &["0123456789abcdef0123456789abcdef", "stt.wer"],
         );
         assert_eq!(body["id"].as_str(), Some(expected_score_id.as_str()));
         assert_eq!(body["dataType"], "NUMERIC");
+    }
+
+    #[test]
+    fn retry_does_not_require_a_transient_error_body() {
+        let (base, server) = mock_server_responses(vec![
+            truncated_status("HTTP/1.1 429 Too Many Requests"),
+            truncated_status("HTTP/1.1 503 Service Unavailable"),
+            ok_json("{}"),
+        ]);
+        let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
+        let trace_id = trace_id_for(&["dataset-1", "cantrip-eval-stt", r#"{"clip":"jfk"}"#]);
+        let payload = experiment_trace(
+            &trace_id,
+            "item-1",
+            "cantrip-eval-stt",
+            "cantrip-eval",
+            30,
+            &json!({ "clip": "jfk" }),
+            &json!({ "stt_chars": 9 }),
+            false,
+        );
+        client.post_trace(&payload).unwrap();
+        assert_eq!(server.join().expect("mock server thread").len(), 3);
     }
 
     #[test]
@@ -1073,7 +1135,7 @@ mod tests {
             ok_json("{}"),
         ]);
         let client = Client::new(&telemetry_config(&base), "cantrip-eval".to_owned()).unwrap();
-        let trace_id = trace_id_for("trace:cantrip-eval:cantrip-eval-stt:stt:jfk");
+        let trace_id = trace_id_for(&["dataset-1", "cantrip-eval-stt", r#"{"clip":"jfk"}"#]);
         let payload = experiment_trace(
             &trace_id,
             "item-1",
