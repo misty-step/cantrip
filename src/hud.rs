@@ -230,6 +230,7 @@ pub fn run(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Resul
         None,
     );
     layer.set_anchor(Anchor::TOP);
+    layer.set_margin(34, 0, 0, 0);
     // wlroots rejects a zero width with only the TOP anchor. A fixed width
     // keeps the surface top-centered for the fixed-size capsule inside.
     layer.set_size(FALLBACK_WIDTH, HUD_HEIGHT);
