@@ -1,4 +1,12 @@
 {
+  "schema": "cantrip.eval.behavior.v1",
+  "dataset": "cantrip-evals",
+  "corpus_version": "2026-08-13",
+  "default_split": "regression",
+  "grader": {
+    "deterministic": "exact-accepted-v1",
+    "judge": "additive-opt-in-v1"
+  },
   "cases": [
     {
       "id": "basic-punctuation",

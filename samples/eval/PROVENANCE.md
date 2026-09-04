@@ -5,6 +5,14 @@ Each clip beyond `jfk` was fetched from its authoritative dataset, verified for
 exactly (canonical fingerprint: uppercase, non-alphanumerics removed) against
 the dataset row before being recorded in `manifest.json`.
 
+The manifest records the current corpus as schema `cantrip.eval.audio.v1`,
+dataset `cantrip-evals`, corpus version `2026-08-13`, and split `regression`.
+These fields describe the corpus; they do not change the historical
+2026-08-13 result hashes. New public clips must be added with a stable source
+URL, license, exact reference match, WAV properties, and a SHA-256 before they
+enter a decision-grade run. A future held-out split must not be copied from
+these regression clips or used to tune the prompt.
+
 | id | file | source | stable source URL | license |
 |---|---|---|---|---|
 | jfk | samples/jfk.wav | JFK public-domain speech (local fixture; ships with cantrip) | local fixture | public-domain |

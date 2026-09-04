@@ -31,5 +31,55 @@ The evaluation matrix includes current low-latency cloud models and a local refe
 ## Consequences
 
 The production path becomes smaller and has no approximate content policy. A bad model response can pass through, so the behavior corpus and model review become release criteria for prompt or model changes. Exact accepted outputs can be reviewed without adding the same rules to the daemon.
-
 The corpus uses synthetic text. Evaluation output files can contain model responses and stay in the existing evaluation-results location. Runtime logs continue to contain character counts only.
+
+
+## Evaluation design amendment (2026-09-03)
+
+The first baseline exposed two limits. The audio corpus is five clean/public
+clips, with two near-trivial clips (`eval/report.md:45-48`), and the behavior
+runner reduces every case to one exact-accepted boolean
+(`examples/eval/main.rs:1340-1367`). WER cannot detect an answer to a dictated
+question, and an aggregate exact count cannot explain a dropped negation,
+changed quantity, or malformed list.
+
+The evaluation contract is therefore deterministic-first:
+
+1. Keep `accepted` strings as the strict reviewed oracle.
+2. Add case-local contracts for required spans, forbidden additions,
+   speech-act/role, and formatting. A pure grader reports each dimension and
+   a reason code; it does not add policy to `src/postproc.rs`.
+3. Add a model judge only as an explicit, additive signal. It returns
+   structured pass/fail/uncertain decisions, uses a fixed model distinct from
+   the candidate, and is calibrated against human labels. A judge pass never
+   overrides a deterministic role or protocol failure.
+4. Split the public behavior corpus into regression, decision, and held-out
+   cases. Keep the current 24 cases as regression cases and add cases for
+   speech acts, negation/quantities/names/paths, corrections, paragraphs,
+   lists, refusals, empty output, and answer-to-question failures.
+5. Keep the current five audio clips for regression, then add balanced
+   decision and held-out strata for accents, noise, short commands, technical
+   vocabulary, and spontaneous dictation. Record source, license, WAV
+   properties, reference, and SHA-256 in `samples/eval/PROVENANCE.md`.
+
+STT promotion reports macro and micro WER/CER, warm p50/p95, cold load-plus-
+decode latency, RTF, failure rate, and cost status. Post-processing promotion
+requires protocol and role fidelity before latency or cost is compared. A
+missing live price is `unknown`, not zero.
+
+The canonical external dataset is `cantrip-evals`. Langfuse publishing stays
+explicit and receives only public/synthetic dataset items plus metadata-only
+traces. Local JSON remains the source of truth.
+
+Do not introduce Harbor for this matrix. Harbor `0.21.0` is the Iron Forest
+agent/task-sandbox precedent (`iron-forest/evals/pyproject.toml:1-7`,
+`iron-forest/evals/run-fast.sh:10-16`), while this evaluation is a
+deterministic Rust pipeline. Extend `examples/eval` with pure graders. Add a
+separate Harbor package only if a later requirement evaluates interactive
+daemon behavior in an isolated keyboard/clipboard/PipeWire environment.
+
+The first implementation slice is limited to the behavior manifest schema,
+pure deterministic graders, split filtering, per-dimension result/board
+output, and self-describing `run.json`. Do not change production fallback
+heuristics, add cloud lanes, or promote a new baseline until the existing
+24-case regression set has been reviewed under the new grader.

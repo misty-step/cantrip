@@ -1,7 +1,12 @@
 {
+  "schema": "cantrip.eval.audio.v1",
+  "dataset": "cantrip-evals",
+  "corpus_version": "2026-08-13",
+  "default_split": "regression",
   "clips": [
     {
       "id": "jfk",
+      "split": "regression",
       "file": "samples/jfk.wav",
       "source": "JFK 'And so, my fellow Americans' (public domain; ships with cantrip)",
       "license": "public-domain",
@@ -9,6 +14,7 @@
     },
     {
       "id": "librispeech-clean",
+      "split": "regression",
       "file": "samples/eval/librispeech-clean.wav",
       "source": "LibriSpeech openSLR12 dev-clean utterance 2277-149896-0000 (CC BY 4.0)",
       "license": "CC BY 4.0",
@@ -16,6 +22,7 @@
     },
     {
       "id": "librispeech-spelling",
+      "split": "regression",
       "file": "samples/eval/librispeech-spelling.wav",
       "source": "LibriSpeech openSLR12 dev-clean utterance 2035-147960-0002 (CC BY 4.0)",
       "license": "CC BY 4.0",
@@ -23,6 +30,7 @@
     },
     {
       "id": "librispeech-other",
+      "split": "regression",
       "file": "samples/eval/librispeech-other.wav",
       "source": "LibriSpeech openSLR12 test-other utterance 7902-96591-0008 (CC BY 4.0)",
       "license": "CC BY 4.0",
@@ -30,6 +38,7 @@
     },
     {
       "id": "commonvoice-37021060",
+      "split": "regression",
       "file": "samples/eval/commonvoice-37021060.wav",
       "source": "Common Voice 22.0 en/test utterance common_voice_en_37021060 (CC0-1.0)",
       "license": "CC0-1.0",
