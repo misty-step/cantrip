@@ -84,6 +84,7 @@ fn postproc_config(endpoint: String) -> PostprocConfig {
         endpoint,
         model: "test-model".to_owned(),
         api_key_id: None,
+        reasoning_effort: None,
         timeout_ms: 5_000,
         passes: 2,
         min_chars: 0,

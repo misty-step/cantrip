@@ -33,6 +33,10 @@ pub struct PostprocConfig {
     pub endpoint: String,
     pub model: String,
     pub api_key_id: Option<String>,
+    /// Reasoning effort for providers that support it (OpenRouter
+    /// `reasoning.effort`): e.g. low, medium, high. Omitted from the
+    /// request when unset; local endpoints ignore unknown fields.
+    pub reasoning_effort: Option<String>,
     pub timeout_ms: u64,
     pub passes: u8,
     /// Skip cleanup when the raw transcript has fewer than this many chars.
@@ -95,6 +99,7 @@ impl Default for PostprocConfig {
             endpoint: "http://localhost:11434/v1".to_owned(),
             model: String::new(),
             api_key_id: None,
+            reasoning_effort: None,
             timeout_ms: 30_000,
             // One cleanup round is enough for modern instruct models; a second
             // pass doubles cloud latency for little gain on residual errors.

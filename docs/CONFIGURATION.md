@@ -43,6 +43,7 @@ model = "qwen3:8b"        # any model your endpoint serves
 timeout_ms = 30000
 passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
 min_chars = 40            # skip cleanup under this length; 0 = never skip
+# reasoning_effort = "low" # optional: low | medium | high | none (for providers supporting reasoning.effort)
 instructions = ""         # optional extra style guidance
 ```
 
@@ -90,6 +91,10 @@ contract, so keep it short and avoid redefining the task.
   about $0.003 per cleanup. The primary operator currently runs
   `google/gemini-3.7-flash` through OpenRouter with `passes = 1` as an
   operator override, not the gauntlet winner.
+- **`reasoning_effort`.** Optional reasoning effort level (e.g. `low`, `medium`,
+  `high`, `none`) for OpenAI-compatible providers that support
+  `reasoning.effort` (such as OpenRouter). Omitted from the request when
+  unset; local endpoints ignore unknown fields.
 - A postproc failure never drops a dictation: the raw transcript is used.
 
 ## Transcript history

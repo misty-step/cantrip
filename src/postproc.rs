@@ -61,9 +61,18 @@ Write only the clean transcript.";
 struct ChatRequest<'a> {
     model: &'a str,
     messages: [ChatMessage<'a>; 2],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningEffort<'a>>,
 }
 
+/// OpenRouter-style reasoning control (`reasoning.effort`). Only sent
+/// when the operator sets `[postproc].reasoning_effort`.
 #[derive(Debug, Serialize)]
+struct ReasoningEffort<'a> {
+    effort: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
 struct ChatMessage<'a> {
     role: &'static str,
     content: &'a str,
@@ -226,6 +235,12 @@ fn chat_round(
                 content: &user,
             },
         ],
+        reasoning: cfg
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .map(|effort| ReasoningEffort { effort }),
     };
     let body = serde_json::to_string(&request).context("serializing post-processing request")?;
     let endpoint = format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/'));
@@ -400,6 +415,28 @@ mod tests {
             .expect_err("empty reply must fail");
         assert_eq!(error.to_string(), "post-processing returned empty text");
         assert!(normalize_response("Clean transcript:", "source").is_err());
+    }
+
+    #[test]
+    fn reasoning_effort_is_sent_only_when_configured() {
+        let message = ChatMessage {
+            role: "user",
+            content: "hi",
+        };
+        let with_effort = serde_json::to_value(ChatRequest {
+            model: "m",
+            messages: [message, message],
+            reasoning: Some(ReasoningEffort { effort: "low" }),
+        })
+        .expect("request serializes");
+        assert_eq!(with_effort["reasoning"]["effort"], "low");
+        let without_effort = serde_json::to_value(ChatRequest {
+            model: "m",
+            messages: [message, message],
+            reasoning: None,
+        })
+        .expect("request serializes");
+        assert!(without_effort.get("reasoning").is_none());
     }
 
     #[test]

@@ -40,6 +40,9 @@ struct Editable {
     pp_endpoint: String,
     pp_model: String,
     pp_key: String,
+    /// Not editable in the window; carried through saves so a
+    /// config-file reasoning effort survives a settings write.
+    pp_effort: Option<String>,
     pp_timeout: u64,
     pp_passes: u8,
     pp_min_chars: usize,
@@ -63,6 +66,7 @@ impl Editable {
             pp_endpoint: cfg.postproc.endpoint.clone(),
             pp_model: cfg.postproc.model.clone(),
             pp_key: cfg.postproc.api_key_id.clone().unwrap_or_default(),
+            pp_effort: cfg.postproc.reasoning_effort.clone(),
             pp_timeout: cfg.postproc.timeout_ms,
             pp_passes: cfg.postproc.passes,
             pp_min_chars: cfg.postproc.min_chars,
@@ -93,6 +97,7 @@ impl Editable {
                 endpoint: self.pp_endpoint.trim().to_owned(),
                 model: self.pp_model.trim().to_owned(),
                 api_key_id: non_empty(self.pp_key.trim()),
+                reasoning_effort: self.pp_effort.clone(),
                 timeout_ms: self.pp_timeout,
                 passes: self.pp_passes.clamp(1, 3),
                 min_chars: self.pp_min_chars,
@@ -686,6 +691,11 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
         "api_key_id",
         config.postproc.api_key_id.as_deref(),
     );
+    set_or_remove(
+        postproc,
+        "reasoning_effort",
+        config.postproc.reasoning_effort.as_deref(),
+    );
     // Timeout is a small positive integer (ms); far below i64::MAX in practice.
     set_preserving_decor(
         postproc,
@@ -912,6 +922,7 @@ mod tests {
                 endpoint: "http://localhost:11434/v1".to_owned(),
                 model: "qwen3:8b".to_owned(),
                 api_key_id: None,
+                reasoning_effort: Some("low".to_owned()),
                 timeout_ms: 30_000,
                 passes: 1,
                 min_chars: 40,
@@ -941,6 +952,7 @@ mod tests {
             pp_endpoint: "http://localhost:11434/v1".to_owned(),
             pp_model: String::new(),
             pp_key: String::new(),
+            pp_effort: None,
             pp_timeout: 10_000,
             pp_passes: 1,
             pp_min_chars: 40,
