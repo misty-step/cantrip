@@ -134,6 +134,7 @@ impl From<String> for StateKind {
 pub struct TerminalOutcome {
     pub message: String,
     pub ok: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +151,7 @@ pub struct CommandReply {
     pub message: Option<String>,
     pub stage: Option<Stage>,
     pub outcome: Option<TerminalOutcome>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +200,8 @@ pub(crate) struct WireReply {
     state: String,
     message: Option<String>,
     #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
     elapsed: Option<u64>,
     #[serde(default)]
     audio_level: Option<u8>,
@@ -211,6 +215,8 @@ pub(crate) struct WireReply {
     last: Option<String>,
     #[serde(default)]
     last_ok: Option<bool>,
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 impl WireReply {
@@ -219,6 +225,7 @@ impl WireReply {
             ok,
             state: state.to_owned(),
             message,
+            error: None,
             elapsed: None,
             audio_level: None,
             audio_silent: None,
@@ -226,7 +233,13 @@ impl WireReply {
             stage: None,
             last: None,
             last_ok: None,
+            last_error: None,
         }
+    }
+
+    pub(crate) fn with_error(mut self, error: impl Into<String>) -> Self {
+        self.error = Some(error.into());
+        self
     }
 
     pub(crate) fn status(
@@ -244,14 +257,15 @@ impl WireReply {
             ),
             None => (None, None, None),
         };
-        let (last, last_ok) = match outcome {
-            Some(outcome) => (Some(outcome.message), Some(outcome.ok)),
-            None => (None, None),
+        let (last, last_ok, last_error) = match outcome {
+            Some(outcome) => (Some(outcome.message), Some(outcome.ok), outcome.error),
+            None => (None, None, None),
         };
         Self {
             ok: true,
             state: state.to_owned(),
             message: None,
+            error: None,
             elapsed,
             audio_level,
             audio_silent,
@@ -259,6 +273,7 @@ impl WireReply {
             stage: stage.map(ToString::to_string),
             last,
             last_ok,
+            last_error,
         }
     }
 
@@ -271,6 +286,7 @@ impl WireReply {
         if let Some(outcome) = outcome {
             self.last = Some(outcome.message);
             self.last_ok = Some(outcome.ok);
+            self.last_error = outcome.error;
         }
         self
     }
@@ -281,7 +297,8 @@ impl WireReply {
             state: self.state.into(),
             message: self.message,
             stage: self.stage.map(Stage::from),
-            outcome: terminal_outcome(self.last, self.last_ok),
+            outcome: terminal_outcome(self.last, self.last_ok, self.last_error),
+            error: self.error,
         }
     }
 
@@ -292,7 +309,7 @@ impl WireReply {
                 .unwrap_or_else(|| "daemon rejected the status request".to_owned());
             anyhow::bail!("{message}");
         }
-        let outcome = terminal_outcome(self.last, self.last_ok);
+        let outcome = terminal_outcome(self.last, self.last_ok, self.last_error);
         match self.state.as_str() {
             "idle" => Ok(StatusSnapshot::Idle { outcome }),
             "recording" => {
@@ -326,10 +343,15 @@ impl WireReply {
     }
 }
 
-fn terminal_outcome(message: Option<String>, ok: Option<bool>) -> Option<TerminalOutcome> {
+fn terminal_outcome(
+    message: Option<String>,
+    ok: Option<bool>,
+    error: Option<String>,
+) -> Option<TerminalOutcome> {
     message.map(|message| TerminalOutcome {
         message,
         ok: ok.unwrap_or(false),
+        error,
     })
 }
 
@@ -449,6 +471,7 @@ mod tests {
                 message: Some("recording".to_owned()),
                 stage: None,
                 outcome: None,
+                error: None,
             }
         );
     }
@@ -465,8 +488,46 @@ mod tests {
                 outcome: Some(TerminalOutcome {
                     message: "Heard nothing".to_owned(),
                     ok: false,
+                    error: None,
                 }),
             }
+        );
+    }
+
+    #[test]
+    fn command_and_status_preserve_structured_error_class() {
+        let command = WireReply::command(
+            false,
+            "idle",
+            Some("post-processing requested but no model set".to_owned()),
+        )
+        .with_error("postproc-model-unset");
+        let command_json = serde_json::to_value(&command).expect("command should serialize");
+        assert_eq!(command_json["error"], "postproc-model-unset");
+        assert_eq!(
+            command.into_command().error.as_deref(),
+            Some("postproc-model-unset")
+        );
+
+        let status = WireReply::status(
+            "idle",
+            None,
+            None,
+            None,
+            Some(TerminalOutcome {
+                message: "post-processing requested but no model set".to_owned(),
+                ok: false,
+                error: Some("postproc-model-unset".to_owned()),
+            }),
+        );
+        let status_json = serde_json::to_value(&status).expect("status should serialize");
+        assert_eq!(status_json["last_error"], "postproc-model-unset");
+        let converted = status.into_status().expect("status should convert");
+        assert_eq!(
+            converted
+                .outcome()
+                .and_then(|outcome| outcome.error.as_deref()),
+            Some("postproc-model-unset")
         );
     }
 

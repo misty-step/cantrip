@@ -407,7 +407,11 @@ fn send_command(command: Command) -> Result<()> {
     }
     print_outcome(reply.outcome.as_ref());
     if !reply.ok {
-        anyhow::bail!("daemon rejected the command");
+        let error = reply
+            .error
+            .as_deref()
+            .unwrap_or("daemon rejected the command");
+        anyhow::bail!("{error}");
     }
     Ok(())
 }
@@ -442,6 +446,9 @@ fn print_outcome(outcome: Option<&ipc::TerminalOutcome>) {
         return;
     };
     println!("last: {}", outcome.message);
+    if let Some(error) = &outcome.error {
+        println!("error: {error}");
+    }
     if !outcome.ok {
         if paths::last_transcript_path()
             .ok()
