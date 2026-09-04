@@ -32,7 +32,9 @@ const HUD_SUPERVISE_INTERVAL: Duration = Duration::from_secs(5);
 const HUD_SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
 /// Fixed daemon-owned sampling window. Status clients only read the cached
 /// result, so HUD and settings polling cannot consume each other's samples.
-const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+/// Sampled every 100 ms against the trailing 200 ms window: overlapping
+/// windows keep the envelope fresh without rereading history.
+const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -112,6 +114,10 @@ struct WorkerResult {
     source: pipeline::Source,
 }
 
+const POSTPROC_MODEL_UNSET_ERROR: &str = "postproc-model-unset";
+const POSTPROC_MODEL_UNSET_MESSAGE: &str =
+    "post-processing requested but [postproc].model is not set — set [postproc].model then cantrip reload, or drop --postproc clean";
+
 /// The daemon's most recent terminal outcome, surfaced on status replies so
 /// the HUD pill can flash the true result instead of a fake success.
 #[derive(Debug, Clone, Default)]
@@ -119,6 +125,8 @@ struct LastOutcome {
     message: Option<String>,
     /// Whether the dictation was delivered (typed or copied).
     ok: Option<bool>,
+    /// Stable machine-readable class for command/status consumers.
+    error: Option<String>,
 }
 
 impl LastOutcome {
@@ -126,6 +134,7 @@ impl LastOutcome {
         Self {
             message: Some(message.into()),
             ok: Some(true),
+            error: None,
         }
     }
 
@@ -133,6 +142,15 @@ impl LastOutcome {
         Self {
             message: Some(message.into()),
             ok: Some(false),
+            error: None,
+        }
+    }
+
+    fn notice_with_error(message: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            message: Some(message.into()),
+            ok: Some(false),
+            error: Some(error.into()),
         }
     }
 
@@ -140,6 +158,7 @@ impl LastOutcome {
         self.message.clone().map(|message| TerminalOutcome {
             message,
             ok: self.ok.unwrap_or(false),
+            error: self.error.clone(),
         })
     }
 }
@@ -486,7 +505,11 @@ fn serve(
                 Err(error) => return Err(error).context("accepting daemon connection"),
             }
         }
-        thread::sleep(Duration::from_millis(50));
+        // Accept-loop quantum, not a data timer: bounds how long a client
+        // connection waits to be accepted. Kept small so `status` round-trips
+        // in milliseconds; the loop body is a nonblocking accept plus cached
+        // reads, so this costs negligible CPU.
+        thread::sleep(Duration::from_millis(5));
     }
 
     if matches!(&state, State::Processing { .. }) {
@@ -585,6 +608,8 @@ fn status_reply(state: &State, last_outcome: &LastOutcome) -> WireReply {
         State::Processing { stage, .. } => (None, None, Some(stage)),
         State::Idle => (None, None, None),
     };
+    // Status reads are non-consuming: the HUD polls every 200 ms, so a
+    // rejection must remain visible until the next accepted recording clears it.
     WireReply::status(state.name(), elapsed, signal, stage, last_outcome.to_ipc())
 }
 
@@ -687,10 +712,10 @@ fn start_recording_with(
     // Forcing cleanup when no model is configured would silently degrade to
     // "cleanup failed — raw text", so reject it up front with a clear error.
     if postproc_override == Some(true) && config.postproc.model.trim().is_empty() {
-        *last_outcome = LastOutcome::notice("Post-processing requested but no model set");
-        return WireReply::command(false, state.name(), Some(
-            "post-processing requested but [postproc].model is not set — add a model or drop --postproc clean".to_owned(),
-        ));
+        let message = POSTPROC_MODEL_UNSET_MESSAGE.to_owned();
+        *last_outcome = LastOutcome::notice_with_error(message.clone(), POSTPROC_MODEL_UNSET_ERROR);
+        return WireReply::command(false, state.name(), Some(message))
+            .with_error(POSTPROC_MODEL_UNSET_ERROR);
     }
     let wav = runtime_dir.join(format!("rec-{}.wav", unix_millis()));
     match start(&wav, config.audio_source.as_deref()) {
@@ -1284,6 +1309,36 @@ mod tests {
         assert!(matches!(state, State::Recording { .. }));
         assert_eq!(last_outcome.message, None);
         assert_eq!(last_outcome.ok, None);
+    }
+
+    #[test]
+    fn clean_start_rejects_without_model_and_keeps_actionable_outcome() {
+        let mut state = State::Idle;
+        let config = Config::default();
+        let mut last_outcome = LastOutcome::default();
+        let reply = start_recording_with(
+            &mut state,
+            &config,
+            Path::new("/tmp"),
+            &mut last_outcome,
+            Some(true),
+            |_wav, _source| panic!("recorder must not start without a postproc model"),
+        );
+        let json = wire(reply);
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["state"], "idle");
+        assert_eq!(json["message"], POSTPROC_MODEL_UNSET_MESSAGE);
+        assert_eq!(json["error"], POSTPROC_MODEL_UNSET_ERROR);
+        assert!(matches!(state, State::Idle));
+
+        let status = wire(status_reply(&state, &last_outcome));
+        assert_eq!(status["state"], "idle");
+        assert_eq!(status["last"], POSTPROC_MODEL_UNSET_MESSAGE);
+        assert_eq!(status["last_ok"], false);
+        assert_eq!(status["last_error"], POSTPROC_MODEL_UNSET_ERROR);
+        let status_again = wire(status_reply(&state, &last_outcome));
+        assert_eq!(status_again["last"], POSTPROC_MODEL_UNSET_MESSAGE);
+        assert_eq!(status_again["last_error"], POSTPROC_MODEL_UNSET_ERROR);
     }
 
     #[test]
