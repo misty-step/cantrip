@@ -2428,6 +2428,56 @@ mod tests {
             "early color should carry recording red"
         );
     }
+
+    #[test]
+    fn sent_state_displays_shimmer_and_ripple_crest() {
+        let render_sent = |t, phase| {
+            let mut canvas = vec![0_u8; 360 * 56 * 4];
+            knight_track(
+                &mut canvas,
+                360,
+                56,
+                180.0,
+                28.0,
+                160.0,
+                20.0,
+                1.0,
+                ChipKind::Sent,
+                None,
+                t,
+                phase,
+                None,
+                None,
+                1.0,
+            );
+            canvas
+        };
+
+        // 1. Mid-ripple (t=0.2): center cell 11 (x=187) is settled green, while wave front at cell 17 (x=270) has radiant mint crest:
+        let mid = render_sent(0.2, 0.0);
+        let center_base = (28 * 360 + 187) as usize * 4;
+        let [b_center, g_center, r_center] =
+            [mid[center_base], mid[center_base + 1], mid[center_base + 2]];
+        assert!(
+            g_center > r_center && g_center > b_center,
+            "center cell must be emerald green"
+        );
+        let crest_base = (28 * 360 + 270) as usize * 4;
+        let [b_crest, g_crest, r_crest] =
+            [mid[crest_base], mid[crest_base + 1], mid[crest_base + 2]];
+        assert!(
+            r_crest >= 200 && g_crest >= 240 && b_crest >= 200,
+            "wave front must flash radiant mint crest (got rgb [{r_crest}, {g_crest}, {b_crest}])"
+        );
+
+        // 2. Settled hold: live phase movement modulates the celebratory shimmer
+        let phase0 = render_sent(1.0, 0.0);
+        let phase1 = render_sent(1.0, 1.0);
+        assert_ne!(
+            phase0, phase1,
+            "settled success state must have live phase shimmer"
+        );
+    }
     fn alpha_at(canvas: &[u8], width: u32, x: u32, y: u32) -> u8 {
         canvas[(y * width + x) as usize * 4 + 3]
     }
