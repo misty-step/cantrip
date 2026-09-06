@@ -260,7 +260,19 @@ fn chat_round(
             bail!("post-processing endpoint returned HTTP {code}");
         }
         Err(ureq::Error::Transport(transport)) => {
-            bail!("post-processing request failed: {transport}");
+            // Transport display strings may embed endpoint credentials or
+            // server-controlled headers. Match the content-free STT boundary.
+            let mut cause = std::error::Error::source(&transport);
+            while let Some(error) = cause {
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+                {
+                    bail!("post-processing request timed out");
+                }
+                cause = error.source();
+            }
+            bail!("post-processing request failed ({:?})", transport.kind());
         }
     };
     let response: ChatResponse = serde_json::from_reader(response.into_reader())

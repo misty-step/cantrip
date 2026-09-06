@@ -24,8 +24,11 @@ sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
+dbus = "0.9.12"
+parking_lot = "0.12"
 smithay-client-toolkit = { version = "0.21.1", default-features = false }
 wayland-client = "0.31.14"
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
 eframe = "0.29"
 ab_glyph = "0.2"
 epaint_default_fonts = "0.29"

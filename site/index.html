@@ -54,11 +54,11 @@
       </article>
       <article>
         <h3>Honest HUD</h3>
-        <p>Warm Minimal capsule. Spinner when busy. Real chunk fill only when multi-chunk STT reports <code>N/M</code>. Success flash, not a novel.</p>
+        <p>Passive, bottom-anchored status. Measured microphone activity and real chunk progress. Clear recovery notices; no focus theft or invented progress.</p>
       </article>
       <article>
-        <h3>Paste-first</h3>
-        <p>Finished text lands via clipboard + Ctrl+Shift+V so paragraphs survive. Type mode still available for terminals.</p>
+        <h3>Guarded delivery</h3>
+        <p>Paste-first delivery preserves paragraphs. Changed focus or an unverified session leaves text for explicit recovery, never a guessed destination.</p>
       </article>
       <article>
         <h3>Optional cleanup</h3>
@@ -74,7 +74,7 @@
 ./target/release/cantrip models pull  # when requested
 ./target/release/cantrip daemon
 ./target/release/cantrip toggle       # press again to stop</code></pre>
-      <p class="fine">Run the daemon in a dedicated terminal for the first session. Follow every <code>doctor</code> action, then bind one COSMIC custom shortcut to the absolute path of <code>cantrip toggle</code>. See the full <a href="../docs/CONFIGURATION.md">configuration guide</a>.</p>
+      <p class="fine">Run the daemon in a dedicated terminal for the first session, follow every <code>doctor</code> action, then bind <code>cantrip toggle</code>. Automatic keyboard delivery currently requires verified Hyprland/logind session history; other desktops can use clipboard mode. Open <code>cantrip actions</code> for per-recording recovery. See the full <a href="../docs/CONFIGURATION.md">configuration guide</a>.</p>
     </section>
   </main>
 

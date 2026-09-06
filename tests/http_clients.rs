@@ -7,9 +7,10 @@ use cantrip::stt;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::Duration;
 
 /// One-shot HTTP server: accepts a single request, captures it, sends `response`.
 fn mock_server(response: String) -> (String, thread::JoinHandle<CapturedRequest>) {
@@ -253,6 +254,22 @@ fn refine_http_error_reports_status_without_response_body() {
     server.join().expect("mock server thread");
 }
 
+#[test]
+fn refine_transport_error_omits_private_endpoint_details() {
+    let cfg = postproc_config(
+        "http://[PRIVATE-ENDPOINT-MARKER]/PRIVATE-PATH?secret=PRIVATE-QUERY".to_owned(),
+    );
+    let error = postproc::refine("dictated words", &cfg, &[], None)
+        .expect_err("malformed endpoint must fail before a request is sent");
+    let diagnostic = format!("{error:#}");
+    for secret in ["PRIVATE-ENDPOINT-MARKER", "PRIVATE-PATH", "PRIVATE-QUERY"] {
+        assert!(
+            !diagnostic.contains(secret),
+            "transport diagnostics must not expose private endpoint details"
+        );
+    }
+}
+
 struct WavFixture {
     path: PathBuf,
 }
@@ -436,6 +453,7 @@ fn transcribe_remote_round_trip_preserves_short_wav() {
         "whisper-large-v3-turbo",
         &["Cantrip".to_owned()],
         Some("sk-cloud"),
+        None,
         |chunk| progress.push(chunk),
     )
     .expect("remote transcription should succeed");
@@ -443,7 +461,19 @@ fn transcribe_remote_round_trip_preserves_short_wav() {
         transcript,
         stt::Transcript::Complete("hello from the cloud".to_owned())
     );
-    assert_eq!(progress, [stt::ChunkProgress { index: 1, total: 1 }]);
+    assert_eq!(
+        progress,
+        [
+            stt::ChunkProgress {
+                completed: 0,
+                total: 1
+            },
+            stt::ChunkProgress {
+                completed: 1,
+                total: 1
+            },
+        ]
+    );
 
     let request = server.join().expect("mock server thread");
     assert_eq!(request.request_line, "POST /audio/transcriptions HTTP/1.1");
@@ -471,6 +501,7 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
         "test-stt-model",
         &["Cantrip".to_owned(), "Parakeet".to_owned()],
         Some("sk-private-http-test"),
+        None,
         |chunk| progress.push(chunk),
     )
     .expect("bounded transcription should succeed");
@@ -492,8 +523,8 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
     );
     assert_eq!(
         progress,
-        (1..=total)
-            .map(|index| stt::ChunkProgress { index, total })
+        (0..=total)
+            .map(|completed| stt::ChunkProgress { completed, total })
             .collect::<Vec<_>>()
     );
 }
@@ -582,6 +613,7 @@ fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_bod
             "test-stt-model",
             &["Cantrip".to_owned(), "Parakeet".to_owned()],
             Some("sk-private-http-test"),
+            None,
             |chunk| progress.push(chunk),
         )
     })
@@ -605,8 +637,14 @@ fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_bod
     assert_eq!(
         progress,
         [
-            stt::ChunkProgress { index: 1, total },
-            stt::ChunkProgress { index: 2, total }
+            stt::ChunkProgress {
+                completed: 0,
+                total
+            },
+            stt::ChunkProgress {
+                completed: 1,
+                total
+            }
         ]
     );
     let logs = String::from_utf8(log_rx.try_iter().flatten().collect()).unwrap();
@@ -632,6 +670,7 @@ fn transcribe_remote_failure_without_earlier_text_remains_an_error() {
         "test-stt-model",
         &[],
         Some("sk-private-http-test"),
+        None,
         |_| {},
     )
     .expect_err("empty earlier chunks do not make a partial transcript");
@@ -659,6 +698,7 @@ fn transcribe_remote_empty_wav_sends_no_request_or_progress() {
         &endpoint,
         "test-stt-model",
         &[],
+        None,
         None,
         |chunk| progress.push(chunk),
     )
@@ -713,6 +753,7 @@ fn transcribe_remote_rejects_inconsistent_wav_container_before_upload() {
             "test-stt-model",
             &[],
             None,
+            None,
             |chunk| progress.push(chunk),
         )
         .expect_err("inconsistent WAV metadata must fail before upload");
@@ -722,6 +763,127 @@ fn transcribe_remote_rejects_inconsistent_wav_container_before_upload() {
             std::io::ErrorKind::WouldBlock
         );
     }
+}
+
+#[test]
+fn remote_progress_completes_only_after_the_backend_response() {
+    let fixture = WavFixture::new(native_spec(), 1_001);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (requested_tx, requested_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request(&stream);
+        requested_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream
+            .write_all(ok_json(r#"{"text":"finished"}"#).as_bytes())
+            .unwrap();
+    });
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let path = fixture.path.clone();
+    let client = thread::spawn(move || {
+        stt::transcribe_remote(&path, &endpoint, "model", &[], None, None, |progress| {
+            progress_tx.send(progress).unwrap();
+        })
+        .unwrap()
+    });
+    assert_eq!(
+        progress_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        stt::ChunkProgress {
+            completed: 0,
+            total: 1
+        }
+    );
+    requested_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        progress_rx.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        client.join().unwrap(),
+        stt::Transcript::Complete("finished".to_owned())
+    );
+    assert_eq!(
+        progress_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        stt::ChunkProgress {
+            completed: 1,
+            total: 1
+        }
+    );
+    assert!(progress_rx.try_recv().is_err());
+    server.join().unwrap();
+}
+
+#[test]
+fn cancelling_a_blocked_remote_chunk_keeps_its_text_and_stops_later_uploads() {
+    let fixture = WavFixture::new(native_spec(), 70 * 16_000);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server_listener = listener.try_clone().unwrap();
+    let (requested_tx, requested_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = server_listener.accept().unwrap();
+        let _ = read_request(&stream);
+        requested_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream
+            .write_all(ok_json(r#"{"text":"saved first chunk"}"#).as_bytes())
+            .unwrap();
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&cancel);
+    let path = fixture.path.clone();
+    let client = thread::spawn(move || {
+        let mut progress = Vec::new();
+        let outcome = stt::transcribe_remote(
+            &path,
+            &endpoint,
+            "model",
+            &[],
+            None,
+            Some(&worker_cancel),
+            |event| progress.push(event),
+        )
+        .unwrap();
+        (outcome, progress)
+    });
+    requested_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    cancel.store(true, Ordering::Release);
+    release_tx.send(()).unwrap();
+    let (outcome, progress) = client.join().unwrap();
+    let total = progress[0].total;
+    assert!(total > 1);
+    assert_eq!(
+        outcome,
+        stt::Transcript::Cancelled {
+            text: "saved first chunk".to_owned(),
+            completed: 1,
+            total,
+        }
+    );
+    assert_eq!(
+        progress,
+        [
+            stt::ChunkProgress {
+                completed: 0,
+                total
+            },
+            stt::ChunkProgress {
+                completed: 1,
+                total
+            },
+        ]
+    );
+    server.join().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 /// Telemetry export speaks Langfuse's OTLP/JSON dialect: Basic auth from the

@@ -1,20 +1,28 @@
-//! One-line command and reply protocol over the daemon Unix socket.
+//! Typed command acknowledgements and identity-aware daemon snapshots.
 
 pub use crate::capture::AUDIO_WAVEFORM_BINS;
+use crate::config::HudConfig;
 use crate::paths;
 use crate::pipeline::Stage;
+use crate::recovery::Take;
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
-pub type AudioWaveform = [[i8; 2]; AUDIO_WAVEFORM_BINS];
+use std::path::Path;
+use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub type AudioWaveform = [[i8; 2]; AUDIO_WAVEFORM_BINS];
+pub(crate) const REQUEST_LIMIT: usize = 4_096;
+pub(crate) const REPLY_LIMIT: usize = 16 * 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Command {
     Toggle {
-        /// Post-processing override for this capture: Some(true) = clean,
-        /// Some(false) = raw, None = follow [postproc].enabled.
         postproc: Option<bool>,
     },
     Start {
@@ -22,21 +30,31 @@ pub enum Command {
     },
     Stop,
     Cancel,
-    /// Re-inject the last saved transcript (paste/clipboard).
+    /// Deliver the latest saved transcript, selected once when accepted.
     Last,
-    /// Re-run STT on the retained failed or partial WAV.
     Recover {
+        id: Option<String>,
         local: bool,
         clipboard: bool,
+    },
+    Copy {
+        id: String,
+    },
+    Dismiss {
+        event_id: Option<u64>,
+    },
+    Forget {
+        id: String,
     },
     Ping,
     Reload,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Request {
     Command(Command),
     Status,
+    Recordings,
 }
 
 impl Request {
@@ -44,91 +62,10 @@ impl Request {
         let value = value.trim();
         if value == "status" {
             Some(Self::Status)
+        } else if value == "recordings" {
+            Some(Self::Recordings)
         } else {
-            Command::parse(value).map(Self::Command)
-        }
-    }
-}
-
-impl Command {
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "toggle" => Some(Self::Toggle { postproc: None }),
-            "toggle-clean" => Some(Self::Toggle {
-                postproc: Some(true),
-            }),
-            "toggle-raw" => Some(Self::Toggle {
-                postproc: Some(false),
-            }),
-            "start" => Some(Self::Start { postproc: None }),
-            "start-clean" => Some(Self::Start {
-                postproc: Some(true),
-            }),
-            "start-raw" => Some(Self::Start {
-                postproc: Some(false),
-            }),
-            "stop" => Some(Self::Stop),
-            "cancel" => Some(Self::Cancel),
-            "last" => Some(Self::Last),
-            "recover" => Some(Self::Recover {
-                local: false,
-                clipboard: false,
-            }),
-            "recover-local" => Some(Self::Recover {
-                local: true,
-                clipboard: false,
-            }),
-            "recover-clipboard" => Some(Self::Recover {
-                local: false,
-                clipboard: true,
-            }),
-            "recover-local-clipboard" => Some(Self::Recover {
-                local: true,
-                clipboard: true,
-            }),
-            "ping" => Some(Self::Ping),
-            "reload" => Some(Self::Reload),
-            _ => None,
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Toggle { postproc: None } => "toggle",
-            Self::Toggle {
-                postproc: Some(true),
-            } => "toggle-clean",
-            Self::Toggle {
-                postproc: Some(false),
-            } => "toggle-raw",
-            Self::Start { postproc: None } => "start",
-            Self::Start {
-                postproc: Some(true),
-            } => "start-clean",
-            Self::Start {
-                postproc: Some(false),
-            } => "start-raw",
-            Self::Stop => "stop",
-            Self::Cancel => "cancel",
-            Self::Last => "last",
-            Self::Recover {
-                local: false,
-                clipboard: false,
-            } => "recover",
-            Self::Recover {
-                local: true,
-                clipboard: false,
-            } => "recover-local",
-            Self::Recover {
-                local: false,
-                clipboard: true,
-            } => "recover-clipboard",
-            Self::Recover {
-                local: true,
-                clipboard: true,
-            } => "recover-local-clipboard",
-            Self::Ping => "ping",
-            Self::Reload => "reload",
+            serde_json::from_str(value).ok().map(Self::Command)
         }
     }
 }
@@ -163,21 +100,121 @@ impl From<String> for StateKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl Serialize for StateKind {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StateKind {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Completeness {
+    Complete,
+    Partial,
+    Empty,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Delivery {
+    None,
+    Typed,
+    Pasted,
+    Copied,
+    Failed,
+    Uncertain,
+    Deferred,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Cleanup {
+    Off,
+    Applied,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifacts {
+    pub take_id: Option<String>,
+    pub audio: bool,
+    pub text: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalOutcome {
+    pub event_id: u64,
+    pub operation_id: Option<String>,
     pub message: String,
-    pub ok: bool,
+    pub completeness: Completeness,
+    pub delivery: Delivery,
+    pub cleanup: Cleanup,
+    pub error: Option<String>,
+    pub artifacts: Artifacts,
+    pub dismissed: bool,
+}
+
+impl TerminalOutcome {
+    /// A complete transcript reached a delivery helper; this is not an app receipt.
+    pub fn is_success(&self) -> bool {
+        self.completeness == Completeness::Complete
+            && matches!(
+                self.delivery,
+                Delivery::Typed | Delivery::Pasted | Delivery::Copied
+            )
+    }
+
+    pub fn needs_attention(&self) -> bool {
+        !self.dismissed
+            && (matches!(
+                self.completeness,
+                Completeness::Partial | Completeness::Failed
+            ) || matches!(
+                self.delivery,
+                Delivery::Failed | Delivery::Uncertain | Delivery::Deferred
+            ) || self
+                .error
+                .as_deref()
+                .is_some_and(|error| error != "cleanup-failed"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionNotice {
+    pub event_id: u64,
+    pub message: String,
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capabilities {
+    pub stop: bool,
+    pub cancel: bool,
+    pub recover: bool,
+    pub copy: bool,
+    pub dismiss: bool,
+    pub local_model: bool,
+    pub remote_configured: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioSignal {
     pub level: u8,
     pub silent: bool,
     pub waveform: AudioWaveform,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandReply {
     pub ok: bool,
     pub state: StateKind,
@@ -187,566 +224,240 @@ pub struct CommandReply {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StatusSnapshot {
-    Idle {
-        outcome: Option<TerminalOutcome>,
-    },
-    Recording {
-        elapsed: u64,
-        signal: Option<AudioSignal>,
-        outcome: Option<TerminalOutcome>,
-    },
-    Processing {
-        stage: Stage,
-        outcome: Option<TerminalOutcome>,
-    },
-    Unknown {
-        state: String,
-        outcome: Option<TerminalOutcome>,
-    },
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OperationKind {
+    Dictation,
+    Recovery,
+    Replay,
+    Forget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusSnapshot {
+    pub epoch: String,
+    pub operation_id: Option<String>,
+    pub operation_kind: Option<OperationKind>,
+    pub state: StateKind,
+    pub elapsed: u64,
+    pub signal: Option<AudioSignal>,
+    pub stage: Option<Stage>,
+    pub outcome: Option<TerminalOutcome>,
+    pub notice: Option<InteractionNotice>,
+    pub pending_recordings: usize,
+    pub capabilities: Capabilities,
+    pub hud: HudConfig,
 }
 
 impl StatusSnapshot {
     pub fn state_name(&self) -> &str {
-        match self {
-            Self::Idle { .. } => "idle",
-            Self::Recording { .. } => "recording",
-            Self::Processing { .. } => "processing",
-            Self::Unknown { state, .. } => state,
-        }
-    }
-
-    pub fn outcome(&self) -> Option<&TerminalOutcome> {
-        match self {
-            Self::Idle { outcome }
-            | Self::Recording { outcome, .. }
-            | Self::Processing { outcome, .. }
-            | Self::Unknown { outcome, .. } => outcome.as_ref(),
-        }
+        self.state.as_str()
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct WireReply {
-    ok: bool,
-    state: String,
-    message: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    elapsed: Option<u64>,
-    #[serde(default)]
-    audio_level: Option<u8>,
-    #[serde(default)]
-    audio_silent: Option<bool>,
-    #[serde(default)]
-    audio_waveform: Option<AudioWaveform>,
-    #[serde(default)]
-    stage: Option<String>,
-    #[serde(default)]
-    last: Option<String>,
-    #[serde(default)]
-    last_ok: Option<bool>,
-    #[serde(default)]
-    last_error: Option<String>,
+/// Submit a mutation. `ok` acknowledges acceptance, not future delivery.
+pub fn command(command: Command) -> Result<CommandReply> {
+    let request = serde_json::to_string(&command).context("encoding daemon command")?;
+    exchange(&request)
 }
 
-impl WireReply {
-    pub(crate) fn command(ok: bool, state: &str, message: Option<String>) -> Self {
-        Self {
-            ok,
-            state: state.to_owned(),
-            message,
-            error: None,
-            elapsed: None,
-            audio_level: None,
-            audio_silent: None,
-            audio_waveform: None,
-            stage: None,
-            last: None,
-            last_ok: None,
-            last_error: None,
-        }
-    }
-
-    pub(crate) fn with_error(mut self, error: impl Into<String>) -> Self {
-        self.error = Some(error.into());
-        self
-    }
-
-    pub(crate) fn status(
-        state: &str,
-        elapsed: Option<u64>,
-        signal: Option<AudioSignal>,
-        stage: Option<&Stage>,
-        outcome: Option<TerminalOutcome>,
-    ) -> Self {
-        let (audio_level, audio_silent, audio_waveform) = match signal {
-            Some(signal) => (
-                Some(signal.level),
-                Some(signal.silent),
-                Some(signal.waveform),
-            ),
-            None => (None, None, None),
-        };
-        let (last, last_ok, last_error) = match outcome {
-            Some(outcome) => (Some(outcome.message), Some(outcome.ok), outcome.error),
-            None => (None, None, None),
-        };
-        Self {
-            ok: true,
-            state: state.to_owned(),
-            message: None,
-            error: None,
-            elapsed,
-            audio_level,
-            audio_silent,
-            audio_waveform,
-            stage: stage.map(ToString::to_string),
-            last,
-            last_ok,
-            last_error,
-        }
-    }
-
-    pub(crate) fn with_stage(mut self, stage: &Stage) -> Self {
-        self.stage = Some(stage.to_string());
-        self
-    }
-
-    pub(crate) fn with_outcome(mut self, outcome: Option<TerminalOutcome>) -> Self {
-        if let Some(outcome) = outcome {
-            self.last = Some(outcome.message);
-            self.last_ok = Some(outcome.ok);
-            self.last_error = outcome.error;
-        }
-        self
-    }
-
-    fn into_command(self) -> CommandReply {
-        CommandReply {
-            ok: self.ok,
-            state: self.state.into(),
-            message: self.message,
-            stage: self.stage.map(Stage::from),
-            outcome: terminal_outcome(self.last, self.last_ok, self.last_error),
-            error: self.error,
-        }
-    }
-
-    fn into_status(self) -> Result<StatusSnapshot> {
-        if !self.ok {
-            let message = self
-                .message
-                .unwrap_or_else(|| "daemon rejected the status request".to_owned());
-            anyhow::bail!("{message}");
-        }
-        let outcome = terminal_outcome(self.last, self.last_ok, self.last_error);
-        match self.state.as_str() {
-            "idle" => Ok(StatusSnapshot::Idle { outcome }),
-            "recording" => {
-                let signal = match (self.audio_level, self.audio_silent, self.audio_waveform) {
-                    (Some(level), Some(silent), Some(waveform)) => Some(AudioSignal {
-                        level,
-                        silent,
-                        waveform,
-                    }),
-                    (None, None, None) => None,
-                    _ => anyhow::bail!("daemon returned incomplete recording audio status"),
-                };
-                Ok(StatusSnapshot::Recording {
-                    elapsed: self.elapsed.unwrap_or_default(),
-                    signal,
-                    outcome,
-                })
-            }
-            "processing" => Ok(StatusSnapshot::Processing {
-                stage: self
-                    .stage
-                    .map(Stage::from)
-                    .unwrap_or(Stage::Transcribing { chunk: 1, total: 1 }),
-                outcome,
-            }),
-            _ => Ok(StatusSnapshot::Unknown {
-                state: self.state,
-                outcome,
-            }),
-        }
-    }
-}
-
-fn terminal_outcome(
-    message: Option<String>,
-    ok: Option<bool>,
-    error: Option<String>,
-) -> Option<TerminalOutcome> {
-    message.map(|message| TerminalOutcome {
-        message,
-        ok: ok.unwrap_or(false),
-        error,
-    })
-}
-
-/// Send a daemon command and read its acknowledgement.
-pub fn send_command(command: Command) -> Result<CommandReply> {
-    let timeout = match command {
-        Command::Toggle { .. } | Command::Stop => Duration::from_secs(30),
-        _ => Duration::from_secs(10),
-    };
-    Ok(exchange(command.as_str(), timeout)?.into_command())
-}
-
-/// Read a complete daemon status snapshot.
+/// Read the complete cached status independently of mutation acknowledgements.
 pub fn status() -> Result<StatusSnapshot> {
-    exchange("status", Duration::from_secs(10))?.into_status()
+    exchange("status")
 }
 
-fn exchange(request: &str, timeout: Duration) -> Result<WireReply> {
+/// Refresh canonical per-take metadata on a dedicated reader, without transcript content.
+pub fn recordings() -> Result<Vec<Take>> {
+    exchange("recordings")
+}
+
+fn exchange<T: DeserializeOwned>(request: &str) -> Result<T> {
+    anyhow::ensure!(
+        request.len() < REQUEST_LIMIT,
+        "daemon request exceeds size limit"
+    );
     let socket = paths::socket_path().context("locating daemon socket")?;
-    let mut stream = UnixStream::connect(&socket).map_err(|error| {
-        anyhow::anyhow!(
-            "cannot connect to cantrip daemon at {}: {error}; start it with: cantrip daemon",
+    let mut stream = connect(&socket).with_context(|| {
+        format!(
+            "cannot connect to cantrip daemon at {}; start it with: cantrip daemon",
             socket.display()
         )
     })?;
     stream
-        .set_read_timeout(Some(timeout))
-        .context("setting daemon reply timeout")?;
+        .set_write_timeout(Some(REQUEST_TIMEOUT))
+        .context("setting daemon request timeout")?;
     writeln!(stream, "{request}").context("sending daemon request")?;
-
-    let mut line = String::new();
-    let mut reader = BufReader::new(stream);
-    let bytes = reader
-        .read_line(&mut line)
-        .context("reading daemon reply")?;
-    if bytes == 0 {
-        anyhow::bail!("daemon closed the socket without a reply");
+    let line = read_reply(&mut stream, Instant::now() + REQUEST_TIMEOUT)?;
+    match serde_json::from_slice(&line) {
+        Ok(reply) => Ok(reply),
+        Err(error) => {
+            if let Ok(CommandReply {
+                ok: false,
+                message: Some(message),
+                ..
+            }) = serde_json::from_slice(&line)
+            {
+                anyhow::bail!("{message}");
+            }
+            Err(error).context("parsing daemon reply")
+        }
     }
-    serde_json::from_str(line.trim()).context("parsing daemon reply")
+}
+
+/// A full Unix listen backlog must not hang a command before its read deadline.
+fn connect(path: &Path) -> Result<UnixStream> {
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    anyhow::ensure!(
+        bytes.len() < address.sun_path.len() && !bytes.contains(&0),
+        "invalid daemon socket path"
+    );
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("creating daemon connection");
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let result = unsafe {
+        libc::connect(
+            fd,
+            (&address as *const libc::sockaddr_un).cast(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error()).context("connecting to daemon socket");
+    }
+    stream
+        .set_nonblocking(false)
+        .context("configuring daemon connection")?;
+    Ok(stream)
+}
+
+fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut buffer = [0_u8; 8_192];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(!remaining.is_zero(), "daemon reply timed out");
+        stream
+            .set_read_timeout(Some(remaining))
+            .context("setting daemon reply timeout")?;
+        let bytes = match stream.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result.context("reading daemon reply")?,
+        };
+        anyhow::ensure!(
+            bytes != 0,
+            "daemon closed the socket before a complete reply"
+        );
+        let end = buffer[..bytes].iter().position(|byte| *byte == b'\n');
+        let content = &buffer[..end.unwrap_or(bytes)];
+        anyhow::ensure!(
+            line.len() + content.len() <= REPLY_LIMIT,
+            "daemon reply exceeds size limit"
+        );
+        line.extend_from_slice(content);
+        if end.is_some() {
+            return Ok(line);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn waveform() -> AudioWaveform {
-        [
-            [-18, 22],
-            [-35, 41],
-            [-64, 72],
-            [-48, 55],
-            [-86, 94],
-            [-61, 68],
-            [-29, 36],
-            [-70, 78],
-            [-45, 51],
-            [-25, 33],
-            [-12, 18],
-        ]
+    fn outcome(completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
+        TerminalOutcome {
+            event_id: 7,
+            operation_id: Some("epoch-2".to_owned()),
+            message: "Result".to_owned(),
+            completeness,
+            delivery,
+            cleanup: Cleanup::Off,
+            error: None,
+            artifacts: Artifacts::default(),
+            dismissed: false,
+        }
     }
 
     #[test]
-    fn request_parse_round_trip_keeps_status_out_of_commands() {
-        let commands = [
-            Command::Toggle { postproc: None },
-            Command::Toggle {
-                postproc: Some(true),
-            },
-            Command::Toggle {
-                postproc: Some(false),
-            },
-            Command::Start { postproc: None },
-            Command::Start {
-                postproc: Some(true),
-            },
-            Command::Start {
-                postproc: Some(false),
-            },
-            Command::Stop,
-            Command::Cancel,
-            Command::Last,
-            Command::Recover {
-                local: false,
-                clipboard: false,
-            },
-            Command::Recover {
-                local: true,
-                clipboard: false,
-            },
-            Command::Recover {
-                local: false,
-                clipboard: true,
-            },
-            Command::Recover {
-                local: true,
-                clipboard: true,
-            },
-            Command::Ping,
-            Command::Reload,
-        ];
-        for command in commands {
-            assert_eq!(
-                Request::parse(command.as_str()),
-                Some(Request::Command(command))
-            );
-        }
-        assert_eq!(Request::parse("status"), Some(Request::Status));
+    fn explicit_recovery_identity_cannot_be_lost_at_the_wire_boundary() {
+        let request = r#"{"command":"recover","id":"chosen-take","local":true,"clipboard":true}"#;
         assert_eq!(
-            Request::parse("recover"),
+            Request::parse(request),
             Some(Request::Command(Command::Recover {
-                local: false,
-                clipboard: false,
+                id: Some("chosen-take".to_owned()),
+                local: true,
+                clipboard: true,
             }))
         );
-        assert_eq!(Request::parse("unknown"), None);
+        assert_eq!(Request::parse("status"), Some(Request::Status));
+        assert_eq!(Request::parse("recordings"), Some(Request::Recordings));
+        assert!(Request::parse(r#"{"command":"status"}"#).is_none());
+        assert!(Request::parse(r#"{"command":"copy","id":"one","unexpected":"two"}"#).is_none());
     }
 
     #[test]
-    fn command_wire_reply_preserves_null_status_fields() {
-        let reply = WireReply::command(true, "recording", Some("recording".to_owned()));
-        let json = serde_json::to_value(reply).expect("reply should serialize");
-        assert_eq!(json["state"], "recording");
-        assert!(json["elapsed"].is_null());
-        assert!(json["audio_level"].is_null());
-        assert!(json["audio_silent"].is_null());
-        assert!(json["audio_waveform"].is_null());
+    fn partial_copy_and_uncertain_delivery_are_not_success() {
+        let partial = outcome(Completeness::Partial, Delivery::Copied);
+        assert!(!partial.is_success());
+        assert!(partial.needs_attention());
+        let uncertain = outcome(Completeness::Complete, Delivery::Uncertain);
+        assert!(!uncertain.is_success());
+        assert!(uncertain.needs_attention());
+        let cancelled = outcome(Completeness::Cancelled, Delivery::Cancelled);
+        assert!(!cancelled.is_success());
+        assert!(!cancelled.needs_attention());
+        assert!(!outcome(Completeness::Empty, Delivery::None).needs_attention());
     }
 
     #[test]
-    fn command_view_accepts_state_without_status_payload() {
-        let wire: WireReply =
-            serde_json::from_str(r#"{"ok":true,"state":"recording","message":"recording"}"#)
-                .expect("legacy command reply should parse");
-        assert_eq!(
-            wire.into_command(),
-            CommandReply {
-                ok: true,
-                state: StateKind::Recording,
-                message: Some("recording".to_owned()),
-                stage: None,
-                outcome: None,
-                error: None,
-            }
-        );
+    fn dismissal_hides_attention_without_rewriting_delivery_or_artifacts() {
+        let mut result = outcome(Completeness::Partial, Delivery::Copied);
+        result.artifacts = Artifacts {
+            take_id: Some("take".to_owned()),
+            audio: true,
+            text: true,
+        };
+        result.dismissed = true;
+        assert!(!result.needs_attention());
+        assert!(!result.is_success());
+        assert!(result.artifacts.audio && result.artifacts.text);
+        let mut cleaned = outcome(Completeness::Complete, Delivery::Pasted);
+        cleaned.cleanup = Cleanup::Failed;
+        cleaned.error = Some("cleanup-failed".to_owned());
+        assert!(cleaned.is_success());
+        assert!(!cleaned.needs_attention());
     }
 
     #[test]
-    fn idle_status_preserves_legacy_terminal_outcome() {
-        let wire: WireReply = serde_json::from_str(
-            r#"{"ok":true,"state":"idle","message":null,"last":"Heard nothing"}"#,
-        )
-        .expect("legacy idle status should parse");
-        assert_eq!(
-            wire.into_status().expect("idle status should convert"),
-            StatusSnapshot::Idle {
-                outcome: Some(TerminalOutcome {
-                    message: "Heard nothing".to_owned(),
-                    ok: false,
-                    error: None,
-                }),
-            }
-        );
+    fn future_state_remains_unknown_not_idle() {
+        let state: StateKind = serde_json::from_str(r#""calibrating""#).unwrap();
+        assert_eq!(state, StateKind::Unknown("calibrating".to_owned()));
+        assert_eq!(serde_json::to_value(state).unwrap(), "calibrating");
     }
 
     #[test]
-    fn command_and_status_preserve_structured_error_class() {
-        let command = WireReply::command(
-            false,
-            "idle",
-            Some("post-processing requested but no model set".to_owned()),
-        )
-        .with_error("postproc-model-unset");
-        let command_json = serde_json::to_value(&command).expect("command should serialize");
-        assert_eq!(command_json["error"], "postproc-model-unset");
-        assert_eq!(
-            command.into_command().error.as_deref(),
-            Some("postproc-model-unset")
-        );
-
-        let status = WireReply::status(
-            "idle",
-            None,
-            None,
-            None,
-            Some(TerminalOutcome {
-                message: "post-processing requested but no model set".to_owned(),
-                ok: false,
-                error: Some("postproc-model-unset".to_owned()),
-            }),
-        );
-        let status_json = serde_json::to_value(&status).expect("status should serialize");
-        assert_eq!(status_json["last_error"], "postproc-model-unset");
-        let converted = status.into_status().expect("status should convert");
-        assert_eq!(
-            converted
-                .outcome()
-                .and_then(|outcome| outcome.error.as_deref()),
-            Some("postproc-model-unset")
-        );
+    fn incomplete_audio_signal_is_rejected() {
+        assert!(serde_json::from_str::<AudioSignal>(r#"{"level":72,"silent":false}"#).is_err());
     }
 
     #[test]
-    fn processing_status_preserves_typed_stage_across_the_json_boundary() {
-        let outbound = [
-            (Stage::Transcribing { chunk: 1, total: 1 }, "transcribing"),
-            (
-                Stage::Transcribing { chunk: 2, total: 5 },
-                "transcribing 2/5",
-            ),
-            (Stage::CleaningUp, "cleaning"),
-            (Stage::Unknown("calibrating".to_owned()), "calibrating"),
-        ];
-        for (stage, expected) in outbound {
-            let json = serde_json::to_value(WireReply::status(
-                "processing",
-                None,
-                None,
-                Some(&stage),
-                None,
-            ))
-            .expect("status should serialize");
-            assert_eq!(json["stage"], expected);
-        }
-
-        let inbound = [
-            (
-                Some("transcribing"),
-                Stage::Transcribing { chunk: 1, total: 1 },
-            ),
-            (
-                Some("transcribing 1/1"),
-                Stage::Transcribing { chunk: 1, total: 1 },
-            ),
-            (
-                Some("transcribing 2/5"),
-                Stage::Transcribing { chunk: 2, total: 5 },
-            ),
-            (Some("cleaning"), Stage::CleaningUp),
-            (
-                Some("transcribing 0/3"),
-                Stage::Unknown("transcribing 0/3".to_owned()),
-            ),
-            (
-                Some("transcribing 4/3"),
-                Stage::Unknown("transcribing 4/3".to_owned()),
-            ),
-            (
-                Some("transcribing 1/0"),
-                Stage::Unknown("transcribing 1/0".to_owned()),
-            ),
-            (
-                Some("transcribing nope"),
-                Stage::Unknown("transcribing nope".to_owned()),
-            ),
-            (
-                Some("calibrating"),
-                Stage::Unknown("calibrating".to_owned()),
-            ),
-            (None, Stage::Transcribing { chunk: 1, total: 1 }),
-        ];
-
-        for (wire_stage, expected) in inbound {
-            let mut json = serde_json::json!({"ok": true, "state": "processing", "message": null});
-            if let Some(stage) = wire_stage {
-                json.as_object_mut()
-                    .expect("fixture should be an object")
-                    .insert(
-                        "stage".to_owned(),
-                        serde_json::Value::String(stage.to_owned()),
-                    );
-            }
-            let wire: WireReply =
-                serde_json::from_value(json).expect("status fixture should deserialize");
-            assert_eq!(
-                wire.into_status().expect("status should convert"),
-                StatusSnapshot::Processing {
-                    stage: expected,
-                    outcome: None,
-                }
-            );
-        }
-    }
-
-    #[test]
-    fn command_stage_preserves_recover_wire_and_typed_views() {
-        let stage = Stage::Transcribing { chunk: 1, total: 1 };
-        let wire = WireReply::command(true, "processing", Some("recovering".to_owned()))
-            .with_stage(&stage);
-        let json = serde_json::to_value(&wire).expect("command reply should serialize");
-        assert_eq!(json["stage"], "transcribing");
-        assert_eq!(
-            wire.into_command().stage,
-            Some(Stage::Transcribing { chunk: 1, total: 1 })
-        );
-    }
-
-    #[test]
-    fn recording_status_groups_complete_audio_signal() {
-        let wire = WireReply::status(
-            "recording",
-            Some(3),
-            Some(AudioSignal {
-                level: 72,
-                silent: false,
-                waveform: waveform(),
-            }),
-            None,
-            None,
-        );
-        assert_eq!(
-            wire.into_status().expect("status should convert"),
-            StatusSnapshot::Recording {
-                elapsed: 3,
-                signal: Some(AudioSignal {
-                    level: 72,
-                    silent: false,
-                    waveform: waveform(),
-                }),
-                outcome: None,
-            }
-        );
-    }
-
-    #[test]
-    fn legacy_status_defaults_missing_recording_fields() {
-        let wire: WireReply =
-            serde_json::from_str(r#"{"ok":true,"state":"recording","message":null}"#)
-                .expect("legacy status should parse");
-        assert_eq!(
-            wire.into_status().expect("legacy status should convert"),
-            StatusSnapshot::Recording {
-                elapsed: 0,
-                signal: None,
-                outcome: None,
-            }
-        );
-    }
-
-    #[test]
-    fn future_state_remains_readable() {
-        let wire: WireReply = serde_json::from_str(
-            r#"{"ok":true,"state":"calibrating","message":null,"future_metric":17}"#,
-        )
-        .expect("future status should parse");
-        assert_eq!(
-            wire.into_status().expect("future status should convert"),
-            StatusSnapshot::Unknown {
-                state: "calibrating".to_owned(),
-                outcome: None,
-            }
-        );
-    }
-
-    #[test]
-    fn partial_audio_status_is_rejected() {
-        let wire: WireReply = serde_json::from_str(
-            r#"{"ok":true,"state":"recording","message":null,"audio_level":72}"#,
-        )
-        .expect("wire reply should parse");
-        let error = wire
-            .into_status()
-            .expect_err("partial audio status must be rejected");
-        assert!(error.to_string().contains("incomplete recording audio"));
+    fn reply_reader_rejects_unterminated_reply() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        server.write_all(b"{}").unwrap();
+        drop(server);
+        assert!(read_reply(&mut client, Instant::now() + Duration::from_secs(1)).is_err());
     }
 }

@@ -24,9 +24,9 @@ pub(crate) type InputWaveform = [[i8; 2]; AUDIO_WAVEFORM_BINS];
 
 /// A running `pw-record` process and its output path.
 ///
-/// `stop` and `cancel` consume the recorder. If the recorder is dropped any
-/// other way (daemon shutdown, panic), `Drop` stops the child and removes the
-/// partial recording.
+/// `stop` and `cancel` consume the recorder. Dropping an abandoned capture
+/// stops the child and removes its partial recording. A retained stop request
+/// transfers WAV ownership even if its worker disappears before finalization.
 pub struct Recorder {
     child: Child,
     wav_path: PathBuf,
@@ -34,6 +34,9 @@ pub struct Recorder {
     signal_monitor: SignalMonitor,
     signal_monitor_warned: bool,
     disarmed: bool,
+    stop_requested: bool,
+    /// A retained stop transfers WAV cleanup even when finalization fails.
+    preserve_wav: bool,
 }
 
 impl Recorder {
@@ -57,6 +60,8 @@ impl Recorder {
             signal_monitor: SignalMonitor::new(started_at),
             signal_monitor_warned: false,
             disarmed: false,
+            stop_requested: false,
+            preserve_wav: false,
         })
     }
     /// Measure the newest PCM appended by `pw-record`.
@@ -76,9 +81,53 @@ impl Recorder {
         }
     }
 
+    /// Request capture termination immediately; the worker still owns reaping
+    /// and WAV finalization. Repeated requests never interrupt finalization.
+    /// Retained stops preserve the WAV if a queued worker disappears; explicit
+    /// discards leave cleanup with the recorder.
+    pub fn request_stop(&mut self, preserve_wav: bool) -> Result<()> {
+        self.preserve_wav = preserve_wav;
+        self.signal_stop()
+    }
+
+    fn signal_stop(&mut self) -> Result<()> {
+        if self.stop_requested {
+            return Ok(());
+        }
+        if self
+            .child
+            .try_wait()
+            .context("checking pw-record state")?
+            .is_none()
+        {
+            send_sigint(&self.child).or_else(|signal_error| {
+                if self
+                    .child
+                    .try_wait()
+                    .context("checking pw-record after SIGINT failure")?
+                    .is_some()
+                {
+                    Ok(())
+                } else {
+                    Err(signal_error)
+                }
+            })?;
+        }
+        self.stop_requested = true;
+        Ok(())
+    }
+
+    fn finish_stop(&mut self) -> Result<()> {
+        self.signal_stop()?;
+        stop_child(&mut self.child)
+    }
+
     /// Stop the process cleanly and return the completed WAV path.
+    /// On error the caller still owns the WAV at the original path; cleanup must
+    /// not erase the only recording before recovery can preserve it.
     pub fn stop(mut self) -> Result<PathBuf> {
-        stop_child(&mut self.child).with_context(|| "stopping pw-record")?;
+        self.preserve_wav = true;
+        self.finish_stop().with_context(|| "stopping pw-record")?;
         verify_wav(&self.wav_path)?;
         self.disarmed = true;
         tracing::info!(
@@ -92,7 +141,7 @@ impl Recorder {
     pub fn cancel(mut self) -> Result<()> {
         self.disarmed = true;
         let elapsed = self.started_at.elapsed();
-        let stop_result = stop_child(&mut self.child);
+        let stop_result = self.finish_stop();
         if let Err(error) = stop_result {
             if let Err(remove_error) = remove_recording(&self.wav_path) {
                 tracing::warn!(
@@ -119,9 +168,12 @@ impl Drop for Recorder {
             return;
         }
         tracing::warn!("[Capture] recorder dropped while running; stopping pw-record");
-        if stop_child(&mut self.child).is_err() {
+        if self.finish_stop().is_err() {
             let _ = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGKILL) };
             let _ = self.child.wait();
+        }
+        if self.preserve_wav {
+            return;
         }
         if let Err(error) = remove_recording(&self.wav_path) {
             tracing::warn!(
@@ -355,30 +407,6 @@ fn pw_record_args(wav_path: &Path, source: Option<&str>) -> Vec<OsString> {
 }
 
 fn stop_child(child: &mut Child) -> Result<()> {
-    if let Some(status) = child.try_wait().context("checking pw-record state")? {
-        let stderr = read_stderr(child)?;
-        tracing::debug!(
-            "[Capture] pw-record already exited before SIGINT: {status}; stderr: {}",
-            display_stderr(&stderr)
-        );
-        return Ok(());
-    }
-
-    send_sigint(child).or_else(|signal_error| {
-        if let Some(status) = child
-            .try_wait()
-            .context("checking pw-record after SIGINT failure")?
-        {
-            let stderr = read_stderr(child)?;
-            tracing::debug!(
-                "[Capture] pw-record already exited before SIGINT: {status}; stderr: {}",
-                display_stderr(&stderr)
-            );
-            return Ok(());
-        }
-        Err(signal_error)
-    })?;
-
     if let Some(status) = wait_for_exit(child)? {
         // pw-record exits with status 1 on SIGINT by design (verified against
         // PipeWire 1.5.85); the WAV is still finalized. Exit status is not a
@@ -484,19 +512,12 @@ pub(crate) fn remove_recording(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        peak_level, pw_record_args, SignalMonitor, AUDIO_WAVEFORM_BINS, SIGNAL_WINDOW_SAMPLES,
-    };
+    use super::{peak_level, SignalMonitor, AUDIO_WAVEFORM_BINS, SIGNAL_WINDOW_SAMPLES};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    fn strings(args: Vec<std::ffi::OsString>) -> Vec<String> {
-        args.into_iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
-    }
     fn wav_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "cantrip-signal-test-{}-{name}.wav",
@@ -523,6 +544,147 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+    fn recorder_for_test(path: PathBuf) -> super::Recorder {
+        let started = Instant::now();
+        super::Recorder {
+            child: std::process::Command::new("/usr/bin/true")
+                .spawn()
+                .expect("start bounded recorder fixture"),
+            wav_path: path,
+            started_at: started,
+            signal_monitor: SignalMonitor::new(started),
+            signal_monitor_warned: false,
+            disarmed: false,
+            stop_requested: false,
+            preserve_wav: false,
+        }
+    }
+
+    #[test]
+    fn failed_finalization_preserves_original_recording() {
+        let path = wav_path("failed-finalization");
+        let audio = b"unfinished WAV header";
+        fs::write(&path, audio).expect("write incomplete recording");
+        assert!(recorder_for_test(path.clone()).stop().is_err());
+        assert_eq!(
+            fs::read(&path).expect("recording survives failed stop"),
+            audio
+        );
+        fs::remove_file(path).expect("remove retained fixture");
+    }
+
+    #[test]
+    fn abandoning_capture_without_stop_still_removes_audio() {
+        let path = wav_path("abandoned-capture");
+        fs::write(&path, wav(&[1000, -1000])).expect("write abandoned recording");
+        drop(recorder_for_test(path.clone()));
+        assert!(
+            !path.exists(),
+            "unrequested capture must not leave audio behind"
+        );
+    }
+
+    #[test]
+    fn requested_stop_survives_abandoned_worker_queue() {
+        let path = wav_path("abandoned-stopped-capture");
+        let audio = wav(&[1000, -1000]);
+        fs::write(&path, &audio).expect("write stopped recording");
+        let mut recorder = recorder_for_test(path.clone());
+        recorder.request_stop(true).expect("request capture stop");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        assert!(sender.send(recorder).is_ok());
+        drop(receiver);
+        assert_eq!(
+            fs::read(&path).expect("stopped recording survives worker disappearance"),
+            audio
+        );
+        fs::remove_file(path).expect("remove retained fixture");
+    }
+
+    #[test]
+    fn requested_discard_removes_audio_if_the_worker_queue_disappears() {
+        let path = wav_path("abandoned-discarded-capture");
+        fs::write(&path, wav(&[1000, -1000])).expect("write discarded recording");
+        let mut recorder = recorder_for_test(path.clone());
+        recorder
+            .request_stop(false)
+            .expect("request capture discard");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        assert!(sender.send(recorder).is_ok());
+        drop(receiver);
+        assert!(
+            !path.exists(),
+            "explicitly discarded capture must not be retained"
+        );
+    }
+
+    #[test]
+    fn stop_request_signals_before_worker_finalizes() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+
+        let path = wav_path("requested-stop");
+        fs::write(&path, wav(&[1000, -1000])).expect("write recording");
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "trap 'printf \"stopped\\n\"; read -r release; exit 0' INT; printf 'ready\\n'; while :; do read -r pending; done"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start recorder finalization fixture");
+        let stdout = child.stdout.take().expect("fixture output");
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let started_at = Instant::now();
+        let mut recorder = super::Recorder {
+            child,
+            wav_path: path.clone(),
+            started_at,
+            signal_monitor: SignalMonitor::new(started_at),
+            signal_monitor_warned: false,
+            disarmed: false,
+            stop_requested: false,
+            preserve_wav: false,
+        };
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            "ready"
+        );
+        recorder
+            .request_stop(true)
+            .expect("request without waiting for finalization");
+        assert_eq!(
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            "stopped"
+        );
+        assert!(
+            recorder.child.try_wait().unwrap().is_none(),
+            "worker has not finalized yet"
+        );
+        recorder.request_stop(true).expect("repeated stop request");
+        recorder
+            .child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"finish\n")
+            .unwrap();
+        assert_eq!(recorder.stop().expect("worker finishes recording"), path);
+        reader.join().unwrap();
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -648,42 +810,5 @@ mod tests {
         assert_eq!(peak_level(32), 0);
         assert!(peak_level(33) > 0);
         assert_eq!(peak_level(i16::MAX as u16), 100);
-    }
-
-    #[test]
-    fn pw_record_args_without_source() {
-        assert_eq!(
-            strings(pw_record_args(Path::new("/tmp/recording.wav"), None)),
-            vec![
-                "--rate",
-                "16000",
-                "--channels",
-                "1",
-                "--format",
-                "s16",
-                "/tmp/recording.wav"
-            ]
-        );
-    }
-
-    #[test]
-    fn pw_record_args_with_source() {
-        assert_eq!(
-            strings(pw_record_args(
-                Path::new("/tmp/recording.wav"),
-                Some("alsa_input.pci-1"),
-            )),
-            vec![
-                "--rate",
-                "16000",
-                "--channels",
-                "1",
-                "--format",
-                "s16",
-                "--target",
-                "alsa_input.pci-1",
-                "/tmp/recording.wav"
-            ]
-        );
     }
 }

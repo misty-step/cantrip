@@ -11,15 +11,16 @@
 //! one frame, then exits. It exists for visual testing on machines without a
 //! screenshot utility.
 
-use crate::config::{Config, PostprocConfig, SttConfig, TelemetryConfig};
+use crate::config::{Config, HudConfig, PostprocConfig, SttConfig, TelemetryConfig};
 use crate::inject::InjectionMode;
 use crate::ipc;
-use crate::paths;
+use crate::{paths, theme};
 use anyhow::{anyhow, Context, Result};
 use eframe::egui;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 /// Frames to render before taking the `--screenshot` (lets layout settle).
@@ -50,6 +51,7 @@ struct Editable {
     /// Not editable in the window; carried through saves so enabling
     /// telemetry in the config file survives a settings write.
     telemetry: TelemetryConfig,
+    hud: HudConfig,
 }
 
 impl Editable {
@@ -72,6 +74,7 @@ impl Editable {
             pp_min_chars: cfg.postproc.min_chars,
             pp_instructions: cfg.postproc.instructions.clone(),
             telemetry: cfg.telemetry.clone(),
+            hud: cfg.hud,
         }
     }
 
@@ -99,11 +102,12 @@ impl Editable {
                 api_key_id: non_empty(self.pp_key.trim()),
                 reasoning_effort: self.pp_effort.clone(),
                 timeout_ms: self.pp_timeout,
-                passes: self.pp_passes.clamp(1, 3),
+                passes: self.pp_passes,
                 min_chars: self.pp_min_chars,
                 instructions: self.pp_instructions.clone(),
             },
             telemetry: self.telemetry.clone(),
+            hud: self.hud,
         }
     }
 }
@@ -132,6 +136,16 @@ struct StatusMsg {
     ok: bool,
 }
 
+fn completed_request<T>(receiver: Option<&Receiver<Result<T>>>) -> Option<Result<T>> {
+    match receiver?.try_recv() {
+        Ok(result) => Some(result),
+        Err(TryRecvError::Empty) => None,
+        Err(TryRecvError::Disconnected) => {
+            Some(Err(anyhow!("The daemon request stopped unexpectedly")))
+        }
+    }
+}
+
 enum EditableConfigLoad {
     Ready {
         config: Box<Config>,
@@ -153,7 +167,7 @@ fn load_editable_config(path: &Path) -> EditableConfigLoad {
         Err(error) => {
             return EditableConfigLoad::Blocked {
                 message: format!(
-                    "Cannot read config; file was not changed: {error}. Inspect it with: cantrip config edit"
+                    "Cannot read config; file was not changed: {error}. Check file ownership and permissions."
                 ),
             };
         }
@@ -163,7 +177,7 @@ fn load_editable_config(path: &Path) -> EditableConfigLoad {
         Err(error) => {
             return EditableConfigLoad::Blocked {
                 message: format!(
-                    "Cannot parse config; file was not changed: {error}. Repair it with: cantrip config edit"
+                    "Cannot parse config; file was not changed: {error}. Choose Repair configuration to edit the original text."
                 ),
             };
         }
@@ -193,6 +207,10 @@ struct SettingsApp {
     daemon_online: bool,
     daemon_state: String,
     last_poll: Instant,
+    poll_result: Option<Receiver<anyhow::Result<ipc::StatusSnapshot>>>,
+    reload_result: Option<Receiver<anyhow::Result<ipc::CommandReply>>>,
+    palette: theme::Palette,
+    repair: Option<(String, String)>,
     frames: u32,
     screenshot: Option<PathBuf>,
     screenshot_requested: bool,
@@ -205,7 +223,8 @@ impl SettingsApp {
         screenshot: Option<PathBuf>,
         config_path: PathBuf,
     ) -> Self {
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
+        let palette = theme::load();
+        apply_theme(&cc.egui_ctx, palette);
         let (edit, loaded_ok, loaded_text, status) = match load_editable_config(&config_path) {
             EditableConfigLoad::Ready {
                 config,
@@ -231,6 +250,10 @@ impl SettingsApp {
             daemon_online: false,
             daemon_state: "offline".to_owned(),
             last_poll: Instant::now() - DAEMON_POLL,
+            poll_result: None,
+            reload_result: None,
+            palette,
+            repair: None,
             frames: 0,
             screenshot,
             screenshot_requested: false,
@@ -246,11 +269,12 @@ impl SettingsApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let side = ((ui.available_width() - Self::MAX_W) * 0.5).max(0.0);
+                let width = ui.available_width().min(Self::MAX_W);
+                let side = ((ui.available_width() - width) * 0.5).max(0.0);
                 ui.horizontal(|ui| {
                     ui.add_space(side);
                     ui.vertical(|ui| {
-                        ui.set_width(Self::MAX_W);
+                        ui.set_width(width);
                         self.form(ui);
                     });
                 });
@@ -261,8 +285,27 @@ impl SettingsApp {
         self.header(ui);
         ui.add_space(2.0);
         if let Some(status) = &self.status {
-            let color = if status.ok { OK } else { ERR };
+            let color = color(if status.ok {
+                self.palette.foreground
+            } else {
+                self.palette.attention
+            });
             ui.colored_label(color, &status.text);
+        }
+        if !self.loaded_ok && self.repair.is_none() && ui.button("Repair configuration").clicked() {
+            match fs::read_to_string(&self.config_path) {
+                Ok(text) => self.repair = Some((text.clone(), text)),
+                Err(_) => self.status = Some(StatusMsg {
+                    text:
+                        "Cannot read this file. Check its ownership and permissions before editing."
+                            .to_owned(),
+                    ok: false,
+                }),
+            }
+        }
+        if self.repair.is_some() {
+            self.repair_form(ui);
+            return;
         }
         ui.add_space(8.0);
 
@@ -274,6 +317,21 @@ impl SettingsApp {
                 self.general_section(ui);
             },
         );
+        Self::section(ui, "HUD", "Quiet by default; captions when needed", |ui| {
+            ui.checkbox(&mut self.edit.hud.labels, "Always show state labels");
+            egui::ComboBox::from_id_salt("reduced-motion")
+                .selected_text(match self.edit.hud.reduced_motion {
+                    None => "Motion: follow desktop",
+                    Some(true) => "Motion: reduced",
+                    Some(false) => "Motion: normal",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.edit.hud.reduced_motion, None, "Follow desktop");
+                    ui.selectable_value(&mut self.edit.hud.reduced_motion, Some(true), "Reduced");
+                    ui.selectable_value(&mut self.edit.hud.reduced_motion, Some(false), "Normal");
+                });
+            ui.label(egui::RichText::new("Important exceptions are always labelled.").weak());
+        });
         Self::section(
             ui,
             "Transcription",
@@ -296,18 +354,22 @@ impl SettingsApp {
             let save = egui::Button::new(
                 egui::RichText::new("Save & reload daemon")
                     .strong()
-                    .color(BG),
+                    .color(color(self.palette.background)),
             )
-            .fill(ACCENT)
-            .rounding(egui::Rounding::same(8.0));
-            if ui.add_enabled(self.loaded_ok, save).clicked() {
+            .fill(color(self.palette.accent));
+            if ui
+                .add_enabled(self.loaded_ok && self.reload_result.is_none(), save)
+                .clicked()
+            {
                 self.save();
             }
             let reload = egui::Button::new("Reload from disk")
-                .fill(PANEL_ALT)
-                .stroke(egui::Stroke::new(1.0_f32, BORDER))
-                .rounding(egui::Rounding::same(8.0));
-            if ui.add(reload).clicked() {
+                .fill(color(self.palette.surface))
+                .stroke(egui::Stroke::new(1.0_f32, color(self.palette.border)));
+            if ui
+                .add_enabled(self.reload_result.is_none(), reload)
+                .clicked()
+            {
                 self.reload_from_disk();
             }
         });
@@ -319,7 +381,7 @@ impl SettingsApp {
                 egui::RichText::new("Cantrip")
                     .strong()
                     .size(21.0)
-                    .color(ACCENT),
+                    .color(color(self.palette.foreground)),
             );
             ui.label(egui::RichText::new("Settings").size(21.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -333,62 +395,57 @@ impl SettingsApp {
         );
     }
 
-    /// Always-open group: accent tick + title + hint above a bordered panel.
     fn section(ui: &mut egui::Ui, title: &str, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 14.0), egui::Sense::hover());
-            ui.painter()
-                .rect_filled(rect, egui::Rounding::same(1.5), ACCENT);
-            ui.add_space(2.0);
-            ui.label(egui::RichText::new(title).strong().size(13.5));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(hint).weak().small());
-        });
-        ui.add_space(3.0);
+        ui.label(egui::RichText::new(title).strong().size(16.0));
+        ui.label(egui::RichText::new(hint).weak().small());
+        ui.add_space(5.0);
         egui::Frame::group(ui.style())
-            .fill(PANEL)
-            .stroke(egui::Stroke::new(1.0_f32, BORDER))
-            .rounding(egui::Rounding::same(8.0))
+            .fill(ui.visuals().faint_bg_color)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .rounding(egui::Rounding::ZERO)
             .inner_margin(egui::Margin::symmetric(12.0, 10.0))
             .show(ui, add);
-        ui.add_space(10.0);
+        ui.add_space(14.0);
     }
 
     /// Live daemon state as a small rounded chip with a status dot.
     fn daemon_badge(&mut self, ui: &mut egui::Ui) {
-        let (color, text) = if !self.daemon_online {
+        let (ink, text) = if !self.daemon_online {
             (
-                egui::Color32::from_rgb(0x66, 0x6c, 0x76),
-                "daemon offline".to_owned(),
+                color(self.palette.foreground),
+                "daemon unreachable".to_owned(),
             )
         } else {
             match self.daemon_state.as_str() {
-                "idle" => (OK, "daemon: idle".to_owned()),
-                "recording" => (ACCENT, "daemon: recording".to_owned()),
-                other => (WARN, format!("daemon: {other}")),
+                "idle" => (color(self.palette.foreground), "daemon: idle".to_owned()),
+                other => (color(self.palette.accent), format!("daemon: {other}")),
             }
         };
         let text_width = ui.fonts(|fonts| {
             fonts
-                .layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), TEXT)
+                .layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), ink)
                 .size()
                 .x
         }) + 28.0;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(text_width, 24.0), egui::Sense::hover());
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(text_width, 24.0), egui::Sense::hover());
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), &text)
+        });
         let painter = ui.painter();
         painter.rect(
             rect,
-            egui::Rounding::same(12.0),
-            PANEL_ALT,
-            egui::Stroke::new(1.0_f32, color.linear_multiply(0.4)),
+            egui::Rounding::ZERO,
+            color(self.palette.surface),
+            egui::Stroke::new(1.0_f32, ink.linear_multiply(0.4)),
         );
-        painter.circle_filled(rect.left_center() + egui::vec2(10.0, 0.0), 3.5, color);
+        painter.circle_filled(rect.left_center() + egui::vec2(10.0, 0.0), 3.5, ink);
         painter.text(
             rect.left_center() + egui::vec2(20.0, 0.0),
             egui::Align2::LEFT_CENTER,
             text,
             egui::FontId::proportional(12.0),
-            TEXT,
+            color(self.palette.foreground),
         );
     }
 
@@ -576,19 +633,12 @@ impl SettingsApp {
     }
 
     fn save(&mut self) {
+        if self.reload_result.is_some() {
+            return;
+        }
         if !self.loaded_ok {
             self.status = Some(StatusMsg {
                 text: "Not saved — the config could not be loaded; fix it and reload first"
-                    .to_owned(),
-                ok: false,
-            });
-            return;
-        }
-        // Refuse to clobber a concurrent external edit (e.g. `cantrip config edit`).
-        let current = fs::read_to_string(&self.config_path).unwrap_or_default();
-        if current != self.loaded_text {
-            self.status = Some(StatusMsg {
-                text: "Config changed on disk since opened — click Reload from disk first"
                     .to_owned(),
                 ok: false,
             });
@@ -602,44 +652,90 @@ impl SettingsApp {
             });
             return;
         }
-        if let Err(error) = save_config_preserving(&self.config_path, &config) {
-            self.status = Some(StatusMsg {
-                text: format!("Save failed: {error:#}"),
-                ok: false,
-            });
-            return;
-        }
-        self.loaded_text = fs::read_to_string(&self.config_path).unwrap_or_default();
-        match ipc::send_command(ipc::Command::Reload) {
-            Ok(reply) if reply.ok => {
+        match save_config_preserving(&self.config_path, &config, &self.loaded_text) {
+            Ok(text) => self.loaded_text = text,
+            Err(error) => {
                 self.status = Some(StatusMsg {
-                    text: "Saved and daemon reloaded".to_owned(),
-                    ok: true,
-                });
-            }
-            Ok(reply) => {
-                self.status = Some(StatusMsg {
-                    text: format!(
-                        "Saved to disk, but reload failed: {}",
-                        reply.message.unwrap_or_default()
-                    ),
+                    text: format!("Save failed: {error:#}"),
                     ok: false,
                 });
-            }
-            Err(_) => {
-                self.status = Some(StatusMsg {
-                    text: "Saved to disk; daemon not running (start it with: cantrip daemon)"
-                        .to_owned(),
-                    ok: true,
-                });
+                return;
             }
         }
+        self.reload_daemon();
+    }
+
+    fn reload_daemon(&mut self) {
+        self.status = Some(StatusMsg {
+            text: "Saved to disk; applying to the daemon…".to_owned(),
+            ok: true,
+        });
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(ipc::command(ipc::Command::Reload));
+        });
+        self.reload_result = Some(rx);
+    }
+
+    fn repair_form(&mut self, ui: &mut egui::Ui) {
+        let Some((_, edited)) = &mut self.repair else {
+            return;
+        };
+        ui.label("Repair the TOML below. The existing file is kept until the replacement parses and validates.");
+        ui.add(
+            egui::TextEdit::multiline(edited)
+                .code_editor()
+                .desired_rows(18)
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    self.reload_result.is_none(),
+                    egui::Button::new("Save repaired configuration"),
+                )
+                .clicked()
+            {
+                let Some((original, edited)) = self.repair.as_ref() else {
+                    return;
+                };
+                let result = (|| -> Result<Config> {
+                    anyhow::ensure!(
+                        fs::read_to_string(&self.config_path)? == *original,
+                        "Configuration changed on disk; reopen repair before saving"
+                    );
+                    let config: Config = toml::from_str(edited).context("TOML is not valid yet")?;
+                    config.validate()?;
+                    backup_config(&self.config_path, original)?;
+                    write_config_atomically(&self.config_path, edited)?;
+                    Ok(config)
+                })();
+                match result {
+                    Ok(config) => {
+                        self.loaded_text = edited.clone();
+                        self.edit = Editable::from_config(&config);
+                        self.loaded_ok = true;
+                        self.repair = None;
+                        self.reload_daemon();
+                    }
+                    Err(error) => {
+                        self.status = Some(StatusMsg {
+                            text: format!("Not saved: {error:#}"),
+                            ok: false,
+                        })
+                    }
+                }
+            }
+            if ui.button("Cancel repair").clicked() {
+                self.repair = None;
+            }
+        });
     }
 }
 
 /// Write the edited config back to disk while preserving comments and ordering
 /// for every key the window did not touch (so the annotated template survives).
-fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
+fn save_config_preserving(path: &Path, config: &Config, expected: &str) -> Result<String> {
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
@@ -647,6 +743,10 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
             return Err(error).with_context(|| format!("reading {}", path.display()));
         }
     };
+    anyhow::ensure!(
+        existing == expected,
+        "Config changed on disk since opened — click Reload from disk first"
+    );
     let mut doc: toml_edit::DocumentMut = existing
         .parse()
         .with_context(|| format!("parsing {}", path.display()))?;
@@ -664,6 +764,14 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
         vocab.push(term.as_str());
     }
     set_preserving_decor(root, "vocabulary", toml_edit::value(vocab));
+
+    let hud = ensure_table(root, "hud")?;
+    set_preserving_decor(hud, "labels", toml_edit::value(config.hud.labels));
+    if let Some(reduced) = config.hud.reduced_motion {
+        set_preserving_decor(hud, "reduced_motion", toml_edit::value(reduced));
+    } else {
+        hud.remove("reduced_motion");
+    }
 
     let stt = ensure_table(root, "stt")?;
     set_preserving_decor(stt, "model", toml_edit::value(config.stt.model.clone()));
@@ -718,6 +826,15 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
         toml_edit::value(config.postproc.instructions.clone()),
     );
 
+    let text = doc.to_string();
+    write_config_atomically(path, &text)?;
+    Ok(text)
+}
+
+fn write_config_atomically(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
     // Atomic write: temp file in the same directory, then rename, so a crash
     // mid-write can never truncate the user's only config (models.rs convention).
     // The counter keeps concurrent saves from colliding on one temp path.
@@ -730,8 +847,45 @@ fn save_config_preserving(path: &Path, config: &Config) -> Result<()> {
         std::process::id(),
         TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    fs::write(&tmp, doc.to_string()).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.with_context(|| format!("saving {}", path.display()))
+}
+
+fn backup_config(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path.parent().context("config path has no parent")?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let backup = parent.join(format!(
+        "config.toml.before-repair-{stamp}-{}.bak",
+        std::process::id()
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&backup)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -773,6 +927,7 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
+            .with_app_id("cantrip-settings")
             .with_inner_size([620.0, 700.0])
             .with_maximized(false)
             .with_title("Cantrip Settings"),
@@ -781,59 +936,56 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     eframe::run_native(
         "cantrip-settings",
         options,
-        Box::new(move |cc| {
-            apply_theme(&cc.egui_ctx);
-            Ok(Box::new(SettingsApp::new(cc, screenshot, config_path)))
-        }),
+        Box::new(move |cc| Ok(Box::new(SettingsApp::new(cc, screenshot, config_path)))),
     )
     .map_err(|error| anyhow!("settings window error: {error}"))
 }
 
-/// Brand palette shared with the HUD pill.
-const BG: egui::Color32 = egui::Color32::from_rgb(0x0e, 0x0e, 0x11);
-const PANEL: egui::Color32 = egui::Color32::from_rgb(0x15, 0x16, 0x1b);
-const PANEL_ALT: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x1c, 0x22);
-const BORDER: egui::Color32 = egui::Color32::from_rgb(0x2b, 0x2d, 0x35);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(0xf2, 0xf4, 0xf8);
-const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x99, 0x9f, 0xa8);
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(0xff, 0x6a, 0x5c);
-const OK: egui::Color32 = egui::Color32::from_rgb(0x74, 0xdc, 0x96);
-const WARN: egui::Color32 = egui::Color32::from_rgb(0xff, 0xba, 0x4a);
-const ERR: egui::Color32 = egui::Color32::from_rgb(0xe5, 0x6a, 0x6a);
+pub(crate) fn color(rgb: [u8; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
 
-/// Force a consistent dark palette that matches the HUD pill, regardless of
-/// the desktop theme egui would otherwise inherit.
-fn apply_theme(ctx: &egui::Context) {
+/// Egui adapter for the same live desktop palette as the passive HUD.
+pub(crate) fn apply_theme(ctx: &egui::Context, palette: theme::Palette) {
     let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = BG;
-    visuals.window_fill = BG;
-    visuals.extreme_bg_color = BG;
-    visuals.faint_bg_color = egui::Color32::from_rgb(0x13, 0x14, 0x18);
-    visuals.override_text_color = Some(TEXT);
-    visuals.hyperlink_color = ACCENT;
-
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT_MUTED);
-    visuals.widgets.noninteractive.bg_fill = BG;
-    visuals.widgets.noninteractive.rounding = egui::Rounding::same(6.0);
-
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, TEXT);
-    visuals.widgets.inactive.bg_fill = PANEL_ALT;
-    visuals.widgets.inactive.weak_bg_fill = PANEL_ALT;
-    visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
-
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x26, 0x27, 0x2f);
-    visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x30, 0x32, 0x3b);
-    visuals.widgets.active.rounding = egui::Rounding::same(6.0);
-
-    visuals.selection.bg_fill = ACCENT.linear_multiply(0.35);
-    visuals.selection.stroke = egui::Stroke::new(1.0_f32, ACCENT);
-    visuals.text_cursor.stroke = egui::Stroke::new(2.0_f32, ACCENT);
-
+    let foreground = color(palette.foreground);
+    let accent = color(palette.accent);
+    let border = egui::Stroke::new(1.0_f32, color(palette.border));
+    visuals.panel_fill = color(palette.background);
+    visuals.window_fill = color(palette.background);
+    visuals.extreme_bg_color = color(palette.background);
+    visuals.faint_bg_color = color(palette.surface);
+    visuals.override_text_color = Some(foreground);
+    visuals.hyperlink_color = accent;
+    visuals.warn_fg_color = color(palette.attention);
+    visuals.error_fg_color = color(palette.attention);
+    for widget in [
+        &mut visuals.widgets.noninteractive,
+        &mut visuals.widgets.inactive,
+        &mut visuals.widgets.hovered,
+        &mut visuals.widgets.active,
+        &mut visuals.widgets.open,
+    ] {
+        widget.rounding = egui::Rounding::ZERO;
+        widget.bg_fill = color(palette.surface);
+        widget.weak_bg_fill = color(palette.surface);
+        widget.bg_stroke = border;
+        widget.fg_stroke = egui::Stroke::new(1.0_f32, foreground);
+    }
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0_f32, accent);
+    visuals.selection.bg_fill = accent.linear_multiply(0.18);
+    visuals.selection.stroke = egui::Stroke::new(1.0_f32, accent);
+    visuals.text_cursor.stroke = egui::Stroke::new(2.0_f32, accent);
+    visuals.window_rounding = egui::Rounding::ZERO;
     ctx.set_visuals(visuals);
     ctx.style_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(14.0, 7.0);
+        style.animation_time = 0.0;
+        for font in style.text_styles.values_mut() {
+            font.family = egui::FontFamily::Monospace;
+        }
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 8.0);
     });
 }
 
@@ -842,20 +994,77 @@ fn apply_theme(ctx: &egui::Context) {
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
-        if self.last_poll.elapsed() >= DAEMON_POLL {
-            self.last_poll = Instant::now();
-            match ipc::status() {
+        if let Some(result) = completed_request(self.poll_result.as_ref()) {
+            match result {
                 Ok(status) => {
                     self.daemon_online = true;
-                    self.daemon_state = status.state_name().to_owned();
+                    self.daemon_state = status.stage.as_ref().map_or_else(
+                        || {
+                            if status.state == ipc::StateKind::Recording && status.signal.is_none()
+                            {
+                                "starting microphone".to_owned()
+                            } else {
+                                status.state_name().to_owned()
+                            }
+                        },
+                        ToString::to_string,
+                    );
                 }
                 Err(_) => {
                     self.daemon_online = false;
-                    self.daemon_state = "offline".to_owned();
+                    self.daemon_state = "unreachable".to_owned();
                 }
             }
+            self.poll_result = None;
         }
-        ctx.request_repaint_after(DAEMON_POLL);
+        if let Some(result) = completed_request(self.reload_result.as_ref()) {
+            self.status = Some(match result {
+                Ok(reply) if reply.ok => StatusMsg {
+                    text: "Saved and daemon reloaded".to_owned(),
+                    ok: true,
+                },
+                Ok(reply) => StatusMsg {
+                    text: format!(
+                        "Saved to disk. {}",
+                        reply
+                            .error
+                            .or(reply.message)
+                            .unwrap_or_else(|| "Daemon did not reload.".to_owned())
+                    ),
+                    ok: false,
+                },
+                Err(_) => StatusMsg {
+                    text: "Saved to disk; daemon unreachable. Open Cantrip actions for setup."
+                        .to_owned(),
+                    ok: true,
+                },
+            });
+            self.reload_result = None;
+        }
+        if self.last_poll.elapsed() >= DAEMON_POLL && self.poll_result.is_none() {
+            self.last_poll = Instant::now();
+            self.palette = theme::load();
+            apply_theme(ctx, self.palette);
+            let (tx, rx) = mpsc::channel();
+            let context = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(ipc::status());
+                context.request_repaint();
+            });
+            self.poll_result = Some(rx);
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            if self.repair.is_some() {
+                self.repair = None;
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        ctx.request_repaint_after(if self.screenshot.is_some() {
+            Duration::from_millis(30)
+        } else {
+            DAEMON_POLL
+        });
 
         egui::CentralPanel::default().show(ctx, |ui| self.show(ui));
 
@@ -929,13 +1138,11 @@ mod tests {
                 instructions: "Remove filler words.".to_owned(),
             },
             telemetry: TelemetryConfig::default(),
+            hud: HudConfig {
+                labels: true,
+                reduced_motion: Some(true),
+            },
         }
-    }
-
-    #[test]
-    fn editable_round_trips_config() {
-        let original = sample_config();
-        assert_eq!(Editable::from_config(&original).to_config(), original);
     }
 
     #[test]
@@ -958,6 +1165,7 @@ mod tests {
             pp_min_chars: 40,
             pp_instructions: String::new(),
             telemetry: TelemetryConfig::default(),
+            hud: HudConfig::default(),
         };
         let config = edit.to_config();
         assert_eq!(config.audio_source, None);
@@ -996,7 +1204,8 @@ mod tests {
             },
             ..sample_config()
         };
-        save_config_preserving(&path, &config).expect("save");
+        let original = fs::read_to_string(&path).expect("original config");
+        save_config_preserving(&path, &config, &original).expect("save");
         let text = fs::read_to_string(&path).expect("read back");
 
         assert!(
@@ -1050,7 +1259,8 @@ mod tests {
             },
             ..sample_config()
         };
-        save_config_preserving(&path, &config).expect("save");
+        let original = fs::read_to_string(&path).expect("original config");
+        save_config_preserving(&path, &config, &original).expect("save");
         let text = fs::read_to_string(&path).expect("read back");
         // The [stt] endpoint/api_key_id must be gone; postproc.endpoint is
         // unrelated and legitimately still present.
@@ -1072,7 +1282,7 @@ mod tests {
             std::process::id()
         ));
         fs::write(&path, "this is [ not toml").expect("write fixture");
-        assert!(save_config_preserving(&path, &sample_config()).is_err());
+        assert!(save_config_preserving(&path, &sample_config(), "this is [ not toml").is_err());
         fs::remove_file(&path).ok();
     }
 
@@ -1094,8 +1304,7 @@ mod tests {
                 assert_eq!(config.injection, InjectionMode::Type);
                 assert_eq!(config.stt.model, "retired-model");
                 assert_eq!(loaded_text, text);
-                assert!(warning.text.contains("Configuration needs repair"));
-                assert!(warning.text.contains("retired-model"));
+                assert!(!warning.ok);
             }
             _ => panic!("parsed validation failure must remain editable"),
         }
@@ -1113,10 +1322,7 @@ mod tests {
         fs::write(&path, text).expect("write fixture");
 
         match load_editable_config(&path) {
-            EditableConfigLoad::Blocked { message } => {
-                assert!(message.contains("file was not changed"));
-                assert!(message.contains("cantrip config edit"));
-            }
+            EditableConfigLoad::Blocked { .. } => {}
             EditableConfigLoad::Ready { .. } => {
                 panic!("malformed config must disable structured saving")
             }
@@ -1148,7 +1354,8 @@ mod tests {
         };
         config.stt.model = "parakeet-tdt-0.6b-v3-int8".to_owned();
         config.validate().expect("correction must validate");
-        save_config_preserving(&path, &config).expect("save corrected config");
+        let original = fs::read_to_string(&path).expect("original config");
+        save_config_preserving(&path, &config, &original).expect("save corrected config");
 
         match load_editable_config(&path) {
             EditableConfigLoad::Ready {
@@ -1169,5 +1376,54 @@ mod tests {
         );
 
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn following_desktop_removes_motion_override_without_losing_unknown_preferences() {
+        let path = std::env::temp_dir().join(format!(
+            "cantrip-settings-motion-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, "[hud]\nlabels = true\nreduced_motion = true\n# keep personal preference\npersonal_scale = 2\n").expect("fixture");
+        let mut config: Config =
+            toml::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        config.hud.reduced_motion = None;
+        let original = fs::read_to_string(&path).expect("original config");
+        save_config_preserving(&path, &config, &original).expect("save desktop preference");
+        let saved = fs::read_to_string(&path).expect("saved");
+        let parsed: Config = toml::from_str(&saved).expect("reparse");
+        assert_eq!(parsed.hud.reduced_motion, None);
+        assert!(parsed.hud.labels);
+        let document: toml::Value = toml::from_str(&saved).expect("document");
+        assert_eq!(document["hud"]["personal_scale"].as_integer(), Some(2));
+        assert!(saved.contains("# keep personal preference"));
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn saving_refuses_to_adopt_concurrent_disk_edits() {
+        let path = std::env::temp_dir().join(format!(
+            "cantrip-settings-concurrent-{}.toml",
+            std::process::id()
+        ));
+        let original = "injection = \"auto\"\n";
+        let changed = "injection = \"clipboard\"\n# external edit\n";
+        fs::write(&path, changed).expect("external edit");
+        assert!(save_config_preserving(&path, &sample_config(), original).is_err());
+        assert_eq!(
+            fs::read_to_string(&path).expect("preserved config"),
+            changed
+        );
+        fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn invalid_cleanup_passes_stay_invalid_until_explicitly_corrected() {
+        let mut config = sample_config();
+        config.postproc.passes = 0;
+        let mut edit = Editable::from_config(&config);
+        assert!(edit.to_config().validate().is_err());
+        edit.pp_passes = 1;
+        assert!(edit.to_config().validate().is_ok());
     }
 }

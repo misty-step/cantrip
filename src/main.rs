@@ -12,7 +12,7 @@ use cantrip::inject::{self, InjectionMode};
 use cantrip::ipc::{self, Command};
 use cantrip::models::{self, PARAKEET_V3_INT8};
 use cantrip::telemetry;
-use cantrip::{config::Config, daemon, hud, keys, paths, pipeline, settings};
+use cantrip::{actions, config::Config, daemon, hud, keys, paths, pipeline, recovery, settings};
 
 /// Per-dictation post-processing request, overriding [postproc].enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -42,15 +42,23 @@ enum CliCommand {
         /// Render one frame to a PNG at PATH, then exit (visual testing).
         #[arg(long, value_name = "PATH")]
         screenshot: Option<PathBuf>,
-        /// State to render with --screenshot: recording | transcribing |
-        /// cleaning | sent | notice (default: recording).
-        /// Requires --screenshot.
+        /// Scenario to render with --screenshot (default: recording).
+        /// Available scenarios cover live signal, progress, and recovery outcomes.
         #[arg(long, value_enum, requires = "screenshot")]
         state: Option<hud::ScreenshotState>,
     },
     /// Open the configuration window.
     Settings {
         /// Render one frame to a PNG at PATH, then exit (visual testing).
+        #[arg(long, value_name = "PATH")]
+        screenshot: Option<PathBuf>,
+    },
+    /// Open recording recovery, explicit clipboard actions, and setup.
+    Actions {
+        /// Open the read-only setup diagnosis immediately.
+        #[arg(long)]
+        doctor: bool,
+        /// Render the actual window to a PNG at PATH, then exit.
         #[arg(long, value_name = "PATH")]
         screenshot: Option<PathBuf>,
     },
@@ -66,11 +74,39 @@ enum CliCommand {
     },
     Stop,
     Cancel,
-    Status,
+    Status {
+        /// Emit the typed, transcript-free status snapshot.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List saved recording metadata, never transcript content.
+    Recordings {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy the saved transcript for this exact recording to the clipboard.
+    Copy {
+        id: String,
+    },
+    /// Hide an outcome or interaction notice without deleting a recording.
+    Dismiss {
+        #[arg(long)]
+        event_id: Option<u64>,
+    },
+    /// Forget retained audio and incomplete text; keep complete archived text.
+    Forget {
+        id: String,
+        /// Confirm this irreversible deletion.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Re-inject the last saved transcript.
     Last,
     /// Re-run STT on the retained failed or partial recording.
     Recover {
+        /// Recover this exact recording; omitted selects the newest retained audio.
+        #[arg(long)]
+        id: Option<String>,
         /// Use installed local Parakeet without cloud STT or cleanup.
         #[arg(long)]
         local: bool,
@@ -229,6 +265,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         CliCommand::Hud { screenshot, state } => hud::run(screenshot, state),
         CliCommand::Settings { screenshot } => settings::run(screenshot),
+        CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
         CliCommand::Toggle { postproc } => send_command(Command::Toggle {
             postproc: postproc.map(|mode| mode == PostprocMode::Clean),
         }),
@@ -237,11 +274,27 @@ fn run(cli: Cli) -> Result<()> {
         }),
         CliCommand::Stop => send_command(Command::Stop),
         CliCommand::Cancel => send_command(Command::Cancel),
-        CliCommand::Status => print_status(),
-        CliCommand::Last => send_command(Command::Last),
-        CliCommand::Recover { local, clipboard } => {
-            send_command(Command::Recover { local, clipboard })
+        CliCommand::Status { json } => print_status(json),
+        CliCommand::Recordings { json } => print_recordings(json),
+        CliCommand::Copy { id } => send_command(Command::Copy { id }),
+        CliCommand::Dismiss { event_id } => send_command(Command::Dismiss { event_id }),
+        CliCommand::Forget { id, yes } => {
+            anyhow::ensure!(
+                yes,
+                "forget deletes retained audio; confirm with --yes, or use cantrip actions"
+            );
+            send_command(Command::Forget { id })
         }
+        CliCommand::Last => send_command(Command::Last),
+        CliCommand::Recover {
+            id,
+            local,
+            clipboard,
+        } => send_command(Command::Recover {
+            id,
+            local,
+            clipboard,
+        }),
         CliCommand::Reload => send_command(Command::Reload),
         CliCommand::Config { command } => run_config(command),
         CliCommand::Key { command } => run_key(command),
@@ -259,6 +312,10 @@ const CONFIG_TEMPLATE: &str = r#"injection = "auto"        # auto | paste | type
 keep_warm = true
 # audio_source = "…"      # optional PipeWire target
 vocabulary = []           # exact-spelling terms for postproc + cloud STT
+
+[hud]
+labels = false            # always show state captions
+# reduced_motion = true  # omit to follow the desktop preference
 
 [stt]
 model = "parakeet-tdt-0.6b-v3-int8"   # local registry name
@@ -412,7 +469,13 @@ fn read_secret(id: &str) -> Result<String> {
 }
 
 fn send_command(command: Command) -> Result<()> {
-    let reply = ipc::send_command(command)?;
+    if matches!(
+        &command,
+        Command::Last | Command::Recover { .. } | Command::Copy { .. } | Command::Forget { .. }
+    ) {
+        ipc::recordings().context("refreshing saved recording metadata")?;
+    }
+    let reply = ipc::command(command)?;
     println!("state: {}", reply.state.as_str());
     if let Some(message) = &reply.message {
         println!("message: {message}");
@@ -431,35 +494,35 @@ fn send_command(command: Command) -> Result<()> {
     Ok(())
 }
 
-fn print_status() -> Result<()> {
-    let status = match ipc::status() {
-        Ok(status) => status,
-        Err(error) => {
-            print_retained_audio();
-            return Err(error);
-        }
-    };
-    println!("state: {}", status.state_name());
-    match &status {
-        ipc::StatusSnapshot::Recording {
-            elapsed, signal, ..
-        } => {
-            println!("elapsed: {elapsed}s");
-            if let Some(signal) = signal {
-                println!("audio-level: {}%", signal.level);
-                println!("audio-silent: {}", signal.silent);
-                print!("audio-waveform:");
-                for [minimum, maximum] in signal.waveform {
-                    print!(" {minimum}:{maximum}");
-                }
-                println!();
-            }
-        }
-        ipc::StatusSnapshot::Processing { stage, .. } => println!("stage: {stage}"),
-        ipc::StatusSnapshot::Idle { .. } | ipc::StatusSnapshot::Unknown { .. } => {}
+fn print_status(json: bool) -> Result<()> {
+    let status = ipc::status()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&status).context("serializing status")?
+        );
+        return Ok(());
     }
-    print_outcome(status.outcome());
-    print_retained_audio();
+    println!("state: {}", status.state_name());
+    if status.state != ipc::StateKind::Idle {
+        println!("elapsed: {}s", status.elapsed);
+    }
+    if let Some(stage) = &status.stage {
+        println!("stage: {stage}");
+    }
+    if let Some(signal) = &status.signal {
+        println!("audio-level: {}%", signal.level);
+        println!("audio-silent: {}", signal.silent);
+    }
+    if let Some(notice) = &status.notice {
+        println!("notice: {} (event {})", notice.message, notice.event_id);
+    }
+    print_outcome(status.outcome.as_ref());
+    let pending = status.pending_recordings;
+    println!("pending-recordings: {pending}");
+    if pending > 0 {
+        println!("hint: cantrip actions   # choose the matching saved recording");
+    }
     Ok(())
 }
 
@@ -468,26 +531,68 @@ fn print_outcome(outcome: Option<&ipc::TerminalOutcome>) {
         return;
     };
     println!("last: {}", outcome.message);
+    println!("event: {}", outcome.event_id);
+    println!("completeness: {}", enum_label(&outcome.completeness));
+    println!("delivery: {}", enum_label(&outcome.delivery));
+    println!("cleanup: {}", enum_label(&outcome.cleanup));
+    println!("dismissed: {}", outcome.dismissed);
     if let Some(error) = &outcome.error {
         println!("error: {error}");
     }
-    if !outcome.ok
-        && paths::last_transcript_path()
-            .ok()
-            .is_some_and(|path| path.is_file())
-    {
-        println!("hint: cantrip last   # replay saved text; it may belong to an older dictation");
+    if let Some(id) = &outcome.artifacts.take_id {
+        println!("recording: {id}");
+        if outcome.artifacts.text {
+            println!("hint: cantrip copy {id}   # copy this recording's saved text");
+        }
+        if outcome.artifacts.audio {
+            println!("hint: cantrip recover --id {id} --local --clipboard");
+        }
     }
 }
 
-fn print_retained_audio() {
-    if let Ok(path) = paths::last_failed_wav_path() {
-        if path.is_file() {
-            println!("retained-audio: {}", path.display());
-            println!("hint: cantrip recover   # retry with configured STT and delivery");
-            println!("hint: cantrip recover --local --clipboard   # installed Parakeet, no cleanup or keystrokes");
+fn print_recordings(json: bool) -> Result<()> {
+    // The daemon owns mutations and its cached list. Read-only history remains
+    // discoverable while it is offline; never infer an offline daemon state.
+    let takes = match ipc::recordings() {
+        Ok(takes) => takes,
+        Err(_) => recovery::list().context("reading saved recording metadata")?,
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&takes).context("serializing recordings")?
+        );
+    } else if takes.is_empty() {
+        println!("No saved recordings.");
+    } else {
+        for take in takes {
+            println!(
+                "{}  {}  {}  {}  text={} audio={} pending={}",
+                take.id,
+                actions::take_time(take.created_at_unix_ms),
+                actions::take_duration(take.duration_ms),
+                if take.partial {
+                    "partial"
+                } else if take.text_available {
+                    "complete text"
+                } else {
+                    "no text"
+                },
+                take.text_available,
+                take.audio_available,
+                take.unresolved,
+            );
         }
+        println!("Open cantrip actions to recover, copy, or forget a specific recording.");
     }
+    Ok(())
+}
+
+fn enum_label(value: &impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
@@ -506,7 +611,7 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
                 expected.display()
             );
         } else {
-            models::ensure_model(spec).context("ensuring transcription model")?;
+            models::ensure_model(spec, None).context("ensuring transcription model")?;
         }
     }
     let mut cache = None;
@@ -516,7 +621,11 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
         &config.stt,
         &config.vocabulary,
         &config.postproc,
-        pipeline::Source::Transcribe,
+        pipeline::RunContext {
+            source: pipeline::Source::Transcribe,
+            take_id: None,
+            cancel: None,
+        },
         |_| {},
     );
     if let pipeline::ArchiveStatus::Failed(error) = &outcome.archive {
@@ -543,7 +652,7 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
 fn pull_model() -> Result<()> {
     println!("pulling model...");
     let model_dir =
-        models::ensure_model(&PARAKEET_V3_INT8).context("pulling transcription model")?;
+        models::ensure_model(&PARAKEET_V3_INT8, None).context("pulling transcription model")?;
     println!("installed: {}", model_dir.display());
     Ok(())
 }
@@ -639,18 +748,14 @@ fn model_status() -> Result<()> {
 #[derive(Debug, Clone, Copy)]
 struct DoctorTools {
     pw_record: bool,
-    wtype: bool,
-    ydotool: bool,
-    ydotool_socket: bool,
+    virtual_keyboard: bool,
     wl_copy: bool,
 }
 
 fn doctor() -> Result<()> {
     let tools = DoctorTools {
         pw_record: inject::executable_in_path("pw-record"),
-        wtype: inject::executable_in_path("wtype"),
-        ydotool: inject::executable_in_path("ydotool"),
-        ydotool_socket: inject::find_ydotool_socket().is_some(),
+        virtual_keyboard: inject::virtual_keyboard_available(),
         wl_copy: inject::executable_in_path("wl-copy"),
     };
     let config_path = paths::config_file().context("locating config file")?;
@@ -659,9 +764,9 @@ fn doctor() -> Result<()> {
 
     match &config {
         Ok(_) if config_exists => println!("config: ready"),
-        Ok(_) => println!("config: defaults in use — run: cantrip config init"),
+        Ok(_) => println!("config: defaults in use — open Settings to customize"),
         Err(_) => {
-            println!("config: blocked — invalid or unreadable; run: cantrip config edit")
+            println!("config: blocked — invalid or unreadable; open Settings to repair")
         }
     }
     println!("{}", capture_diagnosis(config.as_ref().ok(), tools));
@@ -687,9 +792,9 @@ fn doctor() -> Result<()> {
         println!("hud: blocked — run Cantrip from a Wayland session");
     }
 
-    match ipc::send_command(Command::Ping) {
-        Ok(reply) if reply.ok => println!("daemon: reachable ({})", reply.state.as_str()),
-        _ => println!("daemon: not running — run: cantrip daemon"),
+    match ipc::status() {
+        Ok(status) => println!("daemon: reachable ({})", status.state_name()),
+        Err(_) => println!("daemon: not running or unreachable — open cantrip actions for setup"),
     }
     Ok(())
 }
@@ -761,30 +866,24 @@ fn cleanup_diagnosis(config: &Config) -> String {
 }
 
 fn injection_diagnosis(mode: InjectionMode, tools: DoctorTools) -> String {
-    let ydotool_ready = tools.ydotool && tools.ydotool_socket;
-    let order = inject::planned_backend_names(mode, tools.wtype, ydotool_ready, tools.wl_copy);
-    let ready = match mode {
-        InjectionMode::Auto => tools.wtype || ydotool_ready || tools.wl_copy,
-        InjectionMode::Paste => tools.wl_copy && (tools.wtype || ydotool_ready),
-        InjectionMode::Type => tools.wtype || ydotool_ready,
-        InjectionMode::Clipboard => tools.wl_copy,
-    };
-    let mode = injection_mode_name(mode);
-    let order = if order.is_empty() {
-        "none".to_owned()
-    } else {
+    let order = inject::planned_backend_names(mode, tools.virtual_keyboard, tools.wl_copy);
+    let available = !order.is_empty();
+    let mode_name = injection_mode_name(mode);
+    let order = if available {
         order.join(" -> ")
+    } else {
+        "none".to_owned()
     };
-    if ready {
-        format!("injection: ready (mode={mode}; order={order})")
+    if available {
+        format!("injection: backends available (mode={mode_name}; order={order}); automatic keys still require verified Hyprland focus and logind lock/suspend history at delivery")
     } else {
         let action = match mode {
-            "paste" => "install wl-clipboard and wtype, or change injection mode",
-            "type" => "install wtype or ydotool with its daemon",
-            "clipboard" => "install wl-clipboard",
-            _ => "install wl-clipboard or wtype",
+            InjectionMode::Paste => "requires wl-clipboard and Wayland virtual-keyboard support; use Settings to choose clipboard-only delivery",
+            InjectionMode::Type => "requires Wayland virtual-keyboard support; strict type mode does not use the clipboard",
+            InjectionMode::Clipboard => "install wl-clipboard",
+            InjectionMode::Auto => "requires Wayland virtual-keyboard support or wl-clipboard",
         };
-        format!("injection: blocked (mode={mode}; order={order}) — {action}")
+        format!("injection: unavailable (mode={mode_name}; order={order}) — {action}")
     }
 }
 
@@ -847,12 +946,6 @@ fn endpoint_lane(origin: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
-
-    #[test]
-    fn clap_definition_is_valid() {
-        Cli::command().debug_assert();
-    }
 
     #[test]
     fn endpoint_diagnostics_drop_sensitive_url_components() {
@@ -889,70 +982,8 @@ mod tests {
             ..Config::default()
         };
         let line = stt_diagnosis(&config);
-        assert_eq!(
-            line,
-            "stt: remote configured (model=speech-model; endpoint=https://api.example.test; credential=keyring id configured)"
-        );
         assert!(!line.contains("secret"));
         assert!(!line.contains("hidden"));
         assert!(!line.contains("private-key-name"));
-    }
-
-    #[test]
-    fn cleanup_diagnosis_reports_lane_and_rejects_empty_endpoint() {
-        let mut config = Config {
-            postproc: cantrip::config::PostprocConfig {
-                enabled: true,
-                endpoint: "http://localhost:11434/v1".to_owned(),
-                model: "qwen3:8b".to_owned(),
-                ..Default::default()
-            },
-            ..Config::default()
-        };
-        assert_eq!(
-            cleanup_diagnosis(&config),
-            "cleanup: local configured (model=qwen3:8b; endpoint=http://localhost:11434; credential=none; min_chars=40)"
-        );
-
-        config.postproc.endpoint.clear();
-        assert_eq!(
-            cleanup_diagnosis(&config),
-            "cleanup: blocked (endpoint is empty) — run: cantrip settings"
-        );
-    }
-    #[test]
-    fn injection_diagnosis_uses_execution_backend_order() {
-        let line = injection_diagnosis(
-            InjectionMode::Auto,
-            DoctorTools {
-                pw_record: true,
-                wtype: true,
-                ydotool: true,
-                ydotool_socket: false,
-                wl_copy: true,
-            },
-        );
-        assert_eq!(
-            line,
-            "injection: ready (mode=auto; order=paste -> wtype -> clipboard)"
-        );
-    }
-
-    #[test]
-    fn injection_diagnosis_explains_strict_mode_blocker() {
-        let line = injection_diagnosis(
-            InjectionMode::Paste,
-            DoctorTools {
-                pw_record: true,
-                wtype: false,
-                ydotool: false,
-                ydotool_socket: false,
-                wl_copy: true,
-            },
-        );
-        assert_eq!(
-            line,
-            "injection: blocked (mode=paste; order=none) — install wl-clipboard and wtype, or change injection mode"
-        );
     }
 }

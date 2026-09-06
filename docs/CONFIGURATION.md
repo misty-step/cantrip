@@ -9,17 +9,14 @@ and adjust the common settings; its Save button writes the file back
 
 Settings can repair a file that parses as TOML but fails Cantrip validation:
 it loads the actual values, explains the validation error, and enables Save
-after correction. If the TOML syntax is malformed or the file cannot be read,
-Settings never replaces it with defaults; it directs you to `cantrip config
-edit` and keeps structured saving disabled until the file parses.
+after correction. Malformed TOML keeps structured saving disabled; the explicit
+Repair flow edits the original text and keeps a backup. External file edits
+are not silently overwritten, and a pending reload disables overlapping saves.
 
-Changes apply immediately, no restart needed. The Save button (or `cantrip
-reload`, for edits made directly to the file with `config edit`) makes the
-daemon re-read the config in place. Each stage picks up the newest values at
-its own boundary: `[stt]`, `vocabulary`, and `[postproc]` when a recording
-stops, `injection` when the corrected text comes back, and `audio_source` on
-the next recording. The one setting that genuinely needs a daemon restart is
-`keep_warm`, which only governs model preload at startup.
+Use Save or `cantrip reload` after changing configuration. Accepted processing
+jobs keep their STT, cleanup, and delivery snapshot; reload affects subsequent
+operations, not in-flight inference. `audio_source` applies to the next capture.
+`keep_warm` governs model preload at startup and needs a daemon restart.
 
 This example opts into local cleanup. Fresh defaults use
 `[postproc].enabled = false` and an empty cleanup model.
@@ -45,6 +42,10 @@ passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
 min_chars = 40            # skip cleanup under this length; 0 = never skip
 # reasoning_effort = "low" # optional: low | medium | high | none (for providers supporting reasoning.effort)
 instructions = ""         # optional extra style guidance
+
+[hud]
+labels = false             # show stage labels continuously
+# reduced_motion = true    # true/false override; omit to follow desktop preference
 ```
 
 ## `[stt]` — transcription
@@ -83,20 +84,23 @@ Compressed WAV encodings, RF64/RIFX, and multiple data chunks must be converted
 to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
 16 kHz mono PCM16.
 
-**Recovery.** `cantrip recover --clipboard` retries retained audio with configured
-STT while only copying the result. `cantrip recover --local --clipboard` uses
+**Recovery.** `cantrip recover --id ID --clipboard` retries the selected retained
+recording with configured STT while only copying the result. Omit `--id` to select
+the newest retained audio. `cantrip recover --id ID --local --clipboard` uses
 installed default Parakeet and skips cleanup for that job, without rewriting
 this file or changing subsequent dictations. Install the model explicitly with
 `cantrip models pull` if needed. `cantrip transcribe --local <wav>` provides the
 same local recognition/cleanup override for files. Separately opted-in telemetry
 remains count-only and enabled; `--local` is not an all-network-off switch.
 
-`cantrip status` lists the retained audio path even after daemon restart.
+`cantrip recordings` lists capture times, recording IDs, durations, and artifact
+availability after daemon restart. `cantrip actions` exposes the same metadata,
+explicit copy/recovery, and confirmed Forget without showing transcript text.
 Operational details remain in `~/.local/state/cantrip/daemon.log`; transcripts
-never appear there. Partial text is marked incomplete and its audio is retained.
-An unrelated successful take cannot erase the recovery slot. The next
-failed/partial take can replace it, and successful complete recovery removes it
-only after text has a durable history or replay-file copy.
+never appear there. Each pending take has independent retained audio; unrelated
+successes or later failures cannot erase it. Complete recovery removes audio only
+after durable text and successful delivery. Dismissal never deletes artifacts.
+Copying saved text does not resolve or delete the retained recording.
 
 ## `[postproc]` — cleanup
 
@@ -171,22 +175,36 @@ you dictate often.
 
 ## `injection`
 
-- `auto` – the default: copy to the Wayland clipboard and send one `Ctrl+Shift+V`
-  (paragraph breaks are preserved), falling back to `wtype` typing, then
-  `ydotool`, then clipboard-only if any backend or shortcut is unavailable.
-- `paste` – copy and `Ctrl+Shift+V` only, no typing fallback; paragraph breaks are
-  preserved.
-- `type` – type directly (never touches the clipboard; newlines are flattened
-  to spaces because typing them would send a Return key, which submits in
-  chat apps).
-- `clipboard` – put the text on the Wayland clipboard for you to paste.
+- `auto` – paste first with `wl-copy` and a native Wayland `Ctrl+Shift+V` chord.
+  If the keyboard backend is unavailable before any input, copy-only is possible
+  after a fresh safety check. If clipboard setup fails before handoff, native
+  typing is possible. No fallback follows a potentially completed handoff or keys.
+- `paste` – clipboard plus `Ctrl+Shift+V` only, with no typing fallback.
+- `type` – native virtual-keyboard typing only; never reads or writes the
+  clipboard. Newlines become spaces so transcript content cannot press Return.
+- `clipboard` – explicitly copy for manual paste; no destination-focus permit
+  or keyboard input. Clipboard contents are not restored afterward.
 
-Pasted or copied text stays on the clipboard, so you can paste it again by
-hand. Injection is atomic: nothing is typed into a live window until the whole
-text is ready, and the single paste keypress cannot be interrupted by losing
-focus mid-composition like long typing streams can. The paste chord is
-`Ctrl+Shift+V` so a terminal or TUI (OMP, Herdr) does not intercept `Ctrl+V`
-as its own empty host-clipboard paste.
+Automatic keyboard delivery requires verified focus, layer-surface and session
+history on a direct Hyprland desktop (verified on 0.56.2) with logind. The guard
+tracks focus changes, session locks, suspend, and compositor/session reconnection.
+Unknown or changed state defers delivery, even in `auto`; choose explicit Copy
+or clipboard recovery instead. `doctor` reports backend availability, not a
+promise that the current destination is safe.
+
+Text is fully composed before delivery. The paste chord preserves paragraph
+breaks and uses `Ctrl+Shift+V` for terminal compatibility. Compositor/helper
+acknowledgement does not prove the destination application accepted the text.
+An uncertain outcome may have changed the clipboard or sent some keys; inspect
+the destination before retrying. Cantrip never retries an uncertain handoff.
+
+## `[hud]` — passive status
+
+`labels = true` keeps stage text visible. `reduced_motion = true` or `false`
+overrides the desktop preference; omit it to follow the desktop. The HUD never
+takes focus or accepts pointer input. Waveform and chunk progress come from the
+daemon's measurements; a stale connection is shown as unknown, not Ready.
+HUD, Actions, and Settings use the active Omarchy palette when available.
 
 ## Opt-in telemetry (`[telemetry]`)
 

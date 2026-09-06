@@ -9,9 +9,11 @@
 
 mod archive;
 
+pub mod actions;
 pub mod capture;
 pub mod config;
 pub mod daemon;
+pub mod desktop;
 pub mod hud;
 pub mod inject;
 pub mod ipc;
@@ -20,6 +22,8 @@ pub mod models;
 pub mod paths;
 pub mod pipeline;
 pub mod postproc;
+pub mod recovery;
 pub mod settings;
 pub mod stt;
 pub mod telemetry;
+pub mod theme;

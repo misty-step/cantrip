@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "cantrip.dictation",
+  "name": "Cantrip Dictation",
+  "version": "2.0.0",
+  "author": "Cantrip contributors",
+  "description": "Quiet dictation status, explicit recovery, and safe cancellation",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "BarWidget.qml"},
+  "barWidget": {
+    "displayName": "Cantrip Dictation",
+    "description": "Raw dictation on left-click; native recording actions on right-click",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

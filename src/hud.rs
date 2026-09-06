@@ -1,17 +1,8 @@
-//! Always-on-top Wayland layer-shell status HUD.
+//! Passive, bottom-anchored Wayland status instrument.
 //!
-//! The HUD is a read-only mirror of the daemon. It polls the existing status
-//! command and never sends a command which can change daemon state.
-//!
-//! Visual design: a 22-cell knight track floats on a fully transparent
-//! 420×56 surface. Cells carry the current state accent: eased waveform
-//! energy while recording, an amber sweep and chunk progress while
-//! transcribing, static violet mid-cells while cleaning, and a green success
-//! hold. Amber notices show readable text; actionable failures stay until the
-//! next operation. Reduced motion freezes the sweep while fades still apply.
-//!
-//! Normal states retain the operator's 2026-09-04 track-only design. Notices
-//! are the exception: color alone cannot explain a failure or its recovery.
+//! One measured 22-cell track, one working accent, and words only when useful.
+//! The daemon owns operations, outcomes and acknowledgement. The HUD never sends
+//! mutations, takes focus, handles pointer input, or invents audio/progress.
 
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use anyhow::{Context, Result};
@@ -31,9 +22,17 @@ use smithay_client_toolkit::{
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
 use std::{
+    borrow::Cow,
     fs,
+    io::Read,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 use wayland_client::{
@@ -42,38 +41,37 @@ use wayland_client::{
     Connection, EventQueue, QueueHandle,
 };
 
-use crate::ipc::{self, AudioWaveform, StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS};
-use crate::pipeline::Stage;
+use crate::{
+    ipc::{
+        self, AudioSignal, AudioWaveform, Cleanup, Completeness, Delivery, StateKind,
+        StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
+    },
+    pipeline::Stage,
+    theme::{self, Palette},
+};
 
-/// Status poll cadence. Matches the daemon's 100 ms signal sampling so each
-/// poll carries a fresh envelope; the round-trip is millisecond-scale.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// Render tick while the chip is visible; IPC polling stays at POLL_INTERVAL.
-const FRAME_INTERVAL: Duration = Duration::from_millis(33);
-/// Higher cadence while measured waveform or chunk-meter values are easing
-/// (~16 ms ≈ 60 fps).
-const METER_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const RESULT_FLASH: Duration = Duration::from_millis(2_500);
-/// Duration of the eased transition run on every visual state change.
-const TRANSITION: Duration = Duration::from_millis(260);
-/// Wall time to ease the chunk meter between targets. Chunk inference is
-/// often <300 ms, so a timed ease always shows motion. Uses ease-in-out
-/// for a steadier native feel than ease-out (which front-loads then lags).
-const METER_EASE: Duration = Duration::from_millis(360);
-/// Short interpolation between measured 200 ms waveform frames. The ease
-/// completes well before the next frame lands, so motion settles instead of
-/// dragging behind the data. It smooths the raster transition without
-/// inventing any unmeasured oscillation.
-const WAVEFORM_EASE: Duration = Duration::from_millis(90);
-/// Extra hold after the bar reaches full while Cleaning so a fast 2-chunk
-/// take does not wipe the fill the instant STT ends.
-const METER_COMPLETE_HOLD: Duration = Duration::from_millis(180);
-/// Tail of the result flash spent fading out, inside the RESULT_FLASH window.
-const FLASH_FADE_TAIL: f32 = 0.25;
-const HUD_HEIGHT: u32 = 56;
-const FALLBACK_WIDTH: u32 = 420;
-const MAX_WIDTH: u32 = 900;
-const NOTICE_HEIGHT: u32 = 88;
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const PREFERENCE_INTERVAL: Duration = Duration::from_secs(2);
+const LABEL_DELAY: Duration = Duration::from_millis(800);
+const SIGNAL_GRACE: Duration = Duration::from_secs(8);
+const SIGNAL_RETURN: Duration = Duration::from_millis(300);
+const MONITOR_DELAY: Duration = Duration::from_secs(5);
+const DISCONNECT_DELAY: Duration = Duration::from_millis(450);
+const STATUS_STALE_AFTER: Duration = Duration::from_secs(2);
+const WAVEFORM_EASE: Duration = Duration::from_millis(80);
+const SETTLE: Duration = Duration::from_millis(160);
+const SUCCESS_HOLD: Duration = Duration::from_millis(700);
+const RESULT_FADE: Duration = Duration::from_millis(140);
+const NOTICE_HOLD: Duration = Duration::from_secs(4);
+const INTERACTION_HOLD: Duration = Duration::from_secs(2);
+const LONG_RECORDING: u64 = 60;
+const SURFACE_WIDTH: u32 = 420;
+const SURFACE_HEIGHT: u32 = 56;
+const CONTAINER_WIDTH: f32 = 336.0;
+const TRACK_HEIGHT: f32 = 44.0;
+const TRACK_WIDTH: f32 = 304.0;
+const CELLS: usize = 22;
 const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-18, 22],
     [-35, 41],
@@ -88,26 +86,11 @@ const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-12, 18],
 ];
 
-/// Normal-state container dimensions, centered in the 420×56 surface.
-/// Notices expand vertically to fit a readable cause and recovery command.
-const CONTAINER_WIDTH: f32 = 336.0;
-const CONTAINER_HEIGHT: f32 = 44.0;
-const TRACK_WIDTH: f32 = 304.0;
-const KNIGHT_CELL_GAP: f32 = 2.0;
-/// Number of segmented cells in the full-width scanner track.
-const KNIGHT_CELLS: usize = 22;
-
-/// Take the single-instance flock on `hud.lock`. Returns `None` when another
-/// HUD already holds the lock. The returned file must stay open for the
-/// process lifetime; the lock is released when the file drops or the process
-/// exits, so a crashed HUD never leaves a stale lock behind.
-/// Shared with the daemon, which uses the same lock to detect a missing HUD.
+/// Shared with the daemon's HUD-presence check. Keep the file alive while running.
 pub(crate) fn acquire_instance_lock() -> Result<Option<fs::File>> {
     acquire_lock_on(&crate::paths::hud_lock_path()?)
 }
 
-/// `acquire_instance_lock` against an explicit path (testable without the
-/// real runtime directory).
 fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
     let file = fs::OpenOptions::new()
         .create(true)
@@ -115,8 +98,7 @@ fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
         .write(true)
         .open(path)
         .with_context(|| format!("opening HUD lock {}", path.display()))?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(Some(file));
     }
     let error = std::io::Error::last_os_error();
@@ -126,159 +108,1051 @@ fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
     Err(error).with_context(|| format!("locking HUD instance file {}", path.display()))
 }
 
-/// Run the HUD until the compositor closes it or the display disconnects.
-///
-/// Display and daemon failures are deliberately non-fatal. The HUD is an
-/// optional client and must not affect the daemon's operation.
-///
-/// With `--screenshot <path>` the HUD renders one state (fixed 00:07 timer
-/// for recording, no daemon polling), dumps a settled frame to a PNG, and
-/// exits — the same visual-test hook the settings window has. `state`
-/// selects the composition; None means Recording.
-pub fn run(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Result<()> {
-    // Single instance: hold an exclusive flock for the process lifetime so
-    // the daemon can detect this HUD (and respawn one when it is missing).
-    // Screenshot mode is a test hook and deliberately skips the lock.
-    let _instance_lock = match screenshot {
-        Some(_) => None,
-        None => match acquire_instance_lock() {
-            Ok(Some(file)) => Some(file),
-            Ok(None) => {
-                tracing::info!("[HUD] another HUD instance is running; exiting");
-                return Ok(());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Recording,
+    Working,
+    Resolved,
+    Neutral,
+    Attention,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Caption {
+    title: String,
+    detail: String,
+    action: String,
+}
+
+impl Caption {
+    fn title(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Visibility {
+    Persistent,
+    Until(Instant),
+}
+
+impl Visibility {
+    fn alpha(self, now: Instant, reduced: bool) -> Option<f32> {
+        match self {
+            Self::Persistent => Some(1.0),
+            Self::Until(until) if now < until => Some(if reduced {
+                1.0
+            } else {
+                (until.duration_since(now).as_secs_f32() / RESULT_FADE.as_secs_f32()).min(1.0)
+            }),
+            Self::Until(_) => None,
+        }
+    }
+}
+
+struct ResultView {
+    event_id: Option<u64>,
+    kind: Kind,
+    caption: Caption,
+    visibility: Visibility,
+}
+
+/// Signal absence at the beginning is actionable; silence after real input is
+/// usually thinking. An amplitude meter cannot diagnose mute/device failure.
+#[derive(Default)]
+struct SignalHistory {
+    monitored: bool,
+    heard_input: bool,
+    warning: bool,
+    returning_since: Option<Instant>,
+    unavailable_since: Option<Instant>,
+}
+
+impl SignalHistory {
+    fn update(&mut self, signal: Option<AudioSignal>, age: Duration, now: Instant) {
+        match signal {
+            Some(signal) => {
+                self.monitored = true;
+                self.unavailable_since = None;
+                if signal.level > 0 {
+                    if self.warning {
+                        let since = self.returning_since.get_or_insert(now);
+                        if now.duration_since(*since) >= SIGNAL_RETURN {
+                            self.warning = false;
+                            self.heard_input = true;
+                        }
+                    } else {
+                        self.heard_input = true;
+                    }
+                } else {
+                    self.returning_since = None;
+                    if !self.heard_input && signal.silent && age >= SIGNAL_GRACE {
+                        self.warning = true;
+                    }
+                }
             }
-            Err(error) => {
-                tracing::warn!("[HUD] cannot take the instance lock: {error:#}");
-                return Ok(());
+            None => {
+                self.returning_since = None;
+                self.unavailable_since.get_or_insert(now);
             }
-        },
-    };
-
-    tracing::info!("[HUD] connecting to Wayland display");
-    let connection = match Connection::connect_to_env() {
-        Ok(connection) => connection,
-        Err(error) => {
-            tracing::warn!("[HUD] Wayland display unavailable: {error}");
-            return Ok(());
         }
-    };
+    }
+}
 
-    let (globals, mut event_queue) = match registry_queue_init(&connection) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!("[HUD] Wayland registry unavailable: {error}");
-            return Ok(());
-        }
-    };
-    let queue_handle = event_queue.handle();
+struct Model {
+    snapshot: Option<StatusSnapshot>,
+    operation: Option<String>,
+    phase_since: Instant,
+    caption_latched: bool,
+    signal: SignalHistory,
+    outcome_event: Option<u64>,
+    notice_event: Option<u64>,
+    result: Option<ResultView>,
+    interaction: Option<(String, Instant)>,
+    lost_since: Option<Instant>,
+    lost_active: bool,
+    kind: Option<Kind>,
+    caption: Caption,
+    caption_revision: u64,
+    progress: Option<(u32, u32)>,
+    waveform: Option<AudioWaveform>,
+    elapsed_label: String,
+    elapsed_value: Option<u64>,
+    reduced_motion: bool,
+    desktop_reduced_motion: bool,
+    track: TrackMotion,
+}
 
-    let compositor = match CompositorState::bind(&globals, &queue_handle) {
-        Ok(compositor) => compositor,
-        Err(error) => {
-            tracing::warn!("[HUD] wl_compositor unavailable: {error}");
-            return Ok(());
+impl Model {
+    fn new(now: Instant) -> Self {
+        Self {
+            snapshot: None,
+            operation: None,
+            phase_since: now,
+            caption_latched: false,
+            signal: SignalHistory::default(),
+            outcome_event: None,
+            notice_event: None,
+            result: None,
+            interaction: None,
+            lost_since: None,
+            lost_active: false,
+            kind: None,
+            caption: Caption::default(),
+            progress: None,
+            waveform: None,
+            elapsed_label: String::new(),
+            elapsed_value: None,
+            caption_revision: 0,
+            reduced_motion: false,
+            desktop_reduced_motion: false,
+            track: TrackMotion::new(now),
         }
-    };
-    let layer_shell = match LayerShell::bind(&globals, &queue_handle) {
-        Ok(layer_shell) => layer_shell,
-        Err(error) => {
-            tracing::warn!("[HUD] layer-shell unavailable: {error}");
-            return Ok(());
-        }
-    };
-    let shm = match Shm::bind(&globals, &queue_handle) {
-        Ok(shm) => shm,
-        Err(error) => {
-            tracing::warn!("[HUD] wl_shm unavailable: {error}");
-            return Ok(());
-        }
-    };
-
-    let surface = compositor.create_surface(&queue_handle);
-    let layer = layer_shell.create_layer_surface(
-        &queue_handle,
-        surface,
-        Layer::Overlay,
-        Some("cantrip-hud"),
-        None,
-    );
-    layer.set_anchor(Anchor::BOTTOM);
-    layer.set_margin(0, 0, 36, 0);
-    // wlroots rejects a zero width with only the BOTTOM anchor. A fixed width
-    // keeps the surface bottom-centered for the fixed-size capsule inside.
-    layer.set_size(FALLBACK_WIDTH, HUD_HEIGHT);
-    layer.set_exclusive_zone(0);
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-    // Never intercept pointer/touch: an empty input region (no rects added)
-    // lets clicks pass through the chip to whatever is underneath.
-    let empty_region = Region::new(&compositor).context("creating empty input region")?;
-    layer
-        .wl_surface()
-        .set_input_region(Some(empty_region.wl_region()));
-    layer.commit();
-    tracing::info!("[HUD] layer surface created (overlay, bottom-center)");
-
-    // Reserve two normal-sized buffers. SlotPool grows if a compositor keeps a
-    // buffer busy longer than one polling interval.
-    let pool_size = FALLBACK_WIDTH
-        .checked_mul(HUD_HEIGHT)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .and_then(|bytes| bytes.checked_mul(2))
-        .context("calculating HUD shared-memory pool size")? as usize;
-    let pool = match SlotPool::new(pool_size, &shm) {
-        Ok(pool) => pool,
-        Err(error) => {
-            tracing::warn!("[HUD] cannot create shared-memory pool: {error}");
-            return Ok(());
-        }
-    };
-
-    // Screenshot mode is the visual-test hook: it must render the same
-    // settled frame regardless of the host's animation setting, so it
-    // forces the animation-free path (frozen phase and progress —
-    // byte-identical output). Live mode honors the desktop preference.
-    let reduced_motion = screenshot.is_none() && prefers_reduced_motion();
-    let mut hud = HudState::new(
-        RegistryState::new(&globals),
-        OutputState::new(&globals, &queue_handle),
-        shm,
-        pool,
-        layer,
-        screenshot,
-        state,
-        reduced_motion,
-    )?;
-    if let Err(error) = event_queue.roundtrip(&mut hud) {
-        tracing::warn!("[HUD] display disconnected during setup: {error}");
-        return Ok(());
     }
 
-    let mut last_poll: Option<Instant> = None;
-    while !hud.exit {
-        let now = Instant::now();
-        if hud.screenshot.is_none()
-            && last_poll.is_none_or(|at| now.duration_since(at) >= POLL_INTERVAL)
+    fn active(&self) -> bool {
+        self.snapshot
+            .as_ref()
+            .is_some_and(|s| matches!(s.state, StateKind::Recording | StateKind::Processing))
+    }
+
+    fn apply(&mut self, status: StatusSnapshot, now: Instant) {
+        let first = self.snapshot.is_none();
+        let epoch_changed = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|old| old.epoch != status.epoch);
+        let active = matches!(status.state, StateKind::Recording | StateKind::Processing);
+        let was_active = self.active();
+        let phase_changed = self
+            .snapshot
+            .as_ref()
+            .is_none_or(|old| old.state != status.state);
+        let new_operation =
+            active && (epoch_changed || !was_active || self.operation != status.operation_id);
+        let was_disconnected = self.lost_since.take().is_some();
+        let lost_active = self.lost_active;
+        self.lost_active = false;
+        self.reduced_motion = status
+            .hud
+            .reduced_motion
+            .unwrap_or(self.desktop_reduced_motion);
+        if epoch_changed {
+            self.outcome_event = None;
+            self.notice_event = None;
+            self.result = None;
+            self.interaction = None;
+        }
+        if new_operation {
+            self.operation = status.operation_id.clone();
+            self.phase_since = now;
+            self.caption_latched = false;
+            self.signal = SignalHistory::default();
+            self.result = None;
+            self.interaction = None;
+            self.elapsed_value = None;
+            // A deliberate operation interrupts even an unfinished result fade.
+            self.track.reset(now);
+            self.kind = None;
+            self.waveform = None;
+            self.progress = None;
+        } else if phase_changed {
+            self.phase_since = now;
+        }
+        if active {
+            self.result = None;
+        }
+        if matches!(status.state, StateKind::Recording) {
+            let age = Duration::from_secs(status.elapsed).max(now.duration_since(self.phase_since));
+            self.signal.update(status.signal, age, now);
+            if self.elapsed_value != Some(status.elapsed) {
+                self.elapsed_value = Some(status.elapsed);
+                self.elapsed_label = format!("Recording · {}", format_elapsed(status.elapsed));
+            }
+        }
+        if let Some(outcome) = &status.outcome {
+            let fresh = self
+                .outcome_event
+                .is_none_or(|event| outcome.event_id > event);
+            let belongs = self.operation.is_none() || outcome.operation_id == self.operation;
+            if outcome.dismissed
+                && self
+                    .result
+                    .as_ref()
+                    .is_some_and(|r| r.event_id == Some(outcome.event_id))
+            {
+                self.result = None;
+            }
+            if fresh {
+                self.outcome_event = Some(outcome.event_id);
+                // Seed cached successes silently on attach/restart. Once idle,
+                // a fresh daemon event is authoritative even if its complete
+                // operation happened between polls; active work still wins.
+                let initial = first || epoch_changed;
+                if !active && !outcome.dismissed && (!initial || persistent(outcome)) {
+                    let mut result = present_outcome(outcome, &status, self.caption_latched, now);
+                    if !initial
+                        && belongs
+                        && outcome.completeness == Completeness::Empty
+                        && self.signal.warning
+                    {
+                        result.caption.title = "No input signal detected".to_owned();
+                        result.caption.detail = if outcome.artifacts.audio {
+                            "Audio saved. Check the microphone input."
+                        } else {
+                            "Check the microphone input."
+                        }
+                        .to_owned();
+                        if result.caption.action.is_empty() {
+                            result.caption.action = "Cantrip actions → Settings".to_owned();
+                        }
+                    }
+                    self.result = Some(result);
+                }
+            }
+            if !fresh
+                && persistent(outcome)
+                && self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|old| old.capabilities != status.capabilities)
+            {
+                if let Some(result) = &mut self.result {
+                    if result.event_id == Some(outcome.event_id) {
+                        result.caption.action =
+                            present_outcome(outcome, &status, self.caption_latched, now)
+                                .caption
+                                .action;
+                    }
+                }
+            }
+        }
+        if (was_disconnected && lost_active || epoch_changed && was_active)
+            && !active
+            && self.result.is_none()
         {
-            hud.poll_status();
-            last_poll = Some(now);
+            let title = if epoch_changed {
+                "Cantrip restarted"
+            } else {
+                "Connection restored"
+            };
+            let matching = status
+                .outcome
+                .as_ref()
+                .filter(|outcome| outcome.operation_id == self.operation);
+            self.result = Some(ResultView {
+                event_id: None,
+                kind: Kind::Neutral,
+                caption: Caption {
+                    title: title.to_owned(),
+                    detail: if matching
+                        .is_some_and(|outcome| outcome.artifacts.audio || outcome.artifacts.text)
+                    {
+                        "The previous take is available in saved recordings.".to_owned()
+                    } else {
+                        "The previous take's result is unknown.".to_owned()
+                    },
+                    action: "Cantrip → Recordings and recovery".to_owned(),
+                },
+                visibility: Visibility::Until(now + NOTICE_HOLD),
+            });
         }
-        if let Err(error) = hud.redraw_if_needed() {
-            tracing::warn!("[HUD] redraw failed: {error:#}");
+        if status.notice.is_none() {
+            self.interaction = None;
         }
-        // Read the Wayland socket with a bounded timeout. This services
-        // buffer releases and disconnects each pass.
-        let timeout = hud.tick_interval();
-        if let Err(error) = timed_dispatch(&mut event_queue, &mut hud, timeout) {
-            tracing::info!("[HUD] Wayland display disconnected; exiting ({error})");
-            break;
+        if let Some(notice) = &status.notice {
+            let fresh = self
+                .notice_event
+                .is_none_or(|event| notice.event_id > event);
+            if fresh {
+                self.notice_event = Some(notice.event_id);
+                if !first && !epoch_changed {
+                    self.interaction = Some((notice.message.clone(), now + INTERACTION_HOLD));
+                }
+            }
+        }
+        self.snapshot = Some(status);
+        self.refresh(now);
+    }
+
+    fn refresh_connection(&mut self, last_status: Instant, now: Instant) {
+        if self.lost_since.is_none()
+            && now.saturating_duration_since(last_status) >= STATUS_STALE_AFTER
+        {
+            self.disconnected(last_status + STATUS_STALE_AFTER);
+        }
+        self.refresh(now);
+    }
+
+    fn disconnected(&mut self, now: Instant) {
+        if self.lost_since.is_none() {
+            self.lost_since = Some(now);
+            self.lost_active = self.active();
+        }
+        self.refresh(now);
+    }
+
+    fn refresh(&mut self, now: Instant) {
+        if self
+            .interaction
+            .as_ref()
+            .is_some_and(|(_, until)| now >= *until)
+        {
+            self.interaction = None;
+        }
+        if self
+            .result
+            .as_ref()
+            .is_some_and(|r| r.visibility.alpha(now, self.reduced_motion).is_none())
+        {
+            self.result = None;
+        }
+        if let Some(since) = self.lost_since {
+            if self.lost_active && now.duration_since(since) >= DISCONNECT_DELAY {
+                self.set_composition(
+                    Some(Kind::Attention),
+                    Caption {
+                        title: "Cantrip connection lost".to_owned(),
+                        detail: "Recording and saved-audio status unknown.".to_owned(),
+                        action: "Cantrip actions → Check setup".to_owned(),
+                    },
+                    None,
+                    None,
+                    now,
+                );
+            }
+            // Coalesce short outages without erasing evidence or continuing
+            // a supposedly live waveform from stale data.
+            if self.lost_active {
+                return;
+            }
+        }
+        let Some(status) = &self.snapshot else {
+            return;
+        };
+        let phase_age = now
+            .duration_since(self.phase_since)
+            .max(Duration::from_secs(status.elapsed));
+        match &status.state {
+            StateKind::Recording => {
+                let (kind, caption) = if status.signal.is_none() {
+                    let unavailable = self.signal.monitored || phase_age >= MONITOR_DELAY;
+                    let waiting = self
+                        .signal
+                        .unavailable_since
+                        .map(|since| now.duration_since(since))
+                        .unwrap_or(phase_age);
+                    let visible =
+                        status.hud.labels || waiting >= LABEL_DELAY || self.caption_latched;
+                    (
+                        Kind::Working,
+                        if visible {
+                            Caption {
+                                title: if unavailable {
+                                    "Input status unavailable"
+                                } else {
+                                    "Starting microphone…"
+                                }
+                                .to_owned(),
+                                detail: if unavailable {
+                                    "Capture is not confirmed by the input monitor."
+                                } else {
+                                    ""
+                                }
+                                .to_owned(),
+                                action: if unavailable {
+                                    "Cantrip actions → Settings"
+                                } else {
+                                    ""
+                                }
+                                .to_owned(),
+                            }
+                        } else {
+                            Caption::default()
+                        },
+                    )
+                } else if self.signal.warning {
+                    (
+                        Kind::Attention,
+                        Caption {
+                            title: "No input signal".to_owned(),
+                            detail: "Check the microphone input.".to_owned(),
+                            action: String::new(),
+                        },
+                    )
+                } else {
+                    let visible = status.hud.labels
+                        || status.elapsed >= LONG_RECORDING
+                        || self.caption_latched;
+                    (
+                        Kind::Recording,
+                        if visible {
+                            Caption::title(&self.elapsed_label)
+                        } else {
+                            Caption::default()
+                        },
+                    )
+                };
+                self.caption_latched |= !caption.title.is_empty();
+                self.set_composition(
+                    Some(kind),
+                    caption,
+                    None,
+                    status.signal.map(|s| s.waveform),
+                    now,
+                );
+            }
+            StateKind::Processing => {
+                self.caption_latched |= status.hud.labels || phase_age >= LABEL_DELAY;
+                let stage = status.stage.as_ref();
+                let progress = stage.and_then(Stage::measured_progress);
+                let caption = if self.caption_latched || matches!(stage, Some(Stage::Cancelling)) {
+                    Caption::title(match stage {
+                        Some(Stage::FinalizingAudio) => Cow::Borrowed("Finishing recording…"),
+                        Some(Stage::RemovingRecording) => Cow::Borrowed("Removing saved audio…"),
+                        Some(Stage::CleaningUp) => Cow::Borrowed("Finishing text…"),
+                        Some(Stage::Delivering) => Cow::Borrowed("Delivering text…"),
+                        Some(Stage::Cancelling) => {
+                            Cow::Borrowed("Cancelling… Waiting for current work.")
+                        }
+                        Some(Stage::Transcribing { .. }) => {
+                            let verb =
+                                if status.operation_kind == Some(ipc::OperationKind::Recovery) {
+                                    "Recovering recording"
+                                } else {
+                                    "Transcribing"
+                                };
+                            match progress {
+                                Some((completed, total)) => {
+                                    Cow::Owned(format!("{verb} · {completed} of {total} complete"))
+                                }
+                                None => Cow::Owned(format!("{verb}…")),
+                            }
+                        }
+                        _ => Cow::Borrowed("Working…"),
+                    })
+                } else {
+                    Caption::default()
+                };
+                self.set_composition(Some(Kind::Working), caption, progress, None, now);
+            }
+            StateKind::Idle => {
+                if let Some(result) = &self.result {
+                    self.set_composition(
+                        Some(result.kind),
+                        result.caption.clone(),
+                        None,
+                        None,
+                        now,
+                    );
+                } else if self.interaction.is_some() {
+                    self.set_composition(Some(Kind::Neutral), Caption::default(), None, None, now);
+                } else {
+                    self.set_composition(None, Caption::default(), None, None, now);
+                }
+            }
+            StateKind::Unknown(_) => {
+                self.set_composition(
+                    Some(Kind::Attention),
+                    Caption {
+                        title: "Cantrip status unavailable".to_owned(),
+                        detail: "Recording and delivery status unknown.".to_owned(),
+                        action: "Cantrip actions → Check setup".to_owned(),
+                    },
+                    None,
+                    None,
+                    now,
+                );
+            }
         }
     }
 
-    tracing::info!("[HUD] stopped");
+    fn set_composition(
+        &mut self,
+        kind: Option<Kind>,
+        caption: Caption,
+        progress: Option<(u32, u32)>,
+        waveform: Option<AudioWaveform>,
+        now: Instant,
+    ) {
+        let changed = kind != self.kind;
+        if self.caption != caption {
+            self.caption_revision = self.caption_revision.wrapping_add(1);
+        }
+        if changed || waveform != self.waveform {
+            let heights = match kind {
+                Some(Kind::Recording) => recording_heights(waveform),
+                Some(Kind::Working) => [6.0; CELLS],
+                Some(Kind::Resolved) => [2.0; CELLS],
+                _ => [3.0; CELLS],
+            };
+            self.track.target(
+                heights,
+                now,
+                if changed { SETTLE } else { WAVEFORM_EASE },
+                changed,
+                self.reduced_motion,
+            );
+        }
+        self.kind = kind;
+        self.caption = caption;
+        self.progress = progress;
+        self.waveform = waveform;
+    }
+
+    fn alpha(&self, now: Instant) -> f32 {
+        if self.active() || self.lost_since.is_some() {
+            return 1.0;
+        }
+        self.result
+            .as_ref()
+            .and_then(|r| r.visibility.alpha(now, self.reduced_motion))
+            .unwrap_or(1.0)
+    }
+
+    fn animate(&self, now: Instant) -> bool {
+        !self.reduced_motion
+            && self.kind.is_some()
+            && ((self.lost_since.is_none() || self.kind == Some(Kind::Attention))
+                && self.track.moving(now)
+                || self.lost_since.is_none()
+                    && (self.kind == Some(Kind::Working) && self.progress.is_none()
+                        || self
+                            .result
+                            .as_ref()
+                            .is_some_and(|r| matches!(r.visibility, Visibility::Until(_)))))
+    }
+}
+
+fn persistent(outcome: &TerminalOutcome) -> bool {
+    !matches!(
+        outcome.completeness,
+        Completeness::Cancelled | Completeness::Empty
+    ) && (matches!(
+        outcome.completeness,
+        Completeness::Failed | Completeness::Partial
+    ) || matches!(
+        outcome.delivery,
+        Delivery::Failed | Delivery::Uncertain | Delivery::Deferred
+    ))
+}
+
+fn present_outcome(
+    outcome: &TerminalOutcome,
+    status: &StatusSnapshot,
+    caption_latched: bool,
+    now: Instant,
+) -> ResultView {
+    let attention = persistent(outcome);
+    let delivered = matches!(outcome.delivery, Delivery::Typed | Delivery::Pasted);
+    let copied = outcome.delivery == Delivery::Copied;
+    let mut caption = Caption::default();
+    let mut kind = if attention {
+        Kind::Attention
+    } else {
+        Kind::Neutral
+    };
+    match outcome.completeness {
+        Completeness::Cancelled => {
+            caption.title = "Cancelled".to_owned();
+            if outcome.artifacts.audio {
+                caption.detail = "Audio saved.".to_owned();
+            }
+        }
+        Completeness::Empty => {
+            caption.title = if outcome.artifacts.audio {
+                "No transcript produced. Audio saved."
+            } else {
+                "No speech found"
+            }
+            .to_owned()
+        }
+        Completeness::Partial => {
+            caption.title = if copied {
+                "Partial text copied."
+            } else if outcome.artifacts.text {
+                "Partial transcript saved."
+            } else {
+                "Partial transcription"
+            }
+            .to_owned()
+        }
+        Completeness::Failed => caption.title = outcome.message.clone(),
+        Completeness::Complete => match outcome.delivery {
+            Delivery::Uncertain => caption.title = "Delivery uncertain. Check the app.".to_owned(),
+            Delivery::Deferred => {
+                caption.title = "Delivery paused. Text was not inserted.".to_owned()
+            }
+            Delivery::Failed => caption.title = "Delivery failed.".to_owned(),
+            Delivery::Cancelled => caption.title = "Cancelled".to_owned(),
+            Delivery::Copied => {
+                kind = Kind::Resolved;
+                caption.title = outcome.message.clone();
+            }
+            Delivery::Typed | Delivery::Pasted => {
+                kind = Kind::Resolved;
+                if status.hud.labels || caption_latched {
+                    caption.title = "Sent".to_owned();
+                }
+            }
+            Delivery::None => caption.title = outcome.message.clone(),
+        },
+    }
+    if outcome.cleanup == Cleanup::Failed && (delivered || copied) {
+        caption.title = if copied {
+            "Original text copied. Cleanup unavailable."
+        } else {
+            "Original text sent. Cleanup unavailable."
+        }
+        .to_owned();
+    }
+    if matches!(
+        outcome.completeness,
+        Completeness::Partial | Completeness::Failed
+    ) || matches!(
+        outcome.delivery,
+        Delivery::Failed | Delivery::Uncertain | Delivery::Deferred
+    ) {
+        caption.detail = match (outcome.artifacts.audio, outcome.artifacts.text) {
+            (true, true) => "Audio and text saved.",
+            (true, false) => "Audio saved.",
+            (false, true) => "Text saved. No saved audio is available.",
+            (false, false) => "No saved audio or text is available.",
+        }
+        .to_owned();
+    }
+    // Actions are descriptions of the deliberately opened menu, not fake controls.
+    // Require the matching artifact and capability; never retarget a changing last take.
+    let named = outcome.artifacts.take_id.is_some();
+    let audio = named && outcome.artifacts.audio;
+    let text = named && outcome.artifacts.text;
+    if !delivered && !(copied && outcome.completeness == Completeness::Complete) {
+        caption.action =
+            if text && status.capabilities.copy && outcome.completeness == Completeness::Complete {
+                "Cantrip actions → Copy this transcript"
+            } else if audio && status.capabilities.recover && status.capabilities.local_model {
+                "Cantrip actions → Recover locally to clipboard"
+            } else if audio && status.capabilities.recover && status.capabilities.remote_configured
+            {
+                "Cantrip actions → Recover with configured provider to clipboard"
+            } else if audio && !status.capabilities.local_model {
+                "Cantrip actions → Install local model"
+            } else if text && status.capabilities.copy {
+                "Cantrip actions → Copy this transcript"
+            } else if attention {
+                "Cantrip actions → Check setup"
+            } else {
+                ""
+            }
+            .to_owned();
+    }
+    if attention && status.capabilities.dismiss {
+        if !caption.action.is_empty() {
+            caption.action.push('\n');
+        }
+        caption
+            .action
+            .push_str("Dismiss outcome keeps saved recordings.");
+    }
+    let dwell = if kind == Kind::Resolved && delivered && outcome.cleanup != Cleanup::Failed {
+        SUCCESS_HOLD + RESULT_FADE
+    } else {
+        NOTICE_HOLD
+    };
+    ResultView {
+        event_id: Some(outcome.event_id),
+        kind,
+        caption,
+        visibility: if attention {
+            Visibility::Persistent
+        } else {
+            Visibility::Until(now + dwell)
+        },
+    }
+}
+
+struct TrackMotion {
+    from: [f32; CELLS],
+    to: [f32; CELLS],
+    presented: [f32; CELLS],
+    since: Instant,
+    duration: Duration,
+}
+
+impl TrackMotion {
+    fn new(now: Instant) -> Self {
+        Self {
+            from: [3.0; CELLS],
+            to: [3.0; CELLS],
+            presented: [3.0; CELLS],
+            since: now,
+            duration: Duration::ZERO,
+        }
+    }
+
+    fn reset(&mut self, now: Instant) {
+        *self = Self::new(now);
+    }
+
+    fn target(
+        &mut self,
+        to: [f32; CELLS],
+        now: Instant,
+        duration: Duration,
+        state_change: bool,
+        reduced: bool,
+    ) {
+        // State changes start from the actual last attached frame, not a
+        // regenerated waveform, and never clear its measured shape first.
+        self.from = if state_change {
+            self.presented
+        } else {
+            self.frame(now)
+        };
+        self.to = to;
+        self.since = now;
+        self.duration = if reduced { Duration::ZERO } else { duration };
+    }
+
+    fn frame(&self, now: Instant) -> [f32; CELLS] {
+        let t = if self.duration.is_zero() {
+            1.0
+        } else {
+            (now.saturating_duration_since(self.since).as_secs_f32() / self.duration.as_secs_f32())
+                .min(1.0)
+        };
+        let eased = 1.0 - (1.0 - t).powi(3);
+        std::array::from_fn(|index| self.from[index] + (self.to[index] - self.from[index]) * eased)
+    }
+
+    fn moving(&self, now: Instant) -> bool {
+        self.from != self.to && now.duration_since(self.since) < self.duration
+    }
+}
+
+fn recording_heights(waveform: Option<AudioWaveform>) -> [f32; CELLS] {
+    let peaks = waveform
+        .unwrap_or([[0; 2]; AUDIO_WAVEFORM_BINS])
+        .map(|bin| f32::from(bin[0].unsigned_abs().max(bin[1].unsigned_abs())) / 100.0);
+    std::array::from_fn(|index| {
+        let position = index as f32 * (AUDIO_WAVEFORM_BINS - 1) as f32 / (CELLS - 1) as f32;
+        let left = (position.floor() as usize).min(AUDIO_WAVEFORM_BINS - 2);
+        let energy = peaks[left] + (peaks[left + 1] - peaks[left]) * (position - left as f32);
+        3.0 + 23.0 * energy.clamp(0.0, 1.0)
+    })
+}
+
+fn completed_cells(progress: (u32, u32)) -> usize {
+    let (completed, total) = progress;
+    if total <= 1 || completed > total {
+        return 0;
+    }
+    (u64::from(completed) * CELLS as u64 / u64::from(total)) as usize
+}
+
+fn format_elapsed(seconds: u64) -> String {
+    format!("{:02}:{:02}", seconds / 60, seconds % 60)
+}
+
+struct PollUpdate {
+    status: std::result::Result<StatusSnapshot, ()>,
+    palette: Palette,
+    reduced_motion: Option<bool>,
+}
+
+struct Poller {
+    receiver: mpsc::Receiver<PollUpdate>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Poller {
+    fn start() -> Result<Self> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        thread::Builder::new()
+            .name("cantrip-hud-status".to_owned())
+            .spawn(move || {
+                let mut palette = theme::load();
+                let mut reduced_motion = desktop_reduced_motion();
+                let mut preference_at = Instant::now();
+                while !stopped.load(Ordering::Relaxed) {
+                    let started = Instant::now();
+                    if started.duration_since(preference_at) >= PREFERENCE_INTERVAL {
+                        palette = theme::load();
+                        reduced_motion = desktop_reduced_motion();
+                        preference_at = Instant::now();
+                    }
+                    let update = PollUpdate {
+                        status: ipc::status().map_err(|_| ()),
+                        palette,
+                        reduced_motion,
+                    };
+                    match sender.try_send(update) {
+                        Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                        Err(mpsc::TrySendError::Disconnected(_)) => break,
+                    }
+                    // A blocked IPC request or desktop preference provider never
+                    // stalls Wayland dispatch or waveform settling.
+                    thread::sleep(POLL_INTERVAL.saturating_sub(started.elapsed()));
+                }
+            })
+            .context("starting HUD status reader")?;
+        Ok(Self { receiver, stop })
+    }
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Query the preference belonging to the running desktop, not an unrelated
+/// installed settings service. Unknown desktops can use the explicit config.
+fn desktop_reduced_motion() -> Option<bool> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if desktop.split(':').any(|name| name == "hyprland") {
+        let output = preference_output("hyprctl", &["-j", "getoption", "animations:enabled"])?;
+        let value: serde_json::Value = serde_json::from_str(&output).ok()?;
+        value
+            .get("bool")
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                value
+                    .get("int")
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|value| value != 0)
+            })
+            .map(|enabled| !enabled)
+    } else if desktop.split(':').any(|name| name == "gnome") {
+        match preference_output(
+            "gsettings",
+            &["get", "org.gnome.desktop.interface", "enable-animations"],
+        )?
+        .trim()
+        {
+            "false" => Some(true),
+            "true" => Some(false),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+fn preference_output(program: &str, args: &[&str]) -> Option<String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let success = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.success(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break false;
+            }
+        }
+    };
+    if !success {
+        return None;
+    }
+    let mut text = String::new();
+    child
+        .stdout
+        .take()?
+        .take(4096)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
+}
+
+/// Run the native layer-shell HUD. Screenshot mode skips IPC and the instance
+/// lock and renders a composed scenario, including deliberately aged transitions.
+pub fn run(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Result<()> {
+    let visual_proof = screenshot.is_some();
+    let result = run_native(screenshot, state);
+    if visual_proof {
+        return result;
+    }
+    if let Err(error) = result {
+        tracing::warn!("[HUD] unavailable: {error:#}");
+    }
     Ok(())
 }
 
-/// Flush, then wait up to `timeout` for Wayland events and dispatch them.
+fn run_native(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Result<()> {
+    let _lock = if screenshot.is_some() {
+        None
+    } else {
+        match acquire_instance_lock()? {
+            Some(file) => Some(file),
+            None => return Ok(()),
+        }
+    };
+    let connection = Connection::connect_to_env().context("connecting HUD to Wayland")?;
+    let (globals, mut queue) =
+        registry_queue_init(&connection).context("reading Wayland globals")?;
+    let qh = queue.handle();
+    let compositor = CompositorState::bind(&globals, &qh).context("binding HUD compositor")?;
+    let layer_shell = LayerShell::bind(&globals, &qh).context("binding HUD layer shell")?;
+    let shm = Shm::bind(&globals, &qh).context("binding HUD shared memory")?;
+    let pool = SlotPool::new((SURFACE_WIDTH * SURFACE_HEIGHT * 8) as usize, &shm)
+        .context("allocating HUD buffer pool")?;
+    let now = Instant::now();
+    let model = if screenshot.is_some() {
+        screenshot_model(state.unwrap_or(ScreenshotState::Recording), now)
+    } else {
+        Model::new(now)
+    };
+    let mut hud = HudState {
+        registry_state: RegistryState::new(&globals),
+        output_state: OutputState::new(&globals, &qh),
+        compositor,
+        layer_shell,
+        shm,
+        pool,
+        layer: None,
+        layer_output: None,
+        configured: false,
+        visible: false,
+        width: SURFACE_WIDTH,
+        height: SURFACE_HEIGHT,
+        requested_size: (SURFACE_WIDTH, SURFACE_HEIGHT),
+        buffer_scale: 1,
+        caption_floor: 0,
+        font: FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR)
+            .context("loading HUD typeface")?,
+        palette: theme::load(),
+        model,
+        last_render: None,
+        last_refresh: now,
+        last_status: now,
+        screenshot,
+        screenshot_state: state,
+        screenshot_at: now,
+        screenshot_done: false,
+        surface_lifecycle: SurfaceLifecycle::WaitingForOutput,
+    };
+    hud.create_layer(&qh)?;
+    queue
+        .roundtrip(&mut hud)
+        .context("configuring HUD surface")?;
+    let poller = if hud.screenshot.is_none() {
+        Some(Poller::start()?)
+    } else {
+        None
+    };
+    loop {
+        let now = Instant::now();
+        if let Some(poller) = &poller {
+            while let Ok(update) = poller.receiver.try_recv() {
+                hud.palette = update.palette;
+                if let Some(reduced) = update.reduced_motion {
+                    hud.model.desktop_reduced_motion = reduced;
+                }
+                match update.status {
+                    Ok(status) => {
+                        let reset_layout =
+                            matches!(status.state, StateKind::Recording | StateKind::Processing)
+                                && (!hud.model.active()
+                                    || hud.model.operation != status.operation_id
+                                    || hud
+                                        .model
+                                        .snapshot
+                                        .as_ref()
+                                        .is_some_and(|old| old.epoch != status.epoch));
+                        hud.model.apply(status, now);
+                        if reset_layout {
+                            hud.caption_floor = 0;
+                        }
+                    }
+                    Err(()) => hud.model.disconnected(now),
+                }
+                hud.last_refresh = now;
+                hud.last_status = now;
+            }
+            if now.duration_since(hud.last_refresh) >= POLL_INTERVAL {
+                hud.model.refresh_connection(hud.last_status, now);
+                hud.last_refresh = now;
+            }
+        }
+        if hud.layer.is_none()
+            && hud.surface_lifecycle.can_create()
+            && hud.output_state.outputs().next().is_some()
+        {
+            hud.create_layer(&qh)?;
+        }
+        hud.redraw(now)?;
+        if hud.screenshot_done {
+            return Ok(());
+        }
+        if hud.screenshot.is_some()
+            && now.duration_since(hud.screenshot_at) > Duration::from_secs(5)
+        {
+            anyhow::bail!("compositor did not configure the HUD screenshot surface");
+        }
+        let interval = if hud.model.animate(now) {
+            FRAME_INTERVAL
+        } else {
+            POLL_INTERVAL
+        };
+        timed_dispatch(&mut queue, &mut hud, interval)?;
+    }
+}
+
 fn timed_dispatch(
     queue: &mut EventQueue<HudState>,
     data: &mut HudState,
@@ -295,939 +1169,388 @@ fn timed_dispatch(
         revents: 0,
     };
     let ready = unsafe { libc::poll(&mut pollfd, 1, timeout.as_millis() as i32) };
-    if ready < 0 {
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            tracing::warn!("[HUD] polling Wayland socket failed: {error}");
-        }
-        queue.dispatch_pending(data)?;
-        return Ok(());
+    if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+        return Err(std::io::Error::last_os_error()).context("polling HUD Wayland socket");
     }
     if ready > 0 && pollfd.revents & libc::POLLIN != 0 {
-        if let Err(error) = guard.read() {
-            // A spurious wake or EAGAIN must not kill the HUD; a real
-            // disconnect surfaces on the next flush().
-            tracing::debug!("[HUD] Wayland read skipped: {error}");
-        }
+        guard.read().context("reading HUD Wayland events")?;
+    } else {
+        drop(guard);
     }
     queue.dispatch_pending(data)?;
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum ResultVisibility {
-    Hidden,
-    FlashUntil(Instant),
-    Persistent,
-}
-
-fn result_fade(visibility: ResultVisibility, now: Instant) -> Option<f32> {
-    match visibility {
-        ResultVisibility::Hidden => None,
-        ResultVisibility::Persistent => Some(1.0),
-        ResultVisibility::FlashUntil(until) if now < until => Some(ease_out_cubic(
-            until.duration_since(now).as_secs_f32() / FLASH_FADE_TAIL,
-        )),
-        ResultVisibility::FlashUntil(_) => None,
-    }
-}
-
 struct HudState {
     registry_state: RegistryState,
     output_state: OutputState,
+    compositor: CompositorState,
+    layer_shell: LayerShell,
     shm: Shm,
     pool: SlotPool,
-    layer: LayerSurface,
-    state: UiState,
-    previous_state: Option<UiStateKind>,
-    /// Last terminal payload observed from the daemon. It is sticky in the
-    /// status stream, so only a changed payload should retrigger the flash.
-    last_outcome: Option<TerminalOutcome>,
-    outcome_seen: bool,
-    /// Failures remain visible until an operation replaces them; other results expire.
-    result_visibility: ResultVisibility,
-    /// Operator-facing reason shown while a notice flash is live.
-    flash_text: Option<String>,
-    /// True when the flash reports a delivered dictation.
-    flash_ok: bool,
-    started_at: Instant,
-    /// Chip kind currently on screen; None while hidden.
-    shown_kind: Option<ChipKind>,
-    /// Start of the eased transition begun by the latest visual change.
-    transition_at: Instant,
-    /// Kind faded from during the current transition; None means pop-in.
-    transition_from: Option<ChipKind>,
-    /// Current eased 0..=1 fill for multi-chunk transcription.
-    meter_display: f32,
-    /// Value at the start of the active meter ease.
-    meter_from: f32,
-    /// Target fraction for the active meter ease (`chunk/total`).
-    meter_to: f32,
-    /// When the active meter ease began.
-    meter_ease_at: Instant,
-    /// True after the first multi-chunk fraction this run; drives the
-    /// complete-to-full hold through Cleaning.
-    meter_armed: bool,
-    /// Keep showing a full bar until this instant after the ease lands on 1.0.
-    meter_hold_until: Option<Instant>,
-    /// Measured envelope at the start and end of the current short visual ease.
-    waveform_from: [[f32; 2]; AUDIO_WAVEFORM_BINS],
-    waveform_to: [[f32; 2]; AUDIO_WAVEFORM_BINS],
-    waveform_ease_at: Instant,
-    /// Desktop animations disabled (gsettings enable-animations=false):
-    /// freezes the scanner phase and skips entry motion.
-    reduced_motion: bool,
-    /// Output scale used for the wl_shm buffer and every device-space draw.
-    buffer_scale: u32,
-    last_render: Option<RenderKey>,
+    layer: Option<LayerSurface>,
+    layer_output: Option<wl_output::WlOutput>,
     configured: bool,
+    visible: bool,
     width: u32,
     height: u32,
-    notice_font: FontRef<'static>,
-    visible: bool,
-    daemon_available: bool,
-    exit: bool,
+    requested_size: (u32, u32),
+    buffer_scale: u32,
+    caption_floor: u32,
+    font: FontRef<'static>,
+    palette: Palette,
+    model: Model,
+    last_render: Option<RenderKey>,
+    last_refresh: Instant,
+    last_status: Instant,
     screenshot: Option<PathBuf>,
-    /// State to render in screenshot mode; None selects Recording.
     screenshot_state: Option<ScreenshotState>,
+    screenshot_at: Instant,
     screenshot_done: bool,
+    surface_lifecycle: SurfaceLifecycle,
+}
+
+/// A compositor close is an instruction, not proof that an output vanished.
+/// Only an actual output event can authorize another surface after closure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfaceLifecycle {
+    WaitingForOutput,
+    Open,
+    Closed,
+}
+
+impl SurfaceLifecycle {
+    fn can_create(self) -> bool {
+        self == Self::WaitingForOutput
+    }
+    fn opened(&mut self) {
+        *self = Self::Open;
+    }
+    fn closed(&mut self) {
+        *self = Self::Closed;
+    }
+    fn output_changed(&mut self) {
+        *self = Self::WaitingForOutput;
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct RenderKey {
+    kind: Option<Kind>,
+    caption_revision: u64,
+    interaction_event: Option<u64>,
+    heights: [u16; CELLS],
+    fill: Option<usize>,
+    breath: u8,
+    alpha: u8,
+    size: (u32, u32, u32),
+    palette: Palette,
 }
 
 impl HudState {
-    fn clear_meter(&mut self) {
-        self.meter_display = 0.0;
-        self.meter_from = 0.0;
-        self.meter_to = 0.0;
-        self.meter_armed = false;
-        self.meter_hold_until = None;
-    }
-    fn clear_waveform(&mut self, now: Instant) {
-        self.waveform_from = [[0.0; 2]; AUDIO_WAVEFORM_BINS];
-        self.waveform_to = [[0.0; 2]; AUDIO_WAVEFORM_BINS];
-        self.waveform_ease_at = now;
-    }
-
-    fn waveform_frame(&self, now: Instant) -> AudioWaveform {
-        let t = if self.reduced_motion || self.screenshot.is_some() {
-            1.0
-        } else {
-            (now.duration_since(self.waveform_ease_at).as_secs_f32() / WAVEFORM_EASE.as_secs_f32())
-                .clamp(0.0, 1.0)
-        };
-        interpolate_waveform(self.waveform_from, self.waveform_to, ease_in_out_cubic(t))
-    }
-
-    fn set_waveform_target(&mut self, target: AudioWaveform, now: Instant) {
-        let target = target.map(|bin| bin.map(f32::from));
-        if self.waveform_to == target {
-            return;
-        }
-        self.waveform_from = self.waveform_frame(now).map(|bin| bin.map(f32::from));
-        self.waveform_to = target;
-        self.waveform_ease_at = now;
-    }
-
-    fn waveform_moving(&self, now: Instant) -> bool {
-        !self.reduced_motion
-            && self.screenshot.is_none()
-            && self.waveform_from != self.waveform_to
-            && now.duration_since(self.waveform_ease_at) < WAVEFORM_EASE
-    }
-
-    #[allow(clippy::too_many_arguments)] // construction plumbing (registry, pool, surface)
-    fn new(
-        registry_state: RegistryState,
-        output_state: OutputState,
-        shm: Shm,
-        pool: SlotPool,
-        layer: LayerSurface,
-        screenshot: Option<PathBuf>,
-        screenshot_state: Option<ScreenshotState>,
-        reduced_motion: bool,
-    ) -> Result<Self> {
-        // Screenshot mode skips daemon polling so the frame is stable and
-        // offline; `view` renders the requested state deterministically.
-        let state = if screenshot.is_some() {
-            UiState::Recording {
-                elapsed: 7,
-                audio_waveform: Some(SCREENSHOT_WAVEFORM),
-                audio_silent: false,
-            }
-        } else {
-            UiState::Idle
-        };
-        Ok(Self {
-            registry_state,
-            output_state,
-            shm,
-            pool,
-            layer,
-            state,
-            previous_state: None,
-            last_outcome: None,
-            outcome_seen: false,
-            result_visibility: ResultVisibility::Hidden,
-            flash_text: None,
-            flash_ok: false,
-            started_at: Instant::now(),
-            shown_kind: None,
-            transition_at: Instant::now(),
-            transition_from: None,
-            meter_display: 0.0,
-            meter_from: 0.0,
-            meter_to: 0.0,
-            meter_ease_at: Instant::now(),
-            meter_armed: false,
-            meter_hold_until: None,
-            waveform_from: [[0.0; 2]; AUDIO_WAVEFORM_BINS],
-            waveform_to: [[0.0; 2]; AUDIO_WAVEFORM_BINS],
-            waveform_ease_at: Instant::now(),
-            reduced_motion,
-            buffer_scale: 1,
-            last_render: None,
-            configured: false,
-            width: FALLBACK_WIDTH,
-            height: HUD_HEIGHT,
-            notice_font: FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR)
-                .context("loading bundled HUD notice font")?,
-            visible: false,
-            daemon_available: false,
-            exit: false,
-            screenshot,
-            screenshot_state,
-            screenshot_done: false,
-        })
-    }
-    /// Logical surface size for one frame: the configured size, clamped.
-    fn frame_size(&self) -> (u32, u32) {
-        (
-            self.width.clamp(FALLBACK_WIDTH.min(200), MAX_WIDTH),
-            self.height.max(HUD_HEIGHT),
-        )
-    }
-
-    /// Device-pixel buffer size advertised through wl_shm.
-    fn buffer_size(&self) -> Result<(u32, u32)> {
-        let (width, height) = self.frame_size();
-        let width = width
-            .checked_mul(self.buffer_scale)
-            .context("calculating HUD buffer width")?;
-        let height = height
-            .checked_mul(self.buffer_scale)
-            .context("calculating HUD buffer height")?;
-        Ok((width, height))
-    }
-
-    fn poll_status(&mut self) {
-        match ipc::status() {
-            Ok(status) => {
-                if !self.daemon_available {
-                    tracing::info!("[HUD] daemon status stream available");
-                    self.daemon_available = true;
-                }
-                self.apply_status(&status, Instant::now());
-            }
-            Err(error) => {
-                if self.daemon_available {
-                    tracing::warn!("[HUD] daemon status unavailable: {error:#}");
-                    self.daemon_available = false;
-                }
-                // A dead daemon must not leave a live Recording chip on
-                // screen; collapse to idle and hide.
-                self.force_idle();
-            }
-        }
-    }
-
-    fn force_idle(&mut self) {
-        self.state = UiState::Idle;
-        self.result_visibility = ResultVisibility::Hidden;
-        self.outcome_seen = false;
-        self.flash_text = None;
-        self.flash_ok = false;
-        self.previous_state = Some(UiStateKind::Idle);
-        self.shown_kind = None;
-        self.clear_meter();
-        self.clear_waveform(Instant::now());
-        self.hide_surface(" (daemon unavailable)");
-    }
-
-    /// Frame pacing: animate while the chip is on screen, otherwise idle at
-    /// the status poll cadence.
-    fn tick_interval(&self) -> Duration {
-        if !self.visible {
-            return POLL_INTERVAL;
-        }
-        let now = Instant::now();
-        let recording = matches!(self.state, UiState::Recording { .. });
-        let processing = matches!(self.state, UiState::Processing { .. });
-        let outcome = matches!(self.state, UiState::Idle)
-            && matches!(self.result_visibility, ResultVisibility::FlashUntil(_));
-        let meter_moving = (self.meter_armed && (self.meter_display - self.meter_to).abs() > 0.002)
-            || self.meter_hold_until.is_some_and(|until| now < until);
-        if recording || processing || outcome || meter_moving || self.waveform_moving(now) {
-            METER_FRAME_INTERVAL
-        } else if matches!(self.result_visibility, ResultVisibility::Persistent)
-            && now.duration_since(self.transition_at) >= TRANSITION
-        {
-            POLL_INTERVAL
-        } else {
-            FRAME_INTERVAL
-        }
-    }
-
-    /// Hide the chip by painting a fully transparent frame.
-    ///
-    /// The surface deliberately stays mapped. Unmapping it (a null buffer)
-    /// requires repeating the configure handshake before another buffer may be
-    /// attached, and COSMIC never sends that second configure: the compositor
-    /// either kills the client or the chip never returns. A transparent frame
-    /// is invisible, keeps the empty input region passing clicks through, and
-    /// costs one buffer per hide.
-    fn hide_surface(&mut self, reason: &str) {
-        if !self.visible {
-            return;
-        }
-        if let Err(error) = self.blank() {
-            tracing::warn!("[HUD] hiding the chip failed: {error:#}");
-            return;
-        }
+    fn create_layer(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+        let surface = self.compositor.create_surface(qh);
+        let layer = self.layer_shell.create_layer_surface(
+            qh,
+            surface,
+            Layer::Overlay,
+            Some("cantrip-hud"),
+            None,
+        );
+        layer.set_anchor(Anchor::BOTTOM);
+        layer.set_margin(0, 0, 36, 0);
+        layer.set_size(self.requested_size.0, self.requested_size.1);
+        layer.set_exclusive_zone(0);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let empty = Region::new(&self.compositor).context("creating HUD pass-through region")?;
+        layer.set_input_region(Some(empty.wl_region()));
+        layer.commit();
+        self.layer = Some(layer);
+        self.surface_lifecycle.opened();
+        self.layer_output = None;
+        self.buffer_scale = 1;
+        self.configured = false;
         self.visible = false;
         self.last_render = None;
-        tracing::info!("[HUD] surface hidden{reason}");
-    }
-
-    fn blank(&mut self) -> Result<()> {
-        let (width, height) = self.buffer_size()?;
-        let stride = width
-            .checked_mul(4)
-            .context("calculating HUD buffer stride")? as i32;
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(
-                width as i32,
-                height as i32,
-                stride,
-                wl_shm::Format::Argb8888,
-            )
-            .context("creating HUD buffer")?;
-        canvas.fill(0);
-        self.layer
-            .wl_surface()
-            .damage_buffer(0, 0, width as i32, height as i32);
-        buffer
-            .attach_to(self.layer.wl_surface())
-            .context("attaching HUD buffer")?;
-        self.layer.commit();
         Ok(())
     }
 
-    fn apply_status(&mut self, status: &StatusSnapshot, now: Instant) {
-        if let StatusSnapshot::Recording {
-            signal: Some(signal),
-            ..
-        } = status
-        {
-            self.set_waveform_target(signal.waveform, now);
-        } else if !matches!(status, StatusSnapshot::Recording { .. }) {
-            self.clear_waveform(now);
-        }
-
-        let outcome = status.outcome();
-        let persistent = outcome.is_some_and(|outcome| !outcome.ok && outcome.error.is_some());
-        let initial_failure = !self.outcome_seen && persistent;
-        // The daemon keeps the terminal payload in every later status reply.
-        // Seed the edge tracker silently, then flash only on a newly changed
-        // payload; in particular this catches idle → idle rejection outcomes.
-        let payload_changed = self.outcome_seen && self.last_outcome.as_ref() != outcome;
-        let outcome_changed = payload_changed && outcome.is_some();
-        if !self.outcome_seen || payload_changed {
-            self.last_outcome = outcome.cloned();
-        }
-        self.outcome_seen = true;
-
-        let next_state = UiState::from_status(status);
-        let next_kind = next_state.kind();
-        let returned_to_idle = self
-            .previous_state
-            .is_some_and(|state| state != UiStateKind::Idle)
-            && matches!(next_state, UiState::Idle);
-        if self.previous_state != Some(next_kind) {
-            match &next_state {
-                UiState::Idle => tracing::info!("[HUD] state=idle"),
-                UiState::Recording {
-                    elapsed,
-                    audio_silent,
-                    ..
-                } => {
-                    tracing::info!(
-                        "[HUD] state=recording elapsed={elapsed}s audio_silent={audio_silent}"
-                    )
-                }
-                UiState::Processing { stage } => {
-                    tracing::info!("[HUD] state=processing stage={stage}")
-                }
-            }
-            self.previous_state = Some(next_kind);
-        }
-
-        if returned_to_idle || outcome_changed || initial_failure {
-            self.result_visibility = if persistent {
-                ResultVisibility::Persistent
-            } else {
-                ResultVisibility::FlashUntil(now + RESULT_FLASH)
-            };
-            // Keep the daemon terminal message for logs/status; the chip
-            // flash uses a short label (Success / notice text).
-            self.flash_text = status.outcome().map(|outcome| outcome.message.clone());
-            self.flash_ok = status.outcome().is_some_and(|outcome| outcome.ok);
-            let chip = if self.flash_ok {
-                "Success"
-            } else {
-                self.flash_text.as_deref().unwrap_or("Notice")
-            };
-            tracing::info!(
-                "[HUD] state=idle result flash ok={} chip=\"{}\" detail_chars={}",
-                self.flash_ok,
-                chip,
-                self.flash_text
-                    .as_deref()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0)
-            );
-        }
-        self.state = next_state;
-        if !matches!(self.state, UiState::Idle)
-            || result_fade(self.result_visibility, now).is_none()
-        {
-            self.result_visibility = ResultVisibility::Hidden;
-        }
+    fn current_surface(&self, surface: &wl_surface::WlSurface) -> bool {
+        self.layer
+            .as_ref()
+            .is_some_and(|layer| layer.wl_surface() == surface)
     }
 
-    fn redraw_if_needed(&mut self) -> Result<()> {
+    fn available_width(&self) -> u32 {
+        self.layer_output
+            .as_ref()
+            .and_then(|output| self.output_state.info(output))
+            .and_then(|info| info.logical_size)
+            .map(|(width, _)| width.max(1) as u32)
+            .unwrap_or(SURFACE_WIDTH)
+            .min(SURFACE_WIDTH)
+    }
+
+    fn redraw(&mut self, now: Instant) -> Result<()> {
         if !self.configured {
             return Ok(());
         }
-        let now = Instant::now();
-        let view = self.view(now);
-
-        let key = view
+        let Some(layer) = &self.layer else {
+            return Ok(());
+        };
+        let model_now = if self.screenshot.is_some() {
+            self.screenshot_at
+        } else {
+            now
+        };
+        let shown = self.model.kind.is_some();
+        let logical_width = self.available_width().max(80);
+        let container_width = CONTAINER_WIDTH.min(self.width.min(logical_width) as f32 - 12.0);
+        let text_width = (container_width - 32.0).max(16.0);
+        let interaction = self
+            .model
+            .interaction
             .as_ref()
-            .map(|view| RenderKey::from_view(view, self.width, self.height, self.buffer_scale));
-        if key == self.last_render && view.is_some() == self.visible {
+            .map(|(text, _)| text.as_str());
+        let primary_height = caption_height(&self.font, &self.model.caption, None, text_width);
+        let feedback_height = if interaction.is_some() {
+            caption_height(&self.font, &self.model.caption, interaction, text_width)
+                .saturating_sub(primary_height)
+        } else {
+            0
+        };
+        if self.model.active() && !self.model.caption.title.is_empty() {
+            self.caption_floor = self.caption_floor.max(primary_height);
+        } else if !shown {
+            self.caption_floor = 0;
+        }
+        let target_height =
+            SURFACE_HEIGHT + primary_height.max(self.caption_floor) + feedback_height;
+        let desired = (logical_width, target_height);
+        if self.requested_size != desired {
+            self.requested_size = desired;
+            layer.set_size(desired.0, desired.1);
+            layer.commit();
+            self.configured = false;
+            // No old-size frame can become the final screenshot.
             return Ok(());
         }
-
-        match view {
-            Some(view) => {
-                let was_visible = self.visible;
-                if self.draw(&view)? {
-                    self.visible = true;
-                    self.last_render = key;
-                    if !was_visible {
-                        tracing::info!("[HUD] surface shown");
-                    }
-                } else {
-                    self.last_render = None;
-                }
-            }
-            None => self.hide_surface(""),
-        }
-        Ok(())
-    }
-
-    fn view(&mut self, now: Instant) -> Option<ChipView> {
-        // Screenshot hook: render exactly the requested state, settled
-        // (progress 1.0, phase 0.0) and with no time-window flash fade, so
-        // every run captures the same byte-identical frame.
-        if let Some(state) = self.screenshot_state {
-            let content = match state {
-                ScreenshotState::Recording => (
-                    "Listening…".to_owned(),
-                    Some(format_elapsed(7)),
-                    ChipKind::Recording,
-                    Some(SCREENSHOT_WAVEFORM),
-                ),
-                ScreenshotState::NoSignal => (
-                    "No mic signal".to_owned(),
-                    Some(format_elapsed(7)),
-                    ChipKind::NoSignal,
-                    Some([[0, 0]; AUDIO_WAVEFORM_BINS]),
-                ),
-                ScreenshotState::Transcribing => (
-                    "Transcribing…".to_owned(),
-                    None,
-                    ChipKind::Transcribing,
-                    None,
-                ),
-                ScreenshotState::Cleaning => {
-                    ("Cleaning…".to_owned(), None, ChipKind::Cleaning, None)
-                }
-                ScreenshotState::Sent => ("Success".to_owned(), None, ChipKind::Sent, None),
-                ScreenshotState::Notice => {
-                    ("Heard nothing".to_owned(), None, ChipKind::Notice, None)
-                }
-            };
-            self.shown_kind = Some(content.2);
-            return Some(ChipView {
-                label: content.0,
-                detail: content.1,
-                kind: content.2,
-                from: None,
-                progress: 1.0,
-                fade: 1.0,
-                phase: 0.0,
-                meter: None,
-                waveform: content.3,
-            });
-        }
-        let waveform_frame = self.waveform_frame(now);
-        let content = match &self.state {
-            UiState::Idle => result_fade(self.result_visibility, now).map(|fade| {
-                // Delivered dictations flash a short word; notices keep
-                // the operator-facing reason (Heard nothing, Cancelled).
-                let label = if self.flash_ok {
-                    "Success".to_owned()
-                } else {
-                    self.flash_text
-                        .clone()
-                        .unwrap_or_else(|| "Notice".to_owned())
-                };
-                let kind = if self.flash_ok {
-                    ChipKind::Sent
-                } else {
-                    ChipKind::Notice
-                };
-                (label, None, kind, fade, None, None)
-            }),
-            UiState::Recording {
-                elapsed,
-                audio_waveform,
-                audio_silent,
-            } => Some((
-                if *audio_silent {
-                    "No mic signal".to_owned()
-                } else {
-                    "Listening…".to_owned()
-                },
-                Some(format_elapsed(*elapsed)),
-                if *audio_silent {
-                    ChipKind::NoSignal
-                } else {
-                    ChipKind::Recording
-                },
-                1.0,
-                None,
-                audio_waveform.map(|_| waveform_frame),
-            )),
-            UiState::Processing { stage } => {
-                let keep_meter = self.meter_armed
-                    || self.meter_display > 0.001
-                    || self.meter_hold_until.is_some_and(|until| now < until);
-                let (label, kind, meter) = processing_chip_content(stage, keep_meter);
-                Some((label, None, kind, 1.0, meter, None))
-            }
+        let freeze_signal =
+            self.model.lost_since.is_some() && self.model.kind != Some(Kind::Attention);
+        let heights = if freeze_signal || self.screenshot_state == Some(ScreenshotState::Settling) {
+            self.model.track.presented
+        } else if self.model.reduced_motion {
+            self.model.track.to
+        } else {
+            self.model.track.frame(model_now)
         };
-        let Some((label, detail, kind, fade, meter_target, waveform)) = content else {
-            self.shown_kind = None;
-            self.clear_meter();
-            return None;
+        let breath = if self.model.kind == Some(Kind::Working)
+            && self.model.progress.is_none()
+            && !self.model.reduced_motion
+            && self.model.lost_since.is_none()
+            && self.screenshot.is_none()
+        {
+            let phase = model_now
+                .duration_since(self.model.phase_since)
+                .as_secs_f32()
+                % 1.8;
+            0.35 + 0.3 * (1.0 - (phase * std::f32::consts::TAU / 1.8).cos()) / 2.0
+        } else {
+            0.5
         };
-
-        if self.shown_kind != Some(kind) {
-            self.transition_from = self.shown_kind;
-            self.transition_at = now;
-            let entering_transcribing = matches!(kind, ChipKind::Transcribing)
-                && !matches!(self.shown_kind, Some(ChipKind::Transcribing));
-            self.shown_kind = Some(kind);
-            // Only reset when a new transcription run begins. Leaving
-            // Transcribing → Cleaning must keep the fill and complete to 1.0.
-            if entering_transcribing {
-                self.meter_display = 0.0;
-                self.meter_from = 0.0;
-                self.meter_to = 0.0;
-                self.meter_ease_at = now;
-                self.meter_armed = false;
-                self.meter_hold_until = None;
-            }
-        }
-        let meter = match meter_target {
-            Some(target) if self.reduced_motion || self.screenshot.is_some() => {
-                let target = target.clamp(0.0, 1.0);
-                self.meter_display = target;
-                self.meter_from = target;
-                self.meter_to = target;
-                if target > 0.0 {
-                    self.meter_armed = true;
-                }
-                Some(target)
-            }
-            Some(target) => {
-                let target = target.clamp(0.0, 1.0);
-                if target > 0.0 {
-                    self.meter_armed = true;
-                }
-                // New target: timed ease from the current display value.
-                // First multi-chunk frame starts from empty (reset above).
-                if (target - self.meter_to).abs() > 0.0005 {
-                    self.meter_from = self.meter_display;
-                    self.meter_to = target;
-                    self.meter_ease_at = now;
-                }
-                let t = (now.duration_since(self.meter_ease_at).as_secs_f32()
-                    / METER_EASE.as_secs_f32())
-                .clamp(0.0, 1.0);
-                let eased =
-                    self.meter_from + (self.meter_to - self.meter_from) * ease_in_out_cubic(t);
-                self.meter_display = eased.clamp(0.0, 1.0);
-                // After we land on full, hold briefly so Cleaning does not
-                // look empty if postproc is instant.
-                if self.meter_to >= 0.999 && t >= 1.0 && self.meter_hold_until.is_none() {
-                    self.meter_hold_until = Some(now + METER_COMPLETE_HOLD);
-                }
-                Some(self.meter_display)
-            }
-            None => {
-                // Outcome flash / non-metered: drop only after any complete hold.
-                if self.meter_hold_until.is_some_and(|until| now < until) {
-                    self.meter_display = 1.0;
-                    Some(1.0)
-                } else {
-                    self.clear_meter();
-                    None
-                }
-            }
-        };
-        let eased = ease_out_cubic(
-            now.duration_since(self.transition_at).as_secs_f32() / TRANSITION.as_secs_f32(),
-        );
-        // Reduced motion and screenshot mode swap states instantly: the
-        // former disables entry animations, the latter ensures the first
-        // redraw captures the settled frame (no quantization race).
-        let progress = if self.reduced_motion || self.screenshot.is_some() {
+        let alpha = if self.screenshot.is_some() {
             1.0
         } else {
-            eased
+            self.model.alpha(now)
         };
-        // A 60s window keeps f32 phase math precise over long uptimes; the
-        // scanner periods divide it, so motion never jumps. Reduced motion
-        // and screenshot mode freeze the phase: the former renders a static
-        // chip (and stops rerasterizing every frame), the latter captures
-        // byte-identical frames independent of scheduling.
-        let phase = if self.reduced_motion || self.screenshot.is_some() {
-            0.0
-        } else {
-            (now.duration_since(self.started_at).as_secs_f64() % 60.0) as f32
+        let key = RenderKey {
+            kind: self.model.kind,
+            caption_revision: self.model.caption_revision,
+            interaction_event: self.model.interaction.as_ref().and(self.model.notice_event),
+            heights: heights.map(|height| (height * 16.0).round() as u16),
+            fill: self.model.progress.map(completed_cells),
+            breath: (breath * 255.0).round() as u8,
+            alpha: (alpha * 255.0).round() as u8,
+            size: (self.width, self.height, self.buffer_scale),
+            palette: self.palette,
         };
-        Some(ChipView {
-            label,
-            detail,
-            kind,
-            from: self.transition_from,
-            progress,
-            fade,
-            phase,
-            meter,
-            waveform,
-        })
-    }
-
-    fn draw(&mut self, view: &ChipView) -> Result<bool> {
-        let notice = view.kind == ChipKind::Notice;
-        let target_height = if notice { NOTICE_HEIGHT } else { HUD_HEIGHT };
-        if self.height != target_height {
-            self.layer.set_size(FALLBACK_WIDTH, target_height);
-            self.layer.commit();
-            return Ok(false);
+        if self.last_render.as_ref() == Some(&key)
+            && shown == self.visible
+            && self.screenshot.is_none()
+        {
+            return Ok(());
         }
-        let (width, height) = self.buffer_size()?;
-        let (logical_width, _) = self.frame_size();
-        let output_scale = self.buffer_scale as f32;
-        let stride = width
-            .checked_mul(4)
-            .context("calculating HUD buffer stride")? as i32;
-        let (buffer, canvas) = self
+        let width = self
+            .width
+            .checked_mul(self.buffer_scale)
+            .context("HUD buffer width overflow")?;
+        let height = self
+            .height
+            .checked_mul(self.buffer_scale)
+            .context("HUD buffer height overflow")?;
+        let stride = width.checked_mul(4).context("HUD buffer stride overflow")?;
+        let (buffer, bytes) = self
             .pool
             .create_buffer(
                 width as i32,
                 height as i32,
-                stride,
+                stride as i32,
                 wl_shm::Format::Argb8888,
             )
-            .context("creating HUD buffer")?;
-        canvas.fill(0);
-
-        // Motion inputs: pop-in scale/alpha from hidden, content crossfade
-        // between kinds, and the flash fade-out tail.
-        let appear = if view.from.is_none() {
-            view.progress
-        } else {
-            1.0
-        };
-        let swap = if view.from.is_some() {
-            0.35 + 0.65 * view.progress
-        } else {
-            1.0
-        };
-        let visibility = appear * view.fade;
-        let scale_factor = if view.from.is_none() {
-            0.94 + 0.06 * appear
-        } else {
-            1.0
-        };
-
-        let container_width = if notice {
-            logical_width as f32 - 8.0
-        } else {
-            CONTAINER_WIDTH.min(logical_width as f32 - 8.0)
-        } * output_scale;
-        let container_height = if notice {
-            NOTICE_HEIGHT as f32 - 12.0
-        } else {
-            CONTAINER_HEIGHT
-        } * output_scale;
-        let center_x = width as f32 / 2.0;
-        let center_y = height as f32 / 2.0;
-        let half_width = (container_width / 2.0) * scale_factor;
-        let half_height = (container_height / 2.0) * scale_factor;
-        let content_alpha = visibility * swap;
-
-        // 1. Background container: sharp rectangular box ("Omarchy Aesthetic", 100% opaque floor + 1px border)
-        rect_container(
-            canvas,
-            width,
-            height,
-            center_x,
-            center_y,
-            half_width,
-            half_height,
-            view.kind,
-            output_scale * scale_factor,
-            visibility,
-        );
-
-        if notice {
-            draw_notice(
-                canvas,
+            .context("creating HUD frame")?;
+        bytes.fill(0);
+        if let Some(kind) = self.model.kind {
+            let mut canvas = Canvas {
+                bytes: &mut *bytes,
                 width,
                 height,
-                &self.notice_font,
-                &view.label,
-                output_scale * scale_factor,
-                content_alpha,
-            );
-        } else {
-            let progress_param = match view.kind {
-                ChipKind::Transcribing => view.meter,
-                _ => None,
+                scale: self.buffer_scale as f32,
+                alpha: 1.0,
             };
-            knight_track(
-                canvas,
-                width,
-                height,
-                center_x,
-                center_y,
-                half_width,
-                half_height,
-                output_scale * scale_factor,
-                view.kind,
-                view.from,
-                view.progress,
-                view.phase,
-                view.waveform,
-                progress_param,
-                content_alpha,
+            let left = (self.width as f32 - container_width) / 2.0;
+            let top = 6.0;
+            let body_height = self.height as f32 - 12.0;
+            canvas.rect(
+                left,
+                top,
+                container_width,
+                body_height,
+                self.palette.border,
+                1.0,
             );
+            canvas.rect(
+                left + 1.0,
+                top + 1.0,
+                container_width - 2.0,
+                body_height - 2.0,
+                self.palette.surface,
+                1.0,
+            );
+            if kind == Kind::Attention {
+                canvas.rect(left, top, 2.0, body_height, self.palette.attention, 1.0);
+            }
+            let rgb = match kind {
+                Kind::Recording | Kind::Working => self.palette.accent,
+                Kind::Attention => self.palette.attention,
+                Kind::Resolved | Kind::Neutral => self.palette.foreground,
+            };
+            let track_width = TRACK_WIDTH.min(container_width - 32.0);
+            let slot_width = track_width / CELLS as f32;
+            let track_left = (self.width as f32 - track_width) / 2.0;
+            for (index, cell_height) in heights.iter().enumerate() {
+                let opacity = match kind {
+                    Kind::Recording => 0.3 + 0.7 * ((*cell_height - 3.0) / 23.0).clamp(0.0, 1.0),
+                    Kind::Working => match key.fill {
+                        Some(filled) => {
+                            if index < filled {
+                                1.0
+                            } else {
+                                0.2
+                            }
+                        }
+                        None => {
+                            if (9..=11).contains(&index) {
+                                breath
+                            } else {
+                                0.3
+                            }
+                        }
+                    },
+                    Kind::Resolved => 1.0,
+                    Kind::Attention => 0.55,
+                    Kind::Neutral => 0.35,
+                };
+                canvas.rect(
+                    track_left + index as f32 * slot_width + 1.0,
+                    top + TRACK_HEIGHT / 2.0 - cell_height / 2.0,
+                    (slot_width - 2.0).max(0.5),
+                    *cell_height,
+                    rgb,
+                    opacity,
+                );
+            }
+            let mut y = top + TRACK_HEIGHT;
+            y += canvas.text(
+                &self.font,
+                &self.model.caption.title,
+                left + 16.0,
+                y,
+                text_width,
+                12.0,
+                3,
+                self.palette.foreground,
+            );
+            if !self.model.caption.detail.is_empty() {
+                y += 3.0;
+                y += canvas.text(
+                    &self.font,
+                    &self.model.caption.detail,
+                    left + 16.0,
+                    y,
+                    text_width,
+                    11.0,
+                    3,
+                    self.palette.foreground,
+                );
+            }
+            if !self.model.caption.action.is_empty() {
+                y += 7.0;
+                y += canvas.text(
+                    &self.font,
+                    &self.model.caption.action,
+                    left + 16.0,
+                    y,
+                    text_width,
+                    10.0,
+                    4,
+                    if kind == Kind::Attention {
+                        self.palette.attention
+                    } else {
+                        self.palette.foreground
+                    },
+                );
+            }
+            if let Some(interaction) = interaction {
+                y += 7.0;
+                canvas.rect(left + 16.0, y, text_width, 1.0, self.palette.border, 1.0);
+                y += 6.0;
+                canvas.text(
+                    &self.font,
+                    interaction,
+                    left + 16.0,
+                    y,
+                    text_width,
+                    11.0,
+                    2,
+                    self.palette.foreground,
+                );
+            }
         }
-
-        self.layer
+        // Fade the composed premultiplied frame once, not each overlapping
+        // primitive; the resting surface is always fully opaque.
+        if alpha < 1.0 {
+            for byte in bytes.iter_mut() {
+                *byte = (f32::from(*byte) * alpha).round() as u8;
+            }
+        }
+        let _ = layer.set_buffer_scale(self.buffer_scale);
+        layer
             .wl_surface()
             .damage_buffer(0, 0, width as i32, height as i32);
         buffer
-            .attach_to(self.layer.wl_surface())
-            .context("attaching HUD buffer")?;
-        self.layer.commit();
-
-        // Screenshot mode: once the pill has finished its pop-in, dump the
-        // frame and exit. The buffer is premultiplied ARGB; convert to
-        // straight RGBA so the PNG shows the intended colors.
-        //
-        // Capture at 0.99, not 1.0: the render key quantizes progress to a
-        // byte, so the draw at progress == 1.0 is skipped as a duplicate of
-        // the 0.9987 frame (rounds to the same key) — waiting for it would
-        // hang the hook. The 0.99+ frame is visually settled.
-        if !self.screenshot_done && view.progress >= 0.99 {
-            let path = match &self.screenshot {
-                Some(path) => path.clone(),
-                None => return Ok(true),
-            };
+            .attach_to(layer.wl_surface())
+            .context("attaching HUD frame")?;
+        layer.commit();
+        self.model.track.presented = heights;
+        self.visible = shown;
+        self.last_render = Some(key);
+        // Keep a transparent mapped frame while idle: remapping requires a
+        // second configure handshake some compositors do not send.
+        if let Some(path) = &self.screenshot {
+            save_screenshot(path, bytes, width, height)?;
             self.screenshot_done = true;
-            let mut rgba = Vec::with_capacity(canvas.len());
-            for pixel in canvas.as_chunks::<4>().0 {
-                let (b, g, r, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
-                if a == 0 {
-                    rgba.extend_from_slice(&[0, 0, 0, 0]);
-                } else {
-                    let scale = 255.0 / a as f32;
-                    let un = |channel: u8| ((channel as f32 * scale).round() as u16).min(255) as u8;
-                    rgba.extend_from_slice(&[un(r), un(g), un(b), a]);
-                }
-            }
-            match image::save_buffer(&path, &rgba, width, height, image::ColorType::Rgba8)
-                .with_context(|| format!("writing {}", path.display()))
-            {
-                Ok(()) => {
-                    eprintln!("saved HUD screenshot to {}", path.display());
-                    std::process::exit(0);
-                }
-                Err(error) => {
-                    eprintln!("HUD screenshot save failed: {error:#}");
-                    std::process::exit(1);
-                }
-            }
         }
-        Ok(true)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum UiState {
-    Idle,
-    Recording {
-        elapsed: u64,
-        audio_waveform: Option<AudioWaveform>,
-        audio_silent: bool,
-    },
-    Processing {
-        stage: Stage,
-    },
-}
-
-impl UiState {
-    fn from_status(status: &StatusSnapshot) -> Self {
-        match status {
-            StatusSnapshot::Recording {
-                elapsed, signal, ..
-            } => Self::Recording {
-                elapsed: *elapsed,
-                audio_waveform: signal.map(|signal| signal.waveform),
-                audio_silent: signal.is_some_and(|signal| signal.silent),
-            },
-            StatusSnapshot::Processing { stage, .. } => Self::Processing {
-                stage: stage.clone(),
-            },
-            StatusSnapshot::Idle { .. } | StatusSnapshot::Unknown { .. } => Self::Idle,
-        }
-    }
-
-    fn kind(&self) -> UiStateKind {
-        match self {
-            Self::Idle => UiStateKind::Idle,
-            Self::Recording {
-                audio_silent: true, ..
-            } => UiStateKind::NoSignal,
-            Self::Recording { .. } => UiStateKind::Recording,
-            Self::Processing {
-                stage: Stage::CleaningUp,
-            } => UiStateKind::Cleaning,
-            Self::Processing { .. } => UiStateKind::Transcribing,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UiStateKind {
-    Idle,
-    Recording,
-    NoSignal,
-    Transcribing,
-    Cleaning,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ChipKind {
-    Sent,
-    Notice,
-    Recording,
-    NoSignal,
-    Transcribing,
-    Cleaning,
-}
-
-/// A state to render deterministically with `--screenshot` (the visual-test
-/// hook), for verifying every composition offline. Defaults to Recording
-/// when the hook runs without `--state`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum ScreenshotState {
-    Recording,
-    NoSignal,
-    Transcribing,
-    Cleaning,
-    Sent,
-    Notice,
-}
-
-/// One frame of chip content plus the motion inputs which style it.
-#[derive(Clone, Debug)]
-struct ChipView {
-    label: String,
-    detail: Option<String>,
-    kind: ChipKind,
-    /// Kind the transition fades from; None means pop-in from hidden.
-    from: Option<ChipKind>,
-    /// Eased 0..=1 progress of the current transition.
-    progress: f32,
-    /// Global fade multiplier for the result-flash tail.
-    fade: f32,
-    /// Wrapped seconds driving scanner sweep and perimeter-trace motion.
-    phase: f32,
-    /// Determinate capsule fill 0..=1 from multi-chunk STT; None = no meter.
-    meter: Option<f32>,
-    /// Measured chronological min/max PCM envelope for the latest window.
-    waveform: Option<AudioWaveform>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RenderKey {
-    label: String,
-    detail: Option<String>,
-    kind: ChipKind,
-    progress: u8,
-    fade: u8,
-    phase: u16,
-    meter: u8,
-    waveform: AudioWaveform,
-    width: u32,
-    height: u32,
-    buffer_scale: u32,
-}
-
-impl RenderKey {
-    fn from_view(view: &ChipView, width: u32, height: u32, buffer_scale: u32) -> Self {
-        let animated = matches!(
-            view.kind,
-            ChipKind::Transcribing | ChipKind::Cleaning | ChipKind::Recording | ChipKind::Sent
-        );
-        Self {
-            label: view.label.clone(),
-            detail: view.detail.clone(),
-            kind: view.kind,
-            progress: (view.progress * 255.0).round() as u8,
-            fade: (view.fade * 255.0).round() as u8,
-            phase: if animated {
-                (view.phase * 30.0).round() as u16
-            } else {
-                0
-            },
-            meter: view
-                .meter
-                .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
-                .unwrap_or(0),
-            waveform: view.waveform.unwrap_or([[0, 0]; AUDIO_WAVEFORM_BINS]),
-            width,
-            height,
-            buffer_scale,
-        }
+        Ok(())
     }
 }
 
@@ -1236,21 +1559,15 @@ impl CompositorHandler for HudState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        new_factor: i32,
+        surface: &wl_surface::WlSurface,
+        factor: i32,
     ) {
-        let next_scale = new_factor.max(1) as u32;
-        if next_scale != self.buffer_scale {
-            if self.layer.set_buffer_scale(next_scale).is_ok() {
-                self.buffer_scale = next_scale;
-            } else {
-                tracing::warn!(
-                    "[HUD] compositor rejected output buffer scale {}; falling back to 1x",
-                    next_scale
-                );
-                self.buffer_scale = 1;
-            }
+        if !self.current_surface(surface) {
+            return;
         }
+        let scale = factor.max(1) as u32;
+        use wayland_client::Proxy;
+        self.buffer_scale = if surface.version() >= 3 { scale } else { 1 };
         self.last_render = None;
     }
 
@@ -1258,10 +1575,12 @@ impl CompositorHandler for HudState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_transform: wl_output::Transform,
+        surface: &wl_surface::WlSurface,
+        _transform: wl_output::Transform,
     ) {
-        self.last_render = None;
+        if self.current_surface(surface) {
+            self.last_render = None;
+        }
     }
 
     fn frame(
@@ -1271,16 +1590,19 @@ impl CompositorHandler for HudState {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        // Animation is timed by the bounded event-loop timeout in run().
     }
 
     fn surface_enter(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
+        surface: &wl_surface::WlSurface,
+        output: &wl_output::WlOutput,
     ) {
+        if self.current_surface(surface) {
+            self.layer_output = Some(output.clone());
+            self.last_render = None;
+        }
     }
 
     fn surface_leave(
@@ -1290,59 +1612,89 @@ impl CompositorHandler for HudState {
         _surface: &wl_surface::WlSurface,
         _output: &wl_output::WlOutput,
     ) {
+        // Keep the last output identity until it is destroyed or a new enter
+        // arrives; wl_surface.leave often precedes output_destroyed.
     }
 }
 
 impl LayerShellHandler for HudState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.exit = true;
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        if self.current_surface(layer.wl_surface()) {
+            self.layer = None;
+            self.configured = false;
+            self.last_render = None;
+            self.visible = false;
+            self.surface_lifecycle.closed();
+        }
     }
 
     fn configure(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        if configure.new_size.0 > 0 {
-            self.width = configure.new_size.0;
+        if !self.current_surface(layer.wl_surface()) {
+            return;
         }
-        if configure.new_size.1 > 0 {
-            self.height = configure.new_size.1;
-        }
+        self.width = if configure.new_size.0 > 0 {
+            configure.new_size.0
+        } else {
+            self.requested_size.0
+        };
+        self.height = if configure.new_size.1 > 0 {
+            configure.new_size.1
+        } else {
+            self.requested_size.1
+        };
         self.configured = true;
         self.last_render = None;
     }
 }
+
 impl OutputHandler for HudState {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
-
     fn new_output(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
+        if self.layer.is_none() {
+            self.surface_lifecycle.output_changed();
+        }
     }
-
     fn update_output(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        if self.layer_output.as_ref() == Some(&output) {
+            self.last_render = None;
+            if self.layer.is_none() {
+                self.surface_lifecycle.output_changed();
+            }
+        }
     }
-
     fn output_destroyed(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        if self.layer_output.as_ref() == Some(&output) || self.layer.is_none() {
+            self.layer = None;
+            self.layer_output = None;
+            self.configured = false;
+            self.last_render = None;
+            self.visible = false;
+            self.surface_lifecycle.output_changed();
+        }
     }
 }
 
@@ -1351,22 +1703,116 @@ impl ShmHandler for HudState {
         &mut self.shm
     }
 }
-
 delegate_registry!(HudState);
-
 impl ProvidesRegistryState for HudState {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
     }
-
     smithay_client_toolkit::registry_handlers![OutputState];
 }
-
 smithay_client_toolkit::delegate_dispatch2!(HudState);
 
-/// Wrap borrowed UTF-8 slices at word boundaries, splitting overlong words
-/// only when necessary. Notice layout needs no heap-allocated line strings.
-fn notice_line(text: &str, max_chars: usize) -> (&str, &str) {
+struct Canvas<'a> {
+    bytes: &'a mut [u8],
+    width: u32,
+    height: u32,
+    scale: f32,
+    alpha: f32,
+}
+
+impl Canvas<'_> {
+    fn pixel(&mut self, x: u32, y: u32, rgb: [u8; 3], coverage: f32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let index = ((y * self.width + x) * 4) as usize;
+        let alpha = coverage.clamp(0.0, 1.0) * self.alpha;
+        for (channel, value) in rgb.into_iter().rev().enumerate() {
+            self.bytes[index + channel] = (f32::from(value) * alpha
+                + f32::from(self.bytes[index + channel]) * (1.0 - alpha))
+                .round() as u8;
+        }
+        self.bytes[index + 3] =
+            (255.0 * alpha + f32::from(self.bytes[index + 3]) * (1.0 - alpha)).round() as u8;
+    }
+
+    fn rect(&mut self, x: f32, y: f32, width: f32, height: f32, rgb: [u8; 3], alpha: f32) {
+        let (left, top, right, bottom) = (
+            x * self.scale,
+            y * self.scale,
+            (x + width) * self.scale,
+            (y + height) * self.scale,
+        );
+        for py in top.floor().max(0.0) as u32..bottom.ceil().min(self.height as f32) as u32 {
+            let vertical = (bottom.min(py as f32 + 1.0) - top.max(py as f32)).clamp(0.0, 1.0);
+            for px in left.floor().max(0.0) as u32..right.ceil().min(self.width as f32) as u32 {
+                let horizontal = (right.min(px as f32 + 1.0) - left.max(px as f32)).clamp(0.0, 1.0);
+                self.pixel(px, py, rgb, horizontal * vertical * alpha);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // Raster text geometry and font are explicit.
+    fn text(
+        &mut self,
+        font: &FontRef<'_>,
+        text: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        size: f32,
+        max_lines: usize,
+        rgb: [u8; 3],
+    ) -> f32 {
+        let max_chars = line_capacity(font, width, size);
+        let font_size = size * self.scale;
+        let scaled = font.as_scaled(font_size);
+        let advance = scaled.h_advance(font.glyph_id('M'));
+        let mut remaining = text.trim();
+        let mut rows = 0;
+        for row in 0..max_lines {
+            if remaining.is_empty() {
+                break;
+            }
+            let (line, rest) = wrap_line(remaining, max_chars);
+            remaining = rest;
+            let truncated = row + 1 == max_lines && !remaining.is_empty();
+            let limit = if truncated {
+                max_chars.saturating_sub(1)
+            } else {
+                max_chars
+            };
+            let mut cursor = x * self.scale;
+            let baseline = (y + row as f32 * (size + 5.0)) * self.scale + scaled.ascent();
+            for character in line.chars().take(limit).chain(truncated.then_some('…')) {
+                let glyph = font
+                    .glyph_id(character)
+                    .with_scale_and_position(font_size, point(cursor, baseline));
+                if let Some(outlined) = font.outline_glyph(glyph) {
+                    let bounds = outlined.px_bounds();
+                    outlined.draw(|gx, gy, coverage| {
+                        let px = bounds.min.x as i32 + gx as i32;
+                        let py = bounds.min.y as i32 + gy as i32;
+                        if px >= 0 && py >= 0 {
+                            self.pixel(px as u32, py as u32, rgb, coverage);
+                        }
+                    });
+                }
+                cursor += advance;
+            }
+            rows += 1;
+        }
+        rows as f32 * (size + 5.0)
+    }
+}
+
+fn line_capacity(font: &FontRef<'_>, width: f32, size: f32) -> usize {
+    (width / font.as_scaled(size).h_advance(font.glyph_id('M')))
+        .floor()
+        .max(1.0) as usize
+}
+
+fn wrap_line(text: &str, max_chars: usize) -> (&str, &str) {
     let mut space = None;
     for (count, (index, character)) in text.char_indices().enumerate() {
         if character == '\n' {
@@ -1383,1238 +1829,758 @@ fn notice_line(text: &str, max_chars: usize) -> (&str, &str) {
     (text, "")
 }
 
-fn draw_notice(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
+fn caption_height(
     font: &FontRef<'_>,
-    text: &str,
-    scale: f32,
-    alpha: f32,
-) {
-    let font_size = 15.0 * scale;
-    let scaled = font.as_scaled(font_size);
-    let advance = scaled.h_advance(font.glyph_id('M'));
-    let inset = 26.0 * scale;
-    let max_chars = ((width as f32 - 2.0 * inset) / advance).max(1.0) as usize;
-    let mut lines = [""; 4];
-    let mut remaining = text.trim();
-    let mut count = 0;
-    for line in &mut lines {
-        if remaining.is_empty() {
-            break;
+    caption: &Caption,
+    interaction: Option<&str>,
+    width: f32,
+) -> u32 {
+    let measure = |text: &str, size: f32, max_lines: usize| {
+        let mut remaining = text.trim();
+        let mut rows = 0;
+        while rows < max_lines && !remaining.is_empty() {
+            remaining = wrap_line(remaining, line_capacity(font, width, size)).1;
+            rows += 1;
         }
-        (*line, remaining) = notice_line(remaining, max_chars);
-        count += 1;
-    }
-    let line_height = 18.0 * scale;
-    let top = (height as f32 - count as f32 * line_height) / 2.0;
-    for (row, line) in lines[..count].iter().enumerate() {
-        let truncated = row + 1 == count && !remaining.is_empty();
-        let limit = if truncated {
-            max_chars.saturating_sub(1)
-        } else {
-            max_chars
-        };
-        let mut x = inset;
-        let y = top + row as f32 * line_height + scaled.ascent();
-        for character in line.chars().take(limit).chain(truncated.then_some('…')) {
-            let glyph = font
-                .glyph_id(character)
-                .with_scale_and_position(font_size, point(x, y));
-            if let Some(outlined) = font.outline_glyph(glyph) {
-                let bounds = outlined.px_bounds();
-                outlined.draw(|gx, gy, coverage| {
-                    let px = bounds.min.x as i32 + gx as i32;
-                    let py = bounds.min.y as i32 + gy as i32;
-                    if px >= 0 && py >= 0 {
-                        blend_pixel(
-                            canvas,
-                            width,
-                            height,
-                            px as u32,
-                            py as u32,
-                            [255, 217, 161, 255],
-                            coverage * alpha,
-                        );
-                    }
-                });
-            }
-            x += advance;
-        }
-    }
-}
-
-fn format_elapsed(seconds: u64) -> String {
-    format!("{:02}:{:02}", seconds / 60, seconds % 60)
-}
-
-/// Cubic ease-out: fast start, gentle landing. Input is clamped to [0, 1].
-fn ease_in_out_cubic(t: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
-    }
-}
-
-fn ease_out_cubic(t: f32) -> f32 {
-    let u = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - u * u * u
-}
-
-fn scale_alpha(color: [u8; 4], factor: f32) -> [u8; 4] {
-    let mut scaled = color;
-    scaled[3] = (scaled[3] as f32 * factor.clamp(0.0, 1.0)).round() as u8;
-    scaled
-}
-fn mix_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
-    let t = t.clamp(0.0, 1.0);
-    [
-        (a[0] as f32 + (b[0] as f32 - a[0] as f32) * t).round() as u8,
-        (a[1] as f32 + (b[1] as f32 - a[1] as f32) * t).round() as u8,
-        (a[2] as f32 + (b[2] as f32 - a[2] as f32) * t).round() as u8,
-    ]
-}
-
-fn accent_color(kind: ChipKind) -> [u8; 3] {
-    match kind {
-        ChipKind::Recording => [255, 106, 92],    // warm coral
-        ChipKind::NoSignal => [255, 178, 92],     // warning amber
-        ChipKind::Transcribing => [255, 186, 74], // amber
-        ChipKind::Cleaning => [190, 142, 255],    // violet
-        ChipKind::Sent => [64, 218, 120],         // bright emerald
-        ChipKind::Notice => [255, 178, 92],       // warm amber
-    }
-}
-
-/// Map typed processing state to the HUD's static content and measured meter
-/// target. `keep_meter` carries an armed multi-chunk fill through Cleaning.
-fn processing_chip_content(stage: &Stage, keep_meter: bool) -> (String, ChipKind, Option<f32>) {
-    match stage {
-        Stage::CleaningUp => (
-            "Cleaning…".to_owned(),
-            ChipKind::Cleaning,
-            keep_meter.then_some(1.0),
-        ),
-        Stage::Transcribing { .. } | Stage::Unknown(_) => {
-            if let Some((chunk, total)) = stage.measured_progress() {
-                (
-                    format!("Transcribing… {chunk}/{total}"),
-                    ChipKind::Transcribing,
-                    Some(chunk as f32 / total as f32),
-                )
-            } else {
-                ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
-            }
-        }
-    }
-}
-
-fn interpolate_waveform(
-    from: [[f32; 2]; AUDIO_WAVEFORM_BINS],
-    to: [[f32; 2]; AUDIO_WAVEFORM_BINS],
-    t: f32,
-) -> AudioWaveform {
-    let t = t.clamp(0.0, 1.0);
-    std::array::from_fn(|index| {
-        std::array::from_fn(|edge| {
-            (from[index][edge] + (to[index][edge] - from[index][edge]) * t)
-                .round()
-                .clamp(-100.0, 100.0) as i8
-        })
-    })
-}
-
-/// Return the transcribing head position in cell coordinates. The head travels
-/// left-to-right, then right-to-left, with a pure phase function so frozen
-/// phases remain byte-identical.
-fn knight_sweep_head(phase: f32) -> f32 {
-    let cycle = (phase / 2.0).rem_euclid(2.0);
-    let position = if cycle <= 1.0 { cycle } else { 2.0 - cycle };
-    position * (KNIGHT_CELLS.saturating_sub(1) as f32)
-}
-
-/// Compute normalized scanner-cell energy for a chip kind.
-fn knight_cell_levels(
-    kind: ChipKind,
-    phase: f32,
-    waveform: Option<AudioWaveform>,
-) -> [f32; KNIGHT_CELLS] {
-    match kind {
-        ChipKind::Recording => {
-            // Peak absolute amplitude per bin: a loud negative-only swing
-            // must light cells exactly like its positive mirror.
-            let mut peaks = [0.0_f32; AUDIO_WAVEFORM_BINS];
-            if let Some(waveform) = waveform {
-                for (index, bin) in waveform.into_iter().enumerate() {
-                    peaks[index] = f32::from(bin[0].unsigned_abs().max(bin[1].unsigned_abs()));
-                }
-            }
-            let last_bin = AUDIO_WAVEFORM_BINS.saturating_sub(1) as f32;
-            std::array::from_fn(|index| {
-                let t = index as f32 * last_bin / (KNIGHT_CELLS.saturating_sub(1) as f32);
-                (smooth_bin(&peaks, t).max(0.0) / 100.0).clamp(0.0, 1.0)
-            })
-        }
-        ChipKind::NoSignal => [0.04; KNIGHT_CELLS],
-        ChipKind::Transcribing => {
-            let head = knight_sweep_head(phase);
-            std::array::from_fn(|index| {
-                let distance = (index as f32 - head).abs();
-                (1.0 - distance / 5.0).clamp(0.0, 1.0)
-            })
-        }
-        ChipKind::Cleaning => [0.5; KNIGHT_CELLS],
-        ChipKind::Sent | ChipKind::Notice => [1.0; KNIGHT_CELLS],
-    }
-}
-/// Sharp rectangular background container ("Omarchy Aesthetic", centered in the HUD surface).
-/// Sits on an opaque dark floor (#13141c) with a crisp 1px anti-aliased border, completely
-/// occluding any text, window content, or desktop background underneath.
-#[allow(clippy::too_many_arguments)]
-fn rect_container(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    center_x: f32,
-    center_y: f32,
-    half_width: f32,
-    half_height: f32,
-    kind: ChipKind,
-    scale: f32,
-    alpha: f32,
-) {
-    if half_width <= 0.0 || half_height <= 0.0 || alpha <= 0.0 {
-        return;
-    }
-    let min_x = (center_x - half_width - 1.0).max(0.0) as u32;
-    let max_x = (center_x + half_width + 1.0).min(width as f32) as u32;
-    let min_y = (center_y - half_height - 1.0).max(0.0) as u32;
-    let max_y = (center_y + half_height + 1.0).min(height as f32) as u32;
-
-    let accent = accent_color(kind);
-    // Deep Omarchy dark background (#13141c = [19, 20, 28]) with 4% accent tint:
-    let floor_rgb = mix_rgb([19, 20, 28], accent, 0.04);
-    let floor_color = [floor_rgb[0], floor_rgb[1], floor_rgb[2], 255];
-
-    // Crisp Omarchy 1px border (#a9b1d6 with accent tint):
-    let border_rgb = mix_rgb([169, 177, 214], accent, 0.35);
-    let border_color = [border_rgb[0], border_rgb[1], border_rgb[2], 80];
-    let border_width = 1.0 * scale;
-
-    for y in min_y..max_y {
-        let dy = (y as f32 + 0.5 - center_y).abs() - half_height;
-        for x in min_x..max_x {
-            let dx = (x as f32 + 0.5 - center_x).abs() - half_width;
-            let d = dx.max(dy);
-            let outer_coverage = (0.5 - d).clamp(0.0, 1.0);
-            if outer_coverage > 0.0 {
-                let inner_d = d + border_width;
-                let inner_coverage = (-inner_d + 0.5).clamp(0.0, 1.0);
-                let border_coverage = (outer_coverage - inner_coverage).clamp(0.0, 1.0);
-
-                if inner_coverage > 0.0 {
-                    blend_pixel(
-                        canvas,
-                        width,
-                        height,
-                        x,
-                        y,
-                        floor_color,
-                        inner_coverage * alpha,
-                    );
-                }
-                if border_coverage > 0.0 {
-                    blend_pixel(
-                        canvas,
-                        width,
-                        height,
-                        x,
-                        y,
-                        border_color,
-                        border_coverage * alpha,
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Paint the full-width segmented scanner track for one chip state.
-#[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, geometry)
-fn knight_track(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    center_x: f32,
-    center_y: f32,
-    half_width: f32,
-    half_height: f32,
-    scale: f32,
-    kind: ChipKind,
-    from: Option<ChipKind>,
-    transition: f32,
-    phase: f32,
-    waveform: Option<AudioWaveform>,
-    progress: Option<f32>,
-    content_alpha: f32,
-) {
-    if content_alpha <= 0.0 {
-        return;
-    }
-    let track_width = (TRACK_WIDTH * scale).min((half_width * 2.0 - 16.0 * scale).max(0.0));
-    let track_left = center_x - track_width / 2.0;
-    let track_top = center_y - half_height;
-    let track_bottom = center_y + half_height;
-    if track_width <= 0.0 || track_bottom <= track_top {
-        return;
-    }
-    let slot_width = track_width / KNIGHT_CELLS as f32;
-    let cell_width = slot_width - KNIGHT_CELL_GAP * scale;
-    if cell_width <= 0.0 {
-        return;
-    }
-
-    let rgb = accent_color(kind);
-    let levels = knight_cell_levels(kind, phase, waveform);
-    let t = ease_out_cubic(transition);
-
-    // Height rule: Sizing is 100% consistent across Transcribing, Cleaning, Sent, and Notice.
-    // The ONLY state with variable cell heights is Recording (Listening), where heights
-    // represent live voice audio levels.
-    for (index, &level) in levels.iter().enumerate() {
-        let cell_center_x = track_left + slot_width * (index as f32 + 0.5);
-
-        let (cell_height, cell_color, cell_alpha) = match kind {
-            ChipKind::Recording => {
-                // 1. Gating & non-linear dynamic range expansion:
-                let gated = ((level - 0.18).max(0.0) / 0.72).clamp(0.0, 1.0);
-                let punch = gated.powf(1.4);
-
-                // 2. Spatial variation: center-weighted vocal equalizer envelope:
-                let center_norm = (index as f32 - 10.5).abs() / 10.5;
-                let bell = (1.0 - center_norm * center_norm * 0.70).max(0.25);
-
-                // 3. Formant ripple shimmer while speaking:
-                let ripple = if gated > 0.02 {
-                    let w1 = (phase * 12.0 + index as f32 * 0.75).sin();
-                    let w2 = (phase * 7.5 - index as f32 * 0.50).cos();
-                    0.82 + 0.18 * (w1 * 0.6 + w2 * 0.4)
-                } else {
-                    1.0
-                };
-
-                let energy = (punch * bell * ripple).clamp(0.0, 1.0);
-                let target_h = (4.0 + 22.0 * energy) * scale;
-                let color_rgb = if energy > 0.05 {
-                    mix_rgb(rgb, [255, 180, 160], energy * 0.45)
-                } else {
-                    rgb
-                };
-                let alpha = 0.28 + 0.72 * energy;
-                (
-                    target_h,
-                    [color_rgb[0], color_rgb[1], color_rgb[2], 255],
-                    alpha,
-                )
-            }
-            ChipKind::NoSignal => (4.0 * scale, [rgb[0], rgb[1], rgb[2], 255], 0.35),
-            ChipKind::Transcribing => {
-                // Sizing is constant (14.0px).
-                // Unfilled cells are sleek dark track slots.
-                // Filled cells are brilliant glowing gold.
-                let base_h = 14.0 * scale;
-                // Elegant transition from recording: audio bars smoothly ease down into 14px!
-                let height = if from == Some(ChipKind::Recording) && t < 1.0 {
-                    let rec_levels = knight_cell_levels(ChipKind::Recording, phase, waveform);
-                    let rec_level = rec_levels[index];
-                    let gated = ((rec_level - 0.18).max(0.0) / 0.72).clamp(0.0, 1.0);
-                    let rec_h = (4.0 + 22.0 * gated.powf(1.4)) * scale;
-                    rec_h + (base_h - rec_h) * t
-                } else {
-                    base_h
-                };
-
-                let (active_color, alpha) = match progress {
-                    Some(p) => {
-                        let fill_edge = p.clamp(0.0, 1.0) * KNIGHT_CELLS as f32;
-                        let cell_pos = index as f32;
-                        if cell_pos < fill_edge - 0.5 {
-                            ([255, 186, 74, 255], 1.0)
-                        } else if (cell_pos - fill_edge).abs() <= 0.8 {
-                            ([255, 230, 120, 255], 1.0)
-                        } else {
-                            ([42, 44, 52, 255], 0.18)
-                        }
-                    }
-                    None => {
-                        let head = knight_sweep_head(phase);
-                        let dist = (index as f32 - head).abs();
-                        if dist < 2.5 {
-                            let intensity = ((2.5 - dist) / 2.5).powi(2);
-                            let sweep_rgb = mix_rgb([255, 186, 74], [255, 235, 140], intensity);
-                            let alpha = 0.18 + 0.82 * intensity;
-                            ([sweep_rgb[0], sweep_rgb[1], sweep_rgb[2], 255], alpha)
-                        } else {
-                            ([42, 44, 52, 255], 0.18)
-                        }
-                    }
-                };
-                let final_color = if from == Some(ChipKind::Recording) && t < 1.0 {
-                    let c = mix_rgb(
-                        accent_color(ChipKind::Recording),
-                        [active_color[0], active_color[1], active_color[2]],
-                        t,
-                    );
-                    [c[0], c[1], c[2], 255]
-                } else {
-                    active_color
-                };
-                (height, final_color, alpha)
-            }
-            ChipKind::Cleaning => {
-                // Sizing is constant (14.0px, matching Transcribing!).
-                // Traveling violet shimmer wave across all 22 cells.
-                let height = 14.0 * scale;
-                let wave = (phase * 6.0 - index as f32 * 0.45).sin();
-                let crest = ((wave + 1.0) / 2.0).powi(2);
-                let wave_rgb = mix_rgb([155, 105, 240], [230, 195, 255], crest);
-                let alpha = 0.28 + 0.72 * crest;
-
-                // Elegant transition from transcribing: color transformation sweep from left to right!
-                let color = if from == Some(ChipKind::Transcribing) && t < 1.0 {
-                    let sweep_front = t * (KNIGHT_CELLS as f32 + 2.0);
-                    let cell_pos = index as f32;
-                    if cell_pos < sweep_front - 1.0 {
-                        [wave_rgb[0], wave_rgb[1], wave_rgb[2], 255]
-                    } else if (cell_pos - sweep_front).abs() <= 1.2 {
-                        [245, 230, 255, 255] // transformation crest flash
-                    } else {
-                        let amber = accent_color(ChipKind::Transcribing);
-                        [amber[0], amber[1], amber[2], 255]
-                    }
-                } else {
-                    [wave_rgb[0], wave_rgb[1], wave_rgb[2], 255]
-                };
-                (height, color, alpha)
-            }
-            ChipKind::Sent => {
-                // Sizing is constant (14.0px, matching Transcribing and Cleaning!).
-                let height = 14.0 * scale;
-                let center_dist = (index as f32 - 10.5).abs();
-                let ripple_front = t * 14.0;
-                let dist_to_front = (center_dist - ripple_front).abs();
-
-                // Celebratory emerald base with traveling mint shimmer:
-                let shimmer = (phase * 4.5 - index as f32 * 0.4).sin();
-                let crest = ((shimmer + 1.0) / 2.0).powi(2);
-                let emerald_shimmer = mix_rgb([64, 218, 120], [185, 255, 210], crest * 0.45);
-
-                if center_dist <= ripple_front {
-                    if dist_to_front < 1.8 && t < 0.95 {
-                        // Radiant leading flash crest:
-                        (height, [220, 255, 235, 255], 1.0)
-                    } else {
-                        // Alive emerald hold with gentle travelling mint gleam:
-                        (
-                            height,
-                            [
-                                emerald_shimmer[0],
-                                emerald_shimmer[1],
-                                emerald_shimmer[2],
-                                255,
-                            ],
-                            1.0,
-                        )
-                    }
-                } else if from == Some(ChipKind::Cleaning) {
-                    let wave = (phase * 6.0 - index as f32 * 0.45).sin();
-                    let crest = ((wave + 1.0) / 2.0).powi(2);
-                    let wave_rgb = mix_rgb([155, 105, 240], [230, 195, 255], crest);
-                    (
-                        height,
-                        [wave_rgb[0], wave_rgb[1], wave_rgb[2], 255],
-                        0.28 + 0.72 * crest,
-                    )
-                } else {
-                    (height, [42, 44, 52, 255], 0.20)
-                }
-            }
-            ChipKind::Notice => (14.0 * scale, [rgb[0], rgb[1], rgb[2], 255], 1.0),
-        };
-
-        cell_rect(
-            canvas,
-            width,
-            height,
-            cell_center_x,
-            center_y,
-            cell_width / 2.0,
-            cell_height / 2.0,
-            cell_color,
-            content_alpha * cell_alpha,
-        );
-    }
-}
-
-/// Sharp square/rectangular cell with 1px anti-aliased edges.
-#[allow(clippy::too_many_arguments)] // paint primitive plumbing (canvas, origin)
-fn cell_rect(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    center_x: f32,
-    center_y: f32,
-    half_width: f32,
-    half_height: f32,
-    color: [u8; 4],
-    alpha: f32,
-) {
-    if half_width <= 0.0 || half_height <= 0.0 || alpha <= 0.0 {
-        return;
-    }
-    let fill = scale_alpha(color, alpha);
-    let min_x = (center_x - half_width - 1.0).max(0.0) as u32;
-    let max_x = (center_x + half_width + 1.0).min(width as f32) as u32;
-    let min_y = (center_y - half_height - 1.0).max(0.0) as u32;
-    let max_y = (center_y + half_height + 1.0).min(height as f32) as u32;
-
-    for y in min_y..max_y {
-        let dy = (y as f32 + 0.5 - center_y).abs() - half_height;
-        for x in min_x..max_x {
-            let dx = (x as f32 + 0.5 - center_x).abs() - half_width;
-            let coverage = (0.5 - dx.max(dy)).clamp(0.0, 1.0);
-            if coverage > 0.0 {
-                blend_pixel(canvas, width, height, x, y, fill, coverage);
-            }
-        }
-    }
-}
-
-/// Catmull-Rom sample of uniform bin values at fractional position `t`.
-/// The raw spline can overshoot between bins, so the result is clamped to
-/// the bracketing measured values: the band smooths but never draws
-/// amplitude outside the captured min/max envelope. Clamped ends keep the
-/// curve inside measured data at the band edges.
-fn smooth_bin(values: &[f32], t: f32) -> f32 {
-    let count = values.len();
-    let clamped = t.clamp(0.0, (count - 1) as f32);
-    let index = (clamped.floor() as usize).min(count - 2);
-    let f = clamped - index as f32;
-    let p0 = values[index.saturating_sub(1)];
-    let p1 = values[index];
-    let p2 = values[index + 1];
-    let p3 = values[(index + 2).min(count - 1)];
-    let spline = 0.5
-        * (2.0 * p1
-            + (-p0 + p2) * f
-            + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f * f
-            + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * f * f * f);
-    spline.clamp(p1.min(p2), p1.max(p2))
-}
-
-/// Read the desktop's animation preference once at startup. Standard
-/// GNOME/COSMIC key; without gsettings (or on a desktop that does not
-/// expose it) animations stay on.
-fn prefers_reduced_motion() -> bool {
-    let Ok(output) = std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "enable-animations"])
-        .output()
-    else {
-        return false;
+        rows as f32 * (size + 5.0)
     };
-    String::from_utf8_lossy(&output.stdout).trim() == "false"
+    let mut height = measure(&caption.title, 12.0, 3);
+    if !caption.detail.is_empty() {
+        height += 3.0 + measure(&caption.detail, 11.0, 3);
+    }
+    if !caption.action.is_empty() {
+        height += 7.0 + measure(&caption.action, 10.0, 4);
+    }
+    if let Some(text) = interaction {
+        height += 14.0 + measure(text, 11.0, 2);
+    }
+    if height > 0.0 {
+        height += 12.0;
+    }
+    height.ceil() as u32
 }
 
-fn blend_pixel(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    color: [u8; 4],
-    coverage: f32,
-) {
-    if x >= width || y >= height {
-        return;
+fn save_screenshot(path: &Path, bytes: &[u8], width: u32, height: u32) -> Result<()> {
+    // A shared-memory slot can be larger than the visible frame. The PNG
+    // encoder requires exactly width × height pixels, not the slot's padding.
+    let length = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .context("HUD screenshot size overflow")?;
+    let bytes = bytes
+        .get(..length)
+        .context("HUD screenshot buffer is incomplete")?;
+    let mut rgba = Vec::with_capacity(bytes.len());
+    for pixel in bytes.as_chunks::<4>().0 {
+        let (b, g, r, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
+        if a == 0 {
+            rgba.extend_from_slice(&[0, 0, 0, 0]);
+        } else {
+            let un = |channel: u8| {
+                (f32::from(channel) * 255.0 / f32::from(a))
+                    .round()
+                    .min(255.0) as u8
+            };
+            rgba.extend_from_slice(&[un(r), un(g), un(b), a]);
+        }
     }
-    let index = ((y * width + x) * 4) as usize;
-    if index + 3 >= canvas.len() {
-        return;
+    image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8)
+        .with_context(|| format!("writing HUD screenshot {}", path.display()))?;
+    eprintln!("saved HUD screenshot to {}", path.display());
+    Ok(())
+}
+
+/// Deterministic, offline compositions rendered by the real Wayland surface.
+/// These names are also the clap values of `cantrip hud --screenshot … --state …`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ScreenshotState {
+    Idle,
+    Recording,
+    LongRecording,
+    Starting,
+    MonitoringUnavailable,
+    NoSignal,
+    Working,
+    Transcribing,
+    ProgressZero,
+    Progress,
+    ProgressComplete,
+    FinalizingAudio,
+    RemovingRecording,
+    Cleaning,
+    Delivering,
+    Cancelling,
+    Sent,
+    Copied,
+    CopiedInstead,
+    CleanupFallback,
+    Empty,
+    EmptySaved,
+    Failed,
+    StorageFailed,
+    Partial,
+    PartialSaved,
+    DeliveryFailed,
+    DeliveryUncertain,
+    Deferred,
+    Cancelled,
+    Disconnected,
+    Reconnected,
+    SetupMissing,
+    Busy,
+    Recovery,
+    ReducedMotion,
+    Settling,
+    Interrupted,
+    Dismissed,
+}
+
+fn preview_snapshot(state: StateKind) -> StatusSnapshot {
+    StatusSnapshot {
+        epoch: "preview-epoch".to_owned(),
+        operation_id: if state == StateKind::Idle {
+            None
+        } else {
+            Some("preview-take".to_owned())
+        },
+        operation_kind: if state == StateKind::Idle {
+            None
+        } else {
+            Some(ipc::OperationKind::Dictation)
+        },
+        state,
+        elapsed: 0,
+        signal: None,
+        stage: None,
+        outcome: None,
+        notice: None,
+        pending_recordings: 0,
+        capabilities: ipc::Capabilities {
+            stop: true,
+            cancel: true,
+            recover: true,
+            copy: true,
+            dismiss: true,
+            local_model: true,
+            remote_configured: false,
+        },
+        hud: crate::config::HudConfig::default(),
     }
-    let src_a = (color[3] as f32 * coverage.clamp(0.0, 1.0)) / 255.0;
-    if src_a <= f32::EPSILON {
-        return;
+}
+
+fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
+    TerminalOutcome {
+        event_id: 1,
+        operation_id: Some("preview-take".to_owned()),
+        message: "Transcription failed.".to_owned(),
+        completeness,
+        delivery,
+        cleanup: Cleanup::Off,
+        error: None,
+        artifacts: ipc::Artifacts::default(),
+        dismissed: false,
     }
-    let src_b = color[2] as f32 * src_a; // color is [R, G, B, A]; canvas is Argb8888 little-endian [B, G, R, A]
-    let src_g = color[1] as f32 * src_a;
-    let src_r = color[0] as f32 * src_a;
+}
 
-    let dst_b = canvas[index] as f32;
-    let dst_g = canvas[index + 1] as f32;
-    let dst_r = canvas[index + 2] as f32;
-    let dst_a = canvas[index + 3] as f32 / 255.0;
-
-    let inv_src_a = 1.0 - src_a;
-    let out_b = src_b + dst_b * inv_src_a;
-    let out_g = src_g + dst_g * inv_src_a;
-    let out_r = src_r + dst_r * inv_src_a;
-    let out_a = src_a + dst_a * inv_src_a;
-
-    canvas[index] = out_b.round().clamp(0.0, 255.0) as u8;
-    canvas[index + 1] = out_g.round().clamp(0.0, 255.0) as u8;
-    canvas[index + 2] = out_r.round().clamp(0.0, 255.0) as u8;
-    canvas[index + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
+    let start = now - Duration::from_secs(3);
+    let mut model = Model::new(start);
+    model.apply(preview_snapshot(StateKind::Idle), start);
+    if state == ScreenshotState::Idle {
+        return model;
+    }
+    let mut recording = preview_snapshot(StateKind::Recording);
+    recording.elapsed = 7;
+    recording.signal = Some(AudioSignal {
+        level: 94,
+        silent: false,
+        waveform: SCREENSHOT_WAVEFORM,
+    });
+    match state {
+        ScreenshotState::LongRecording => recording.elapsed = 888,
+        ScreenshotState::Starting => {
+            recording.signal = None;
+            recording.elapsed = 1;
+        }
+        ScreenshotState::MonitoringUnavailable => {
+            recording.signal = None;
+            recording.elapsed = 8;
+        }
+        ScreenshotState::NoSignal => {
+            recording.elapsed = 12;
+            recording.signal = Some(AudioSignal {
+                level: 0,
+                silent: true,
+                waveform: [[0; 2]; AUDIO_WAVEFORM_BINS],
+            });
+        }
+        _ => {}
+    }
+    model.apply(recording, start);
+    model.track.presented = model.track.frame(now);
+    if matches!(
+        state,
+        ScreenshotState::Recording
+            | ScreenshotState::LongRecording
+            | ScreenshotState::Starting
+            | ScreenshotState::MonitoringUnavailable
+            | ScreenshotState::NoSignal
+    ) {
+        model.refresh(now);
+        return model;
+    }
+    if matches!(
+        state,
+        ScreenshotState::Disconnected | ScreenshotState::Reconnected
+    ) {
+        model.disconnected(now - Duration::from_secs(1));
+        model.refresh(now);
+        if state == ScreenshotState::Reconnected {
+            let mut restarted = preview_snapshot(StateKind::Idle);
+            restarted.epoch = "preview-restarted".to_owned();
+            model.apply(restarted, now);
+        }
+        model.track.since = now - SETTLE;
+        return model;
+    }
+    let mut processing = preview_snapshot(StateKind::Processing);
+    if state == ScreenshotState::Recovery {
+        processing.operation_kind = Some(ipc::OperationKind::Recovery);
+    }
+    if state == ScreenshotState::RemovingRecording {
+        processing.operation_kind = Some(ipc::OperationKind::Forget);
+    }
+    processing.stage = Some(match state {
+        ScreenshotState::FinalizingAudio => Stage::FinalizingAudio,
+        ScreenshotState::RemovingRecording => Stage::RemovingRecording,
+        ScreenshotState::Cleaning => Stage::CleaningUp,
+        ScreenshotState::Delivering => Stage::Delivering,
+        ScreenshotState::Cancelling => Stage::Cancelling,
+        ScreenshotState::ProgressZero => Stage::Transcribing {
+            completed: 0,
+            total: 30,
+        },
+        ScreenshotState::Progress
+        | ScreenshotState::Busy
+        | ScreenshotState::Recovery
+        | ScreenshotState::ReducedMotion => Stage::Transcribing {
+            completed: 12,
+            total: 30,
+        },
+        ScreenshotState::ProgressComplete => Stage::Transcribing {
+            completed: 30,
+            total: 30,
+        },
+        _ => Stage::Transcribing {
+            completed: 0,
+            total: 1,
+        },
+    });
+    processing.elapsed = if matches!(state, ScreenshotState::Working | ScreenshotState::Settling) {
+        0
+    } else {
+        2
+    };
+    processing.hud.reduced_motion = Some(state == ScreenshotState::ReducedMotion);
+    if state == ScreenshotState::Busy {
+        processing.notice = Some(ipc::InteractionNotice {
+            event_id: 1,
+            message: "Already working on this take.".to_owned(),
+            error: None,
+        });
+    }
+    let processing_at = match state {
+        ScreenshotState::Settling => now - Duration::from_millis(60),
+        ScreenshotState::Working => now - Duration::from_millis(400),
+        ScreenshotState::Busy => now - Duration::from_secs(1),
+        _ => now - Duration::from_secs(2),
+    };
+    model.apply(processing, processing_at);
+    if state == ScreenshotState::Settling {
+        model.track.presented = model.track.frame(now);
+    }
+    if matches!(
+        state,
+        ScreenshotState::Working
+            | ScreenshotState::Transcribing
+            | ScreenshotState::ProgressZero
+            | ScreenshotState::Progress
+            | ScreenshotState::ProgressComplete
+            | ScreenshotState::FinalizingAudio
+            | ScreenshotState::RemovingRecording
+            | ScreenshotState::Cleaning
+            | ScreenshotState::Delivering
+            | ScreenshotState::Cancelling
+            | ScreenshotState::Busy
+            | ScreenshotState::Recovery
+            | ScreenshotState::ReducedMotion
+            | ScreenshotState::Settling
+    ) {
+        model.refresh(now);
+        return model;
+    }
+    let (completeness, delivery) = match state {
+        ScreenshotState::Empty | ScreenshotState::EmptySaved => {
+            (Completeness::Empty, Delivery::None)
+        }
+        ScreenshotState::Failed
+        | ScreenshotState::StorageFailed
+        | ScreenshotState::SetupMissing
+        | ScreenshotState::Dismissed => (Completeness::Failed, Delivery::None),
+        ScreenshotState::Partial => (Completeness::Partial, Delivery::Copied),
+        ScreenshotState::PartialSaved => (Completeness::Partial, Delivery::Deferred),
+        ScreenshotState::DeliveryFailed => (Completeness::Complete, Delivery::Failed),
+        ScreenshotState::DeliveryUncertain => (Completeness::Complete, Delivery::Uncertain),
+        ScreenshotState::Deferred => (Completeness::Complete, Delivery::Deferred),
+        ScreenshotState::Cancelled => (Completeness::Cancelled, Delivery::Cancelled),
+        ScreenshotState::Copied | ScreenshotState::CopiedInstead => {
+            (Completeness::Complete, Delivery::Copied)
+        }
+        _ => (Completeness::Complete, Delivery::Pasted),
+    };
+    let mut outcome = preview_outcome(completeness, delivery);
+    outcome.message = match state {
+        ScreenshotState::Copied => "Copied. Paste when ready.",
+        ScreenshotState::CopiedInstead => "Copied instead. Paste when ready.",
+        ScreenshotState::SetupMissing => "Local speech model unavailable.",
+        ScreenshotState::StorageFailed => "Transcription failed. Audio could not be saved.",
+        _ => "Transcription failed.",
+    }
+    .to_owned();
+    outcome.artifacts = ipc::Artifacts {
+        take_id: Some("preview-take".to_owned()),
+        audio: matches!(
+            state,
+            ScreenshotState::Failed
+                | ScreenshotState::Partial
+                | ScreenshotState::PartialSaved
+                | ScreenshotState::EmptySaved
+                | ScreenshotState::Dismissed
+        ),
+        text: matches!(
+            state,
+            ScreenshotState::Partial
+                | ScreenshotState::PartialSaved
+                | ScreenshotState::DeliveryFailed
+                | ScreenshotState::DeliveryUncertain
+                | ScreenshotState::Deferred
+        ),
+    };
+    if state == ScreenshotState::CleanupFallback {
+        outcome.cleanup = Cleanup::Failed;
+    }
+    if state == ScreenshotState::Dismissed {
+        outcome.dismissed = true;
+    }
+    let mut idle = preview_snapshot(StateKind::Idle);
+    idle.pending_recordings = usize::from(outcome.artifacts.audio || outcome.artifacts.text);
+    idle.outcome = Some(outcome);
+    idle.capabilities.local_model = state != ScreenshotState::SetupMissing;
+    // Fast happy completion never forces the delayed-caption path.
+    if matches!(state, ScreenshotState::Sent | ScreenshotState::Interrupted) {
+        model.caption_latched = false;
+    }
+    model.apply(idle, now - Duration::from_millis(200));
+    if state == ScreenshotState::Interrupted {
+        let mut next = preview_snapshot(StateKind::Recording);
+        next.operation_id = Some("next-preview-take".to_owned());
+        next.signal = Some(AudioSignal {
+            level: 94,
+            silent: false,
+            waveform: SCREENSHOT_WAVEFORM,
+        });
+        model.apply(next, now - Duration::from_millis(180));
+    }
+    model.refresh(now);
+    model
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        acquire_lock_on, ease_in_out_cubic, ease_out_cubic, format_elapsed, interpolate_waveform,
-        knight_cell_levels, knight_sweep_head, knight_track, processing_chip_content,
-        rect_container, smooth_bin, ChipKind, UiState, UiStateKind, KNIGHT_CELLS,
-        SCREENSHOT_WAVEFORM,
-    };
-    use crate::ipc::{AudioSignal, StatusSnapshot, AUDIO_WAVEFORM_BINS};
-    use crate::pipeline::Stage;
-    use std::fs;
-    use std::path::PathBuf;
+    use super::*;
 
-    fn lock_path() -> PathBuf {
-        let mut path = std::env::temp_dir();
-        path.push(format!("cantrip-hud-lock-test-{}", std::process::id()));
-        let _ = fs::remove_file(&path);
-        path
+    fn recording(elapsed: u64, signal: Option<AudioSignal>) -> StatusSnapshot {
+        let mut status = preview_snapshot(StateKind::Recording);
+        status.elapsed = elapsed;
+        status.signal = signal;
+        status
+    }
+
+    fn signal(active: bool) -> AudioSignal {
+        AudioSignal {
+            level: if active { 94 } else { 0 },
+            silent: !active,
+            waveform: if active {
+                SCREENSHOT_WAVEFORM
+            } else {
+                [[0; 2]; AUDIO_WAVEFORM_BINS]
+            },
+        }
+    }
+
+    #[test]
+    fn no_input_warning_is_initial_only_and_clears_with_hysteresis() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(false))), now);
+        model.apply(
+            recording(4, Some(signal(false))),
+            now + Duration::from_secs(4),
+        );
+        assert_eq!(model.kind, Some(Kind::Recording));
+        model.apply(
+            recording(9, Some(signal(false))),
+            now + Duration::from_secs(9),
+        );
+        assert_eq!(model.kind, Some(Kind::Attention));
+        model.apply(
+            recording(9, Some(signal(true))),
+            now + Duration::from_millis(9100),
+        );
+        assert_eq!(model.kind, Some(Kind::Attention));
+        model.apply(
+            recording(9, Some(signal(true))),
+            now + Duration::from_millis(9500),
+        );
+        assert_eq!(model.kind, Some(Kind::Recording));
+        model.apply(
+            recording(40, Some(signal(false))),
+            now + Duration::from_secs(40),
+        );
+        assert_eq!(
+            model.kind,
+            Some(Kind::Recording),
+            "thinking after real input must not warn"
+        );
+    }
+
+    #[test]
+    fn startup_unknown_is_not_measured_capture() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, None), now);
+        assert_eq!(model.kind, Some(Kind::Working));
+        assert!(model.waveform.is_none());
+        assert!(model.caption.title.is_empty());
+        model.refresh(now + LABEL_DELAY);
+        assert!(!model.caption.title.is_empty());
+        model.apply(
+            recording(1, Some(signal(true))),
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(model.kind, Some(Kind::Recording));
+        model.apply(recording(2, None), now + Duration::from_secs(2));
+        assert!(model.waveform.is_none());
+        assert_ne!(model.kind, Some(Kind::Recording));
+    }
+
+    #[test]
+    fn stop_settles_from_last_presented_measurement_and_can_be_interrupted() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(true))), now);
+        let shown = model.track.frame(now + Duration::from_millis(55));
+        model.track.presented = shown;
+        let mut processing = preview_snapshot(StateKind::Processing);
+        processing.stage = Some(Stage::Transcribing {
+            completed: 0,
+            total: 5,
+        });
+        let stop = now + Duration::from_millis(60);
+        model.apply(processing, stop);
+        assert_eq!(model.track.frame(stop), shown);
+        let settling = model.track.frame(stop + SETTLE / 2);
+        for ((from, mid), to) in shown.into_iter().zip(settling).zip(model.track.to) {
+            assert!(mid >= from.min(to) && mid <= from.max(to));
+        }
+        assert_eq!(model.track.frame(stop + SETTLE), [6.0; CELLS]);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+        model.apply(idle, stop + SETTLE);
+        assert_eq!(model.kind, Some(Kind::Resolved));
+        let mut next = recording(0, Some(signal(true)));
+        next.operation_id = Some("next".to_owned());
+        model.apply(next, stop + SETTLE + Duration::from_millis(1));
+        assert_eq!(model.kind, Some(Kind::Recording));
+        assert!(model.result.is_none());
+    }
+
+    #[test]
+    fn delayed_caption_survives_stage_changes_without_faking_completion() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Processing);
+        status.stage = Some(Stage::Transcribing {
+            completed: 0,
+            total: 30,
+        });
+        model.apply(status.clone(), now);
+        assert!(model.caption.title.is_empty());
+        assert_eq!(completed_cells(model.progress.expect("measured work")), 0);
+        model.refresh(now + LABEL_DELAY);
+        assert!(!model.caption.title.is_empty());
+        status.stage = Some(Stage::Transcribing {
+            completed: 29,
+            total: 30,
+        });
+        model.apply(status.clone(), now + Duration::from_secs(1));
+        assert!(completed_cells(model.progress.expect("measured work")) < CELLS);
+        status.stage = Some(Stage::CleaningUp);
+        model.apply(status, now + Duration::from_millis(1100));
+        assert_eq!(model.kind, Some(Kind::Working));
+        assert!(!model.caption.title.is_empty());
+        assert!(
+            model.progress.is_none(),
+            "cleanup cannot imply remaining transcription completed"
+        );
+        assert_eq!(completed_cells((30, 30)), CELLS);
+        assert_eq!(completed_cells((31, 30)), 0);
+    }
+
+    #[test]
+    fn busy_feedback_never_replaces_or_replays_the_active_operation() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = recording(2, Some(signal(true)));
+        model.apply(status.clone(), now);
+        status.notice = Some(ipc::InteractionNotice {
+            event_id: 10,
+            message: "Busy".to_owned(),
+            error: None,
+        });
+        model.apply(status.clone(), now + Duration::from_millis(100));
+        assert_eq!(model.kind, Some(Kind::Recording));
+        assert!(model.interaction.is_some());
+        assert!(model.result.is_none());
+        model.apply(status, now + Duration::from_secs(3));
+        assert!(model.interaction.is_none());
+        assert_eq!(model.kind, Some(Kind::Recording));
+    }
+
+    #[test]
+    fn persistent_failure_dismisses_without_replaying_after_a_new_take() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut failed = preview_snapshot(StateKind::Idle);
+        failed.outcome = Some(preview_outcome(Completeness::Failed, Delivery::None));
+        model.apply(failed.clone(), now);
+        model.refresh(now + Duration::from_secs(60));
+        assert_eq!(model.kind, Some(Kind::Attention));
+        failed.outcome.as_mut().expect("outcome").dismissed = true;
+        model.apply(failed.clone(), now + Duration::from_secs(61));
+        assert!(model.kind.is_none());
+        let mut next = recording(0, Some(signal(true)));
+        next.operation_id = Some("other-take".to_owned());
+        model.apply(next, now + Duration::from_secs(62));
+        failed.outcome.as_mut().expect("outcome").dismissed = false;
+        model.apply(failed, now + Duration::from_secs(63));
+        assert!(
+            model.kind.is_none(),
+            "cached old event is not completion of a new take"
+        );
+    }
+
+    #[test]
+    fn disconnect_coalesces_and_restart_does_not_replay_success() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut cached = preview_snapshot(StateKind::Idle);
+        cached.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+        model.apply(cached.clone(), now);
+        assert!(model.kind.is_none());
+        model.apply(
+            recording(2, Some(signal(true))),
+            now + Duration::from_secs(1),
+        );
+        model.disconnected(now + Duration::from_secs(2));
+        assert_eq!(model.kind, Some(Kind::Recording));
+        model.refresh(now + Duration::from_secs(2) + DISCONNECT_DELAY);
+        assert_eq!(model.kind, Some(Kind::Attention));
+        cached.epoch = "restarted-epoch".to_owned();
+        model.apply(cached, now + Duration::from_secs(3));
+        assert_eq!(model.kind, Some(Kind::Neutral));
+        assert!(!model.caption.title.is_empty());
+    }
+
+    #[test]
+    fn cancellation_and_empty_stay_neutral_even_when_they_preserve_audio() {
+        let now = Instant::now();
+        for completeness in [Completeness::Empty, Completeness::Cancelled] {
+            let mut status = preview_snapshot(StateKind::Idle);
+            let mut outcome = preview_outcome(completeness, Delivery::None);
+            outcome.artifacts = ipc::Artifacts {
+                take_id: Some("saved".to_owned()),
+                audio: true,
+                text: false,
+            };
+            outcome.error = Some("not a reason to alarm on deliberate cancellation".to_owned());
+            status.outcome = Some(outcome.clone());
+            let view = present_outcome(&outcome, &status, false, now);
+            assert_eq!(view.kind, Kind::Neutral);
+            assert!(!matches!(view.visibility, Visibility::Persistent));
+            assert!(
+                !view.caption.action.is_empty(),
+                "saved audio remains deliberately recoverable"
+            );
+        }
+    }
+
+    #[test]
+    fn reduced_motion_preserves_measured_data_and_explicit_override_wins() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.desktop_reduced_motion = true;
+        let mut status = recording(0, Some(signal(true)));
+        model.apply(status.clone(), now);
+        assert!(!model.animate(now));
+        assert_eq!(
+            model.track.frame(now),
+            recording_heights(status.signal.map(|s| s.waveform))
+        );
+        status.hud.reduced_motion = Some(false);
+        status.signal = Some(signal(false));
+        model.apply(status, now + Duration::from_millis(100));
+        assert!(model.animate(now + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn labelled_success_is_short_and_an_idle_disconnect_cannot_pin_it() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut active = recording(0, Some(signal(true)));
+        active.hud.labels = true;
+        model.apply(active, now);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.hud.labels = true;
+        idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+        model.apply(idle, now + Duration::from_millis(100));
+        assert_eq!(model.kind, Some(Kind::Resolved));
+        assert!(!model.caption.title.is_empty());
+        model.disconnected(now + Duration::from_millis(200));
+        model.refresh(now + Duration::from_secs(1));
+        assert!(model.kind.is_none());
+    }
+
+    #[test]
+    fn a_copy_finishing_between_polls_still_reports_its_new_outcome() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(true))), now);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+        model.apply(idle.clone(), now + Duration::from_millis(100));
+        let outcome = idle.outcome.as_mut().expect("terminal result");
+        outcome.event_id = 2;
+        outcome.operation_id = Some("copy-another-recording".to_owned());
+        outcome.delivery = Delivery::Copied;
+        outcome.message = "Copied. Paste when ready.".to_owned();
+        model.apply(idle, now + Duration::from_millis(300));
+        assert_eq!(model.kind, Some(Kind::Resolved));
+        assert_eq!(
+            model.result.as_ref().and_then(|result| result.event_id),
+            Some(2)
+        );
+        assert!(!model.caption.title.is_empty());
+    }
+
+    #[test]
+    fn fresh_idle_outcome_wins_when_the_last_observed_operation_was_different() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(true))), now);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        let mut outcome = preview_outcome(Completeness::Complete, Delivery::Copied);
+        outcome.operation_id = Some("unobserved-short-operation".to_owned());
+        outcome.message = "Copied. Paste when ready.".to_owned();
+        idle.outcome = Some(outcome);
+        model.apply(idle.clone(), now + POLL_INTERVAL);
+        assert_eq!(model.kind, Some(Kind::Resolved));
+        let mut next = recording(0, Some(signal(true)));
+        next.operation_id = Some("new-active-operation".to_owned());
+        next.outcome = idle.outcome;
+        model.apply(next, now + POLL_INTERVAL * 2);
+        assert_eq!(model.kind, Some(Kind::Recording));
+        assert!(model.result.is_none());
+    }
+
+    #[test]
+    fn stalled_status_requests_stop_presenting_live_capture() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(true))), now);
+        model.refresh_connection(now, now + STATUS_STALE_AFTER);
+        assert!(!model.animate(now + STATUS_STALE_AFTER));
+        model.refresh_connection(now, now + STATUS_STALE_AFTER + DISCONNECT_DELAY);
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert!(model.waveform.is_none());
+        assert!(model.progress.is_none());
+        let restored = now + STATUS_STALE_AFTER + Duration::from_secs(1);
+        model.apply(recording(3, Some(signal(true))), restored);
+        assert_eq!(model.kind, Some(Kind::Recording));
+        assert!(model.lost_since.is_none());
+    }
+
+    #[test]
+    fn dismissing_a_notice_removes_feedback_without_hiding_the_take() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = recording(0, Some(signal(true)));
+        model.apply(status.clone(), now);
+        status.notice = Some(ipc::InteractionNotice {
+            event_id: 1,
+            message: "Busy".to_owned(),
+            error: None,
+        });
+        model.apply(status.clone(), now + POLL_INTERVAL);
+        assert!(model.interaction.is_some());
+        status.notice = None;
+        model.apply(status, now + POLL_INTERVAL * 2);
+        assert!(model.interaction.is_none());
+        assert_eq!(model.kind, Some(Kind::Recording));
+    }
+
+    #[test]
+    fn compositor_close_waits_for_an_output_event_before_reopening() {
+        let mut lifecycle = SurfaceLifecycle::Open;
+        lifecycle.closed();
+        assert!(
+            !lifecycle.can_create(),
+            "ordinary loop ticks must respect compositor closure"
+        );
+        lifecycle.output_changed();
+        assert!(lifecycle.can_create(), "real hotplug permits a replacement");
+        lifecycle.opened();
+        assert!(
+            !lifecycle.can_create(),
+            "an existing surface must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn screenshot_ignores_shared_memory_slot_padding() {
+        let path =
+            std::env::temp_dir().join(format!("cantrip-hud-screenshot-{}.png", std::process::id()));
+        let mut bytes = [255_u8; 64];
+        bytes[..4].copy_from_slice(&[10, 20, 30, 128]);
+        save_screenshot(&path, &bytes, 1, 1).unwrap();
+        let image = image::open(&path).unwrap().into_rgba8();
+        assert_eq!(image.dimensions(), (1, 1));
+        assert_eq!(image.get_pixel(0, 0).0, [60, 40, 20, 128]);
+        assert!(save_screenshot(&path, &bytes[..3], 1, 1).is_err());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn lock_is_exclusive_until_the_file_drops() {
-        let path = lock_path();
-        let first = acquire_lock_on(&path).expect("first lock should succeed");
+        let path =
+            std::env::temp_dir().join(format!("cantrip-hud-lock-test-{}", std::process::id()));
+        let first = acquire_lock_on(&path).expect("first lock");
         assert!(first.is_some());
-
-        // A second open of the same inode must contend (flock is per fd,
-        // not per process), so a duplicate HUD instance cannot start.
-        let second = acquire_lock_on(&path).expect("lock check should not error");
-        assert!(second.is_none());
-
-        // Dropping the file releases the lock: the daemon can respawn.
+        assert!(acquire_lock_on(&path).expect("second lock").is_none());
         drop(first);
-        let third = acquire_lock_on(&path).expect("re-lock after drop should succeed");
+        let third = acquire_lock_on(&path).expect("reacquire lock");
         assert!(third.is_some());
         drop(third);
-        let _ = fs::remove_file(&path);
-    }
-
-    #[test]
-    fn formats_elapsed_as_minutes_and_seconds() {
-        assert_eq!(format_elapsed(0), "00:00");
-        assert_eq!(format_elapsed(12), "00:12");
-        assert_eq!(format_elapsed(125), "02:05");
-    }
-
-    #[test]
-    fn ease_in_out_cubic_is_symmetric_and_smooth() {
-        assert!(ease_in_out_cubic(-1.0).abs() < 1e-6);
-        assert!((ease_in_out_cubic(1.0) - 1.0).abs() < 1e-6);
-        assert!((ease_in_out_cubic(0.5) - 0.5).abs() < 1e-5);
-        // Mid slope gentler than ease-out at t=0.25 (less front-loaded).
-        assert!(
-            ease_in_out_cubic(0.25) < ease_out_cubic(0.25),
-            "in-out should lag ease-out early"
-        );
-    }
-
-    #[test]
-    fn ease_out_cubic_clamps_and_decelerates() {
-        assert!(ease_out_cubic(-1.0).abs() < 1e-6);
-        assert!((ease_out_cubic(2.0) - 1.0).abs() < 1e-6);
-        assert!((ease_out_cubic(1.0) - 1.0).abs() < 1e-6);
-        let mut previous = 0.0_f32;
-        for step in 0..=20 {
-            let value = ease_out_cubic(step as f32 / 20.0);
-            assert!(value >= previous, "must be monotonic");
-            previous = value;
-        }
-        assert!(ease_out_cubic(0.5) > 0.5, "ease-out is front-loaded");
-    }
-
-    #[test]
-    fn recording_status_carries_waveform_and_warning_into_hud_state() {
-        let waveform = SCREENSHOT_WAVEFORM;
-        let active = StatusSnapshot::Recording {
-            elapsed: 12,
-            signal: Some(AudioSignal {
-                level: 72,
-                silent: false,
-                waveform,
-            }),
-            outcome: None,
-        };
-        assert_eq!(
-            UiState::from_status(&active),
-            UiState::Recording {
-                elapsed: 12,
-                audio_waveform: Some(waveform),
-                audio_silent: false,
-            }
-        );
-
-        let silent = StatusSnapshot::Recording {
-            elapsed: 12,
-            signal: Some(AudioSignal {
-                level: 0,
-                silent: true,
-                waveform: [[0, 0]; AUDIO_WAVEFORM_BINS],
-            }),
-            outcome: None,
-        };
-        let state = UiState::from_status(&silent);
-        assert!(matches!(
-            state,
-            UiState::Recording {
-                audio_silent: true,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn unknown_daemon_status_is_safe_for_an_older_hud() {
-        let status = StatusSnapshot::Unknown {
-            state: "calibrating".to_owned(),
-            outcome: None,
-        };
-        assert_eq!(UiState::from_status(&status), UiState::Idle);
-    }
-
-    #[test]
-    fn waveform_interpolation_stays_between_measured_frames() {
-        let from = [[0.0; 2]; AUDIO_WAVEFORM_BINS];
-        let to = SCREENSHOT_WAVEFORM.map(|bin| bin.map(f32::from));
-        assert_eq!(
-            interpolate_waveform(from, to, 0.0),
-            [[0, 0]; AUDIO_WAVEFORM_BINS]
-        );
-        let midpoint = interpolate_waveform(from, to, 0.5);
-        for (midpoint, target) in midpoint.into_iter().zip(SCREENSHOT_WAVEFORM) {
-            for edge in 0..2 {
-                assert!((i16::from(midpoint[edge]) * 2 - i16::from(target[edge])).abs() <= 1);
-            }
-        }
-        assert_eq!(interpolate_waveform(from, to, 1.0), SCREENSHOT_WAVEFORM);
-    }
-
-    #[test]
-    fn smooth_bin_never_overshoots_measured_bins() {
-        let cases: [[f32; 7]; 3] = [
-            [0.0, 90.0, -20.0, 60.0, -90.0, 30.0, 0.0],
-            [10.0, 10.0, 10.0, 80.0, 10.0, 10.0, 10.0],
-            [-94.0, 94.0, -94.0, 94.0, -94.0, 94.0, -94.0],
-        ];
-        for values in cases {
-            for step in 0..=60 {
-                let t = step as f32 / 10.0;
-                let index = (t.floor() as usize).min(values.len() - 2);
-                let low = values[index].min(values[index + 1]);
-                let high = values[index].max(values[index + 1]);
-                let sample = smooth_bin(&values, t);
-                assert!(
-                    (low..=high).contains(&sample),
-                    "t={t}: {sample} outside [{low}, {high}]"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn knight_scanner_sweep_head_is_deterministic_at_fixed_phase() {
-        let phase = 1.25;
-        let first = knight_sweep_head(phase);
-        let second = knight_sweep_head(phase);
-        assert_eq!(first, second);
-        assert_eq!(knight_sweep_head(0.0), 0.0);
-        assert_eq!(knight_sweep_head(1.0), 10.5);
-        assert_eq!(
-            knight_sweep_head(2.0),
-            (KNIGHT_CELLS.saturating_sub(1) as f32)
-        );
-        assert_eq!(knight_sweep_head(4.0), 0.0);
-    }
-
-    #[test]
-    fn sent_knight_track_lights_every_cell() {
-        let width = 360;
-        let height = 56;
-        let mut canvas = vec![0_u8; width * height * 4];
-        knight_track(
-            &mut canvas,
-            width as u32,
-            height as u32,
-            180.0,
-            28.0,
-            160.0,
-            20.0,
-            1.0,
-            ChipKind::Sent,
-            None,
-            1.0,
-            0.0,
-            None,
-            None,
-            1.0,
-        );
-        let slot_width = 304.0 / KNIGHT_CELLS as f32;
-        for index in 0..KNIGHT_CELLS {
-            let x = (28.0 + slot_width * (index as f32 + 0.5)).round() as u32;
-            assert!(
-                alpha_at(&canvas, width as u32, x, 28) > 0,
-                "sent cell {index} must be lit"
-            );
-        }
-    }
-
-    #[test]
-    fn knight_track_paints_inside_capsule_inset() {
-        let width = 360;
-        let height = 56;
-        let mut canvas = vec![0_u8; width * height * 4];
-        knight_track(
-            &mut canvas,
-            width as u32,
-            height as u32,
-            180.0,
-            28.0,
-            160.0,
-            20.0,
-            1.0,
-            ChipKind::Cleaning,
-            None,
-            1.0,
-            1.1,
-            None,
-            None,
-            1.0,
-        );
-        let mut painted = false;
-        for (index, pixel) in canvas.as_chunks::<4>().0.iter().enumerate() {
-            if pixel[3] == 0 {
-                continue;
-            }
-            painted = true;
-            let x = (index % width) as f32 + 0.5;
-            let y = (index / width) as f32 + 0.5;
-            assert!((24.0..=336.0).contains(&x));
-            assert!((12.0..=44.0).contains(&y));
-        }
-        assert!(painted, "cleaning scanner should paint static cells");
-    }
-
-    #[test]
-    fn frozen_knight_phase_is_byte_deterministic() {
-        let render = || {
-            let mut canvas = vec![0_u8; 360 * 56 * 4];
-            knight_track(
-                &mut canvas,
-                360,
-                56,
-                180.0,
-                28.0,
-                160.0,
-                20.0,
-                1.0,
-                ChipKind::Transcribing,
-                None,
-                1.0,
-                0.0,
-                None,
-                None,
-                1.0,
-            );
-            canvas
-        };
-        let first = render();
-        let second = render();
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn knight_recording_lights_negative_only_envelopes() {
-        let negative = [[-80, -40]; AUDIO_WAVEFORM_BINS];
-        let levels = knight_cell_levels(ChipKind::Recording, 0.0, Some(negative));
-        assert!(
-            levels.iter().all(|level| (*level - 0.8).abs() < 0.001),
-            "negative-only swing must read peak amplitude: {levels:?}"
-        );
-        let mirror = [[40, 80]; AUDIO_WAVEFORM_BINS];
-        assert_eq!(
-            levels,
-            knight_cell_levels(ChipKind::Recording, 0.0, Some(mirror))
-        );
-    }
-
-    #[test]
-    fn processing_status_keeps_typed_stage_and_safe_kind() {
-        let progress = StatusSnapshot::Processing {
-            stage: Stage::Transcribing { chunk: 2, total: 5 },
-            outcome: None,
-        };
-        assert_eq!(
-            UiState::from_status(&progress),
-            UiState::Processing {
-                stage: Stage::Transcribing { chunk: 2, total: 5 },
-            }
-        );
-        assert_eq!(
-            UiState::from_status(&progress).kind(),
-            UiStateKind::Transcribing
-        );
-
-        let cleaning = StatusSnapshot::Processing {
-            stage: Stage::CleaningUp,
-            outcome: None,
-        };
-        assert_eq!(
-            UiState::from_status(&cleaning).kind(),
-            UiStateKind::Cleaning
-        );
-
-        let future = StatusSnapshot::Processing {
-            stage: Stage::Unknown("aligning".to_owned()),
-            outcome: None,
-        };
-        assert_eq!(
-            UiState::from_status(&future).kind(),
-            UiStateKind::Transcribing
-        );
-    }
-
-    #[test]
-    fn processing_chip_uses_only_typed_measured_progress() {
-        assert_eq!(
-            processing_chip_content(&Stage::Transcribing { chunk: 2, total: 5 }, false),
-            (
-                "Transcribing… 2/5".to_owned(),
-                ChipKind::Transcribing,
-                Some(0.4)
-            )
-        );
-        assert_eq!(
-            processing_chip_content(&Stage::Transcribing { chunk: 1, total: 1 }, false),
-            ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
-        );
-        assert_eq!(
-            processing_chip_content(&Stage::Unknown("aligning".to_owned()), false),
-            ("Transcribing…".to_owned(), ChipKind::Transcribing, None)
-        );
-        assert_eq!(
-            processing_chip_content(&Stage::CleaningUp, false),
-            ("Cleaning…".to_owned(), ChipKind::Cleaning, None)
-        );
-        assert_eq!(
-            processing_chip_content(&Stage::CleaningUp, true),
-            ("Cleaning…".to_owned(), ChipKind::Cleaning, Some(1.0))
-        );
-    }
-
-    #[test]
-    fn transcribing_progress_fills_cells_left_to_right() {
-        let render = |progress| {
-            let mut canvas = vec![0_u8; 360 * 56 * 4];
-            knight_track(
-                &mut canvas,
-                360,
-                56,
-                180.0,
-                28.0,
-                160.0,
-                20.0,
-                1.0,
-                ChipKind::Transcribing,
-                None,
-                1.0,
-                0.0,
-                None,
-                progress,
-                1.0,
-            );
-            canvas
-        };
-        let half = render(Some(0.5));
-        let left = alpha_at(&half, 360, 60, 28);
-        let right = alpha_at(&half, 360, 300, 28);
-        assert!(left > 200, "filled cell must be near-opaque (left={left})");
-        assert!(right < 60, "unfilled cell must stay dim (right={right})");
-        let full = render(Some(1.0));
-        assert!(alpha_at(&full, 360, 300, 28) > 200);
-    }
-
-    #[test]
-    fn track_leaves_surface_transparent_outside_cells() {
-        let mut canvas = vec![0_u8; 360 * 56 * 4];
-        knight_track(
-            &mut canvas,
-            360,
-            56,
-            180.0,
-            28.0,
-            160.0,
-            20.0,
-            1.0,
-            ChipKind::Sent,
-            None,
-            1.0,
-            0.0,
-            None,
-            None,
-            1.0,
-        );
-        assert_eq!(alpha_at(&canvas, 360, 0, 0), 0);
-        assert_eq!(alpha_at(&canvas, 360, 359, 55), 0);
-        assert!(alpha_at(&canvas, 360, 187, 28) > 200);
-    }
-
-    #[test]
-    fn track_cells_carry_state_accent() {
-        let render = |kind| {
-            let mut canvas = vec![0_u8; 360 * 56 * 4];
-            knight_track(
-                &mut canvas,
-                360,
-                56,
-                180.0,
-                28.0,
-                160.0,
-                20.0,
-                1.0,
-                kind,
-                None,
-                1.0,
-                0.0,
-                Some([[50, 50]; AUDIO_WAVEFORM_BINS]),
-                None,
-                1.0,
-            );
-            let base = (28 * 360 + 187) as usize * 4;
-            [canvas[base], canvas[base + 1], canvas[base + 2]]
-        };
-        let [b, g, r] = render(ChipKind::Recording);
-        assert!(r > g && r > b, "coral cell must be red-dominant");
-        let [b, g, r] = render(ChipKind::Cleaning);
-        assert!(b > r && b > g, "violet cell must be blue-dominant");
-    }
-
-    #[test]
-    fn rect_container_paints_opaque_floor_and_border() {
-        let width = 420;
-        let height = 56;
-        let mut canvas = vec![0_u8; width * height * 4];
-        rect_container(
-            &mut canvas,
-            width as u32,
-            height as u32,
-            210.0,
-            28.0,
-            168.0,
-            22.0,
-            ChipKind::Transcribing,
-            1.0,
-            1.0,
-        );
-        // Interior floor is 100% opaque (255)
-        assert_eq!(alpha_at(&canvas, width as u32, 210, 28), 255);
-        // Outside is transparent
-        assert_eq!(alpha_at(&canvas, width as u32, 10, 10), 0);
-        assert_eq!(alpha_at(&canvas, width as u32, 410, 50), 0);
-    }
-
-    #[test]
-    fn state_cell_heights_are_constant_except_recording() {
-        let states = [
-            ChipKind::Transcribing,
-            ChipKind::Cleaning,
-            ChipKind::Sent,
-            ChipKind::Notice,
-        ];
-        for kind in states {
-            let mut canvas = vec![0_u8; 360 * 56 * 4];
-            knight_track(
-                &mut canvas,
-                360,
-                56,
-                180.0,
-                28.0,
-                160.0,
-                20.0,
-                1.0,
-                kind,
-                None,
-                1.0,
-                0.0,
-                None,
-                None,
-                1.0,
-            );
-            for (index, pixel) in canvas.as_chunks::<4>().0.iter().enumerate() {
-                if pixel[3] == 0 {
-                    continue;
-                }
-                let y = (index / 360) as f32 + 0.5;
-                // Constant 14px height centered at y=28 (20.5..=35.5)
-                assert!(
-                    (20.5..=35.5).contains(&y),
-                    "{kind:?} pixel at y={y} exceeded 14px constant height bounds"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn recording_cell_height_scales_with_audio_energy() {
-        let render_recording = |peak| {
-            let mut canvas = vec![0_u8; 360 * 56 * 4];
-            knight_track(
-                &mut canvas,
-                360,
-                56,
-                180.0,
-                28.0,
-                160.0,
-                20.0,
-                1.0,
-                ChipKind::Recording,
-                None,
-                1.0,
-                0.0,
-                Some([[peak, peak]; AUDIO_WAVEFORM_BINS]),
-                None,
-                1.0,
-            );
-            let mut min_y = 56.0_f32;
-            let mut max_y = 0.0_f32;
-            for (index, pixel) in canvas.as_chunks::<4>().0.iter().enumerate() {
-                if pixel[3] > 50 {
-                    let y = (index / 360) as f32 + 0.5;
-                    min_y = min_y.min(y);
-                    max_y = max_y.max(y);
-                }
-            }
-            max_y - min_y
-        };
-        let silent_height = render_recording(0);
-        let loud_height = render_recording(90);
-        assert!(
-            silent_height <= 6.0,
-            "silent input should render minimal resting height (got {silent_height})"
-        );
-        assert!(
-            loud_height >= 18.0,
-            "loud voice input should expand dramatically (got {loud_height})"
-        );
-    }
-
-    #[test]
-    fn transition_from_recording_to_transcribing_morphs_height_and_color() {
-        let render_transition = |t| {
-            let mut canvas = vec![0_u8; 360 * 56 * 4];
-            knight_track(
-                &mut canvas,
-                360,
-                56,
-                180.0,
-                28.0,
-                160.0,
-                20.0,
-                1.0,
-                ChipKind::Transcribing,
-                Some(ChipKind::Recording),
-                t,
-                0.0,
-                Some([[80, 80]; AUDIO_WAVEFORM_BINS]),
-                Some(1.0),
-                1.0,
-            );
-            let base = (28 * 360 + 187) as usize * 4;
-            let (b, g, r) = (canvas[base], canvas[base + 1], canvas[base + 2]);
-            let mut min_y = 56.0_f32;
-            let mut max_y = 0.0_f32;
-            for (index, pixel) in canvas.as_chunks::<4>().0.iter().enumerate() {
-                if (index % 360) == 187 && pixel[3] > 100 {
-                    let y = (index / 360) as f32 + 0.5;
-                    min_y = min_y.min(y);
-                    max_y = max_y.max(y);
-                }
-            }
-            (max_y - min_y, [b, g, r])
-        };
-        let (early_h, [_, _, early_r]) = render_transition(0.0);
-        let (settled_h, [_, _, settled_r]) = render_transition(1.0);
-        assert!(
-            early_h > 18.0,
-            "early height should be high from recording (got {early_h})"
-        );
-        assert!(
-            (settled_h - 14.0).abs() <= 1.0,
-            "settled height should be 14px (got {settled_h})"
-        );
-        assert!(
-            early_r >= settled_r,
-            "early color should carry recording red"
-        );
-    }
-
-    #[test]
-    fn sent_state_displays_shimmer_and_ripple_crest() {
-        let render_sent = |t, phase| {
-            let mut canvas = vec![0_u8; 360 * 56 * 4];
-            knight_track(
-                &mut canvas,
-                360,
-                56,
-                180.0,
-                28.0,
-                160.0,
-                20.0,
-                1.0,
-                ChipKind::Sent,
-                None,
-                t,
-                phase,
-                None,
-                None,
-                1.0,
-            );
-            canvas
-        };
-
-        // 1. Mid-ripple (t=0.2): center cell 11 (x=187) is settled green, while wave front at cell 17 (x=270) has radiant mint crest:
-        let mid = render_sent(0.2, 0.0);
-        let center_base = (28 * 360 + 187) as usize * 4;
-        let [b_center, g_center, r_center] =
-            [mid[center_base], mid[center_base + 1], mid[center_base + 2]];
-        assert!(
-            g_center > r_center && g_center > b_center,
-            "center cell must be emerald green"
-        );
-        let crest_base = (28 * 360 + 270) as usize * 4;
-        let [b_crest, g_crest, r_crest] =
-            [mid[crest_base], mid[crest_base + 1], mid[crest_base + 2]];
-        assert!(
-            r_crest >= 200 && g_crest >= 240 && b_crest >= 200,
-            "wave front must flash radiant mint crest (got rgb [{r_crest}, {g_crest}, {b_crest}])"
-        );
-
-        // 2. Settled hold: live phase movement modulates the celebratory shimmer
-        let phase0 = render_sent(1.0, 0.0);
-        let phase1 = render_sent(1.0, 1.0);
-        assert_ne!(
-            phase0, phase1,
-            "settled success state must have live phase shimmer"
-        );
-    }
-    fn alpha_at(canvas: &[u8], width: u32, x: u32, y: u32) -> u8 {
-        canvas[(y * width + x) as usize * 4 + 3]
+        let _ = fs::remove_file(path);
     }
 }

@@ -10,12 +10,15 @@ Cantrip is a local-first Linux dictation app: one Rust crate and the `cantrip` b
 - `src/capture.rs` — `pw-record` child process
 - `src/stt.rs` — Parakeet via transcribe-rs
 - `src/models.rs` — model download and verification (`~/.local/share/cantrip/models`)
-- `src/inject.rs` — `wtype` → `ydotool` → `wl-copy` delivery
+- `src/inject.rs`, `src/desktop.rs` — bounded native Wayland delivery and verified focus/session permits
 - `src/config.rs`, `src/paths.rs` — TOML config and XDG paths
 - `src/postproc.rs` — OpenAI-compatible transcript cleanup
 - `src/keys.rs` — OS keyring API-key access
 - `src/pipeline.rs` — shared STT/postproc pipeline for the daemon and `transcribe`
 - `src/hud.rs` — layer-shell status HUD (`cantrip hud`)
+- `src/actions.rs` — explicit recording recovery and setup window
+- `src/archive.rs`, `src/recovery.rs` — owner-private per-take history and retained audio
+- `src/theme.rs` — shared desktop palette
 - `src/telemetry.rs` — opt-in Langfuse OTLP export
 
 ## Commands
@@ -40,8 +43,10 @@ cargo run -- transcribe samples/jfk.wav
 - API keys belong in the OS keyring via `cantrip key`, never in files, logs, or git.
 - Stop `pw-record` with SIGINT and wait; SIGKILL can corrupt the WAV.
 - Type-mode injection never touches the clipboard. Paste-first delivery may use `wl-copy`; clipboard mode does not restore prior contents.
-- In-flight recordings live under `$XDG_RUNTIME_DIR/cantrip` and are removed after processing. A complete STT failure may retain one owner-only `~/.local/state/cantrip/last-failed.wav` for `cantrip recover`.
+- In-flight recordings live under `$XDG_RUNTIME_DIR/cantrip`. Stopped takes are durably retained under their own IDs in the transcript history before STT. Failed, partial, cancelled, or undelivered takes remain independent; complete durable text plus successful delivery permits audio removal. Storage failures preserve runtime audio where possible and must be surfaced.
 - Successful transcripts are owner-only local history under `$XDG_STATE_HOME/cantrip/transcripts` and are never uploaded automatically.
+- Dismissal acknowledges feedback, never deletes artifacts. Forget requires explicit confirmation and removes only the selected take's retained audio and incomplete text; complete archived text stays.
+- Automatic delivery requires uninterrupted verified destination/session history. Unknown focus, lock, suspend, or reconnection defers; potentially completed handoffs are uncertain and never retried through another backend.
 - Keep the std-thread + mpsc process model; do not add an async runtime or a second durable work ledger.
 - Use `anyhow` context for fallible operations and reserve `unwrap()` for tests.
 - Use Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`) on the `master` branch.

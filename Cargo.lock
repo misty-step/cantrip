@@ -673,6 +673,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "clap",
+ "dbus",
  "dirs",
  "eframe",
  "epaint_default_fonts",
@@ -681,6 +682,7 @@ dependencies = [
  "image",
  "keyring",
  "libc",
+ "parking_lot",
  "serde",
  "serde_json",
  "sha2",
@@ -693,6 +695,7 @@ dependencies = [
  "transcribe-rs",
  "ureq 2.12.1",
  "wayland-client",
+ "wayland-protocols-misc",
 ]
 
 [[package]]

@@ -1,49 +1,54 @@
 //! The cantrip daemon and its socket-driven state machine.
 
 use crate::capture::{self, InputSignal};
-use crate::config::{Config, PostprocConfig, SttConfig};
+use crate::config::{Config, SttConfig, TelemetryConfig};
 use crate::hud;
-use crate::inject::{self, InjectionMode, InjectionOutcome};
-use crate::ipc::{AudioSignal, Command, Request, TerminalOutcome, WireReply};
+use crate::inject::{
+    self, DeliveryGuard, InjectionFailure, InjectionFailureKind, InjectionMode, InjectionOutcome,
+};
+use crate::ipc::{
+    self, Artifacts, AudioSignal, Capabilities, Cleanup, Command, CommandReply, Completeness,
+    Delivery, InteractionNotice, OperationKind, Request, StateKind, StatusSnapshot,
+    TerminalOutcome,
+};
 use crate::models;
 use crate::paths;
-use crate::pipeline::{self, PostprocStatus};
+use crate::pipeline::{self, PostprocStatus, Stage};
+use crate::recovery::{self, Take};
 use crate::stt;
 use crate::telemetry::{self, TelemetryReporter};
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-const CLIENT_LINE_LIMIT: usize = 256;
-const CLIENT_READ_DEADLINE: Duration = Duration::from_secs(2);
-/// How often the daemon checks that a HUD is alive and holding its lock.
+const CLIENT_DEADLINE: Duration = Duration::from_secs(2);
+const MAX_CLIENTS: usize = 64;
 const HUD_SUPERVISE_INTERVAL: Duration = Duration::from_secs(5);
-/// Minimum gap between HUD spawn attempts, so a broken HUD (for example a
-/// headless session with no Wayland) cannot cause a respawn hot loop.
 const HUD_SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
-/// Fixed daemon-owned sampling window. Status clients only read the cached
-/// result, so HUD and settings polling cannot consume each other's samples.
-/// Sampled every 100 ms against the trailing 200 ms window: overlapping
-/// windows keep the envelope fresh without rereading history.
+/// Only the daemon consumes capture samples; status clients share this cache.
 const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+const CAPABILITY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const MEANINGFUL_CAPTURE_MS: u64 = 3_000;
+const CANCEL_OPEN: u8 = 0;
+const CANCEL_REQUESTED: u8 = 1;
+const CANCEL_SEALED: u8 = 2;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// The recorder operations the daemon state machine needs. Production uses
-/// `capture::Recorder`; tests substitute a fake so Idle/Recording/Processing
-/// transitions can be proven without PipeWire hardware.
 trait RecorderBoundary: Send {
     fn input_signal(&mut self) -> Option<InputSignal>;
+    fn request_stop(&mut self, preserve_wav: bool) -> Result<()>;
     fn stop(self: Box<Self>) -> Result<PathBuf>;
     fn cancel(self: Box<Self>) -> Result<()>;
 }
@@ -51,6 +56,10 @@ trait RecorderBoundary: Send {
 impl RecorderBoundary for capture::Recorder {
     fn input_signal(&mut self) -> Option<InputSignal> {
         capture::Recorder::input_signal(self)
+    }
+
+    fn request_stop(&mut self, preserve_wav: bool) -> Result<()> {
+        capture::Recorder::request_stop(self, preserve_wav)
     }
 
     fn stop(self: Box<Self>) -> Result<PathBuf> {
@@ -66,109 +75,318 @@ extern "C" fn signal_handler(_signal: libc::c_int) {
     SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Identity {
+    epoch: Arc<str>,
+    operation_id: String,
+    take_id: String,
+    kind: Option<OperationKind>,
+}
+
+#[derive(Clone)]
+struct Operation {
+    identity: Arc<Identity>,
+    cancel: Arc<AtomicBool>,
+    lifecycle: Arc<AtomicU8>,
+    hud: crate::config::HudConfig,
+    started: Instant,
+}
+
+impl Operation {
+    fn request_cancel(&self) -> bool {
+        if self
+            .lifecycle
+            .compare_exchange(
+                CANCEL_OPEN,
+                CANCEL_REQUESTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.cancel.store(true, Ordering::Release);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Cancellation and irreversible cleanup have one atomic ordering. Once
+    /// cleanup commits, a later Cancel is rejected rather than acknowledged.
+    fn seal(&self) -> bool {
+        self.lifecycle
+            .compare_exchange(
+                CANCEL_OPEN,
+                CANCEL_SEALED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
 enum State {
     Idle,
     Recording {
+        operation: Operation,
         recorder: Box<dyn RecorderBoundary>,
+        wav: PathBuf,
+        config: Box<Config>,
         started: Instant,
         signal: Option<InputSignal>,
         next_signal_sample: Instant,
-        /// Per-capture post-processing override (Some(true)=clean,
-        /// Some(false)=raw, None=follow config). Applied when this capture
-        /// is stopped and dispatched to the worker.
-        postproc: Option<bool>,
     },
     Processing {
-        started: Instant,
-        stage: pipeline::Stage,
+        operation: Operation,
+        phase_started: Instant,
+        stage: Stage,
+        kind: WorkKind,
     },
 }
 
 impl State {
-    fn name(&self) -> &'static str {
+    fn kind(&self) -> StateKind {
         match self {
-            Self::Idle => "idle",
-            Self::Recording { .. } => "recording",
-            Self::Processing { .. } => "processing",
+            Self::Idle => StateKind::Idle,
+            Self::Recording { .. } => StateKind::Recording,
+            Self::Processing { .. } => StateKind::Processing,
         }
     }
+
+    fn operation(&self) -> Option<&Operation> {
+        match self {
+            Self::Idle => None,
+            Self::Recording { operation, .. } | Self::Processing { operation, .. } => {
+                Some(operation)
+            }
+        }
+    }
+
+    fn stage(&self) -> Option<&Stage> {
+        match self {
+            Self::Processing { stage, .. } => Some(stage),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkKind {
+    Transcription,
+    Delivery,
+    Discard,
+    Forget,
+    Retain,
+}
+
+enum Work {
+    Capture {
+        recorder: Box<dyn RecorderBoundary>,
+        wav: PathBuf,
+        duration_ms: u64,
+        discard: bool,
+    },
+    Recover,
+    Text,
+    Forget,
 }
 
 struct Job {
-    wav: PathBuf,
-    stt: SttConfig,
-    vocabulary: Vec<String>,
-    postproc: PostprocConfig,
-    /// Only explicit recovery delivery overrides bypass the live config.
-    injection_override: Option<InjectionMode>,
-    source: pipeline::Source,
-    /// Wall time of the recording itself, for the telemetry capture span.
-    capture_ms: u64,
+    operation: Operation,
+    config: Box<Config>,
+    guard: Option<DeliveryGuard>,
+    work: Work,
+}
+
+struct StageEvent {
+    identity: Arc<Identity>,
+    stage: Stage,
 }
 
 struct WorkerResult {
-    result: std::result::Result<String, String>,
-    stt_elapsed: Duration,
-    postproc: PostprocStatus,
-    partial: bool,
-    capture_ms: u64,
-    postproc_usage: Option<crate::postproc::RefinementUsage>,
-    /// Which pipeline lane produced this result, for telemetry labeling.
-    source: pipeline::Source,
-    injection_override: Option<InjectionMode>,
-    stt_model: String,
-    stt_remote: bool,
-    cleanup_model: String,
-    wav_retained: bool,
-    transcript_saved: bool,
+    identity: Arc<Identity>,
+    outcome: TerminalOutcome,
+    recordings: Option<Vec<Take>>,
+    telemetry: Option<(TelemetryConfig, telemetry::JobTelemetry)>,
 }
 
-const POSTPROC_MODEL_UNSET_ERROR: &str = "postproc-model-unset";
-const POSTPROC_MODEL_UNSET_MESSAGE: &str =
-    "post-processing requested but [postproc].model is not set — set [postproc].model then cantrip reload, or drop --postproc clean";
-
-/// The daemon's most recent terminal outcome, surfaced on status replies so
-/// the HUD pill can flash the true result instead of a fake success.
-#[derive(Debug, Clone, Default)]
-struct LastOutcome {
-    message: Option<String>,
-    /// Whether a complete dictation was delivered (typed or copied).
-    ok: Option<bool>,
-    /// Stable machine-readable class for command/status consumers.
-    error: Option<String>,
+struct Daemon {
+    config: Config,
+    state: State,
+    epoch: Arc<str>,
+    event_sequence: u64,
+    operation_sequence: u64,
+    outcome: Option<TerminalOutcome>,
+    notice: Option<InteractionNotice>,
+    recordings: Vec<Take>,
+    pending_recordings: usize,
+    has_audio: bool,
+    has_text: bool,
+    history_revision: u64,
+    local_model: bool,
+    worker_available: bool,
+    retainer: Option<JoinHandle<WorkerResult>>,
 }
 
-impl LastOutcome {
-    fn success(message: impl Into<String>) -> Self {
+impl Daemon {
+    fn new(config: Config, recordings: Vec<Take>, local_model: bool) -> Self {
         Self {
-            message: Some(message.into()),
-            ok: Some(true),
-            error: None,
+            config,
+            state: State::Idle,
+            epoch: Arc::from(recovery::new_id()),
+            event_sequence: 0,
+            operation_sequence: 0,
+            outcome: None,
+            notice: None,
+            pending_recordings: recordings.iter().filter(|take| take.unresolved).count(),
+            has_audio: recordings.iter().any(|take| take.audio_available),
+            has_text: recordings.iter().any(|take| take.text_available),
+            history_revision: 0,
+            recordings,
+            local_model,
+            worker_available: true,
+            retainer: None,
         }
     }
 
-    fn notice(message: impl Into<String>) -> Self {
-        Self {
-            message: Some(message.into()),
-            ok: Some(false),
-            error: None,
+    fn replace_recordings(&mut self, recordings: Vec<Take>) {
+        self.pending_recordings = recordings.iter().filter(|take| take.unresolved).count();
+        self.has_audio = recordings.iter().any(|take| take.audio_available);
+        self.has_text = recordings.iter().any(|take| take.text_available);
+        self.recordings = recordings;
+        self.history_revision += 1;
+    }
+
+    fn operation(&mut self, take_id: String, kind: Option<OperationKind>) -> Operation {
+        self.operation_sequence += 1;
+        Operation {
+            identity: Arc::new(Identity {
+                epoch: self.epoch.clone(),
+                operation_id: format!("{}-{}", self.epoch, self.operation_sequence),
+                take_id,
+                kind,
+            }),
+            cancel: Arc::new(AtomicBool::new(false)),
+            lifecycle: Arc::new(AtomicU8::new(CANCEL_OPEN)),
+            hud: self.config.hud,
+            started: Instant::now(),
         }
     }
 
-    fn notice_with_error(message: impl Into<String>, error: impl Into<String>) -> Self {
-        Self {
+    fn event_id(&mut self) -> u64 {
+        self.event_sequence += 1;
+        self.event_sequence
+    }
+
+    fn notice(&mut self, message: impl Into<String>, error: Option<&str>) {
+        self.notice = Some(InteractionNotice {
+            event_id: self.event_id(),
+            message: message.into(),
+            error: error.map(str::to_owned),
+        });
+    }
+
+    fn reply(&self, ok: bool, message: impl Into<String>, error: Option<&str>) -> CommandReply {
+        CommandReply {
+            ok,
+            state: self.state.kind(),
             message: Some(message.into()),
-            ok: Some(false),
-            error: Some(error.into()),
+            stage: self.state.stage().cloned(),
+            outcome: self.outcome.clone(),
+            error: error.map(str::to_owned),
         }
     }
 
-    fn to_ipc(&self) -> Option<TerminalOutcome> {
-        self.message.clone().map(|message| TerminalOutcome {
-            message,
-            ok: self.ok.unwrap_or(false),
-            error: self.error.clone(),
-        })
+    fn reject(&mut self, message: &str, error: &str) -> CommandReply {
+        self.notice(message, Some(error));
+        self.reply(false, message, Some(error))
+    }
+
+    fn busy(&mut self) -> CommandReply {
+        self.reject(
+            "Another operation is active; nothing new was started.",
+            "busy",
+        )
+    }
+
+    fn publish(&mut self, mut outcome: TerminalOutcome) {
+        outcome.event_id = self.event_id();
+        self.outcome = Some(outcome);
+    }
+
+    fn begin(&mut self, operation: Operation, stage: Stage, kind: WorkKind) {
+        self.outcome = None;
+        self.notice = None;
+        self.state = State::Processing {
+            operation,
+            phase_started: Instant::now(),
+            stage,
+            kind,
+        };
+    }
+
+    fn snapshot(&self) -> StatusSnapshot {
+        let (elapsed, signal) = match &self.state {
+            State::Recording {
+                started, signal, ..
+            } => (
+                started.elapsed().as_secs(),
+                signal.map(|signal| AudioSignal {
+                    level: signal.level,
+                    silent: signal.silent,
+                    waveform: signal.waveform,
+                }),
+            ),
+            State::Processing { phase_started, .. } => (phase_started.elapsed().as_secs(), None),
+            State::Idle => (0, None),
+        };
+        let idle = matches!(self.state, State::Idle) && self.worker_available;
+        let cancellable = match &self.state {
+            State::Recording { .. } => true,
+            State::Processing {
+                operation, kind, ..
+            } => {
+                matches!(kind, WorkKind::Transcription | WorkKind::Delivery)
+                    && operation.lifecycle.load(Ordering::Acquire) == CANCEL_OPEN
+            }
+            State::Idle => false,
+        };
+        let hud = self
+            .state
+            .operation()
+            .map_or(self.config.hud, |operation| operation.hud);
+        StatusSnapshot {
+            epoch: self.epoch.to_string(),
+            operation_id: self
+                .state
+                .operation()
+                .map(|operation| operation.identity.operation_id.clone()),
+            operation_kind: self
+                .state
+                .operation()
+                .and_then(|operation| operation.identity.kind),
+            state: self.state.kind(),
+            elapsed,
+            signal,
+            stage: self.state.stage().cloned(),
+            outcome: self.outcome.clone(),
+            notice: self.notice.clone(),
+            pending_recordings: self.pending_recordings,
+            capabilities: Capabilities {
+                stop: matches!(self.state, State::Recording { .. }),
+                cancel: cancellable,
+                recover: idle && self.has_audio,
+                copy: idle && self.has_text,
+                dismiss: self.notice.is_some()
+                    || self
+                        .outcome
+                        .as_ref()
+                        .is_some_and(|outcome| !outcome.dismissed),
+                local_model: self.local_model,
+                remote_configured: self.config.stt.endpoint.is_some(),
+            },
+            hud,
+        }
     }
 }
 
@@ -184,26 +402,11 @@ impl Drop for SocketCleanup {
     }
 }
 
-struct RecordingCleanup(PathBuf);
-
-impl Drop for RecordingCleanup {
-    fn drop(&mut self) {
-        if let Err(error) = capture::remove_recording(&self.0) {
-            tracing::warn!("[Capture] recording cleanup failed: {error:#}");
-        }
-    }
-}
 /// Run the cantrip daemon until it receives SIGINT, SIGTERM, or a fatal error.
 pub fn run(config: Config, preload: bool) -> Result<()> {
     tracing::info!("[Daemon] starting cantrip {}", env!("CARGO_PKG_VERSION"));
     SHUTDOWN.store(false, Ordering::SeqCst);
     install_signal_handlers();
-
-    if config.stt.endpoint.is_none() {
-        let spec = models::require(&config.stt.model)?;
-        models::installed(spec)?.context("model not installed — run: cantrip models pull")?;
-        tracing::info!("[Models] model is installed");
-    }
 
     let runtime_dir =
         paths::ensure_dir(paths::runtime_dir()?).context("creating runtime directory")?;
@@ -234,38 +437,43 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
         .set_nonblocking(true)
         .context("enabling non-blocking daemon socket")?;
 
-    let warm = preload || config.keep_warm;
+    let import_failed = recovery::import_legacy().is_err();
+    let recordings = recovery::list();
+    let list_failed = recordings.is_err();
+    let local_model = local_model_ready(&SttConfig::default());
+    let mut daemon = Daemon::new(config, recordings.unwrap_or_default(), local_model);
+    if import_failed || list_failed {
+        tracing::warn!("[Daemon] recovery discovery incomplete class=storage-failed");
+        daemon.notice(
+            "Saved recordings could not all be loaded; check storage and refresh.",
+            Some("storage-failed"),
+        );
+    }
+    DeliveryGuard::prepare();
+    let warm = preload || daemon.config.keep_warm;
     let WorkerChannels {
         jobs: job_tx,
         results: result_rx,
-        ready: ready_rx,
         stages: stage_rx,
         handle: worker,
-    } = spawn_worker(&config, warm);
-    match ready_rx
-        .recv()
-        .context("waiting for transcription worker")?
-    {
-        Ok(()) => {}
-        Err(error) => {
-            drop(job_tx);
-            let _ = worker.join();
-            return Err(anyhow::anyhow!("{}", error));
-        }
-    }
+    } = spawn_worker(warm, daemon.config.stt.clone());
 
     tracing::info!("[Daemon] listening");
     start_hud_supervisor(runtime_dir.clone());
     let telemetry_reporter = TelemetryReporter::spawn();
     let loop_result = serve(
         &listener,
-        config,
         &runtime_dir,
+        &mut daemon,
         &job_tx,
         &result_rx,
         &stage_rx,
         &telemetry_reporter,
     );
+    if loop_result.is_err() {
+        finish_retention(&mut daemon, &telemetry_reporter);
+        shutdown_state(&mut daemon.state);
+    }
     drop(job_tx);
     if worker.join().is_err() {
         tracing::warn!("[STT] worker thread exited unexpectedly");
@@ -282,32 +490,23 @@ fn install_signal_handlers() {
     }
 }
 
-/// Own the HUD lifecycle: check every few seconds that a HUD is alive (it
-/// holds an exclusive flock on `hud.lock`); when the lock is free, spawn a
-/// detached HUD. The user never has to start or restart the pill by hand.
 fn start_hud_supervisor(runtime_dir: PathBuf) {
     thread::spawn(move || {
-        // Start in the past so the first check can spawn immediately.
-        // checked_sub: on a machine with less than 30s of monotonic uptime a
-        // plain subtraction would panic.
         let mut last_spawn = Instant::now()
             .checked_sub(HUD_SPAWN_COOLDOWN)
             .unwrap_or_else(Instant::now);
         loop {
             if last_spawn.elapsed() >= HUD_SPAWN_COOLDOWN {
                 match hud::acquire_instance_lock() {
-                    Ok(Some(_lock)) => {
-                        // Lock free: no HUD is running. Release it and spawn
-                        // one; the child takes the lock itself (or exits if
-                        // another instance won the race).
-                        drop(_lock);
+                    Ok(Some(lock)) => {
+                        drop(lock);
                         last_spawn = Instant::now();
                         match spawn_hud(&runtime_dir) {
                             Ok(()) => tracing::info!("[Daemon] HUD not running; spawned it"),
                             Err(error) => tracing::warn!("[Daemon] spawning HUD failed: {error:#}"),
                         }
                     }
-                    Ok(None) => {} // a HUD holds the lock and is alive
+                    Ok(None) => {}
                     Err(error) => tracing::warn!("[Daemon] HUD lock check failed: {error:#}"),
                 }
             }
@@ -316,9 +515,6 @@ fn start_hud_supervisor(runtime_dir: PathBuf) {
     });
 }
 
-/// Launch the HUD as a detached child of this process. Its output goes to
-/// `hud.log` in the runtime directory; it leaves the daemon's process group
-/// so terminal signals to the daemon do not kill the pill.
 fn spawn_hud(runtime_dir: &Path) -> Result<()> {
     let executable = std::env::current_exe().context("locating the cantrip binary")?;
     let log_path = runtime_dir.join("hud.log");
@@ -371,110 +567,31 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Channels wiring the daemon loop to its transcription worker thread.
 struct WorkerChannels {
     jobs: Sender<Job>,
     results: Receiver<WorkerResult>,
-    ready: Receiver<std::result::Result<(), String>>,
-    stages: Receiver<pipeline::Stage>,
+    stages: Receiver<StageEvent>,
     handle: JoinHandle<()>,
 }
 
-fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
+fn spawn_worker(warm: bool, warm_stt: SttConfig) -> WorkerChannels {
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
-    let (ready_tx, ready_rx) = mpsc::channel::<std::result::Result<(), String>>();
-    let (stage_tx, stage_rx) = mpsc::channel::<pipeline::Stage>();
-    let report_stage = move |stage: pipeline::Stage| {
-        let _ = stage_tx.send(stage);
-    };
-    let warm_stt = config.stt.clone();
+    let (stage_tx, stage_rx) = mpsc::channel::<StageEvent>();
     let worker = thread::spawn(move || {
         let mut transcriber: pipeline::TranscriberCache = None;
         if warm && warm_stt.endpoint.is_none() {
             match pipeline::load_transcriber(&warm_stt.model) {
                 Ok(loaded) => transcriber = Some(loaded),
-                Err(error) => {
-                    let _ = ready_tx.send(Err(format!("loading transcription model: {error:#}")));
-                    return;
-                }
+                Err(error) => tracing::warn!(
+                    "[Models] warm load skipped class=local-model-unavailable error={error:#}"
+                ),
             }
         }
-        let _ = ready_tx.send(Ok(()));
-
         while let Ok(job) = job_rx.recv() {
-            let Job {
-                wav,
-                stt,
-                vocabulary,
-                postproc,
-                source,
-                capture_ms,
-                injection_override,
-            } = job;
-            let wav = RecordingCleanup(wav);
-            let outcome = pipeline::run(
-                &mut transcriber,
-                &wav.0,
-                &stt,
-                &vocabulary,
-                &postproc,
-                source,
-                &report_stage,
-            );
-            match &outcome.archive {
-                pipeline::ArchiveStatus::Saved(path) => {
-                    tracing::info!("[Daemon] archived transcript path={}", path.display());
-                }
-                pipeline::ArchiveStatus::Failed(error) => {
-                    tracing::warn!("[Daemon] transcript archive failed error={error}");
-                }
-                pipeline::ArchiveStatus::NotApplicable => {}
-            }
-            let mut transcript_saved = false;
-            if let Ok(text) = outcome.text.as_ref() {
-                if !text.trim().is_empty() {
-                    match persist_last_transcript(text) {
-                        Ok(()) => transcript_saved = true,
-                        Err(error) => {
-                            tracing::warn!("[Daemon] could not save last transcript: {error:#}");
-                        }
-                    }
-                }
-            }
-            // Recovery may consume audio only after nonempty recovered text
-            // has a durable owner-private copy, never before both writes fail.
-            let transcript_safe =
-                transcript_saved || matches!(&outcome.archive, pipeline::ArchiveStatus::Saved(_));
-            let wav_retained = match paths::last_failed_wav_path().and_then(|path| {
-                update_failed_wav(&path, &wav.0, source, &outcome, transcript_safe)
-            }) {
-                Ok(retained) => retained,
-                Err(error) => {
-                    tracing::warn!("[Daemon] recovery audio persistence failed error={error:#}");
-                    false
-                }
-            };
-            let worker_result = WorkerResult {
-                result: outcome.text,
-                stt_elapsed: outcome.stt_elapsed,
-                postproc: outcome.postproc,
-                partial: outcome.partial,
-                capture_ms,
-                postproc_usage: outcome.postproc_usage,
-                source,
-                injection_override,
-                stt_model: stt.model,
-                stt_remote: stt.endpoint.is_some(),
-                cleanup_model: postproc.model,
-                wav_retained,
-                transcript_saved,
-            };
-            let chars = worker_result
-                .result
-                .as_ref()
-                .map_or(0, |text| text.chars().count());
-            if result_tx.send(worker_result).is_err() {
+            let result = run_job(job, &mut transcriber, &stage_tx);
+            let chars = result.telemetry.as_ref().map_or(0, |(_, job)| job.chars);
+            if result_tx.send(result).is_err() {
                 tracing::warn!("[Daemon] transcription result dropped chars={chars}");
             }
         }
@@ -482,48 +599,91 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
     WorkerChannels {
         jobs: job_tx,
         results: result_rx,
-        ready: ready_rx,
         stages: stage_rx,
         handle: worker,
     }
 }
+
 fn serve(
     listener: &UnixListener,
-    mut config: Config,
     runtime_dir: &Path,
+    daemon: &mut Daemon,
     job_tx: &Sender<Job>,
     result_rx: &Receiver<WorkerResult>,
-    stage_rx: &Receiver<pipeline::Stage>,
+    stage_rx: &Receiver<StageEvent>,
     telemetry_reporter: &TelemetryReporter,
 ) -> Result<()> {
-    let mut state = State::Idle;
-    let mut last_outcome = LastOutcome::default();
+    let mut clients: Vec<PendingClient> = Vec::new();
+    let mut history = HistoryReader::spawn()?;
+    let mut next_capability_refresh = Instant::now();
     loop {
-        drain_stage(&mut state, stage_rx);
-        drain_worker_results(
-            &mut state,
-            &config,
-            result_rx,
-            &mut last_outcome,
-            telemetry_reporter,
-        )?;
-        refresh_recording_signal(&mut state);
+        drain_stage(daemon, stage_rx);
+        drain_worker_results(daemon, result_rx, telemetry_reporter);
+        if daemon
+            .retainer
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            finish_retention(daemon, telemetry_reporter);
+        }
+        refresh_recording_signal(&mut daemon.state);
+        if Instant::now() >= next_capability_refresh {
+            daemon.local_model = local_model_ready(&SttConfig::default());
+            next_capability_refresh = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
+        }
+        if let Ok((revision, refreshed)) = history.results.try_recv() {
+            history.active = false;
+            if revision != daemon.history_revision {
+                if clients.iter().any(|client| client.history_wait)
+                    && history.request(daemon.history_revision).is_err()
+                {
+                    let payload = encode_reply(&daemon.reply(
+                        false,
+                        "Saved recordings could not be refreshed.",
+                        Some("storage-failed"),
+                    ))?;
+                    for client in &mut clients {
+                        if client.history_wait {
+                            client.respond(payload.clone());
+                        }
+                    }
+                }
+            } else {
+                let payload = match refreshed {
+                    Ok((recordings, payload)) => {
+                        daemon.replace_recordings(recordings);
+                        payload
+                    }
+                    Err(()) => encode_reply(&daemon.reply(
+                        false,
+                        "Saved recordings could not be refreshed.",
+                        Some("storage-failed"),
+                    ))?,
+                };
+                for client in &mut clients {
+                    if client.history_wait {
+                        client.respond(payload.clone());
+                    }
+                }
+            }
+        }
         if SHUTDOWN.load(Ordering::SeqCst) {
             break;
         }
-
-        loop {
+        // A stream of connecting clients cannot starve cancellation or results.
+        for _ in 0..16 {
             match listener.accept() {
-                Ok((stream, _)) => {
-                    if let Err(error) = handle_connection(
-                        stream,
-                        &mut state,
-                        &mut config,
-                        runtime_dir,
-                        job_tx,
-                        &mut last_outcome,
-                    ) {
-                        tracing::warn!("[Daemon] client request failed: {error:#}");
+                Ok((stream, _)) if clients.len() < MAX_CLIENTS => {
+                    if let Some(client) = accept_client(stream) {
+                        clients.push(client);
+                    }
+                }
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(true);
+                    if let Ok(payload) =
+                        encode_reply(&daemon.reply(false, "Too many daemon clients.", Some("busy")))
+                    {
+                        let _ = stream.write(&payload);
                     }
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
@@ -531,112 +691,636 @@ fn serve(
                 Err(error) => return Err(error).context("accepting daemon connection"),
             }
         }
-        // Accept-loop quantum, not a data timer: bounds how long a client
-        // connection waits to be accepted. Kept small so `status` round-trips
-        // in milliseconds; the loop body is a nonblocking accept plus cached
-        // reads, so this costs negligible CPU.
+        let mut index = 0;
+        while index < clients.len() {
+            match poll_client(&mut clients[index]) {
+                ClientPoll::Pending => index += 1,
+                ClientPoll::Ready(request) => {
+                    let client = &mut clients[index];
+                    let reply = match request {
+                        Ok(Request::Command(command)) => Some(encode_reply(&execute(
+                            command,
+                            daemon,
+                            runtime_dir,
+                            job_tx,
+                        ))?),
+                        Ok(Request::Status) => Some(encode_reply(&daemon.snapshot())?),
+                        Ok(Request::Recordings) => {
+                            client.history_wait = true;
+                            client.deadline = Instant::now() + Duration::from_secs(8);
+                            if let Err(error) = history.request(daemon.history_revision) {
+                                tracing::warn!(
+                                    "[Daemon] history reader unavailable class=storage-failed"
+                                );
+                                client.history_wait = false;
+                                let _ = error;
+                                Some(encode_reply(&daemon.reply(
+                                    false,
+                                    "Saved recordings could not be refreshed.",
+                                    Some("storage-failed"),
+                                ))?)
+                            } else {
+                                None
+                            }
+                        }
+                        Err(message) => Some(encode_reply(&daemon.reply(
+                            false,
+                            message,
+                            Some("protocol"),
+                        ))?),
+                    };
+                    if let Some(reply) = reply {
+                        client.respond(reply);
+                    }
+                    index += 1;
+                }
+                ClientPoll::Closed => {
+                    clients.swap_remove(index);
+                }
+            }
+        }
         thread::sleep(Duration::from_millis(5));
     }
 
-    if matches!(&state, State::Processing { .. }) {
+    finish_retention(daemon, telemetry_reporter);
+    if let State::Processing { operation, .. } = &daemon.state {
+        operation.request_cancel();
         match result_rx.recv_timeout(Duration::from_secs(30)) {
-            Ok(result) => handle_worker_result(
-                &mut state,
-                &config,
-                result,
-                &mut last_outcome,
-                telemetry_reporter,
-            )?,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                tracing::warn!("[STT] transcription result timed out during shutdown");
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                anyhow::bail!("transcription worker died");
-            }
+            Ok(result) => apply_worker_result(daemon, result, telemetry_reporter),
+            Err(_) => tracing::warn!("[Daemon] worker has not settled during shutdown"),
         }
     }
-    shutdown_state(&mut state);
+    shutdown_state(&mut daemon.state);
     tracing::info!("[Daemon] shutting down");
     Ok(())
 }
-fn handle_connection(
-    mut stream: UnixStream,
-    state: &mut State,
-    config: &mut Config,
-    runtime_dir: &Path,
-    job_tx: &Sender<Job>,
-    last_outcome: &mut LastOutcome,
-) -> Result<()> {
-    let deadline = Instant::now() + CLIENT_READ_DEADLINE;
-    let mut command_line = Vec::with_capacity(CLIENT_LINE_LIMIT);
-    let mut byte = [0_u8; 1];
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            write_client_error(&mut stream, state, "client request timed out")?;
-            return Ok(());
-        }
-        stream
-            .set_read_timeout(Some(remaining))
-            .context("setting client read timeout")?;
-        match stream.read(&mut byte) {
-            Ok(0) => {
-                if command_line.is_empty() {
-                    return Ok(());
-                }
-                break;
-            }
-            Ok(1) => {
-                if byte[0] == b'\n' {
-                    break;
-                }
-                command_line.push(byte[0]);
-                if command_line.len() >= CLIENT_LINE_LIMIT {
-                    write_client_error(&mut stream, state, "client request exceeds 256 bytes")?;
-                    return Ok(());
-                }
-            }
-            Ok(_) => unreachable!("single-byte client read returned multiple bytes"),
-            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                write_client_error(&mut stream, state, "client request timed out")?;
-                return Ok(());
-            }
-            Err(error) => return Err(error).context("reading client command"),
-        }
-    }
 
-    let command_line = String::from_utf8_lossy(&command_line);
-    let reply = match Request::parse(&command_line) {
-        Some(Request::Command(command)) => {
-            execute(command, state, config, runtime_dir, job_tx, last_outcome)
-        }
-        Some(Request::Status) => status_reply(state, last_outcome),
-        None => WireReply::command(false, state.name(), Some("unknown command".to_owned())),
-    };
-    let json = serde_json::to_string(&reply).context("serializing daemon reply")?;
-    writeln!(stream, "{json}").context("writing daemon reply")?;
-    Ok(())
+type HistoryRead = (u64, std::result::Result<(Vec<Take>, Arc<Vec<u8>>), ()>);
+
+/// One bounded read worker, independent of inference and delivery. Deliberate
+/// history reads refresh disk; high-cadence status never scans or serializes it.
+struct HistoryReader {
+    requests: mpsc::SyncSender<u64>,
+    results: Receiver<HistoryRead>,
+    active: bool,
 }
 
-fn status_reply(state: &State, last_outcome: &LastOutcome) -> WireReply {
-    let (elapsed, signal, stage) = match state {
-        State::Recording {
-            started, signal, ..
-        } => (
-            Some(started.elapsed().as_secs()),
-            signal.map(|value| AudioSignal {
-                level: value.level,
-                silent: value.silent,
-                waveform: value.waveform,
-            }),
-            None,
-        ),
-        State::Processing { stage, .. } => (None, None, Some(stage)),
-        State::Idle => (None, None, None),
+impl HistoryReader {
+    fn spawn() -> Result<Self> {
+        let (requests, receiver) = mpsc::sync_channel(1);
+        let (sender, results) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("history-reader".to_owned())
+            .spawn(move || {
+                while let Ok(revision) = receiver.recv() {
+                    let read = recovery::list()
+                        .and_then(|takes| encode_reply(&takes).map(|payload| (takes, payload)))
+                        .map_err(|_| ());
+                    if sender.send((revision, read)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .context("starting history reader")?;
+        Ok(Self {
+            requests,
+            results,
+            active: false,
+        })
+    }
+
+    fn request(&mut self, revision: u64) -> Result<()> {
+        if !self.active {
+            self.requests
+                .try_send(revision)
+                .context("requesting history refresh")?;
+            self.active = true;
+        }
+        Ok(())
+    }
+}
+
+struct PendingClient {
+    stream: UnixStream,
+    buffer: Vec<u8>,
+    response: Option<Arc<Vec<u8>>>,
+    written: usize,
+    history_wait: bool,
+    deadline: Instant,
+}
+
+impl PendingClient {
+    fn respond(&mut self, payload: Arc<Vec<u8>>) {
+        self.response = Some(payload);
+        self.history_wait = false;
+        self.deadline = Instant::now() + Duration::from_secs(8);
+    }
+}
+
+enum ClientPoll {
+    Pending,
+    Ready(Result<Request, &'static str>),
+    Closed,
+}
+
+fn accept_client(stream: UnixStream) -> Option<PendingClient> {
+    stream.set_nonblocking(true).ok()?;
+    Some(PendingClient {
+        stream,
+        buffer: Vec::new(),
+        response: None,
+        written: 0,
+        history_wait: false,
+        deadline: Instant::now() + CLIENT_DEADLINE,
+    })
+}
+
+fn poll_client(client: &mut PendingClient) -> ClientPoll {
+    if Instant::now() >= client.deadline {
+        return if client.response.is_some() {
+            ClientPoll::Closed
+        } else {
+            ClientPoll::Ready(Err("daemon request timed out"))
+        };
+    }
+    if let Some(response) = &client.response {
+        let end = (client.written + 65_536).min(response.len());
+        match client.stream.write(&response[client.written..end]) {
+            Ok(0) => return ClientPoll::Closed,
+            Ok(written) => client.written += written,
+            Err(error)
+                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+            Err(_) => return ClientPoll::Closed,
+        }
+        return if client.written == response.len() {
+            ClientPoll::Closed
+        } else {
+            ClientPoll::Pending
+        };
+    }
+    if client.history_wait {
+        return ClientPoll::Pending;
+    }
+    let mut buffer = [0_u8; 512];
+    loop {
+        match client.stream.read(&mut buffer) {
+            Ok(0) => {
+                return if client.buffer.is_empty() {
+                    ClientPoll::Closed
+                } else {
+                    ClientPoll::Ready(Err("incomplete daemon request"))
+                }
+            }
+            Ok(bytes) => {
+                let newline = buffer[..bytes].iter().position(|byte| *byte == b'\n');
+                let end = newline.unwrap_or(bytes);
+                if client.buffer.len() + end >= ipc::REQUEST_LIMIT {
+                    return ClientPoll::Ready(Err("daemon request exceeds size limit"));
+                }
+                client.buffer.extend_from_slice(&buffer[..end]);
+                if newline.is_some() {
+                    return ClientPoll::Ready(decode_request(&client.buffer));
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return ClientPoll::Pending,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return ClientPoll::Closed,
+        }
+    }
+}
+
+fn decode_request(bytes: &[u8]) -> Result<Request, &'static str> {
+    let line = std::str::from_utf8(bytes).map_err(|_| "invalid daemon request")?;
+    Request::parse(line).ok_or("unknown daemon command")
+}
+
+struct ReplyBuffer(Vec<u8>);
+
+impl Write for ReplyBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + bytes.len() >= ipc::REPLY_LIMIT {
+            return Err(std::io::Error::other("daemon reply exceeds size limit"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_reply<T: Serialize + ?Sized>(value: &T) -> Result<Arc<Vec<u8>>> {
+    let mut buffer = ReplyBuffer(Vec::new());
+    serde_json::to_writer(&mut buffer, value).context("serializing daemon reply")?;
+    buffer.0.push(b'\n');
+    Ok(Arc::new(buffer.0))
+}
+
+fn execute(
+    command: Command,
+    daemon: &mut Daemon,
+    runtime_dir: &Path,
+    job_tx: &Sender<Job>,
+) -> CommandReply {
+    match command {
+        Command::Toggle { postproc } => match &daemon.state {
+            State::Idle => start_recording(daemon, runtime_dir, postproc),
+            State::Recording { .. } => stop_recording(daemon, job_tx, false),
+            State::Processing { .. } => daemon.busy(),
+        },
+        Command::Start { postproc } => match &daemon.state {
+            State::Idle => start_recording(daemon, runtime_dir, postproc),
+            _ => daemon.busy(),
+        },
+        Command::Stop => match &daemon.state {
+            State::Recording { .. } => stop_recording(daemon, job_tx, false),
+            State::Idle => daemon.reject("Nothing is recording.", "not-recording"),
+            State::Processing { .. } => daemon.busy(),
+        },
+        Command::Cancel => cancel_command(daemon, job_tx),
+        Command::Last => replay_latest(daemon, job_tx),
+        Command::Recover {
+            id,
+            local,
+            clipboard,
+        } => recover_take(daemon, job_tx, id, local, clipboard),
+        Command::Copy { id } => copy_take(daemon, job_tx, id),
+        Command::Dismiss { event_id } => dismiss(daemon, event_id),
+        Command::Forget { id } => forget_take(daemon, job_tx, id),
+        Command::Ping => daemon.reply(true, "pong", None),
+        Command::Reload => match Config::load() {
+            Ok(config) => {
+                daemon.config = config;
+                daemon.local_model = local_model_ready(&SttConfig::default());
+                tracing::info!("[Daemon] config reloaded");
+                daemon.reply(true, "reloaded", None)
+            }
+            Err(_) => daemon.reject(
+                "Configuration could not be reloaded; the active configuration is unchanged.",
+                "reload-failed",
+            ),
+        },
+    }
+}
+
+fn start_recording(
+    daemon: &mut Daemon,
+    runtime_dir: &Path,
+    postproc: Option<bool>,
+) -> CommandReply {
+    if !daemon.worker_available {
+        return daemon.reject("Transcription worker unavailable.", "stt-failed");
+    }
+    if postproc == Some(true) && daemon.config.postproc.model.trim().is_empty() {
+        let mut outcome = setup_failure(
+            "Post-processing requested but [postproc].model is not set.",
+            "postproc-model-unset",
+        );
+        outcome.event_id = daemon.event_id();
+        daemon.outcome = Some(outcome);
+        return daemon.reply(
+            false,
+            "Post-processing requested but [postproc].model is not set.",
+            Some("postproc-model-unset"),
+        );
+    }
+    if daemon.config.stt.endpoint.is_none() && !local_model_ready(&daemon.config.stt) {
+        let mut outcome = setup_failure(
+            "Local model unavailable — run: cantrip models pull",
+            "local-model-unavailable",
+        );
+        outcome.event_id = daemon.event_id();
+        daemon.outcome = Some(outcome);
+        return daemon.reply(
+            false,
+            "Local model unavailable — run: cantrip models pull",
+            Some("local-model-unavailable"),
+        );
+    }
+    let wav = runtime_dir.join(format!("rec-{}.wav", recovery::new_id()));
+    match capture::Recorder::start(&wav, daemon.config.audio_source.as_deref()) {
+        Ok(recorder) => {
+            let operation = daemon.operation(recovery::new_id(), Some(OperationKind::Dictation));
+            let mut config = daemon.config.clone();
+            if let Some(enabled) = postproc {
+                config.postproc.enabled = enabled;
+            }
+            let started = Instant::now();
+            daemon.outcome = None;
+            daemon.notice = None;
+            daemon.state = State::Recording {
+                operation,
+                recorder: Box::new(recorder),
+                wav,
+                config: Box::new(config),
+                started,
+                signal: None,
+                next_signal_sample: started,
+            };
+            tracing::info!("[Daemon] state idle -> recording");
+            daemon.reply(true, "recording", None)
+        }
+        Err(_) => {
+            tracing::warn!("[Capture] starting recording failed class=capture-failed");
+            let mut outcome = setup_failure("Starting recording failed", "capture-failed");
+            outcome.event_id = daemon.event_id();
+            daemon.outcome = Some(outcome);
+            daemon.reply(false, "Starting recording failed", Some("capture-failed"))
+        }
+    }
+}
+
+fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, discard: bool) -> CommandReply {
+    let State::Recording {
+        operation,
+        mut recorder,
+        wav,
+        config,
+        started,
+        ..
+    } = std::mem::replace(&mut daemon.state, State::Idle)
+    else {
+        unreachable!("stop_recording called outside recording");
     };
-    // Status reads are non-consuming: the HUD polls every 200 ms, so a
-    // rejection must remain visible until the next accepted recording clears it.
-    WireReply::status(state.name(), elapsed, signal, stage, last_outcome.to_ipc())
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let guard = (!discard).then(DeliveryGuard::capture);
+    if recorder.request_stop(!discard).is_err() {
+        tracing::warn!(
+            "[Capture] immediate stop request failed; finalization will retry class=capture-failed"
+        );
+    }
+    let job = Job {
+        operation: operation.clone(),
+        config,
+        guard,
+        work: Work::Capture {
+            recorder,
+            wav,
+            duration_ms,
+            discard,
+        },
+    };
+    let kind = if discard {
+        WorkKind::Discard
+    } else {
+        WorkKind::Transcription
+    };
+    let stage = if discard {
+        Stage::Cancelling
+    } else {
+        Stage::FinalizingAudio
+    };
+    if let Err(mpsc::SendError(job)) = job_tx.send(job) {
+        daemon.worker_available = false;
+        daemon.begin(operation, stage, WorkKind::Retain);
+        daemon.retainer = Some(thread::spawn(move || {
+            let identity = job.operation.identity.clone();
+            let mut outcome = retain_rejected_capture(job);
+            let recordings = recovery::list().ok();
+            storage_warning(&mut outcome, recordings.is_none());
+            WorkerResult {
+                identity,
+                outcome,
+                recordings,
+                telemetry: None,
+            }
+        }));
+        return daemon.reply(
+            false,
+            "Worker unavailable; recording finalization is running without transcription.",
+            Some("worker-failed"),
+        );
+    }
+    daemon.begin(operation, stage, kind);
+    tracing::info!("[Daemon] state recording -> processing");
+    if discard {
+        daemon.reply(true, "cancelling", None)
+    } else {
+        daemon.reply(true, "processing", None)
+    }
+}
+
+fn cancel_command(daemon: &mut Daemon, job_tx: &Sender<Job>) -> CommandReply {
+    match &daemon.state {
+        State::Idle => daemon.reject("Nothing to cancel.", "nothing-to-cancel"),
+        State::Recording { .. } => stop_recording(daemon, job_tx, true),
+        State::Processing { kind, .. }
+            if !matches!(kind, WorkKind::Transcription | WorkKind::Delivery) =>
+        {
+            daemon.busy()
+        }
+        State::Processing { operation, .. } => {
+            if !operation.request_cancel() {
+                return daemon.reject(
+                    "The operation is already cancelling or settling.",
+                    "already-settling",
+                );
+            }
+            if let State::Processing {
+                stage,
+                phase_started,
+                ..
+            } = &mut daemon.state
+            {
+                *stage = Stage::Cancelling;
+                *phase_started = Instant::now();
+            }
+            daemon.reply(true, "cancelling", None)
+        }
+    }
+}
+
+fn replay_latest(daemon: &mut Daemon, job_tx: &Sender<Job>) -> CommandReply {
+    if !matches!(daemon.state, State::Idle) {
+        return daemon.busy();
+    }
+    let Some(take) = daemon
+        .recordings
+        .iter()
+        .find(|take| take.text_available)
+        .cloned()
+    else {
+        return daemon.reject("No saved transcript.", "no-transcript");
+    };
+    dispatch_text(daemon, job_tx, take, daemon.config.injection)
+}
+
+fn recover_take(
+    daemon: &mut Daemon,
+    job_tx: &Sender<Job>,
+    id: Option<String>,
+    local: bool,
+    clipboard: bool,
+) -> CommandReply {
+    if !matches!(daemon.state, State::Idle) {
+        return daemon.busy();
+    }
+    let Some(take) = select_take(&daemon.recordings, id.as_deref(), |take| {
+        take.audio_available && (id.is_some() || take.unresolved || take.partial)
+    }) else {
+        let message = if id.is_some() {
+            "That recording is not available."
+        } else {
+            "No failed recording to recover."
+        };
+        return daemon.reject(message, "no-recording");
+    };
+    let mut config = daemon.config.clone();
+    if local {
+        config.stt = SttConfig::default();
+        config.postproc.enabled = false;
+        if !local_model_ready(&config.stt) {
+            let mut outcome = setup_failure(
+                "Local model unavailable — run: cantrip models pull",
+                "local-model-unavailable",
+            );
+            outcome.artifacts.take_id = Some(take.id.clone());
+            outcome.artifacts.audio = take.audio_available;
+            outcome.artifacts.text = take.text_available;
+            outcome.event_id = daemon.event_id();
+            daemon.outcome = Some(outcome);
+            return daemon.reply(
+                false,
+                "Local model unavailable — run: cantrip models pull",
+                Some("local-model-unavailable"),
+            );
+        }
+    }
+    if clipboard {
+        config.injection = InjectionMode::Clipboard;
+    }
+    let operation = daemon.operation(take.id, Some(OperationKind::Recovery));
+    let job = Job {
+        operation: operation.clone(),
+        config: Box::new(config),
+        guard: Some(DeliveryGuard::capture()),
+        work: Work::Recover,
+    };
+    if job_tx.send(job).is_err() {
+        daemon.worker_available = false;
+        return daemon.reject("Transcription worker unavailable.", "stt-failed");
+    }
+    daemon.begin(
+        operation,
+        Stage::Transcribing {
+            completed: 0,
+            total: 1,
+        },
+        WorkKind::Transcription,
+    );
+    daemon.reply(true, "recovering", None)
+}
+
+fn copy_take(daemon: &mut Daemon, job_tx: &Sender<Job>, id: String) -> CommandReply {
+    if !matches!(daemon.state, State::Idle) {
+        return daemon.busy();
+    }
+    let Some(take) = select_take(&daemon.recordings, Some(&id), |take| take.text_available) else {
+        return daemon.reject("That recording is not available.", "no-transcript");
+    };
+    dispatch_text(daemon, job_tx, take, InjectionMode::Clipboard)
+}
+
+fn forget_take(daemon: &mut Daemon, job_tx: &Sender<Job>, id: String) -> CommandReply {
+    if !matches!(daemon.state, State::Idle) {
+        return daemon.busy();
+    }
+    if select_take(&daemon.recordings, Some(&id), |_| true).is_none() {
+        return daemon.reject("That recording is not available.", "no-recording");
+    }
+    let operation = daemon.operation(id, Some(OperationKind::Forget));
+    let job = Job {
+        operation: operation.clone(),
+        config: Box::new(daemon.config.clone()),
+        guard: None,
+        work: Work::Forget,
+    };
+    if job_tx.send(job).is_err() {
+        daemon.worker_available = false;
+        return daemon.reject("Transcription worker unavailable.", "stt-failed");
+    }
+    daemon.begin(operation, Stage::RemovingRecording, WorkKind::Forget);
+    daemon.reply(true, "forgetting", None)
+}
+
+fn dispatch_text(
+    daemon: &mut Daemon,
+    job_tx: &Sender<Job>,
+    take: Take,
+    mode: InjectionMode,
+) -> CommandReply {
+    let mut config = daemon.config.clone();
+    config.injection = mode;
+    let operation = daemon.operation(take.id, Some(OperationKind::Replay));
+    let job = Job {
+        operation: operation.clone(),
+        config: Box::new(config),
+        guard: Some(DeliveryGuard::capture()),
+        work: Work::Text,
+    };
+    if job_tx.send(job).is_err() {
+        daemon.worker_available = false;
+        return daemon.reject("Transcription worker unavailable.", "stt-failed");
+    }
+    daemon.begin(operation, Stage::Delivering, WorkKind::Delivery);
+    daemon.reply(true, "delivering", None)
+}
+
+fn dismiss(daemon: &mut Daemon, event_id: Option<u64>) -> CommandReply {
+    let mut changed = false;
+    if let Some(notice) = &daemon.notice {
+        if event_id.is_none_or(|id| id == notice.event_id) {
+            daemon.notice = None;
+            changed = true;
+        }
+    }
+    if let Some(outcome) = &mut daemon.outcome {
+        if event_id.is_none_or(|id| id == outcome.event_id) {
+            outcome.dismissed = true;
+            changed = true;
+        }
+    }
+    if changed {
+        daemon.reply(true, "dismissed", None)
+    } else {
+        daemon.reject("Nothing to dismiss.", "nothing-to-dismiss")
+    }
+}
+
+fn select_take(
+    recordings: &[Take],
+    id: Option<&str>,
+    predicate: impl Fn(&Take) -> bool,
+) -> Option<Take> {
+    match id {
+        Some(id) => recordings
+            .iter()
+            .find(|take| take.id == id && predicate(take))
+            .cloned(),
+        None => recordings.iter().find(|take| predicate(take)).cloned(),
+    }
+}
+
+fn local_model_ready(stt: &SttConfig) -> bool {
+    models::require(&stt.model)
+        .ok()
+        .and_then(|spec| models::installed(spec).ok().flatten())
+        .is_some()
+}
+
+fn setup_failure(message: &str, error: &str) -> TerminalOutcome {
+    TerminalOutcome {
+        event_id: 0,
+        operation_id: None,
+        message: message.to_owned(),
+        completeness: Completeness::Failed,
+        delivery: Delivery::None,
+        cleanup: Cleanup::Off,
+        error: Some(error.to_owned()),
+        artifacts: Artifacts::default(),
+        dismissed: false,
+    }
 }
 
 fn refresh_recording_signal(state: &mut State) {
@@ -657,1363 +1341,1451 @@ fn refresh_recording_signal(state: &mut State) {
     *next_signal_sample = now + SIGNAL_SAMPLE_INTERVAL;
 }
 
-fn write_client_error(stream: &mut UnixStream, state: &State, message: &str) -> Result<()> {
-    let reply = WireReply::command(false, state.name(), Some(message.to_owned()));
-    let json = serde_json::to_string(&reply).context("serializing client error reply")?;
-    writeln!(stream, "{json}").context("writing client error reply")?;
-    Ok(())
-}
-
-fn execute(
-    command: Command,
-    state: &mut State,
-    config: &mut Config,
-    runtime_dir: &Path,
-    job_tx: &Sender<Job>,
-    last_outcome: &mut LastOutcome,
-) -> WireReply {
-    match command {
-        Command::Toggle { postproc } => match state {
-            State::Idle => start_recording(state, config, runtime_dir, last_outcome, postproc),
-            State::Recording { .. } => stop_recording(state, config, job_tx, last_outcome),
-            State::Processing { .. } => busy_reply(state),
-        },
-        Command::Start { postproc } => match state {
-            State::Idle => start_recording(state, config, runtime_dir, last_outcome, postproc),
-            State::Processing { .. } => busy_reply(state),
-            State::Recording { .. } => {
-                WireReply::command(false, state.name(), Some("busy".to_owned()))
-            }
-        },
-        Command::Stop => match state {
-            State::Recording { .. } => stop_recording(state, config, job_tx, last_outcome),
-            State::Idle => {
-                WireReply::command(false, state.name(), Some("not recording".to_owned()))
-            }
-            State::Processing { .. } => busy_reply(state),
-        },
-        Command::Cancel => cancel_recording(state, last_outcome),
-        Command::Last => replay_last(state, config, last_outcome),
-        Command::Recover { local, clipboard } => {
-            recover_failed(state, config, job_tx, last_outcome, local, clipboard)
-        }
-        Command::Ping => WireReply::command(true, state.name(), Some("pong".to_owned())),
-        Command::Reload => match Config::load() {
-            Ok(new_config) => {
-                *config = new_config;
-                tracing::info!("[Daemon] config reloaded");
-                WireReply::command(true, state.name(), Some("reloaded".to_owned()))
-            }
-            Err(error) => WireReply::command(false, state.name(), Some(format!("{error:#}"))),
-        },
-    }
-}
-
-fn start_recording(
-    state: &mut State,
-    config: &Config,
-    runtime_dir: &Path,
-    last_outcome: &mut LastOutcome,
-    postproc_override: Option<bool>,
-) -> WireReply {
-    start_recording_with(
-        state,
-        config,
-        runtime_dir,
-        last_outcome,
-        postproc_override,
-        |wav, source| {
-            capture::Recorder::start(wav, source)
-                .map(|recorder| Box::new(recorder) as Box<dyn RecorderBoundary>)
-        },
-    )
-}
-
-fn start_recording_with(
-    state: &mut State,
-    config: &Config,
-    runtime_dir: &Path,
-    last_outcome: &mut LastOutcome,
-    postproc_override: Option<bool>,
-    start: impl FnOnce(&Path, Option<&str>) -> Result<Box<dyn RecorderBoundary>>,
-) -> WireReply {
-    // Forcing cleanup when no model is configured would silently degrade to
-    // "cleanup failed — raw text", so reject it up front with a clear error.
-    if postproc_override == Some(true) && config.postproc.model.trim().is_empty() {
-        let message = POSTPROC_MODEL_UNSET_MESSAGE.to_owned();
-        *last_outcome = LastOutcome::notice_with_error(message.clone(), POSTPROC_MODEL_UNSET_ERROR);
-        return WireReply::command(false, state.name(), Some(message))
-            .with_error(POSTPROC_MODEL_UNSET_ERROR);
-    }
-    let wav = runtime_dir.join(format!("rec-{}.wav", unix_millis()));
-    match start(&wav, config.audio_source.as_deref()) {
-        Ok(recorder) => {
-            let started = Instant::now();
-            *state = State::Recording {
-                recorder,
-                started,
-                signal: None,
-                next_signal_sample: started,
-                postproc: postproc_override,
-            };
-            *last_outcome = LastOutcome::default();
-            tracing::info!("[Daemon] state idle -> recording");
-            WireReply::command(true, state.name(), Some("recording".to_owned()))
-        }
-        Err(error) => {
-            *last_outcome = LastOutcome::notice("Starting recording failed");
-            WireReply::command(
-                false,
-                state.name(),
-                Some(format!("starting recording failed: {error:#}")),
-            )
-        }
-    }
-}
-
-fn stop_recording(
-    state: &mut State,
-    config: &Config,
-    job_tx: &Sender<Job>,
-    last_outcome: &mut LastOutcome,
-) -> WireReply {
-    let State::Recording {
-        recorder,
-        started,
-        postproc,
-        ..
-    } = std::mem::replace(state, State::Idle)
-    else {
-        unreachable!("stop_recording called outside recording state");
-    };
-
-    let record_secs = started.elapsed().as_secs_f64();
-    let wav = match recorder.stop() {
-        Ok(wav) => wav,
-        Err(error) => {
-            *last_outcome = LastOutcome::notice("Recording failed");
-            return WireReply::command(
-                false,
-                state.name(),
-                Some(format!("stopping recording failed: {error:#}")),
-            );
-        }
-    };
-    // Apply this capture's override (None = follow config) to the worker job.
-    let mut postproc_cfg = config.postproc.clone();
-    if let Some(force) = postproc {
-        postproc_cfg.enabled = force;
-    }
-    let job = Job {
-        wav: wav.clone(),
-        stt: config.stt.clone(),
-        vocabulary: config.vocabulary.clone(),
-        postproc: postproc_cfg,
-        injection_override: None,
-        source: pipeline::Source::Dictation,
-        capture_ms: (record_secs * 1000.0) as u64,
-    };
-    if job_tx.send(job).is_err() {
-        let wav_retained = match persist_failed_wav(&wav) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!("[Daemon] recovery audio persistence failed error={error:#}");
-                false
-            }
-        };
-        if let Err(error) = capture::remove_recording(&wav) {
-            tracing::warn!("[Capture] recording cleanup failed: {error:#}");
-        }
-        *last_outcome = LastOutcome::notice_with_error(
-            format!("Transcription unavailable; {}", recovery_hint(wav_retained)),
-            "stt-failed",
-        );
-        return WireReply::command(
-            false,
-            state.name(),
-            Some("transcription worker unavailable".to_owned()),
-        )
-        .with_error("stt-failed")
-        .with_outcome(last_outcome.to_ipc());
-    }
-    *state = State::Processing {
-        started: Instant::now(),
-        stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
-    };
-    tracing::info!("[Daemon] state recording -> processing record_secs={record_secs:.3}");
-    WireReply::command(true, state.name(), Some("processing".to_owned()))
-}
-
-fn cancel_recording(state: &mut State, last_outcome: &mut LastOutcome) -> WireReply {
-    let previous = std::mem::replace(state, State::Idle);
-    match previous {
-        State::Recording { recorder, .. } => match recorder.cancel() {
-            Ok(()) => {
-                tracing::info!("[Daemon] state recording -> idle (cancelled)");
-                *last_outcome = LastOutcome::notice("Cancelled");
-                WireReply::command(true, state.name(), Some("cancelled".to_owned()))
-            }
-            Err(error) => {
-                *last_outcome = LastOutcome::notice("Cancelling failed");
-                WireReply::command(
-                    false,
-                    state.name(),
-                    Some(format!("cancelling recording failed: {error:#}")),
-                )
-            }
-        },
-        other => {
-            *state = other;
-            if matches!(state, State::Processing { .. }) {
-                busy_reply(state)
-            } else {
-                WireReply::command(false, state.name(), Some("nothing to cancel".to_owned()))
-            }
-        }
-    }
-}
-
-fn busy_reply(state: &State) -> WireReply {
-    WireReply::command(false, state.name(), Some("busy: processing".to_owned()))
-}
-
-fn drain_stage(state: &mut State, stage_rx: &Receiver<pipeline::Stage>) {
-    let mut latest = None;
+fn drain_stage(daemon: &mut Daemon, stage_rx: &Receiver<StageEvent>) {
     while let Ok(event) = stage_rx.try_recv() {
-        latest = Some(event);
+        if let State::Processing {
+            operation,
+            stage,
+            phase_started,
+            ..
+        } = &mut daemon.state
+        {
+            if event.identity.as_ref() == operation.identity.as_ref() && *stage != Stage::Cancelling
+            {
+                if std::mem::discriminant(stage) != std::mem::discriminant(&event.stage) {
+                    *phase_started = Instant::now();
+                }
+                *stage = event.stage;
+            }
+        }
     }
-    // Draining always: stale events from a finished job are discarded
-    // here, before a next job's own Transcribing event arrives. Only the
-    // most recent stage is applied, and only while processing.
-    if let (Some(event), State::Processing { stage, .. }) = (latest, state) {
-        *stage = event;
+}
+
+fn finish_retention(daemon: &mut Daemon, telemetry_reporter: &TelemetryReporter) {
+    let Some(retainer) = daemon.retainer.take() else {
+        return;
+    };
+    match retainer.join() {
+        Ok(result) => apply_worker_result(daemon, result, telemetry_reporter),
+        Err(_) => {
+            let mut outcome = setup_failure(
+                "Recording finalization failed; check runtime storage.",
+                "worker-failed",
+            );
+            if let Some(operation) = daemon.state.operation() {
+                outcome.operation_id = Some(operation.identity.operation_id.clone());
+                outcome.artifacts = facts(&operation.identity.take_id);
+                operation.lifecycle.store(CANCEL_SEALED, Ordering::Release);
+            }
+            daemon.state = State::Idle;
+            daemon.publish(outcome);
+        }
     }
 }
 
 fn drain_worker_results(
-    state: &mut State,
-    config: &Config,
+    daemon: &mut Daemon,
     result_rx: &Receiver<WorkerResult>,
-    last_outcome: &mut LastOutcome,
     telemetry_reporter: &TelemetryReporter,
-) -> Result<()> {
-    loop {
-        let result = match result_rx.try_recv() {
-            Ok(result) => result,
-            Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => {
-                *last_outcome =
-                    LastOutcome::notice_with_error("Transcription worker failed", "stt-failed");
-                anyhow::bail!("transcription worker died");
-            }
-        };
-        handle_worker_result(state, config, result, last_outcome, telemetry_reporter)?;
-    }
-}
-fn handle_worker_result(
-    state: &mut State,
-    config: &Config,
-    result: WorkerResult,
-    last_outcome: &mut LastOutcome,
-    telemetry_reporter: &TelemetryReporter,
-) -> Result<()> {
-    handle_worker_result_with(
-        state,
-        config,
-        result,
-        last_outcome,
-        telemetry_reporter,
-        inject::inject,
-    )
-}
-
-fn handle_worker_result_with(
-    state: &mut State,
-    config: &Config,
-    result: WorkerResult,
-    last_outcome: &mut LastOutcome,
-    telemetry_reporter: &TelemetryReporter,
-    inject: impl FnOnce(&str, InjectionMode) -> Result<InjectionOutcome>,
-) -> Result<()> {
-    let processing_started = match state {
-        State::Processing { started, .. } => *started,
-        _ => {
-            tracing::warn!("[Daemon] ignored transcription result outside processing state");
-            return Ok(());
-        }
-    };
-    let WorkerResult {
-        result: transcript,
-        stt_elapsed,
-        postproc,
-        partial,
-        capture_ms,
-        postproc_usage,
-        source,
-        injection_override,
-        stt_model,
-        stt_remote,
-        cleanup_model,
-        wav_retained,
-        transcript_saved,
-    } = result;
-    let postproc_failed = matches!(&postproc, PostprocStatus::Failed { .. });
-    let postproc_ms = match postproc {
-        PostprocStatus::Applied { ms } | PostprocStatus::Failed { ms } => Some(ms),
-        PostprocStatus::Off | PostprocStatus::SkippedShort { .. } => None,
-    };
-
-    // Telemetry facts, filled in by the branches below and exported once
-    // the job settles. Counts and classes only — never transcript text.
-    let mut tel_chars: usize = 0;
-    let mut tel_delivered: Option<&'static str> = None;
-    let mut tel_inject_ms: Option<u64> = None;
-    let mut tel_error_class = partial.then(|| "stt-partial".to_owned());
-    match transcript {
-        Ok(text) if text.trim().is_empty() => {
-            tracing::info!(
-                "[Daemon] state processing -> idle stt_ms={} chars=0 partial={partial}",
-                stt_elapsed.as_millis()
-            );
-            *last_outcome = if partial {
-                LastOutcome::notice_with_error(
-                    format!("Partial transcription; {}", recovery_hint(wav_retained)),
-                    "stt-partial",
-                )
-            } else {
-                LastOutcome::notice("Heard nothing")
-            };
-        }
-        Ok(text) => {
-            let chars = text.chars().count();
-            tel_chars = chars;
-            let inject_started = Instant::now();
-            let cleanup_suffix = if postproc_failed {
-                " (cleanup failed — raw text)"
-            } else {
-                ""
-            };
-            match inject(&text, injection_override.unwrap_or(config.injection)) {
-                Ok(outcome) => {
-                    let inject_ms = inject_started.elapsed().as_millis();
-                    tel_inject_ms = Some(inject_ms as u64);
-                    let total_ms = processing_started.elapsed().as_millis();
-                    tel_delivered = Some(match outcome {
-                        InjectionOutcome::Typed("wtype") => "typed-wtype",
-                        InjectionOutcome::Typed(_) => "typed-ydotool",
-                        InjectionOutcome::Pasted => "pasted",
-                        InjectionOutcome::Clipboard => "clipboard",
-                    });
-                    log_processing_idle(stt_elapsed, inject_ms, chars, postproc_ms);
-                    tracing::info!("[Inject] injected chars={chars} total_ms={total_ms}");
-                    *last_outcome = if partial {
-                        let delivery = match outcome {
-                            InjectionOutcome::Typed(_) => "typed",
-                            InjectionOutcome::Pasted => "pasted",
-                            InjectionOutcome::Clipboard => "copied",
-                        };
-                        LastOutcome::notice_with_error(
-                            format!(
-                                "Partial {delivery} ({chars} chars); {}",
-                                recovery_hint(wav_retained)
-                            ),
-                            "stt-partial",
-                        )
-                    } else {
-                        let message = match outcome {
-                            InjectionOutcome::Typed(tool) => {
-                                format!("Typed {chars} chars ({tool}){cleanup_suffix}")
-                            }
-                            InjectionOutcome::Pasted => format!(
-                                "Pasted {chars} chars (clipboard + Ctrl+Shift+V){cleanup_suffix}"
-                            ),
-                            InjectionOutcome::Clipboard => format!(
-                                "Copied to clipboard — press Ctrl+Shift+V ({chars} chars){cleanup_suffix}"
-                            ),
-                        };
-                        LastOutcome::success(message)
-                    };
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
-                        stt_elapsed.as_millis()
-                    );
-                    *last_outcome = if partial {
-                        LastOutcome::notice_with_error(
-                            format!(
-                                "Partial text not delivered; {}",
-                                recovery_hint(wav_retained)
-                            ),
-                            "stt-partial",
-                        )
-                    } else {
-                        tel_error_class = Some("injection-failed".to_owned());
-                        LastOutcome::notice_with_error(
-                            if transcript_saved {
-                                "Text saved — run: cantrip last".to_owned()
-                            } else if wav_retained {
-                                format!("Delivery failed; {}", recovery_hint(true))
-                            } else {
-                                "Delivery failed; last transcript could not be saved".to_owned()
-                            },
-                            "injection-failed",
-                        )
-                    };
-                }
-            }
-        }
-        Err(error) => {
-            let notice = stt::classify_failure(&error);
-            tracing::warn!(
-                "[STT] transcription failed stt_ms={} class=stt-failed reason={notice}",
-                stt_elapsed.as_millis()
-            );
-            *last_outcome = LastOutcome::notice_with_error(
-                format!("{notice}; {}", recovery_hint(wav_retained)),
-                "stt-failed",
-            );
-            tel_error_class = Some("stt-failed".to_owned());
-        }
-    }
-
-    if config.telemetry.enabled {
-        let cleanup_state = match &postproc {
-            PostprocStatus::Applied { .. } => "applied",
-            PostprocStatus::Failed { .. } => "failed",
-            PostprocStatus::SkippedShort { .. } => "skipped_short",
-            PostprocStatus::Off => "off",
-        };
-        let cleanup_attempted = matches!(
-            postproc,
-            PostprocStatus::Applied { .. } | PostprocStatus::Failed { .. }
-        );
-        let job = telemetry::JobTelemetry {
-            source: source.as_str(),
-            capture_ms,
-            stt_ms: stt_elapsed.as_millis() as u64,
-            stt_model,
-            stt_remote,
-            chars: tel_chars,
-            partial,
-            cleanup_state,
-            cleanup_ms: postproc_ms.map(|ms| ms as u64),
-            cleanup_model: cleanup_attempted.then_some(cleanup_model),
-            tokens_in: postproc_usage.as_ref().map(|usage| usage.prompt_tokens),
-            tokens_out: postproc_usage.as_ref().map(|usage| usage.completion_tokens),
-            tokens_total: postproc_usage.as_ref().map(|usage| usage.total_tokens),
-            inject_ms: tel_inject_ms,
-            delivered: tel_delivered,
-            error_class: tel_error_class,
-            total_ms: capture_ms + processing_started.elapsed().as_millis() as u64,
-        };
-        telemetry_reporter.report(&config.telemetry, job);
-    }
-    *state = State::Idle;
-    Ok(())
-}
-
-fn log_processing_idle(
-    stt_elapsed: Duration,
-    inject_ms: u128,
-    chars: usize,
-    postproc_ms: Option<u128>,
 ) {
-    if let Some(postproc_ms) = postproc_ms {
-        tracing::info!(
-            "[Daemon] state processing -> idle stt_ms={} inject_ms={} postproc_ms={postproc_ms} chars={chars}",
-            stt_elapsed.as_millis(),
-            inject_ms
-        );
-    } else {
-        tracing::info!(
-            "[Daemon] state processing -> idle stt_ms={} inject_ms={} chars={chars}",
-            stt_elapsed.as_millis(),
-            inject_ms
-        );
+    if !daemon.worker_available {
+        return;
     }
+    loop {
+        match result_rx.try_recv() {
+            Ok(result) => apply_worker_result(daemon, result, telemetry_reporter),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                daemon.worker_available = false;
+                if let State::Processing { operation, .. } = &daemon.state {
+                    operation.cancel.store(true, Ordering::Release);
+                    operation.lifecycle.store(CANCEL_SEALED, Ordering::Release);
+                    let mut outcome = setup_failure(
+                        "Worker failed; no further delivery will be attempted.",
+                        "worker-failed",
+                    );
+                    outcome.operation_id = Some(operation.identity.operation_id.clone());
+                    outcome.artifacts = facts(&operation.identity.take_id);
+                    describe_artifacts(&mut outcome);
+                    daemon.state = State::Idle;
+                    daemon.publish(outcome);
+                    if let Ok(recordings) = recovery::list() {
+                        daemon.replace_recordings(recordings);
+                    }
+                } else {
+                    daemon.notice(
+                        "Worker unavailable; restart Cantrip before recording.",
+                        Some("worker-failed"),
+                    );
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn apply_worker_result(
+    daemon: &mut Daemon,
+    result: WorkerResult,
+    telemetry_reporter: &TelemetryReporter,
+) {
+    let current = daemon
+        .state
+        .operation()
+        .map(|operation| operation.identity.clone());
+    if current.as_deref() != Some(result.identity.as_ref()) {
+        tracing::warn!("[Daemon] ignored stale worker result");
+        return;
+    }
+    if let Some(recordings) = result.recordings {
+        daemon.replace_recordings(recordings);
+    }
+    // A reload never changes credentials/config inside a running operation,
+    // but a live telemetry opt-out still vetoes its not-yet-queued report.
+    if daemon.config.telemetry.enabled {
+        if let Some((config, job)) = result.telemetry {
+            telemetry_reporter.report(&config, job);
+        }
+    }
+    if let Some(operation) = daemon.state.operation() {
+        operation.lifecycle.store(CANCEL_SEALED, Ordering::Release);
+    }
+    daemon.state = State::Idle;
+    daemon.publish(result.outcome);
 }
 
 fn shutdown_state(state: &mut State) {
-    let previous = std::mem::replace(state, State::Idle);
-    if let State::Recording { recorder, .. } = previous {
-        if let Err(error) = recorder.cancel() {
-            tracing::warn!("[Capture] shutdown cancellation failed: {error:#}");
+    match std::mem::replace(state, State::Idle) {
+        State::Recording { recorder, .. } => {
+            if recorder.cancel().is_err() {
+                tracing::warn!("[Capture] shutdown cancellation failed class=capture-failed");
+            }
         }
+        State::Processing { operation, .. } => {
+            operation.request_cancel();
+        }
+        State::Idle => {}
     }
 }
 
-fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -> WireReply {
-    if !matches!(state, State::Idle) {
-        return busy_reply(state);
-    }
-    match read_last_transcript() {
-        Ok(text) if text.trim().is_empty() => {
-            *last_outcome = LastOutcome::notice("No saved transcript");
-            WireReply::command(false, state.name(), Some("no saved transcript".to_owned()))
-                .with_outcome(last_outcome.to_ipc())
+fn retain_rejected_capture(job: Job) -> TerminalOutcome {
+    let mut outcome = setup_failure(
+        "Worker unavailable; transcription did not start.",
+        "worker-failed",
+    );
+    outcome.operation_id = Some(job.operation.identity.operation_id.clone());
+    if let Work::Capture {
+        recorder,
+        wav,
+        duration_ms,
+        discard,
+    } = job.work
+    {
+        if discard {
+            if recorder.cancel().is_err() {
+                outcome.error = Some("capture-cancel-failed".to_owned());
+                outcome.message =
+                    "Recording cancellation did not complete; check runtime storage.".to_owned();
+            } else {
+                outcome.completeness = Completeness::Cancelled;
+                outcome.delivery = Delivery::Cancelled;
+                outcome.message = "Cancelled; the transcription worker is unavailable.".to_owned();
+                outcome.error = None;
+            }
+        } else {
+            let wav = recorder.stop().unwrap_or(wav);
+            let saved = persist_attempt(
+                &job.operation.identity.take_id,
+                duration_ms,
+                None,
+                Some(&wav),
+                false,
+                true,
+            );
+            outcome.artifacts = saved.artifacts;
+            describe_artifacts(&mut outcome);
+            storage_warning(&mut outcome, saved.warning);
+            if saved.durable_audio {
+                remove_runtime(&wav, &mut outcome);
+            }
         }
-        Ok(text) => {
-            let chars = text.chars().count();
-            match inject::inject(&text, config.injection) {
-                Ok(outcome) => {
-                    let message = match outcome {
-                        InjectionOutcome::Typed(tool) => format!("Replayed {chars} chars ({tool})"),
-                        InjectionOutcome::Pasted => {
-                            format!("Replayed {chars} chars (clipboard + Ctrl+Shift+V)")
-                        }
-                        InjectionOutcome::Clipboard => {
-                            format!("Replayed to clipboard — press Ctrl+Shift+V ({chars} chars)")
-                        }
-                    };
-                    tracing::info!("[Inject] replayed last transcript chars={chars}");
-                    *last_outcome = LastOutcome::success(message.clone());
-                    WireReply::command(true, state.name(), Some(message))
-                        .with_outcome(last_outcome.to_ipc())
+    }
+    job.operation
+        .lifecycle
+        .store(CANCEL_SEALED, Ordering::Release);
+    outcome
+}
+
+struct WorkerContext<'a> {
+    operation: &'a Operation,
+    config: &'a Config,
+    guard: Option<&'a DeliveryGuard>,
+    stages: &'a Sender<StageEvent>,
+}
+
+impl WorkerContext<'_> {
+    fn id(&self) -> &str {
+        &self.operation.identity.take_id
+    }
+
+    fn cancelled(&self) -> bool {
+        self.operation.cancel.load(Ordering::Acquire)
+            || self.operation.lifecycle.load(Ordering::Acquire) == CANCEL_REQUESTED
+    }
+
+    fn stage(&self, stage: Stage) {
+        let _ = self.stages.send(StageEvent {
+            identity: self.operation.identity.clone(),
+            stage,
+        });
+    }
+
+    fn outcome(&self, completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
+        TerminalOutcome {
+            event_id: 0,
+            operation_id: Some(self.operation.identity.operation_id.clone()),
+            message: match completeness {
+                Completeness::Cancelled => "Cancelled.",
+                Completeness::Empty => "No text returned.",
+                Completeness::Failed => "The operation failed.",
+                Completeness::Partial => "Partial transcription.",
+                Completeness::Complete => "Transcription complete.",
+            }
+            .to_owned(),
+            completeness,
+            delivery,
+            cleanup: Cleanup::Off,
+            error: None,
+            artifacts: facts(self.id()),
+            dismissed: false,
+        }
+    }
+
+    fn deliver(&self, text: &str, partial: bool) -> DeliveryReport {
+        self.stage(Stage::Delivering);
+        deliver_with(
+            text,
+            self.config.injection,
+            partial,
+            &self.operation.cancel,
+            |text, mode| match self.guard {
+                Some(guard) => inject::inject(text, mode, guard, &self.operation.cancel),
+                None => Err(InjectionFailure {
+                    kind: InjectionFailureKind::Deferred,
+                    message: "The intended destination is unknown.".to_owned(),
+                }),
+            },
+        )
+    }
+}
+
+fn run_job(
+    job: Job,
+    transcriber: &mut pipeline::TranscriberCache,
+    stages: &Sender<StageEvent>,
+) -> WorkerResult {
+    let Job {
+        operation,
+        config,
+        guard,
+        work,
+    } = job;
+    let context = WorkerContext {
+        operation: &operation,
+        config: &config,
+        guard: guard.as_ref(),
+        stages,
+    };
+    let (mut outcome, telemetry) = match work {
+        Work::Capture {
+            recorder,
+            wav,
+            duration_ms,
+            discard,
+        } => {
+            if discard {
+                let mut outcome = context.outcome(Completeness::Cancelled, Delivery::Cancelled);
+                outcome.artifacts = Artifacts::default();
+                if recorder.cancel().is_err() {
+                    outcome.completeness = Completeness::Failed;
+                    outcome.delivery = Delivery::None;
+                    outcome.message =
+                        "Recording cancellation did not complete; check runtime storage."
+                            .to_owned();
+                    outcome.error = Some("capture-cancel-failed".to_owned());
                 }
-                Err(error) => {
-                    tracing::warn!("[Inject] replay failed chars={chars} error={error:#}");
-                    *last_outcome = LastOutcome::notice_with_error(
-                        "Replay failed — run: cantrip last",
-                        "injection-failed",
-                    );
-                    WireReply::command(
-                        false,
-                        state.name(),
-                        Some(format!("replay failed: {error:#}")),
-                    )
-                    .with_outcome(last_outcome.to_ipc())
+                (outcome, None)
+            } else {
+                match recorder.stop() {
+                    Ok(wav) => process_audio(
+                        &context,
+                        transcriber,
+                        wav,
+                        duration_ms,
+                        pipeline::Source::Dictation,
+                    ),
+                    Err(_) => {
+                        // Recorder::stop preserves its original WAV even when
+                        // finalization fails. Never infer a valid complete WAV.
+                        let saved = persist_attempt(
+                            context.id(),
+                            duration_ms,
+                            None,
+                            Some(&wav),
+                            false,
+                            true,
+                        );
+                        let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
+                        outcome.message = "Recording could not be finalized.".to_owned();
+                        outcome.error = Some("capture-failed".to_owned());
+                        outcome.artifacts = saved.artifacts;
+                        describe_artifacts(&mut outcome);
+                        storage_warning(&mut outcome, saved.warning);
+                        if saved.durable_audio {
+                            remove_runtime(&wav, &mut outcome);
+                        }
+                        (outcome, None)
+                    }
                 }
             }
         }
+        Work::Recover => match recovery::audio_path(context.id()) {
+            Ok(wav) => {
+                let duration = stt::wav_duration_ms(&wav).unwrap_or(0);
+                process_audio(
+                    &context,
+                    transcriber,
+                    wav,
+                    duration,
+                    pipeline::Source::Recover,
+                )
+            }
+            Err(_) => {
+                let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
+                outcome.message = "That recording's audio is no longer available.".to_owned();
+                outcome.error = Some("no-recording".to_owned());
+                (outcome, None)
+            }
+        },
+        Work::Text => replay_text(&context),
+        Work::Forget => {
+            let removed = recovery::forget(context.id());
+            let mut outcome = context.outcome(Completeness::Complete, Delivery::None);
+            outcome.message = "Retained recording removed.".to_owned();
+            if removed.is_err() {
+                outcome.completeness = Completeness::Failed;
+                outcome.message = "Recording removal did not complete.".to_owned();
+                outcome.error = Some("forget-failed".to_owned());
+            }
+            // get, including after unlink/fsync failure, reports actual files.
+            outcome.artifacts = facts(context.id());
+            if removed.is_ok() && outcome.artifacts.text {
+                outcome.message.push_str(" Archived text is unchanged.");
+            }
+            (outcome, None)
+        }
+    };
+    operation.lifecycle.store(CANCEL_SEALED, Ordering::Release);
+    let recordings = recovery::list().ok();
+    if recordings.is_none() {
+        storage_warning(&mut outcome, true);
+    }
+    tracing::info!(
+        "[Daemon] operation settled completeness={:?} delivery={:?} cleanup={:?}",
+        outcome.completeness,
+        outcome.delivery,
+        outcome.cleanup
+    );
+    WorkerResult {
+        identity: operation.identity.clone(),
+        outcome,
+        recordings,
+        telemetry: telemetry.map(|job| (config.telemetry.clone(), job)),
+    }
+}
+
+/// File presence and permission to discard the source are separate facts.
+struct SavedArtifacts {
+    artifacts: Artifacts,
+    durable_audio: bool,
+    durable_text: bool,
+    audio_conflict: bool,
+    warning: bool,
+}
+
+fn persist_attempt(
+    take_id: &str,
+    duration_ms: u64,
+    text: Option<&str>,
+    wav: Option<&Path>,
+    partial: bool,
+    unresolved: bool,
+) -> SavedArtifacts {
+    let saved = recovery::persist(take_id, duration_ms, text, wav, partial, unresolved);
+    let (take, durable, mut audio_conflict) = match saved {
+        Ok(take) => {
+            let artifacts = artifacts_for(take_id, Some(&take));
+            return SavedArtifacts {
+                durable_audio: artifacts.audio,
+                // A successful complete persist publishes exactly this text.
+                durable_text: !partial
+                    && text.is_some_and(|text| !text.trim().is_empty())
+                    && artifacts.text,
+                audio_conflict: false,
+                warning: wav.is_some() && !artifacts.audio,
+                artifacts,
+            };
+        }
         Err(error) => {
-            *last_outcome = LastOutcome::notice("No saved transcript");
-            WireReply::command(
-                false,
-                state.name(),
-                Some(format!("no saved transcript: {error:#}")),
-            )
-            .with_outcome(last_outcome.to_ipc())
+            let audio_conflict = error.is::<recovery::AudioMismatch>();
+            tracing::warn!("[Daemon] artifact persistence failed class=storage-failed");
+            // Read attempted writes even if the subsequent confirmation fails.
+            let present = recovery::get(take_id).ok();
+            match recovery::confirm(take_id) {
+                Ok(take) => (Some(take), true, audio_conflict),
+                Err(_) => (present, false, audio_conflict),
+            }
         }
+    };
+    let mut saved = saved_artifacts(
+        take_id,
+        take.as_ref(),
+        durable,
+        text,
+        wav.is_some(),
+        partial,
+    );
+    if let Some(wav) = wav {
+        match recovery::confirm_audio(take_id, wav) {
+            Ok(take) => {
+                saved.durable_audio = take.audio_available;
+                saved.warning |= !take.audio_available;
+            }
+            Err(error) => {
+                audio_conflict |= error.is::<recovery::AudioMismatch>();
+                saved.durable_audio = false;
+                saved.warning = true;
+            }
+        }
+    }
+    saved.audio_conflict = audio_conflict;
+    saved.durable_audio &= !audio_conflict;
+    saved.durable_text &= !audio_conflict;
+    saved.warning |= audio_conflict;
+    saved
+}
+
+fn saved_artifacts(
+    take_id: &str,
+    take: Option<&Take>,
+    durable: bool,
+    text: Option<&str>,
+    wants_audio: bool,
+    partial: bool,
+) -> SavedArtifacts {
+    let artifacts = artifacts_for(take_id, take);
+    let matching_text = !partial
+        && text
+            .filter(|text| !text.trim().is_empty())
+            .is_some_and(|text| recovery::read_text(take_id).is_ok_and(|saved| saved == text));
+    SavedArtifacts {
+        durable_audio: durable && artifacts.audio,
+        durable_text: durable && matching_text,
+        audio_conflict: false,
+        warning: !durable
+            || (wants_audio && !artifacts.audio)
+            || (!partial && text.is_some_and(|text| !text.trim().is_empty()) && !matching_text),
+        artifacts,
     }
 }
 
-fn recover_failed(
-    state: &mut State,
-    config: &Config,
-    job_tx: &Sender<Job>,
-    last_outcome: &mut LastOutcome,
-    local: bool,
-    clipboard: bool,
-) -> WireReply {
-    if !matches!(state, State::Idle) {
-        return busy_reply(state);
+fn artifacts_for(take_id: &str, take: Option<&Take>) -> Artifacts {
+    Artifacts {
+        take_id: Some(take_id.to_owned()),
+        audio: take.is_some_and(|take| take.audio_available),
+        text: take.is_some_and(|take| take.text_available),
     }
-    let path = match paths::last_failed_wav_path() {
-        Ok(path) if path.is_file() => path,
-        Ok(_) => {
-            *last_outcome = LastOutcome::notice("No failed recording to recover");
-            return WireReply::command(
-                false,
-                state.name(),
-                Some("no failed recording to recover".to_owned()),
-            )
-            .with_outcome(last_outcome.to_ipc());
-        }
-        Err(error) => {
-            *last_outcome = LastOutcome::notice("No failed recording to recover");
-            return WireReply::command(
-                false,
-                state.name(),
-                Some(format!("no failed recording: {error:#}")),
-            )
-            .with_outcome(last_outcome.to_ipc());
-        }
-    };
-    let stt = if local {
-        SttConfig::default()
-    } else {
-        config.stt.clone()
-    };
-    let mut postproc = config.postproc.clone();
-    if local {
-        postproc.enabled = false;
-        let installed = (|| -> Result<()> {
-            let spec = models::require(&stt.model)?;
-            let expected = paths::models_dir()?.join(spec.dir_name);
-            anyhow::ensure!(
-                models::installed(spec)?.is_some(),
-                "local model not installed at {} — run: cantrip models pull",
-                expected.display()
-            );
-            Ok(())
-        })();
-        if let Err(error) = installed {
-            *last_outcome = LastOutcome::notice_with_error(
-                "Local model unavailable — run: cantrip models pull",
-                "local-model-unavailable",
-            );
-            return WireReply::command(false, state.name(), Some(format!("{error:#}")))
-                .with_error("local-model-unavailable")
-                .with_outcome(last_outcome.to_ipc());
-        }
-    }
-    // Copy into a fresh runtime WAV so the worker's cleanup still applies.
-    let runtime = match paths::runtime_dir().and_then(paths::ensure_dir) {
-        Ok(dir) => dir,
-        Err(error) => {
-            *last_outcome = LastOutcome::notice_with_error(
-                "Recovery could not start; retained audio is unchanged",
-                "recovery-unavailable",
-            );
-            return WireReply::command(
-                false,
-                state.name(),
-                Some(format!("runtime dir unavailable: {error:#}")),
-            )
-            .with_error("recovery-unavailable")
-            .with_outcome(last_outcome.to_ipc());
-        }
-    };
-    let wav = runtime.join(format!("recover-{}.wav", unix_millis()));
-    if let Err(error) = copy_owner_file(&path, &wav) {
-        *last_outcome = LastOutcome::notice_with_error(
-            "Recovery could not start; retained audio is unchanged",
-            "recovery-unavailable",
-        );
-        return WireReply::command(
-            false,
-            state.name(),
-            Some(format!("copying failed WAV failed: {error}")),
-        )
-        .with_error("recovery-unavailable")
-        .with_outcome(last_outcome.to_ipc());
-    }
-    let job = Job {
-        wav: wav.clone(),
-        stt,
-        vocabulary: config.vocabulary.clone(),
-        postproc,
-        injection_override: clipboard.then_some(InjectionMode::Clipboard),
-        source: pipeline::Source::Recover,
-        capture_ms: 0,
-    };
-    if job_tx.send(job).is_err() {
-        let _ = capture::remove_recording(&wav);
-        *last_outcome = LastOutcome::notice_with_error(
-            "Transcription worker unavailable; retained audio is unchanged",
-            "stt-failed",
-        );
-        return WireReply::command(
-            false,
-            state.name(),
-            Some("transcription worker unavailable".to_owned()),
-        )
-        .with_error("stt-failed")
-        .with_outcome(last_outcome.to_ipc());
-    }
-    *last_outcome = LastOutcome::default();
-    let stage = pipeline::Stage::Transcribing { chunk: 1, total: 1 };
-    let reply =
-        WireReply::command(true, "processing", Some("recovering".to_owned())).with_stage(&stage);
-    *state = State::Processing {
-        started: Instant::now(),
-        stage,
-    };
-    tracing::info!("[Daemon] state idle -> processing (recover failed WAV)");
-    reply
 }
 
-fn persist_last_transcript(text: &str) -> Result<()> {
-    let path = paths::last_transcript_path()?;
-    write_owner_file(&path, text.as_bytes())
+fn facts(take_id: &str) -> Artifacts {
+    artifacts_for(take_id, recovery::get(take_id).ok().as_ref())
 }
 
-fn persist_failed_wav(src: &Path) -> Result<()> {
-    let path = paths::last_failed_wav_path()?;
-    copy_owner_file(src, &path)?;
-    tracing::info!("[Daemon] kept failed WAV for recover");
-    Ok(())
-}
-
-fn update_failed_wav(
-    path: &Path,
-    src: &Path,
+fn process_audio(
+    context: &WorkerContext<'_>,
+    transcriber: &mut pipeline::TranscriberCache,
+    wav: PathBuf,
+    duration_ms: u64,
     source: pipeline::Source,
-    outcome: &pipeline::Outcome,
-    transcript_safe: bool,
-) -> Result<bool> {
-    if source == pipeline::Source::Recover
-        && !outcome.keep_wav
-        && !outcome.partial
-        && transcript_safe
-        && outcome
-            .text
-            .as_ref()
-            .is_ok_and(|text| !text.trim().is_empty())
-    {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("clearing recovered audio"),
-        }
-        if let Some(parent) = path.parent() {
-            fs::File::open(parent)?
-                .sync_all()
-                .context("syncing recovered audio removal")?;
-        }
-        return Ok(false);
+) -> (TerminalOutcome, Option<telemetry::JobTelemetry>) {
+    let runtime_source = source == pipeline::Source::Dictation;
+    // Secure the full take before entering blocking inference. Recovery uses
+    // the same immutable sidecar; no retry changes another recording's files.
+    let initial = persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
+    if initial.audio_conflict {
+        let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
+        outcome.message =
+            "Recording identity does not match its retained audio; transcription did not start."
+                .to_owned();
+        outcome.artifacts = initial.artifacts;
+        describe_artifacts(&mut outcome);
+        storage_warning(&mut outcome, true);
+        return (outcome, None);
     }
-    if outcome.keep_wav || source == pipeline::Source::Recover {
-        // Recovery runs on a runtime copy. Keep the already-private original
-        // instead of risking another copy of the same audio on a failed retry.
-        let retained = source == pipeline::Source::Recover
-            && fs::symlink_metadata(path).is_ok_and(|metadata| {
-                metadata.is_file()
-                    && metadata.uid() == unsafe { libc::getuid() }
-                    && metadata.permissions().mode() & 0o777 == 0o600
-            });
-        if !retained {
-            copy_owner_file(src, path)?;
-            tracing::info!("[Daemon] kept failed WAV for recover");
+    if context.cancelled() {
+        let mut outcome = context.outcome(Completeness::Cancelled, Delivery::Cancelled);
+        outcome.artifacts = initial.artifacts;
+        describe_artifacts(&mut outcome);
+        storage_warning(&mut outcome, initial.warning);
+        if runtime_source && initial.durable_audio {
+            remove_runtime(&wav, &mut outcome);
         }
-        return Ok(true);
+        return (outcome, None);
     }
-    // Unrelated dictations and one-shot transcriptions never consume the slot.
-    Ok(false)
+    let pipeline = pipeline::run(
+        transcriber,
+        &wav,
+        &context.config.stt,
+        &context.config.vocabulary,
+        &context.config.postproc,
+        pipeline::RunContext {
+            source,
+            take_id: Some(context.id()),
+            cancel: Some(&context.operation.cancel),
+        },
+        |stage| context.stage(stage),
+    );
+    finish_audio(context, &wav, duration_ms, source, pipeline)
 }
 
-fn recovery_hint(wav_retained: bool) -> &'static str {
-    if wav_retained {
-        "audio saved — cantrip recover --local --clipboard"
+fn finish_audio(
+    context: &WorkerContext<'_>,
+    wav: &Path,
+    duration_ms: u64,
+    source: pipeline::Source,
+    pipeline: pipeline::Outcome,
+) -> (TerminalOutcome, Option<telemetry::JobTelemetry>) {
+    let text = pipeline
+        .text
+        .as_ref()
+        .ok()
+        .map(String::as_str)
+        .filter(|text| !text.trim().is_empty());
+    let cancelled = pipeline.cancelled || context.cancelled();
+    let completeness = if cancelled {
+        Completeness::Cancelled
+    } else if pipeline.text.is_err() {
+        Completeness::Failed
+    } else if pipeline.partial {
+        Completeness::Partial
+    } else if text.is_none() {
+        Completeness::Empty
     } else {
-        "audio could not be saved; check storage before recording again"
+        Completeness::Complete
+    };
+    let short_empty = completeness == Completeness::Empty
+        && !pipeline.keep_wav
+        && duration_ms < MEANINGFUL_CAPTURE_MS
+        && source == pipeline::Source::Dictation
+        && context.operation.seal();
+    let mut outcome = context.outcome(completeness, Delivery::None);
+    outcome.cleanup = cleanup_from(&pipeline.postproc);
+    let mut saved = if short_empty {
+        let removed = recovery::forget(context.id()).is_ok();
+        SavedArtifacts {
+            artifacts: facts(context.id()),
+            durable_audio: false,
+            durable_text: false,
+            audio_conflict: false,
+            warning: !removed,
+        }
+    } else {
+        persist_attempt(
+            context.id(),
+            duration_ms,
+            text,
+            Some(wav),
+            pipeline.partial || cancelled,
+            true,
+        )
+    };
+    let mut report = DeliveryReport::none();
+    if completeness == Completeness::Cancelled {
+        report.delivery = Delivery::Cancelled;
+    } else if let Some(text) = text {
+        report = context.deliver(text, pipeline.partial);
+        outcome.delivery = report.delivery;
+        if report.delivery == Delivery::Cancelled {
+            outcome.completeness = Completeness::Cancelled;
+            // Cancellation after successful STT is still an incomplete attempt.
+            saved = persist_attempt(context.id(), duration_ms, Some(text), Some(wav), true, true);
+        } else if completeness == Completeness::Complete
+            && report.delivered()
+            && saved.durable_text
+            && context.operation.seal()
+        {
+            let resolved = recovery::resolve(context.id()).is_ok();
+            // A failed resolve may have unlinked the audio then failed fsync.
+            // Confirm again before using old durability to delete the source.
+            let confirmed = recovery::confirm(context.id());
+            saved = saved_artifacts(
+                context.id(),
+                confirmed.as_ref().ok(),
+                confirmed.is_ok(),
+                Some(text),
+                false,
+                false,
+            );
+            if confirmed.is_err() {
+                saved.artifacts = facts(context.id());
+            }
+            saved.warning |= !resolved;
+        }
+    }
+    if context.cancelled() && !report.delivered() && report.delivery != Delivery::Uncertain {
+        outcome.completeness = Completeness::Cancelled;
+        report.delivery = Delivery::Cancelled;
+        report.error = None;
+    }
+    outcome.delivery = report.delivery;
+    outcome.artifacts = saved.artifacts;
+    outcome.error = report
+        .error
+        .map(str::to_owned)
+        .or_else(|| match outcome.completeness {
+            Completeness::Failed => Some("stt-failed".to_owned()),
+            Completeness::Partial => Some("stt-partial".to_owned()),
+            _ if outcome.cleanup == Cleanup::Failed => Some("cleanup-failed".to_owned()),
+            _ => None,
+        });
+    outcome.message = describe_delivery(&outcome, context.config.injection);
+    if let Err(error) = &pipeline.text {
+        if outcome.completeness != Completeness::Cancelled {
+            let notice = stt::classify_failure(error);
+            tracing::warn!("[STT] transcription failed notice={notice}");
+            outcome.message = format!("{notice}.");
+        }
+    }
+    if context.cancelled() && report.delivered() {
+        outcome
+            .message
+            .push_str(" Cancellation arrived after delivery.");
+    }
+    if !report.delivered() || outcome.completeness == Completeness::Partial {
+        describe_artifacts(&mut outcome);
+    }
+    if outcome.cleanup == Cleanup::Failed {
+        outcome
+            .message
+            .push_str(" Cleanup was unavailable; original text was used.");
+    }
+    let archive_failed = matches!(pipeline.archive, pipeline::ArchiveStatus::Failed(_));
+    storage_warning(&mut outcome, saved.warning);
+    if archive_failed {
+        if outcome
+            .error
+            .as_deref()
+            .is_none_or(|error| error == "cleanup-failed")
+        {
+            outcome.error = Some("history-incomplete".to_owned());
+        }
+        outcome
+            .message
+            .push_str(" Detailed transcript history could not be saved.");
+    }
+    let may_remove = saved.durable_audio
+        || (completeness == Completeness::Complete
+            && saved.durable_text
+            && report.delivered()
+            && context.operation.lifecycle.load(Ordering::Acquire) == CANCEL_SEALED)
+        || (short_empty && !saved.warning);
+    if source == pipeline::Source::Dictation && may_remove {
+        remove_runtime(wav, &mut outcome);
+    }
+    let metadata = context.config.telemetry.enabled.then(|| {
+        let capture_ms = if source == pipeline::Source::Dictation {
+            duration_ms
+        } else {
+            0
+        };
+        let cleanup_ms = match pipeline.postproc {
+            PostprocStatus::Applied { ms } | PostprocStatus::Failed { ms } => {
+                Some(milliseconds(ms))
+            }
+            _ => None,
+        };
+        telemetry::JobTelemetry {
+            source: source.as_str(),
+            capture_ms,
+            stt_ms: milliseconds(pipeline.stt_elapsed.as_millis()),
+            stt_model: context.config.stt.model.clone(),
+            stt_remote: context.config.stt.endpoint.is_some(),
+            chars: text.map_or(0, |text| text.chars().count()),
+            partial: pipeline.partial,
+            cleanup_state: match outcome.cleanup {
+                Cleanup::Applied => "applied",
+                Cleanup::Failed => "failed",
+                Cleanup::Skipped => "skipped_short",
+                Cleanup::Off => "off",
+            },
+            cleanup_ms,
+            cleanup_model: cleanup_ms.map(|_| context.config.postproc.model.clone()),
+            tokens_in: pipeline
+                .postproc_usage
+                .as_ref()
+                .map(|usage| usage.prompt_tokens),
+            tokens_out: pipeline
+                .postproc_usage
+                .as_ref()
+                .map(|usage| usage.completion_tokens),
+            tokens_total: pipeline
+                .postproc_usage
+                .as_ref()
+                .map(|usage| usage.total_tokens),
+            inject_ms: report.elapsed_ms,
+            delivered: report.backend,
+            error_class: outcome.error.clone(),
+            total_ms: milliseconds(context.operation.started.elapsed().as_millis()),
+        }
+    });
+    (outcome, metadata)
+}
+
+fn replay_text(context: &WorkerContext<'_>) -> (TerminalOutcome, Option<telemetry::JobTelemetry>) {
+    let take = recovery::get(context.id());
+    let text = recovery::read_text(context.id());
+    let (Ok(take), Ok(text)) = (take, text) else {
+        let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
+        outcome.message = "That recording's transcript is no longer available.".to_owned();
+        outcome.error = Some("no-transcript".to_owned());
+        return (outcome, None);
+    };
+    let report = context.deliver(&text, take.partial);
+    let completeness = if report.delivery == Delivery::Cancelled {
+        Completeness::Cancelled
+    } else if take.partial {
+        Completeness::Partial
+    } else {
+        Completeness::Complete
+    };
+    let mut outcome = context.outcome(completeness, report.delivery);
+    outcome.error = report
+        .error
+        .map(str::to_owned)
+        .or_else(|| (completeness == Completeness::Partial).then(|| "stt-partial".to_owned()));
+    outcome.message = describe_delivery(&outcome, context.config.injection);
+    if !report.delivered() || take.partial {
+        describe_artifacts(&mut outcome);
+    }
+    // Replaying an earlier transcript is not a successful retry of its audio.
+    let metadata = context
+        .config
+        .telemetry
+        .enabled
+        .then(|| telemetry::JobTelemetry {
+            source: pipeline::Source::Replay.as_str(),
+            chars: text.chars().count(),
+            partial: take.partial,
+            cleanup_state: "off",
+            inject_ms: report.elapsed_ms,
+            delivered: report.backend,
+            error_class: outcome.error.clone(),
+            total_ms: milliseconds(context.operation.started.elapsed().as_millis()),
+            ..telemetry::JobTelemetry::default()
+        });
+    (outcome, metadata)
+}
+
+#[derive(Debug)]
+struct DeliveryReport {
+    delivery: Delivery,
+    error: Option<&'static str>,
+    elapsed_ms: Option<u64>,
+    backend: Option<&'static str>,
+}
+
+impl DeliveryReport {
+    fn none() -> Self {
+        Self {
+            delivery: Delivery::None,
+            error: None,
+            elapsed_ms: None,
+            backend: None,
+        }
+    }
+
+    fn delivered(&self) -> bool {
+        matches!(
+            self.delivery,
+            Delivery::Typed | Delivery::Pasted | Delivery::Copied
+        )
     }
 }
 
-fn write_owner_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    atomic_owner_file(path, |file| {
-        file.write_all(bytes).context("writing owner-private state")
-    })
-}
-
-fn copy_owner_file(src: &Path, path: &Path) -> Result<()> {
-    let mut source =
-        fs::File::open(src).with_context(|| format!("opening recording {}", src.display()))?;
-    atomic_owner_file(path, |file| {
-        std::io::copy(&mut source, file).context("copying owner-private recording")?;
-        Ok(())
-    })
-}
-
-fn atomic_owner_file(path: &Path, write: impl FnOnce(&mut fs::File) -> Result<()>) -> Result<()> {
-    let parent = path.parent().context("state path has no parent")?;
-    paths::ensure_dir(parent.to_path_buf())?;
-    let sequence = FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = parent.join(format!(
-        ".cantrip-state-{}-{}-{sequence}.tmp",
-        std::process::id(),
-        unix_millis()
-    ));
-    let mut file = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&temporary)
-        .with_context(|| format!("creating {}", temporary.display()))?;
-    let result = (|| -> Result<()> {
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .context("setting owner-private state permissions")?;
-        write(&mut file)?;
-        file.sync_all().context("syncing owner-private state")?;
-        fs::rename(&temporary, path).with_context(|| format!("publishing {}", path.display()))?;
-        fs::File::open(parent)?
-            .sync_all()
-            .context("syncing state directory")?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+fn deliver_with(
+    text: &str,
+    requested: InjectionMode,
+    partial: bool,
+    cancel: &AtomicBool,
+    mut inject: impl FnMut(
+        &str,
+        InjectionMode,
+    ) -> std::result::Result<InjectionOutcome, InjectionFailure>,
+) -> DeliveryReport {
+    if cancel.load(Ordering::Acquire) {
+        return DeliveryReport {
+            delivery: Delivery::Cancelled,
+            ..DeliveryReport::none()
+        };
     }
-    result
+    if partial && requested == InjectionMode::Type {
+        return DeliveryReport {
+            delivery: Delivery::Deferred,
+            error: Some("stt-partial"),
+            ..DeliveryReport::none()
+        };
+    }
+    let mode = if partial {
+        InjectionMode::Clipboard
+    } else {
+        requested
+    };
+    let started = Instant::now();
+    let mut result = inject(text, mode);
+    if matches!(&result, Err(error) if error.kind == InjectionFailureKind::Deferred)
+        && matches!(mode, InjectionMode::Auto | InjectionMode::Paste)
+        && !cancel.load(Ordering::Acquire)
+    {
+        // Deferred guarantees no keys were initiated. Uncertain is never retried.
+        result = inject(text, InjectionMode::Clipboard);
+    }
+    if cancel.load(Ordering::Acquire)
+        && matches!(&result, Err(error) if matches!(error.kind, InjectionFailureKind::Deferred | InjectionFailureKind::Failed))
+    {
+        return DeliveryReport {
+            delivery: Delivery::Cancelled,
+            elapsed_ms: Some(milliseconds(started.elapsed().as_millis())),
+            ..DeliveryReport::none()
+        };
+    }
+    let (delivery, backend, error) = match result {
+        Ok(InjectionOutcome::Typed(_)) => (Delivery::Typed, Some("typed-wayland"), None),
+        Ok(InjectionOutcome::Pasted) => (Delivery::Pasted, Some("pasted"), None),
+        Ok(InjectionOutcome::Clipboard) => (Delivery::Copied, Some("clipboard"), None),
+        Err(error) => match error.kind {
+            InjectionFailureKind::Cancelled => (Delivery::Cancelled, None, None),
+            InjectionFailureKind::Deferred => {
+                (Delivery::Deferred, None, Some("injection-deferred"))
+            }
+            InjectionFailureKind::Failed => (Delivery::Failed, None, Some("injection-failed")),
+            InjectionFailureKind::Uncertain => {
+                (Delivery::Uncertain, None, Some("injection-uncertain"))
+            }
+        },
+    };
+    DeliveryReport {
+        delivery,
+        backend,
+        error,
+        elapsed_ms: Some(milliseconds(started.elapsed().as_millis())),
+    }
 }
 
-fn read_last_transcript() -> Result<String> {
-    let path = paths::last_transcript_path()?;
-    fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+fn describe_delivery(outcome: &TerminalOutcome, requested: InjectionMode) -> String {
+    match (outcome.completeness, outcome.delivery) {
+        (Completeness::Cancelled, _) => "Cancelled.".to_owned(),
+        (Completeness::Empty, _) => "No text returned.".to_owned(),
+        (Completeness::Failed, _) => "Transcription failed.".to_owned(),
+        (Completeness::Partial, Delivery::Copied) => {
+            "Partial text copied. Review before pasting.".to_owned()
+        }
+        (Completeness::Partial, Delivery::Uncertain) => {
+            "Partial text copy is uncertain.".to_owned()
+        }
+        (Completeness::Partial, _) => "Partial text was not delivered.".to_owned(),
+        (_, Delivery::Typed) => "Typed.".to_owned(),
+        (_, Delivery::Pasted) => "Pasted.".to_owned(),
+        (_, Delivery::Copied) if requested == InjectionMode::Clipboard => {
+            "Copied. Paste when ready.".to_owned()
+        }
+        (_, Delivery::Copied) => "Copied instead. Paste when ready.".to_owned(),
+        (_, Delivery::Uncertain) => {
+            "Delivery is uncertain; check the destination before trying again.".to_owned()
+        }
+        (_, Delivery::Deferred) => {
+            "Not delivered to the changed or unverified destination.".to_owned()
+        }
+        (_, Delivery::Failed) => "Delivery failed.".to_owned(),
+        _ => "No text delivered.".to_owned(),
+    }
 }
 
-fn unix_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
+fn describe_artifacts(outcome: &mut TerminalOutcome) {
+    match (outcome.artifacts.text, outcome.artifacts.audio) {
+        (true, true) => outcome
+            .message
+            .push_str(" Saved text and audio are available."),
+        (true, false) => outcome.message.push_str(" Saved text is available."),
+        (false, true) => outcome.message.push_str(" Saved audio is available."),
+        (false, false) => {}
+    }
+}
+
+fn storage_warning(outcome: &mut TerminalOutcome, warning: bool) {
+    if warning && outcome.error.as_deref() != Some("storage-failed") {
+        outcome.error = Some("storage-failed".to_owned());
+        outcome
+            .message
+            .push_str(" Recording storage is incomplete; check storage before recording again.");
+    }
+}
+
+fn remove_runtime(path: &Path, outcome: &mut TerminalOutcome) {
+    if capture::remove_recording(path).is_err() {
+        storage_warning(outcome, true);
+    }
+}
+
+fn cleanup_from(status: &PostprocStatus) -> Cleanup {
+    match status {
+        PostprocStatus::Off => Cleanup::Off,
+        PostprocStatus::Applied { .. } => Cleanup::Applied,
+        PostprocStatus::SkippedShort { .. } => Cleanup::Skipped,
+        PostprocStatus::Failed { .. } => Cleanup::Failed,
+    }
+}
+
+fn milliseconds(ms: u128) -> u64 {
+    u64::try_from(ms).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new() -> Self {
-            let sequence = FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "cantrip-daemon-test-{}-{}-{sequence}",
-                std::process::id(),
-                unix_millis()
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
+    fn take(id: &str, audio: bool, text: bool) -> Take {
+        Take {
+            id: id.to_owned(),
+            created_at_unix_ms: 1,
+            duration_ms: Some(4_000),
+            text_available: text,
+            audio_available: audio,
+            partial: false,
+            unresolved: audio,
         }
     }
 
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+    fn idle_daemon() -> Daemon {
+        Daemon::new(Config::default(), vec![take("keep-me", true, true)], false)
+    }
+
+    fn processing(kind: WorkKind) -> (Daemon, Operation) {
+        let mut daemon = idle_daemon();
+        let operation = daemon.operation("keep-me".to_owned(), Some(OperationKind::Dictation));
+        daemon.begin(
+            operation.clone(),
+            Stage::Transcribing {
+                completed: 0,
+                total: 2,
+            },
+            kind,
+        );
+        (daemon, operation)
+    }
+
+    #[test]
+    fn status_size_is_independent_of_history_size() {
+        let mut daemon = idle_daemon();
+        let baseline = encode_reply(&daemon.snapshot()).unwrap().len();
+        daemon.replace_recordings(
+            (0..10_000)
+                .map(|id| take(&format!("take-{id}"), true, true))
+                .collect(),
+        );
+        let snapshot = daemon.snapshot();
+        assert_eq!(snapshot.pending_recordings, 10_000);
+        assert!(encode_reply(&snapshot).unwrap().len() < baseline + 10);
+    }
+
+    #[test]
+    fn capture_signal_none_is_starting_not_proved_listening() {
+        let mut daemon = idle_daemon();
+        let operation = daemon.operation("new".to_owned(), Some(OperationKind::Dictation));
+        daemon.state = State::Recording {
+            operation,
+            recorder: Box::new(FakeRecorder::default()),
+            wav: PathBuf::from("/tmp/unused.wav"),
+            config: Box::new(Config::default()),
+            started: Instant::now(),
+            signal: None,
+            next_signal_sample: Instant::now() + Duration::from_secs(30),
+        };
+        assert!(daemon.snapshot().signal.is_none());
+        assert_eq!(
+            daemon.snapshot().operation_kind,
+            Some(OperationKind::Dictation)
+        );
+    }
+
+    #[test]
+    fn busy_notice_does_not_replace_active_or_outcome() {
+        let (mut daemon, _) = processing(WorkKind::Transcription);
+        let (job_tx, job_rx) = mpsc::channel();
+        let reply = execute(
+            Command::Start { postproc: None },
+            &mut daemon,
+            Path::new("/tmp"),
+            &job_tx,
+        );
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_deref(), Some("busy"));
+        assert!(matches!(daemon.state, State::Processing { .. }));
+        assert!(daemon.outcome.is_none());
+        assert_eq!(
+            daemon.notice.as_ref().unwrap().error.as_deref(),
+            Some("busy")
+        );
+        assert!(job_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn processing_cancel_acknowledges_without_settling() {
+        let (mut daemon, operation) = processing(WorkKind::Transcription);
+        let (job_tx, job_rx) = mpsc::channel();
+        let reply = execute(Command::Cancel, &mut daemon, Path::new("/tmp"), &job_tx);
+        assert!(reply.ok);
+        assert_eq!(reply.stage, Some(Stage::Cancelling));
+        assert!(operation.cancel.load(Ordering::SeqCst));
+        assert!(matches!(
+            daemon.state,
+            State::Processing {
+                stage: Stage::Cancelling,
+                ..
+            }
+        ));
+        assert!(job_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_worker_result_cannot_replace_a_newer_operation() {
+        let (mut daemon, old) = processing(WorkKind::Transcription);
+        let reporter = TelemetryReporter::spawn();
+        let newer = daemon.operation("keep-me".to_owned(), Some(OperationKind::Replay));
+        daemon.begin(newer.clone(), Stage::Delivering, WorkKind::Delivery);
+        apply_worker_result(
+            &mut daemon,
+            WorkerResult {
+                identity: old.identity,
+                outcome: TerminalOutcome {
+                    event_id: 0,
+                    operation_id: Some("old".to_owned()),
+                    message: "should not appear".to_owned(),
+                    completeness: Completeness::Complete,
+                    delivery: Delivery::Pasted,
+                    cleanup: Cleanup::Off,
+                    error: None,
+                    artifacts: Artifacts::default(),
+                    dismissed: false,
+                },
+                recordings: Some(Vec::new()),
+                telemetry: None,
+            },
+            &reporter,
+        );
+        assert!(matches!(daemon.state, State::Processing { .. }));
+        assert!(daemon.outcome.is_none());
+        assert_eq!(
+            daemon.state.operation().unwrap().identity.operation_id,
+            newer.identity.operation_id
+        );
+        assert_eq!(daemon.snapshot().pending_recordings, 1);
+        reporter.shutdown();
+    }
+
+    #[test]
+    fn targeted_dismiss_does_not_hide_an_independent_notice_or_delete_artifacts() {
+        let mut daemon = idle_daemon();
+        daemon.notice("busy", Some("busy"));
+        daemon.publish(TerminalOutcome {
+            event_id: 0,
+            operation_id: Some("op".to_owned()),
+            message: "Partial text copied (4 chars).".to_owned(),
+            completeness: Completeness::Partial,
+            delivery: Delivery::Copied,
+            cleanup: Cleanup::Off,
+            error: Some("stt-partial".to_owned()),
+            artifacts: Artifacts {
+                take_id: Some("keep-me".to_owned()),
+                audio: true,
+                text: true,
+            },
+            dismissed: false,
+        });
+        let event = daemon.outcome.as_ref().unwrap().event_id;
+        let (job_tx, _) = mpsc::channel();
+        let reply = execute(
+            Command::Dismiss {
+                event_id: Some(event),
+            },
+            &mut daemon,
+            Path::new("/tmp"),
+            &job_tx,
+        );
+        assert!(reply.ok);
+        assert!(daemon.notice.is_some());
+        let outcome = daemon.outcome.unwrap();
+        assert!(outcome.dismissed);
+        assert!(outcome.artifacts.audio);
+        assert_eq!(outcome.artifacts.take_id.as_deref(), Some("keep-me"));
+    }
+
+    #[test]
+    fn recover_rejects_unknown_identity_instead_of_retargeting() {
+        let mut daemon = idle_daemon();
+        let (job_tx, job_rx) = mpsc::channel();
+        let reply = execute(
+            Command::Recover {
+                id: Some("missing".to_owned()),
+                local: false,
+                clipboard: true,
+            },
+            &mut daemon,
+            Path::new("/tmp"),
+            &job_tx,
+        );
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_deref(), Some("no-recording"));
+        assert!(job_rx.try_recv().is_err());
+        assert!(matches!(daemon.state, State::Idle));
+    }
+
+    #[test]
+    fn cancellation_prevents_every_delivery_mode() {
+        for mode in [
+            InjectionMode::Auto,
+            InjectionMode::Type,
+            InjectionMode::Paste,
+            InjectionMode::Clipboard,
+        ] {
+            let report = deliver_with(
+                "never dispatched",
+                mode,
+                false,
+                &AtomicBool::new(true),
+                |_, _| {
+                    panic!("cancelled work must not reach the delivery boundary");
+                },
+            );
+            assert_eq!(report.delivery, Delivery::Cancelled);
         }
     }
 
-    fn pipeline_outcome(
-        text: std::result::Result<String, String>,
-        partial: bool,
-    ) -> pipeline::Outcome {
-        pipeline::Outcome {
-            keep_wav: partial || text.is_err(),
-            text,
-            stt_elapsed: Duration::from_millis(10),
-            postproc: PostprocStatus::Off,
-            postproc_usage: None,
-            partial,
-            archive: pipeline::ArchiveStatus::NotApplicable,
+    #[test]
+    fn partial_text_never_reaches_keyboard_or_paste_delivery() {
+        let cancel = AtomicBool::new(false);
+        let strict = deliver_with("incomplete", InjectionMode::Type, true, &cancel, |_, _| {
+            panic!("strict typing cannot fall back to clipboard");
+        });
+        assert_eq!(strict.delivery, Delivery::Deferred);
+        for requested in [
+            InjectionMode::Auto,
+            InjectionMode::Paste,
+            InjectionMode::Clipboard,
+        ] {
+            let report = deliver_with("incomplete", requested, true, &cancel, |_, actual| {
+                assert_eq!(actual, InjectionMode::Clipboard);
+                Ok(InjectionOutcome::Clipboard)
+            });
+            assert_eq!(report.delivery, Delivery::Copied);
         }
     }
 
-    fn worker_result(outcome: pipeline::Outcome) -> WorkerResult {
-        WorkerResult {
-            transcript_saved: outcome
-                .text
-                .as_ref()
-                .is_ok_and(|text| !text.trim().is_empty()),
-            result: outcome.text,
-            stt_elapsed: outcome.stt_elapsed,
-            postproc: outcome.postproc,
-            partial: outcome.partial,
-            capture_ms: 0,
-            postproc_usage: outcome.postproc_usage,
-            source: pipeline::Source::Dictation,
-            injection_override: None,
-            stt_model: "test-stt".to_owned(),
-            stt_remote: true,
-            cleanup_model: String::new(),
-            wav_retained: true,
+    #[test]
+    fn uncertain_delivery_never_starts_a_second_backend() {
+        let mut calls = 0;
+        let report = deliver_with(
+            "do not duplicate",
+            InjectionMode::Auto,
+            false,
+            &AtomicBool::new(false),
+            |_, _| {
+                calls += 1;
+                Err(InjectionFailure {
+                    kind: InjectionFailureKind::Uncertain,
+                    message: "not payload".to_owned(),
+                })
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(report.delivery, Delivery::Uncertain);
+        assert_eq!(report.error, Some("injection-uncertain"));
+    }
+
+    #[test]
+    fn focus_deferral_copies_only_when_policy_allows_and_not_after_cancel() {
+        let cancel = AtomicBool::new(false);
+        let mut modes = Vec::new();
+        let report = deliver_with(
+            "recoverable",
+            InjectionMode::Paste,
+            false,
+            &cancel,
+            |_, mode| {
+                modes.push(mode);
+                if mode == InjectionMode::Clipboard {
+                    Ok(InjectionOutcome::Clipboard)
+                } else {
+                    Err(InjectionFailure {
+                        kind: InjectionFailureKind::Deferred,
+                        message: String::new(),
+                    })
+                }
+            },
+        );
+        assert_eq!(report.delivery, Delivery::Copied);
+        assert_eq!(modes, [InjectionMode::Paste, InjectionMode::Clipboard]);
+        let mut calls = 0;
+        let interrupted = deliver_with(
+            "recoverable",
+            InjectionMode::Auto,
+            false,
+            &cancel,
+            |_, _| {
+                calls += 1;
+                cancel.store(true, Ordering::Release);
+                Err(InjectionFailure {
+                    kind: InjectionFailureKind::Deferred,
+                    message: String::new(),
+                })
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(interrupted.delivery, Delivery::Cancelled);
+    }
+
+    #[test]
+    fn completed_delivery_is_not_relabelled_as_cancellation() {
+        let cancel = AtomicBool::new(false);
+        let report = deliver_with(
+            "already sent",
+            InjectionMode::Type,
+            false,
+            &cancel,
+            |_, _| {
+                cancel.store(true, Ordering::Release);
+                Ok(InjectionOutcome::Typed("wayland"))
+            },
+        );
+        assert_eq!(report.delivery, Delivery::Typed);
+    }
+
+    #[test]
+    fn stage_updates_match_epoch_and_preserve_elapsed_chunk_phase() {
+        let (mut daemon, operation) = processing(WorkKind::Transcription);
+        if let State::Processing { phase_started, .. } = &mut daemon.state {
+            *phase_started = Instant::now() - Duration::from_secs(60);
         }
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(StageEvent {
+                identity: operation.identity.clone(),
+                stage: Stage::Transcribing {
+                    completed: 1,
+                    total: 2,
+                },
+            })
+            .unwrap();
+        let foreign = Arc::new(Identity {
+            epoch: Arc::from("other-epoch"),
+            operation_id: operation.identity.operation_id.clone(),
+            take_id: operation.identity.take_id.clone(),
+            kind: operation.identity.kind,
+        });
+        sender
+            .send(StageEvent {
+                identity: foreign,
+                stage: Stage::Delivering,
+            })
+            .unwrap();
+        drain_stage(&mut daemon, &receiver);
+        assert_eq!(
+            daemon.snapshot().stage,
+            Some(Stage::Transcribing {
+                completed: 1,
+                total: 2
+            })
+        );
+        assert!(daemon.snapshot().elapsed >= 60);
+        sender
+            .send(StageEvent {
+                identity: operation.identity.clone(),
+                stage: Stage::CleaningUp,
+            })
+            .unwrap();
+        drain_stage(&mut daemon, &receiver);
+        assert!(daemon.snapshot().elapsed < 10);
+        let (jobs, _) = mpsc::channel();
+        assert!(cancel_command(&mut daemon, &jobs).ok);
+        sender
+            .send(StageEvent {
+                identity: operation.identity,
+                stage: Stage::Delivering,
+            })
+            .unwrap();
+        drain_stage(&mut daemon, &receiver);
+        assert_eq!(daemon.snapshot().stage, Some(Stage::Cancelling));
+    }
+
+    #[test]
+    fn cancellation_after_settlement_is_rejected() {
+        let (mut daemon, operation) = processing(WorkKind::Delivery);
+        assert!(operation.seal());
+        let (sender, _) = mpsc::channel();
+        assert!(!cancel_command(&mut daemon, &sender).ok);
+        assert!(!operation.cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn accepted_cancellation_prevents_irreversible_audio_cleanup() {
+        let (mut daemon, operation) = processing(WorkKind::Transcription);
+        let (sender, _) = mpsc::channel();
+        assert!(cancel_command(&mut daemon, &sender).ok);
+        assert!(!operation.seal());
+        assert!(!operation.request_cancel());
+        assert_eq!(daemon.snapshot().stage, Some(Stage::Cancelling));
+    }
+
+    #[test]
+    fn present_audio_without_durability_cannot_authorize_source_deletion() {
+        let take = take("present-not-synced", true, false);
+        let saved = saved_artifacts(&take.id, Some(&take), false, None, true, false);
+        assert!(saved.artifacts.audio);
+        assert!(!saved.durable_audio);
+        assert!(!saved.durable_text);
+        assert!(saved.warning);
+    }
+
+    #[test]
+    fn shutdown_revokes_processing_delivery() {
+        let (mut daemon, operation) = processing(WorkKind::Transcription);
+        shutdown_state(&mut daemon.state);
+        let report = deliver_with(
+            "must stay saved",
+            InjectionMode::Auto,
+            false,
+            &operation.cancel,
+            |_, _| {
+                panic!("shutdown must revoke delivery");
+            },
+        );
+        assert_eq!(report.delivery, Delivery::Cancelled);
+    }
+
+    #[test]
+    fn capture_policy_survives_live_configuration_change() {
+        let mut daemon = idle_daemon();
+        daemon.config.injection = InjectionMode::Type;
+        daemon.config.hud.labels = true;
+        let operation = daemon.operation("stable-take".to_owned(), Some(OperationKind::Dictation));
+        let recorder = FakeRecorder::default();
+        let stop_requested = recorder.stop_requested.clone();
+        daemon.state = State::Recording {
+            operation,
+            recorder: Box::new(recorder),
+            wav: PathBuf::from("/unused-test-capture.wav"),
+            config: Box::new(daemon.config.clone()),
+            started: Instant::now(),
+            signal: None,
+            next_signal_sample: Instant::now(),
+        };
+        daemon.config.injection = InjectionMode::Clipboard;
+        daemon.config.hud.labels = false;
+        let (sender, receiver) = mpsc::channel();
+        assert!(stop_recording(&mut daemon, &sender, true).ok);
+        assert!(stop_requested.load(Ordering::Acquire));
+        assert!(daemon.snapshot().hud.labels);
+        let job = receiver.try_recv().unwrap();
+        let report = deliver_with(
+            "partial",
+            job.config.injection,
+            true,
+            &job.operation.cancel,
+            |_, _| {
+                panic!("the reloaded clipboard policy must not apply to the earlier capture");
+            },
+        );
+        assert_eq!(report.delivery, Delivery::Deferred);
+    }
+
+    #[test]
+    fn blocked_reply_does_not_block_another_status_client() {
+        let (server, _slow_reader) = UnixStream::pair().unwrap();
+        let mut slow = accept_client(server).unwrap();
+        slow.respond(Arc::new(vec![b'x'; 2_000_000]));
+        for _ in 0..64 {
+            assert!(matches!(poll_client(&mut slow), ClientPoll::Pending));
+        }
+        let (server, mut reader) = UnixStream::pair().unwrap();
+        let mut client = accept_client(server).unwrap();
+        reader.write_all(b"status\n").unwrap();
+        assert!(matches!(
+            poll_client(&mut client),
+            ClientPoll::Ready(Ok(Request::Status))
+        ));
+        let (daemon, _) = processing(WorkKind::Delivery);
+        client.respond(encode_reply(&daemon.snapshot()).unwrap());
+        assert!(matches!(poll_client(&mut client), ClientPoll::Closed));
+        drop(client);
+        let snapshot: StatusSnapshot = serde_json::from_reader(reader).unwrap();
+        assert_eq!(snapshot.epoch, daemon.epoch.as_ref());
+        assert_eq!(snapshot.state, StateKind::Processing);
+        assert!(snapshot.capabilities.cancel);
+    }
+
+    #[test]
+    fn unterminated_and_invalid_utf8_requests_are_rejected() {
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let mut pending = accept_client(server).unwrap();
+        client.write_all(b"status").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(matches!(
+            poll_client(&mut pending),
+            ClientPoll::Ready(Err(_))
+        ));
+        assert!(decode_request(&[0xff]).is_err());
     }
 
     struct FakeRecorder {
         signal: Option<InputSignal>,
+        stop_requested: Arc<AtomicBool>,
         stop_result: Result<PathBuf>,
         cancel_result: Result<()>,
+    }
+
+    impl Default for FakeRecorder {
+        fn default() -> Self {
+            Self {
+                signal: None,
+                stop_requested: Arc::new(AtomicBool::new(false)),
+                stop_result: Ok(PathBuf::from("/tmp/unused.wav")),
+                cancel_result: Ok(()),
+            }
+        }
     }
 
     impl RecorderBoundary for FakeRecorder {
         fn input_signal(&mut self) -> Option<InputSignal> {
             self.signal
         }
-
+        fn request_stop(&mut self, _preserve_wav: bool) -> Result<()> {
+            self.stop_requested.store(true, Ordering::Release);
+            Ok(())
+        }
         fn stop(self: Box<Self>) -> Result<PathBuf> {
-            let this = *self;
-            this.stop_result
+            self.stop_result
         }
-
         fn cancel(self: Box<Self>) -> Result<()> {
-            let this = *self;
-            this.cancel_result
+            self.cancel_result
         }
-    }
-
-    fn fake_signal() -> InputSignal {
-        InputSignal {
-            level: 50,
-            silent: false,
-            waveform: [[0, 0]; crate::capture::AUDIO_WAVEFORM_BINS],
-        }
-    }
-
-    fn fake_recorder() -> FakeRecorder {
-        FakeRecorder {
-            signal: Some(fake_signal()),
-            stop_result: Ok(PathBuf::from("/tmp/cantrip-fake-recording.wav")),
-            cancel_result: Ok(()),
-        }
-    }
-
-    fn recording_state(recorder: FakeRecorder) -> State {
-        State::Recording {
-            recorder: Box::new(recorder),
-            started: Instant::now(),
-            signal: None,
-            next_signal_sample: Instant::now(),
-            postproc: None,
-        }
-    }
-
-    fn processing_state() -> State {
-        State::Processing {
-            started: Instant::now(),
-            stage: pipeline::Stage::Transcribing { chunk: 1, total: 1 },
-        }
-    }
-
-    fn wire(reply: WireReply) -> serde_json::Value {
-        serde_json::to_value(reply).expect("reply should serialize")
-    }
-
-    #[test]
-    fn start_recording_with_fake_recorder_enters_recording() {
-        let mut state = State::Idle;
-        let config = Config::default();
-        let mut last_outcome = LastOutcome::success("stale");
-        let recorder = Box::new(fake_recorder());
-        let reply = start_recording_with(
-            &mut state,
-            &config,
-            Path::new("/tmp"),
-            &mut last_outcome,
-            None,
-            |_wav, _source| Ok(recorder),
-        );
-        let json = wire(reply);
-        assert_eq!(json["ok"], true);
-        assert_eq!(json["state"], "recording");
-        assert!(matches!(state, State::Recording { .. }));
-        assert_eq!(last_outcome.message, None);
-        assert_eq!(last_outcome.ok, None);
-    }
-
-    #[test]
-    fn clean_start_rejects_without_model_and_keeps_actionable_outcome() {
-        let mut state = State::Idle;
-        let config = Config::default();
-        let mut last_outcome = LastOutcome::default();
-        let reply = start_recording_with(
-            &mut state,
-            &config,
-            Path::new("/tmp"),
-            &mut last_outcome,
-            Some(true),
-            |_wav, _source| panic!("recorder must not start without a postproc model"),
-        );
-        let json = wire(reply);
-        assert_eq!(json["ok"], false);
-        assert_eq!(json["state"], "idle");
-        assert_eq!(json["message"], POSTPROC_MODEL_UNSET_MESSAGE);
-        assert_eq!(json["error"], POSTPROC_MODEL_UNSET_ERROR);
-        assert!(matches!(state, State::Idle));
-
-        let status = wire(status_reply(&state, &last_outcome));
-        assert_eq!(status["state"], "idle");
-        assert_eq!(status["last"], POSTPROC_MODEL_UNSET_MESSAGE);
-        assert_eq!(status["last_ok"], false);
-        assert_eq!(status["last_error"], POSTPROC_MODEL_UNSET_ERROR);
-        let status_again = wire(status_reply(&state, &last_outcome));
-        assert_eq!(status_again["last"], POSTPROC_MODEL_UNSET_MESSAGE);
-        assert_eq!(status_again["last_error"], POSTPROC_MODEL_UNSET_ERROR);
-    }
-
-    #[test]
-    fn start_recording_with_failing_recorder_stays_idle() {
-        let mut state = State::Idle;
-        let config = Config::default();
-        let mut last_outcome = LastOutcome::default();
-        let reply = start_recording_with(
-            &mut state,
-            &config,
-            Path::new("/tmp"),
-            &mut last_outcome,
-            None,
-            |_wav, _source| Err(anyhow::anyhow!("no PipeWire")),
-        );
-        let json = wire(reply);
-        assert_eq!(json["ok"], false);
-        assert_eq!(json["state"], "idle");
-        assert!(matches!(state, State::Idle));
-        assert_eq!(
-            last_outcome.message.as_deref(),
-            Some("Starting recording failed")
-        );
-    }
-
-    #[test]
-    fn stop_recording_dispatches_job_and_enters_processing() {
-        let (job_tx, job_rx) = mpsc::channel::<Job>();
-        let config = Config::default();
-        let wav = PathBuf::from("/tmp/cantrip-fake-recording.wav");
-        let mut state = recording_state(FakeRecorder {
-            stop_result: Ok(wav.clone()),
-            ..fake_recorder()
-        });
-        let mut last_outcome = LastOutcome::default();
-
-        let reply = stop_recording(&mut state, &config, &job_tx, &mut last_outcome);
-
-        let json = wire(reply);
-        assert_eq!(json["ok"], true);
-        assert_eq!(json["state"], "processing");
-        assert!(matches!(state, State::Processing { .. }));
-        let job = job_rx.try_recv().expect("job should be dispatched");
-        assert_eq!(job.wav, wav);
-        assert_eq!(job.source, pipeline::Source::Dictation);
-        assert_eq!(last_outcome.message, None);
-    }
-
-    #[test]
-    fn stop_recording_failure_returns_to_idle() {
-        let (job_tx, job_rx) = mpsc::channel::<Job>();
-        let config = Config::default();
-        let mut state = recording_state(FakeRecorder {
-            stop_result: Err(anyhow::anyhow!("pw-record died")),
-            ..fake_recorder()
-        });
-        let mut last_outcome = LastOutcome::default();
-
-        let reply = stop_recording(&mut state, &config, &job_tx, &mut last_outcome);
-
-        let json = wire(reply);
-        assert_eq!(json["ok"], false);
-        assert_eq!(json["state"], "idle");
-        assert!(matches!(state, State::Idle));
-        assert!(job_rx.try_recv().is_err(), "no job on recorder failure");
-        assert_eq!(last_outcome.message.as_deref(), Some("Recording failed"));
-    }
-
-    #[test]
-    fn cancel_recording_stops_fake_recorder_and_returns_idle() {
-        let mut state = recording_state(fake_recorder());
-        let mut last_outcome = LastOutcome::default();
-
-        let reply = cancel_recording(&mut state, &mut last_outcome);
-
-        let json = wire(reply);
-        assert_eq!(json["ok"], true);
-        assert_eq!(json["state"], "idle");
-        assert!(matches!(state, State::Idle));
-        assert_eq!(last_outcome.message.as_deref(), Some("Cancelled"));
-    }
-
-    #[test]
-    fn cancel_recording_failure_still_returns_idle() {
-        let mut state = recording_state(FakeRecorder {
-            cancel_result: Err(anyhow::anyhow!("pw-record stuck")),
-            ..fake_recorder()
-        });
-        let mut last_outcome = LastOutcome::default();
-
-        let reply = cancel_recording(&mut state, &mut last_outcome);
-
-        let json = wire(reply);
-        assert_eq!(json["ok"], false);
-        assert_eq!(json["state"], "idle");
-        assert!(matches!(state, State::Idle));
-        assert_eq!(last_outcome.message.as_deref(), Some("Cancelling failed"));
-    }
-
-    #[test]
-    fn refresh_recording_signal_surfaces_fake_signal() {
-        let signal = fake_signal();
-        let mut state = recording_state(FakeRecorder {
-            signal: Some(signal),
-            ..fake_recorder()
-        });
-
-        refresh_recording_signal(&mut state);
-
-        match state {
-            State::Recording { signal: actual, .. } => assert_eq!(actual, Some(signal)),
-            State::Processing { .. } => panic!("state should remain recording, got processing"),
-            State::Idle => panic!("state should remain recording, got idle"),
-        }
-    }
-
-    #[test]
-    fn processing_rejects_mutating_commands() {
-        let commands = [
-            Command::Toggle { postproc: None },
-            Command::Start { postproc: None },
-            Command::Stop,
-            Command::Cancel,
-            Command::Last,
-            Command::Recover {
-                local: false,
-                clipboard: false,
-            },
-            Command::Recover {
-                local: true,
-                clipboard: true,
-            },
-        ];
-        let (job_tx, _job_rx) = mpsc::channel::<Job>();
-
-        for command in commands {
-            let mut state = processing_state();
-            let mut config = Config::default();
-            let mut last_outcome = LastOutcome::default();
-
-            let reply = execute(
-                command,
-                &mut state,
-                &mut config,
-                Path::new("/tmp"),
-                &job_tx,
-                &mut last_outcome,
-            );
-
-            let json = wire(reply);
-            assert_eq!(json["ok"], false);
-            assert_eq!(json["state"], "processing");
-            assert!(matches!(state, State::Processing { .. }));
-        }
-    }
-
-    #[test]
-    fn write_owner_file_creates_missing_parent_with_0600() {
-        let root = TestDir::new();
-        let path = root.0.join("state/last-transcript.txt");
-
-        write_owner_file(&path, b"hello").expect("write should create missing parent");
-
-        assert_eq!(fs::read(&path).unwrap(), b"hello");
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    #[test]
-    fn retained_audio_survives_until_complete_durable_recovery() {
-        let root = TestDir::new();
-        let slot = root.0.join("state/last-failed.wav");
-        let recording = root.0.join("recording.wav");
-        fs::write(&recording, b"original failed audio").unwrap();
-        let failure = pipeline_outcome(Err("STT failed".to_owned()), false);
-        assert!(update_failed_wav(
-            &slot,
-            &recording,
-            pipeline::Source::Dictation,
-            &failure,
-            false
-        )
-        .unwrap());
-
-        let complete = pipeline_outcome(Ok("complete transcript".to_owned()), false);
-        update_failed_wav(
-            &slot,
-            &recording,
-            pipeline::Source::Dictation,
-            &complete,
-            true,
-        )
-        .unwrap();
-        update_failed_wav(
-            &slot,
-            &recording,
-            pipeline::Source::Transcribe,
-            &complete,
-            true,
-        )
-        .unwrap();
-        assert_eq!(fs::read(&slot).unwrap(), b"original failed audio");
-
-        assert!(
-            update_failed_wav(&slot, &root.0, pipeline::Source::Dictation, &failure, false)
-                .is_err()
-        );
-        assert_eq!(fs::read(&slot).unwrap(), b"original failed audio");
-
-        // A failed retry already owns a safe source: even a missing runtime
-        // copy must not make it rewrite or lose the retained original.
-        fs::remove_file(&recording).unwrap();
-        assert!(update_failed_wav(
-            &slot,
-            &recording,
-            pipeline::Source::Recover,
-            &failure,
-            false
-        )
-        .unwrap());
-        assert_eq!(fs::read(&slot).unwrap(), b"original failed audio");
-
-        fs::write(&recording, b"new partially transcribed audio").unwrap();
-        let partial = pipeline_outcome(Ok("partial transcript".to_owned()), true);
-        assert!(update_failed_wav(
-            &slot,
-            &recording,
-            pipeline::Source::Dictation,
-            &partial,
-            true
-        )
-        .unwrap());
-        assert_eq!(fs::read(&slot).unwrap(), b"new partially transcribed audio");
-
-        assert!(
-            update_failed_wav(&slot, &recording, pipeline::Source::Recover, &partial, true)
-                .unwrap()
-        );
-        let empty = pipeline_outcome(Ok(" \n".to_owned()), false);
-        assert!(
-            update_failed_wav(&slot, &recording, pipeline::Source::Recover, &empty, true).unwrap()
-        );
-        // Disk-full or failed archive/last-transcript writes cannot consume
-        // the audio even after STT returns a complete nonempty transcript.
-        assert!(update_failed_wav(
-            &slot,
-            &recording,
-            pipeline::Source::Recover,
-            &complete,
-            false
-        )
-        .unwrap());
-        assert_eq!(fs::read(&slot).unwrap(), b"new partially transcribed audio");
-
-        write_owner_file(&root.0.join("last-transcript.txt"), b"complete transcript").unwrap();
-        assert!(!update_failed_wav(
-            &slot,
-            &recording,
-            pipeline::Source::Recover,
-            &complete,
-            true
-        )
-        .unwrap());
-        assert!(!slot.exists());
-    }
-
-    #[test]
-    fn interrupted_owner_write_preserves_old_audio_and_removes_staging_file() {
-        let root = TestDir::new();
-        let slot = root.0.join("last-failed.wav");
-        write_owner_file(&slot, b"old audio").unwrap();
-
-        let result = atomic_owner_file(&slot, |file| {
-            assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
-            file.write_all(b"interrupted new audio")?;
-            anyhow::bail!("simulated disk full");
-        });
-
-        assert!(result.is_err());
-        assert_eq!(fs::read(&slot).unwrap(), b"old audio");
-        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn private_copy_replaces_symlink_without_touching_target() {
-        let root = TestDir::new();
-        let victim = root.0.join("unrelated.txt");
-        let source = root.0.join("recording.wav");
-        let slot = root.0.join("last-failed.wav");
-        fs::write(&victim, b"unrelated data").unwrap();
-        fs::write(&source, b"private audio").unwrap();
-        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
-        std::os::unix::fs::symlink(&victim, &slot).unwrap();
-
-        copy_owner_file(&source, &slot).unwrap();
-
-        assert_eq!(fs::read(&victim).unwrap(), b"unrelated data");
-        assert_eq!(fs::read(&slot).unwrap(), b"private audio");
-        assert!(!fs::symlink_metadata(&slot)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(
-            fs::metadata(&slot).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-    }
-
-    #[test]
-    fn delivered_partial_is_an_error_until_next_operation() {
-        let mut state = processing_state();
-        let config = Config::default();
-        let reporter = TelemetryReporter::spawn();
-        let private_text = "private partial dictation marker";
-        let mut last_outcome = LastOutcome::default();
-        let result = worker_result(pipeline_outcome(Ok(private_text.to_owned()), true));
-
-        handle_worker_result_with(
-            &mut state,
-            &config,
-            result,
-            &mut last_outcome,
-            &reporter,
-            |_, _| Ok(InjectionOutcome::Clipboard),
-        )
-        .unwrap();
-
-        assert!(matches!(state, State::Idle));
-        let status = wire(status_reply(&state, &last_outcome));
-        assert_eq!(status["last_ok"], false);
-        assert_eq!(status["last_error"], "stt-partial");
-        assert!(!status.to_string().contains(private_text));
-        assert_eq!(
-            wire(status_reply(&state, &last_outcome))["last_error"],
-            "stt-partial"
-        );
-
-        start_recording_with(
-            &mut state,
-            &config,
-            Path::new("/unused"),
-            &mut last_outcome,
-            None,
-            |_, _| Ok(Box::new(fake_recorder())),
-        );
-        assert!(matches!(state, State::Recording { .. }));
-        let status = wire(status_reply(&state, &last_outcome));
-        assert!(status["last"].is_null());
-        assert!(status["last_error"].is_null());
-        reporter.shutdown();
-    }
-
-    #[test]
-    fn full_stt_failure_exposes_class_without_private_error_content() {
-        let root = TestDir::new();
-        let log_path = root.0.join("daemon.log");
-        let log = fs::File::create(&log_path).unwrap();
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(log)
-            .finish();
-        let mut state = processing_state();
-        let config = Config::default();
-        let reporter = TelemetryReporter::spawn();
-        let private_error = "private provider body marker";
-        let result = worker_result(pipeline_outcome(
-            Err(format!("endpoint returned HTTP 413: {private_error}")),
-            false,
-        ));
-        let mut last_outcome = LastOutcome::default();
-
-        tracing::subscriber::with_default(subscriber, || {
-            handle_worker_result_with(
-                &mut state,
-                &config,
-                result,
-                &mut last_outcome,
-                &reporter,
-                |_, _| panic!("failed STT must never inject text"),
-            )
-            .unwrap();
-        });
-
-        assert!(matches!(state, State::Idle));
-        let status = wire(status_reply(&state, &last_outcome));
-        assert_eq!(status["last_ok"], false);
-        assert_eq!(status["last_error"], "stt-failed");
-        assert!(!status.to_string().contains(private_error));
-        let log = fs::read_to_string(log_path).unwrap();
-        assert!(log.contains("class=stt-failed"));
-        assert!(!log.contains(private_error));
-        reporter.shutdown();
     }
 }

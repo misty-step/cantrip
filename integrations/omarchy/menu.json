@@ -1,0 +1,49 @@
+{
+  "cantrip": {
+    "label": "Cantrip",
+    "description": "Dictation, saved recordings, recovery, and setup",
+    "aliases": ["dictation", "voice"]
+  },
+  "cantrip.raw": {
+    "label": "Toggle raw dictation",
+    "action": "cantrip toggle --postproc raw",
+    "description": "Same action as Super+R; skips transcript cleanup"
+  },
+  "cantrip.clean": {
+    "label": "Toggle clean dictation",
+    "action": "cantrip toggle --postproc clean",
+    "description": "Same action as Super+Shift+R; requests configured cleanup"
+  },
+  "cantrip.stop": {
+    "label": "Stop recording",
+    "action": "cantrip stop",
+    "when": "cantrip status --json 2>/dev/null | jq -e '.capabilities.stop == true' >/dev/null"
+  },
+  "cantrip.cancel": {
+    "label": "Cancel without delivery",
+    "action": "cantrip cancel",
+    "description": "Discard active capture, or cancel processing and keep recovery evidence",
+    "when": "cantrip status --json 2>/dev/null | jq -e '.capabilities.cancel == true' >/dev/null"
+  },
+  "cantrip.recordings": {
+    "label": "Recordings and recovery",
+    "action": "cantrip actions",
+    "description": "Choose a saved take; copy its transcript, recover to clipboard, or forget its audio"
+  },
+  "cantrip.dismiss": {
+    "label": "Dismiss current notice",
+    "action": "cantrip dismiss",
+    "description": "Hide the current notice without deleting any recording",
+    "when": "cantrip status --json 2>/dev/null | jq -e '.capabilities.dismiss == true' >/dev/null"
+  },
+  "cantrip.settings": {
+    "label": "Settings",
+    "action": "cantrip settings",
+    "description": "Input, models, provider configuration, state labels, and reduced motion"
+  },
+  "cantrip.check": {
+    "label": "Check setup",
+    "action": "cantrip actions --doctor",
+    "description": "Native setup diagnosis, local model installation, and OS-keyring credentials"
+  }
+}

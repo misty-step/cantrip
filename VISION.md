@@ -13,8 +13,9 @@ cloud SaaS. One Rust crate, one binary `cantrip`, operator-owned machine.
 
 Linux users who write in real apps (editors, browsers, chat) and want speech as
 a first-class input without shipping audio to a vendor by default. Primary
-operator today: a single power user on COSMIC/wlroots-class compositors. The
-design still aims at any cold installer who can run `doctor` and bind one hotkey.
+operator today: a single power user on Hyprland/Omarchy. The design still aims at
+any cold installer who can run `doctor` and bind one hotkey; unverified desktop
+delivery falls back to an explicit operator choice, never an assumed destination.
 
 ## Job to be done
 
@@ -35,9 +36,11 @@ owner-private local history supports recovery and evaluation.
 2. **Paste-first delivery.** Paragraphs survive; type mode never touches the clipboard.
 3. **Honest HUD.** Static phases; determinate fill only from measured multi-chunk STT.
 4. **Small process model.** No async runtime; std threads + mpsc; one warm worker.
-5. **Operator evidence.** Failed audio, the last transcript, and owner-private
-   transcript history remain locally available without support theater.
+5. **Operator evidence.** Each pending recording and its saved text remain
+   independently recoverable in owner-private history, without support theater.
 6. **Secrets out of the tree.** No API keys in files, logs, or git.
+7. **Verified destination.** Focus and session uncertainty defer delivery; an
+   uncertain keyboard or clipboard handoff never triggers an automatic retry.
 
 ## Standards
 
@@ -65,9 +68,9 @@ owner-private local history supports recovery and evaluation.
 
 ## Excellent outcomes
 
-**Near (weeks):** Install, doctor, hotkey, dictate a paragraph with paste-first
-delivery and a legible Success flash. Failures leave a recoverable WAV or last
-transcript. CI and forest checks prove the contracts above.
+**Near (weeks):** Install, doctor, hotkey, dictate a paragraph with guarded
+paste-first delivery and a legible outcome. Failures leave independently
+recoverable recordings. Repository checks prove the contracts above.
 
 **Horizon (~6–12 months):** Indispensable daily driver on mainstream Wayland
 setups: reliable long-form dictation, configurable cleanup without drama,

@@ -60,19 +60,10 @@ pub fn daemon_log_path() -> Result<PathBuf> {
     Ok(state_dir()?.join("daemon.log"))
 }
 
-/// Last delivered (or partial) transcript text. Owner-only; never logged.
-pub fn last_transcript_path() -> Result<PathBuf> {
-    Ok(state_dir()?.join("last-transcript.txt"))
-}
-
-/// `$XDG_STATE_HOME/cantrip/transcripts/` — owner-private transcript history.
+/// `$XDG_STATE_HOME/cantrip/transcripts/` — canonical owner-private history
+/// JSON and matching per-take recovery WAV sidecars.
 pub fn transcript_history_dir() -> Result<PathBuf> {
     Ok(state_dir()?.join("transcripts"))
-}
-
-/// Last WAV with failed or partial STT. Retained until successful recovery.
-pub fn last_failed_wav_path() -> Result<PathBuf> {
-    Ok(state_dir()?.join("last-failed.wav"))
 }
 
 /// Create a directory (and parents) if missing, then return it.

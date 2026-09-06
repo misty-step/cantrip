@@ -6,6 +6,7 @@ use serde::Deserialize;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
@@ -24,10 +25,10 @@ const LOCAL_CHUNK_SEARCH_SECS: f32 = 3.0;
 /// Minimum residual kept as its own chunk.
 const LOCAL_MIN_CHUNK_SECS: f32 = 0.5;
 
-/// Progress of a multi-chunk transcription (1-based index).
+/// Number of chunks whose backend call has successfully returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkProgress {
-    pub index: u32,
+    pub completed: u32,
     pub total: u32,
 }
 
@@ -41,12 +42,20 @@ pub enum Transcript {
         failed_at: u32,
         total: u32,
     },
+    /// Cancellation preserves text already returned by the backend.
+    Cancelled {
+        text: String,
+        completed: u32,
+        total: u32,
+    },
 }
 
 impl Transcript {
     pub fn text(&self) -> &str {
         match self {
-            Self::Complete(text) | Self::Partial { text, .. } => text,
+            Self::Complete(text) | Self::Partial { text, .. } | Self::Cancelled { text, .. } => {
+                text
+            }
         }
     }
 
@@ -76,8 +85,16 @@ impl Transcriber {
     pub fn transcribe_wav(
         &mut self,
         wav: &Path,
+        cancel: Option<&AtomicBool>,
         mut on_progress: impl FnMut(ChunkProgress),
     ) -> Result<Transcript> {
+        if is_cancelled(cancel) {
+            return Ok(Transcript::Cancelled {
+                text: String::new(),
+                completed: 0,
+                total: 0,
+            });
+        }
         let samples = transcribe_rs::audio::read_wav_samples(wav).with_context(|| {
             format!(
                 "reading WAV {} with Parakeet model {}",
@@ -85,10 +102,17 @@ impl Transcriber {
                 self.model_dir.display()
             )
         })?;
+        if is_cancelled(cancel) {
+            return Ok(Transcript::Cancelled {
+                text: String::new(),
+                completed: 0,
+                total: 0,
+            });
+        }
         let audio_seconds = samples.len() as f64 / f64::from(SAMPLE_RATE);
         let started = Instant::now();
         let outcome = self
-            .transcribe_samples(&samples, &mut on_progress)
+            .transcribe_samples(&samples, cancel, &mut on_progress)
             .with_context(|| {
                 format!(
                     "transcribing WAV {} with Parakeet model {}",
@@ -111,11 +135,13 @@ impl Transcriber {
     fn transcribe_samples(
         &mut self,
         samples: &[f32],
+        cancel: Option<&AtomicBool>,
         on_progress: &mut impl FnMut(ChunkProgress),
     ) -> Result<Transcript> {
         collect_chunks(
             &plan_chunks(samples),
             SAMPLE_RATE,
+            cancel,
             on_progress,
             |start, end| self.transcribe_chunk(&samples[start..end]),
         )
@@ -140,47 +166,71 @@ impl Transcriber {
 fn collect_chunks(
     ranges: &[(usize, usize)],
     sample_rate: f32,
+    cancel: Option<&AtomicBool>,
     on_progress: &mut impl FnMut(ChunkProgress),
     mut transcribe_chunk: impl FnMut(usize, usize) -> Result<String>,
 ) -> Result<Transcript> {
     let total = u32::try_from(ranges.len()).context("too many transcription chunks")?;
     let mut parts = Vec::with_capacity(ranges.len());
+    let mut completed = 0;
+    if !ranges.is_empty() && !is_cancelled(cancel) {
+        on_progress(ChunkProgress { completed, total });
+    }
     for (index, &(start, end)) in ranges.iter().enumerate() {
-        let progress = ChunkProgress {
-            index: index as u32 + 1,
-            total,
-        };
-        on_progress(progress);
+        if is_cancelled(cancel) {
+            return Ok(Transcript::Cancelled {
+                text: parts.join(" "),
+                completed,
+                total,
+            });
+        }
+        let chunk = index as u32 + 1;
         tracing::info!(
-            "[STT] chunk={}/{} start_s={:.2} duration_s={:.2}",
-            progress.index,
-            progress.total,
+            "[STT] chunk={chunk}/{total} start_s={:.2} duration_s={:.2}",
             start as f32 / sample_rate,
             (end - start) as f32 / sample_rate
         );
         match transcribe_chunk(start, end) {
             Ok(text) => {
-                if !text.is_empty() {
+                if !text.trim().is_empty() {
                     parts.push(text);
                 }
+                completed += 1;
+                on_progress(ChunkProgress { completed, total });
+            }
+            Err(_) if is_cancelled(cancel) => {
+                return Ok(Transcript::Cancelled {
+                    text: parts.join(" "),
+                    completed,
+                    total,
+                });
             }
             Err(error) if !parts.is_empty() => {
                 tracing::warn!(
-                    "[STT] chunk {}/{} failed after partial text chars={} error={error:#}",
-                    progress.index,
-                    progress.total,
+                    "[STT] chunk {chunk}/{total} failed after partial text chars={} error={error:#}",
                     parts.iter().map(|part| part.chars().count()).sum::<usize>()
                 );
                 return Ok(Transcript::Partial {
                     text: parts.join(" "),
-                    failed_at: progress.index,
+                    failed_at: chunk,
                     total,
                 });
             }
             Err(error) => return Err(error),
         }
     }
+    if is_cancelled(cancel) {
+        return Ok(Transcript::Cancelled {
+            text: parts.join(" "),
+            completed,
+            total,
+        });
+    }
     Ok(Transcript::Complete(parts.join(" ")))
+}
+
+pub(crate) fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire))
 }
 
 /// Plan inclusive-exclusive sample ranges for energy-adaptive chunks.
@@ -244,77 +294,126 @@ fn low_energy_split(samples: &[f32], target: usize, search_secs: f32) -> usize {
 /// remains free to report its own format diagnostics.
 pub fn wav_duration_ms(path: &Path) -> Result<u64> {
     let mut file = File::open(path).with_context(|| format!("opening WAV {}", path.display()))?;
-    wav_duration_ms_from(&mut file)
+    wav_metadata_from(&mut file)
+        .map(|metadata| metadata.duration_ms)
         .with_context(|| format!("reading WAV duration {}", path.display()))
 }
 
-fn wav_duration_ms_from(reader: &mut (impl Read + Seek)) -> Result<u64> {
+pub(crate) struct WavMetadata {
+    pub duration_ms: u64,
+    pub frames: u64,
+}
+
+pub(crate) fn wav_metadata_from(reader: &mut (impl Read + Seek)) -> Result<WavMetadata> {
+    let file_len = reader
+        .seek(SeekFrom::End(0))
+        .context("reading WAV length")?;
+    reader.seek(SeekFrom::Start(0)).context("rewinding WAV")?;
     let mut header = [0_u8; 12];
     reader
         .read_exact(&mut header)
         .context("reading RIFF header")?;
-    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
-        anyhow::bail!("not a RIFF/WAVE file");
-    }
-
-    let mut byte_rate = None;
+    anyhow::ensure!(
+        &header[..4] == b"RIFF" && &header[8..] == b"WAVE",
+        "not a RIFF/WAVE file"
+    );
+    let riff_end = u64::from(u32::from_le_bytes(header[4..8].try_into()?)) + 8;
+    anyhow::ensure!(
+        (12..=file_len).contains(&riff_end),
+        "WAV RIFF length exceeds the file or omits its header"
+    );
+    let mut audio_format = None;
     let mut data_bytes = None;
-    loop {
+    let mut position = 12;
+    while position < riff_end {
+        anyhow::ensure!(riff_end - position >= 8, "truncated WAV chunk header");
         let mut chunk = [0_u8; 8];
-        match reader.read_exact(&mut chunk) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error).context("reading WAV chunk header"),
-        }
-        let size = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]) as u64;
-        match &chunk[0..4] {
+        reader
+            .read_exact(&mut chunk)
+            .context("reading WAV chunk header")?;
+        let size = u64::from(u32::from_le_bytes(chunk[4..].try_into()?));
+        let end = position + 8 + size + size % 2;
+        anyhow::ensure!(
+            end <= riff_end,
+            "WAV chunk or padding exceeds its container"
+        );
+        match &chunk[..4] {
             b"fmt " => {
-                if size < 12 {
-                    anyhow::bail!("WAV fmt chunk is too short");
+                anyhow::ensure!(
+                    audio_format.is_none() && size >= 16,
+                    "invalid WAV format chunk"
+                );
+                let mut format = [0_u8; 40];
+                let bytes = usize::try_from(size.min(format.len() as u64))?;
+                reader
+                    .read_exact(&mut format[..bytes])
+                    .context("reading WAV format")?;
+                let mut encoding = u16::from_le_bytes(format[..2].try_into()?);
+                let channels = u16::from_le_bytes(format[2..4].try_into()?);
+                let sample_rate = u32::from_le_bytes(format[4..8].try_into()?);
+                let byte_rate = u32::from_le_bytes(format[8..12].try_into()?);
+                let frame_bytes = u16::from_le_bytes(format[12..14].try_into()?);
+                let bits = u16::from_le_bytes(format[14..16].try_into()?);
+                let mut valid_bits = bits;
+                if size != 16 {
+                    anyhow::ensure!(size >= 18, "truncated WAV format extension");
+                    let extension = u64::from(u16::from_le_bytes(format[16..18].try_into()?));
+                    anyhow::ensure!(18 + extension <= size, "truncated WAV format extension");
+                    if encoding == 0xfffe {
+                        anyhow::ensure!(extension >= 22, "truncated extensible WAV format");
+                        let declared = u16::from_le_bytes(format[18..20].try_into()?);
+                        anyhow::ensure!(declared <= bits, "invalid WAV valid-bit count");
+                        if declared > 0 {
+                            valid_bits = declared;
+                        }
+                        anyhow::ensure!(
+                            format[26..40] == [0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113],
+                            "unsupported extensible WAV encoding"
+                        );
+                        encoding = u16::from_le_bytes(format[24..26].try_into()?);
+                    }
                 }
-                let mut format = [0_u8; 12];
-                reader
-                    .read_exact(&mut format)
-                    .context("reading WAV fmt chunk")?;
-                byte_rate =
-                    Some(u32::from_le_bytes([format[8], format[9], format[10], format[11]]) as u64);
-                reader
-                    .seek(SeekFrom::Current(
-                        i64::try_from(size - 12).context("WAV chunk too large")?,
-                    ))
-                    .context("skipping WAV fmt extension")?;
+                anyhow::ensure!(
+                    matches!(encoding, 1 | 3)
+                        && channels > 0
+                        && sample_rate > 0
+                        && frame_bytes > 0
+                        && frame_bytes.is_multiple_of(channels)
+                        && bits > 0
+                        && u32::from(bits) <= u32::from(frame_bytes / channels) * 8
+                        && u64::from(byte_rate) == u64::from(sample_rate) * u64::from(frame_bytes),
+                    "invalid WAV encoding or sample format"
+                );
+                anyhow::ensure!(
+                    encoding != 3
+                        || (matches!(bits, 32 | 64)
+                            && valid_bits == bits
+                            && u32::from(bits) == u32::from(frame_bytes / channels) * 8),
+                    "invalid IEEE-float WAV format"
+                );
+                audio_format = Some((byte_rate, frame_bytes));
             }
             b"data" => {
+                anyhow::ensure!(data_bytes.is_none(), "multiple WAV data chunks");
                 data_bytes = Some(size);
-                reader
-                    .seek(SeekFrom::Current(
-                        i64::try_from(size).context("WAV data too large")?,
-                    ))
-                    .context("skipping WAV data")?;
             }
-            _ => {
-                reader
-                    .seek(SeekFrom::Current(
-                        i64::try_from(size).context("WAV chunk too large")?,
-                    ))
-                    .context("skipping WAV chunk")?;
-            }
+            _ => {}
         }
-        if size % 2 == 1 {
-            reader
-                .seek(SeekFrom::Current(1))
-                .context("skipping WAV chunk padding")?;
-        }
-        if byte_rate.is_some() && data_bytes.is_some() {
-            break;
-        }
+        reader
+            .seek(SeekFrom::Start(end))
+            .context("seeking WAV chunk")?;
+        position = end;
     }
-
-    let byte_rate = byte_rate
-        .filter(|rate| *rate > 0)
-        .context("WAV has no byte rate")?;
+    let (byte_rate, frame_bytes) = audio_format.context("WAV has no format chunk")?;
     let data_bytes = data_bytes.context("WAV has no data chunk")?;
-    Ok(data_bytes.saturating_mul(1_000) / byte_rate)
+    anyhow::ensure!(
+        data_bytes.is_multiple_of(u64::from(frame_bytes)),
+        "WAV data ends inside a sample frame"
+    );
+    Ok(WavMetadata {
+        duration_ms: data_bytes.saturating_mul(1_000) / u64::from(byte_rate),
+        frames: data_bytes / u64::from(frame_bytes),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -333,10 +432,25 @@ pub fn transcribe_remote(
     model: &str,
     vocabulary: &[String],
     api_key: Option<&str>,
+    cancel: Option<&AtomicBool>,
     mut on_progress: impl FnMut(ChunkProgress),
 ) -> Result<Transcript> {
+    if is_cancelled(cancel) {
+        return Ok(Transcript::Cancelled {
+            text: String::new(),
+            completed: 0,
+            total: 0,
+        });
+    }
     let mut source =
         RemoteWav::open(wav).with_context(|| format!("reading WAV {}", wav.display()))?;
+    if is_cancelled(cancel) {
+        return Ok(Transcript::Cancelled {
+            text: String::new(),
+            completed: 0,
+            total: 0,
+        });
+    }
     if source.frames == 0 {
         return Ok(Transcript::Complete(String::new()));
     }
@@ -364,6 +478,13 @@ pub fn transcribe_remote(
         // used for planning, never to re-encode the source samples.
         let samples = transcribe_rs::audio::read_wav_samples(wav)
             .with_context(|| format!("reading WAV {} for chunk planning", wav.display()))?;
+        if is_cancelled(cancel) {
+            return Ok(Transcript::Cancelled {
+                text: String::new(),
+                completed: 0,
+                total: 0,
+            });
+        }
         plan_chunks_with_limit(&samples, max_frames)
     } else {
         let chunk_frames = short_frames.min(max_frames);
@@ -394,6 +515,7 @@ pub fn transcribe_remote(
     collect_chunks(
         &ranges,
         source.sample_rate as f32,
+        cancel,
         &mut on_progress,
         |start, end| {
             body.truncate(prefix_len);
@@ -408,6 +530,7 @@ pub fn transcribe_remote(
                 body.len() <= MAX_REMOTE_REQUEST_BYTES,
                 "remote transcription upload exceeds its size limit"
             );
+            anyhow::ensure!(!is_cancelled(cancel), "transcription cancelled");
 
             let started = Instant::now();
             let response = match request.clone().send_bytes(&body) {
@@ -649,6 +772,9 @@ impl RemoteWav {
 /// Never includes transcript content — structural causes only.
 pub fn classify_failure(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
+    if lower.contains("api key") || lower.contains("keyring") || lower.contains("secret service") {
+        return "Transcription credential unavailable";
+    }
     // Parakeet ONNX encoder cliff (observed live as axis broadcast 77 by 5077).
     if lower.contains("broadcast") || lower.contains("axis ==") {
         return "Audio too long for the model";
@@ -658,6 +784,9 @@ pub fn classify_failure(error: &str) -> &'static str {
     }
     if lower.contains("http 413") {
         return "Transcription upload too large";
+    }
+    if lower.contains("http 401") || lower.contains("http 403") {
+        return "Transcription authorization failed";
     }
     // Match the ureq status form we emit: "returned HTTP {code}".
     if lower.contains("returned http ") || lower.contains("http 4") || lower.contains("http 5") {
@@ -703,6 +832,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn credential_failures_are_actionable_without_exposing_key_context() {
+        let notice =
+            classify_failure("api key 'PRIVATE_KEY_ID' unavailable: keyring lookup failed");
+        assert_eq!(notice, classify_failure("api key unavailable"));
+        assert_ne!(notice, classify_failure("unclassified failure"));
+        assert!(!notice.contains("PRIVATE_KEY_ID"));
+    }
+
+    #[test]
     fn wav_duration_uses_data_size_and_byte_rate() {
         let mut wav = Vec::new();
         wav.extend_from_slice(b"RIFF");
@@ -717,11 +855,16 @@ mod tests {
         wav.extend_from_slice(&16_u16.to_le_bytes());
         wav.extend_from_slice(b"data");
         wav.extend_from_slice(&32_000_u32.to_le_bytes());
+        wav.resize(32_044, 0);
 
         assert_eq!(
-            wav_duration_ms_from(&mut std::io::Cursor::new(wav)).unwrap(),
+            wav_metadata_from(&mut std::io::Cursor::new(&wav))
+                .unwrap()
+                .duration_ms,
             1_000
         );
+        wav.truncate(44);
+        assert!(wav_metadata_from(&mut std::io::Cursor::new(wav)).is_err());
     }
 
     #[test]
@@ -758,5 +901,133 @@ mod tests {
         for window in ranges.windows(2) {
             assert_eq!(window[0].1, window[1].0);
         }
+    }
+
+    #[test]
+    fn completed_progress_follows_backend_return_not_dispatch() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        let transcript = collect_chunks(
+            &[(0, 1), (1, 2)],
+            SAMPLE_RATE,
+            None,
+            &mut |progress| {
+                events
+                    .borrow_mut()
+                    .push(format!("completed {}", progress.completed))
+            },
+            |start, _| {
+                events.borrow_mut().push(format!("backend {start}"));
+                Ok(format!("chunk-{start}"))
+            },
+        )
+        .unwrap();
+        assert_eq!(transcript.text(), "chunk-0 chunk-1");
+        assert_eq!(
+            events.into_inner(),
+            [
+                "completed 0",
+                "backend 0",
+                "completed 1",
+                "backend 1",
+                "completed 2"
+            ]
+        );
+    }
+
+    #[test]
+    fn cancellation_before_transcription_dispatch_never_calls_the_backend() {
+        let cancel = AtomicBool::new(true);
+        let mut progress = Vec::new();
+        let mut calls = 0;
+        let result = collect_chunks(
+            &[(0, 1), (1, 2)],
+            SAMPLE_RATE,
+            Some(&cancel),
+            &mut |event| progress.push(event),
+            |_, _| {
+                calls += 1;
+                Ok("must not run".to_owned())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 0);
+        assert!(progress.is_empty());
+        assert_eq!(
+            result,
+            Transcript::Cancelled {
+                text: String::new(),
+                completed: 0,
+                total: 2
+            }
+        );
+    }
+
+    #[test]
+    fn cancellation_from_progress_callback_stops_before_the_next_chunk() {
+        let cancel = AtomicBool::new(false);
+        let mut calls = 0;
+        let result = collect_chunks(
+            &[(0, 1), (1, 2)],
+            SAMPLE_RATE,
+            Some(&cancel),
+            &mut |event| {
+                if event.completed == 1 {
+                    cancel.store(true, Ordering::Release);
+                }
+            },
+            |_, _| {
+                calls += 1;
+                Ok("saved words".to_owned())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(
+            result,
+            Transcript::Cancelled {
+                text: "saved words".to_owned(),
+                completed: 1,
+                total: 2
+            }
+        );
+    }
+
+    #[test]
+    fn cancellation_during_the_last_backend_call_is_not_complete_success() {
+        let cancel = AtomicBool::new(false);
+        let mut progress = Vec::new();
+        let result = collect_chunks(
+            &[(0, 1)],
+            SAMPLE_RATE,
+            Some(&cancel),
+            &mut |event| progress.push(event),
+            |_, _| {
+                cancel.store(true, Ordering::Release);
+                Ok("returned safely".to_owned())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            Transcript::Cancelled {
+                text: "returned safely".to_owned(),
+                completed: 1,
+                total: 1
+            }
+        );
+        assert_eq!(
+            progress,
+            [
+                ChunkProgress {
+                    completed: 0,
+                    total: 1
+                },
+                ChunkProgress {
+                    completed: 1,
+                    total: 1
+                },
+            ]
+        );
     }
 }

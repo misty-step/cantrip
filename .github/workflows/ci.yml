@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       # Toolchain source of truth is rust-toolchain.toml (channel "stable").
       # rustup honors it on every cargo invocation below; this step just
       # pre-installs the matching stable toolchain and its components.

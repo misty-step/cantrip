@@ -16,6 +16,16 @@ pub struct Config {
     pub stt: SttConfig,
     pub postproc: PostprocConfig,
     pub telemetry: TelemetryConfig,
+    pub hud: HudConfig,
+}
+
+/// Accessibility preferences for the passive dictation HUD.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct HudConfig {
+    pub labels: bool,
+    /// None follows the desktop; an explicit value overrides that preference.
+    pub reduced_motion: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -55,6 +65,7 @@ impl Default for Config {
             stt: SttConfig::default(),
             postproc: PostprocConfig::default(),
             telemetry: TelemetryConfig::default(),
+            hud: HudConfig::default(),
         }
     }
 }
