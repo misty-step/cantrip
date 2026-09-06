@@ -3,7 +3,7 @@
 use crate::capture::{self, InputSignal};
 use crate::config::{Config, PostprocConfig, SttConfig};
 use crate::hud;
-use crate::inject::{self, InjectionOutcome};
+use crate::inject::{self, InjectionMode, InjectionOutcome};
 use crate::ipc::{AudioSignal, Command, Request, TerminalOutcome, WireReply};
 use crate::models;
 use crate::paths;
@@ -18,7 +18,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -37,6 +37,7 @@ const HUD_SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
 const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// The recorder operations the daemon state machine needs. Production uses
 /// `capture::Recorder`; tests substitute a fake so Idle/Recording/Processing
@@ -98,6 +99,8 @@ struct Job {
     stt: SttConfig,
     vocabulary: Vec<String>,
     postproc: PostprocConfig,
+    /// Only explicit recovery delivery overrides bypass the live config.
+    injection_override: Option<InjectionMode>,
     source: pipeline::Source,
     /// Wall time of the recording itself, for the telemetry capture span.
     capture_ms: u64,
@@ -112,6 +115,12 @@ struct WorkerResult {
     postproc_usage: Option<crate::postproc::RefinementUsage>,
     /// Which pipeline lane produced this result, for telemetry labeling.
     source: pipeline::Source,
+    injection_override: Option<InjectionMode>,
+    stt_model: String,
+    stt_remote: bool,
+    cleanup_model: String,
+    wav_retained: bool,
+    transcript_saved: bool,
 }
 
 const POSTPROC_MODEL_UNSET_ERROR: &str = "postproc-model-unset";
@@ -123,7 +132,7 @@ const POSTPROC_MODEL_UNSET_MESSAGE: &str =
 #[derive(Debug, Clone, Default)]
 struct LastOutcome {
     message: Option<String>,
-    /// Whether the dictation was delivered (typed or copied).
+    /// Whether a complete dictation was delivered (typed or copied).
     ok: Option<bool>,
     /// Stable machine-readable class for command/status consumers.
     error: Option<String>,
@@ -401,6 +410,7 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 postproc,
                 source,
                 capture_ms,
+                injection_override,
             } = job;
             let wav = RecordingCleanup(wav);
             let outcome = pipeline::run(
@@ -421,20 +431,30 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 }
                 pipeline::ArchiveStatus::NotApplicable => {}
             }
-            if outcome.keep_wav {
-                if let Err(error) = persist_failed_wav(&wav.0) {
-                    tracing::warn!("[Daemon] could not keep failed WAV: {error:#}");
-                }
-            } else {
-                clear_failed_wav();
-            }
+            let mut transcript_saved = false;
             if let Ok(text) = outcome.text.as_ref() {
                 if !text.trim().is_empty() {
-                    if let Err(error) = persist_last_transcript(text) {
-                        tracing::warn!("[Daemon] could not save last transcript: {error:#}");
+                    match persist_last_transcript(text) {
+                        Ok(()) => transcript_saved = true,
+                        Err(error) => {
+                            tracing::warn!("[Daemon] could not save last transcript: {error:#}");
+                        }
                     }
                 }
             }
+            // Recovery may consume audio only after nonempty recovered text
+            // has a durable owner-private copy, never before both writes fail.
+            let transcript_safe =
+                transcript_saved || matches!(&outcome.archive, pipeline::ArchiveStatus::Saved(_));
+            let wav_retained = match paths::last_failed_wav_path().and_then(|path| {
+                update_failed_wav(&path, &wav.0, source, &outcome, transcript_safe)
+            }) {
+                Ok(retained) => retained,
+                Err(error) => {
+                    tracing::warn!("[Daemon] recovery audio persistence failed error={error:#}");
+                    false
+                }
+            };
             let worker_result = WorkerResult {
                 result: outcome.text,
                 stt_elapsed: outcome.stt_elapsed,
@@ -443,6 +463,12 @@ fn spawn_worker(config: &Config, warm: bool) -> WorkerChannels {
                 capture_ms,
                 postproc_usage: outcome.postproc_usage,
                 source,
+                injection_override,
+                stt_model: stt.model,
+                stt_remote: stt.endpoint.is_some(),
+                cleanup_model: postproc.model,
+                wav_retained,
+                transcript_saved,
             };
             let chars = worker_result
                 .result
@@ -668,7 +694,9 @@ fn execute(
         },
         Command::Cancel => cancel_recording(state, last_outcome),
         Command::Last => replay_last(state, config, last_outcome),
-        Command::Recover => recover_failed(state, config, job_tx, last_outcome),
+        Command::Recover { local, clipboard } => {
+            recover_failed(state, config, job_tx, last_outcome, local, clipboard)
+        }
         Command::Ping => WireReply::command(true, state.name(), Some("pong".to_owned())),
         Command::Reload => match Config::load() {
             Ok(new_config) => {
@@ -781,19 +809,32 @@ fn stop_recording(
         stt: config.stt.clone(),
         vocabulary: config.vocabulary.clone(),
         postproc: postproc_cfg,
+        injection_override: None,
         source: pipeline::Source::Dictation,
         capture_ms: (record_secs * 1000.0) as u64,
     };
     if job_tx.send(job).is_err() {
+        let wav_retained = match persist_failed_wav(&wav) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!("[Daemon] recovery audio persistence failed error={error:#}");
+                false
+            }
+        };
         if let Err(error) = capture::remove_recording(&wav) {
             tracing::warn!("[Capture] recording cleanup failed: {error:#}");
         }
-        *last_outcome = LastOutcome::notice("Transcription failed");
+        *last_outcome = LastOutcome::notice_with_error(
+            format!("Transcription unavailable; {}", recovery_hint(wav_retained)),
+            "stt-failed",
+        );
         return WireReply::command(
             false,
             state.name(),
             Some("transcription worker unavailable".to_owned()),
-        );
+        )
+        .with_error("stt-failed")
+        .with_outcome(last_outcome.to_ipc());
     }
     *state = State::Processing {
         started: Instant::now(),
@@ -861,7 +902,8 @@ fn drain_worker_results(
             Ok(result) => result,
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => {
-                *last_outcome = LastOutcome::notice("Transcription failed");
+                *last_outcome =
+                    LastOutcome::notice_with_error("Transcription worker failed", "stt-failed");
                 anyhow::bail!("transcription worker died");
             }
         };
@@ -874,6 +916,24 @@ fn handle_worker_result(
     result: WorkerResult,
     last_outcome: &mut LastOutcome,
     telemetry_reporter: &TelemetryReporter,
+) -> Result<()> {
+    handle_worker_result_with(
+        state,
+        config,
+        result,
+        last_outcome,
+        telemetry_reporter,
+        inject::inject,
+    )
+}
+
+fn handle_worker_result_with(
+    state: &mut State,
+    config: &Config,
+    result: WorkerResult,
+    last_outcome: &mut LastOutcome,
+    telemetry_reporter: &TelemetryReporter,
+    inject: impl FnOnce(&str, InjectionMode) -> Result<InjectionOutcome>,
 ) -> Result<()> {
     let processing_started = match state {
         State::Processing { started, .. } => *started,
@@ -890,6 +950,12 @@ fn handle_worker_result(
         capture_ms,
         postproc_usage,
         source,
+        injection_override,
+        stt_model,
+        stt_remote,
+        cleanup_model,
+        wav_retained,
+        transcript_saved,
     } = result;
     let postproc_failed = matches!(&postproc, PostprocStatus::Failed { .. });
     let postproc_ms = match postproc {
@@ -902,14 +968,21 @@ fn handle_worker_result(
     let mut tel_chars: usize = 0;
     let mut tel_delivered: Option<&'static str> = None;
     let mut tel_inject_ms: Option<u64> = None;
-    let mut tel_error_class: Option<String> = None;
+    let mut tel_error_class = partial.then(|| "stt-partial".to_owned());
     match transcript {
         Ok(text) if text.trim().is_empty() => {
             tracing::info!(
-                "[Daemon] state processing -> idle stt_ms={} chars=0 (no speech detected)",
+                "[Daemon] state processing -> idle stt_ms={} chars=0 partial={partial}",
                 stt_elapsed.as_millis()
             );
-            *last_outcome = LastOutcome::notice("Heard nothing");
+            *last_outcome = if partial {
+                LastOutcome::notice_with_error(
+                    format!("Partial transcription; {}", recovery_hint(wav_retained)),
+                    "stt-partial",
+                )
+            } else {
+                LastOutcome::notice("Heard nothing")
+            };
         }
         Ok(text) => {
             let chars = text.chars().count();
@@ -920,60 +993,87 @@ fn handle_worker_result(
             } else {
                 ""
             };
-            let partial_suffix = if partial {
-                " (partial — later audio failed)"
-            } else {
-                ""
-            };
-            match inject::inject(&text, config.injection) {
+            match inject(&text, injection_override.unwrap_or(config.injection)) {
                 Ok(outcome) => {
                     let inject_ms = inject_started.elapsed().as_millis();
                     tel_inject_ms = Some(inject_ms as u64);
                     let total_ms = processing_started.elapsed().as_millis();
-                    let message = match outcome {
-                        InjectionOutcome::Typed(tool) => {
-                            tel_delivered = Some(if tool == "wtype" {
-                                "typed-wtype"
-                            } else {
-                                "typed-ydotool"
-                            });
-                            format!("Typed {chars} chars ({tool}){cleanup_suffix}{partial_suffix}")
-                        }
-                        InjectionOutcome::Pasted => {
-                            tel_delivered = Some("pasted");
-                            format!(
-                                "Pasted {chars} chars (clipboard + Ctrl+Shift+V){cleanup_suffix}{partial_suffix}"
-                            )
-                        }
-                        InjectionOutcome::Clipboard => {
-                            tel_delivered = Some("clipboard");
-                            format!(
-                                "Copied to clipboard — press Ctrl+Shift+V ({chars} chars){cleanup_suffix}{partial_suffix}"
-                            )
-                        }
-                    };
+                    tel_delivered = Some(match outcome {
+                        InjectionOutcome::Typed("wtype") => "typed-wtype",
+                        InjectionOutcome::Typed(_) => "typed-ydotool",
+                        InjectionOutcome::Pasted => "pasted",
+                        InjectionOutcome::Clipboard => "clipboard",
+                    });
                     log_processing_idle(stt_elapsed, inject_ms, chars, postproc_ms);
                     tracing::info!("[Inject] injected chars={chars} total_ms={total_ms}");
-                    *last_outcome = LastOutcome::success(message);
+                    *last_outcome = if partial {
+                        let delivery = match outcome {
+                            InjectionOutcome::Typed(_) => "typed",
+                            InjectionOutcome::Pasted => "pasted",
+                            InjectionOutcome::Clipboard => "copied",
+                        };
+                        LastOutcome::notice_with_error(
+                            format!(
+                                "Partial {delivery} ({chars} chars); {}",
+                                recovery_hint(wav_retained)
+                            ),
+                            "stt-partial",
+                        )
+                    } else {
+                        let message = match outcome {
+                            InjectionOutcome::Typed(tool) => {
+                                format!("Typed {chars} chars ({tool}){cleanup_suffix}")
+                            }
+                            InjectionOutcome::Pasted => format!(
+                                "Pasted {chars} chars (clipboard + Ctrl+Shift+V){cleanup_suffix}"
+                            ),
+                            InjectionOutcome::Clipboard => format!(
+                                "Copied to clipboard — press Ctrl+Shift+V ({chars} chars){cleanup_suffix}"
+                            ),
+                        };
+                        LastOutcome::success(message)
+                    };
                 }
                 Err(error) => {
                     tracing::warn!(
                         "[Inject] injection failed chars={chars} stt_ms={} error={error:#}",
                         stt_elapsed.as_millis()
                     );
-                    *last_outcome = LastOutcome::notice("Saved — run: cantrip last");
-                    tel_error_class = Some("injection-failed".to_owned());
+                    *last_outcome = if partial {
+                        LastOutcome::notice_with_error(
+                            format!(
+                                "Partial text not delivered; {}",
+                                recovery_hint(wav_retained)
+                            ),
+                            "stt-partial",
+                        )
+                    } else {
+                        tel_error_class = Some("injection-failed".to_owned());
+                        LastOutcome::notice_with_error(
+                            if transcript_saved {
+                                "Text saved — run: cantrip last".to_owned()
+                            } else if wav_retained {
+                                format!("Delivery failed; {}", recovery_hint(true))
+                            } else {
+                                "Delivery failed; last transcript could not be saved".to_owned()
+                            },
+                            "injection-failed",
+                        )
+                    };
                 }
             }
         }
         Err(error) => {
             let notice = stt::classify_failure(&error);
             tracing::warn!(
-                "[STT] transcription failed stt_ms={} notice={notice} error={error}",
+                "[STT] transcription failed stt_ms={} class=stt-failed reason={notice}",
                 stt_elapsed.as_millis()
             );
-            *last_outcome = LastOutcome::notice(format!("{notice} — run: cantrip recover"));
-            tel_error_class = Some(notice.to_owned());
+            *last_outcome = LastOutcome::notice_with_error(
+                format!("{notice}; {}", recovery_hint(wav_retained)),
+                "stt-failed",
+            );
+            tel_error_class = Some("stt-failed".to_owned());
         }
     }
 
@@ -992,13 +1092,13 @@ fn handle_worker_result(
             source: source.as_str(),
             capture_ms,
             stt_ms: stt_elapsed.as_millis() as u64,
-            stt_model: config.stt.model.clone(),
-            stt_remote: config.stt.endpoint.is_some(),
+            stt_model,
+            stt_remote,
             chars: tel_chars,
             partial,
             cleanup_state,
             cleanup_ms: postproc_ms.map(|ms| ms as u64),
-            cleanup_model: cleanup_attempted.then(|| config.postproc.model.clone()),
+            cleanup_model: cleanup_attempted.then_some(cleanup_model),
             tokens_in: postproc_usage.as_ref().map(|usage| usage.prompt_tokens),
             tokens_out: postproc_usage.as_ref().map(|usage| usage.completion_tokens),
             tokens_total: postproc_usage.as_ref().map(|usage| usage.total_tokens),
@@ -1073,7 +1173,10 @@ fn replay_last(state: &State, config: &Config, last_outcome: &mut LastOutcome) -
                 }
                 Err(error) => {
                     tracing::warn!("[Inject] replay failed chars={chars} error={error:#}");
-                    *last_outcome = LastOutcome::notice("Replay failed");
+                    *last_outcome = LastOutcome::notice_with_error(
+                        "Replay failed — run: cantrip last",
+                        "injection-failed",
+                    );
                     WireReply::command(
                         false,
                         state.name(),
@@ -1100,6 +1203,8 @@ fn recover_failed(
     config: &Config,
     job_tx: &Sender<Job>,
     last_outcome: &mut LastOutcome,
+    local: bool,
+    clipboard: bool,
 ) -> WireReply {
     if !matches!(state, State::Idle) {
         return busy_reply(state);
@@ -1125,42 +1230,89 @@ fn recover_failed(
             .with_outcome(last_outcome.to_ipc());
         }
     };
+    let stt = if local {
+        SttConfig::default()
+    } else {
+        config.stt.clone()
+    };
+    let mut postproc = config.postproc.clone();
+    if local {
+        postproc.enabled = false;
+        let installed = (|| -> Result<()> {
+            let spec = models::require(&stt.model)?;
+            let expected = paths::models_dir()?.join(spec.dir_name);
+            anyhow::ensure!(
+                models::installed(spec)?.is_some(),
+                "local model not installed at {} — run: cantrip models pull",
+                expected.display()
+            );
+            Ok(())
+        })();
+        if let Err(error) = installed {
+            *last_outcome = LastOutcome::notice_with_error(
+                "Local model unavailable — run: cantrip models pull",
+                "local-model-unavailable",
+            );
+            return WireReply::command(false, state.name(), Some(format!("{error:#}")))
+                .with_error("local-model-unavailable")
+                .with_outcome(last_outcome.to_ipc());
+        }
+    }
     // Copy into a fresh runtime WAV so the worker's cleanup still applies.
     let runtime = match paths::runtime_dir().and_then(paths::ensure_dir) {
         Ok(dir) => dir,
         Err(error) => {
+            *last_outcome = LastOutcome::notice_with_error(
+                "Recovery could not start; retained audio is unchanged",
+                "recovery-unavailable",
+            );
             return WireReply::command(
                 false,
                 state.name(),
                 Some(format!("runtime dir unavailable: {error:#}")),
-            );
+            )
+            .with_error("recovery-unavailable")
+            .with_outcome(last_outcome.to_ipc());
         }
     };
     let wav = runtime.join(format!("recover-{}.wav", unix_millis()));
-    if let Err(error) = fs::copy(&path, &wav) {
+    if let Err(error) = copy_owner_file(&path, &wav) {
+        *last_outcome = LastOutcome::notice_with_error(
+            "Recovery could not start; retained audio is unchanged",
+            "recovery-unavailable",
+        );
         return WireReply::command(
             false,
             state.name(),
             Some(format!("copying failed WAV failed: {error}")),
-        );
+        )
+        .with_error("recovery-unavailable")
+        .with_outcome(last_outcome.to_ipc());
     }
     let job = Job {
         wav: wav.clone(),
-        stt: config.stt.clone(),
+        stt,
         vocabulary: config.vocabulary.clone(),
-        postproc: config.postproc.clone(),
+        postproc,
+        injection_override: clipboard.then_some(InjectionMode::Clipboard),
         source: pipeline::Source::Recover,
         capture_ms: 0,
     };
     if job_tx.send(job).is_err() {
         let _ = capture::remove_recording(&wav);
-        *last_outcome = LastOutcome::notice("Transcription failed");
+        *last_outcome = LastOutcome::notice_with_error(
+            "Transcription worker unavailable; retained audio is unchanged",
+            "stt-failed",
+        );
         return WireReply::command(
             false,
             state.name(),
             Some("transcription worker unavailable".to_owned()),
-        );
+        )
+        .with_error("stt-failed")
+        .with_outcome(last_outcome.to_ipc());
     }
+    *last_outcome = LastOutcome::default();
     let stage = pipeline::Stage::Transcribing { chunk: 1, total: 1 };
     let reply =
         WireReply::command(true, "processing", Some("recovering".to_owned())).with_stage(&stage);
@@ -1179,39 +1331,111 @@ fn persist_last_transcript(text: &str) -> Result<()> {
 
 fn persist_failed_wav(src: &Path) -> Result<()> {
     let path = paths::last_failed_wav_path()?;
-    if let Some(parent) = path.parent() {
-        paths::ensure_dir(parent.to_path_buf())?;
-    }
-    fs::copy(src, &path)
-        .with_context(|| format!("copying failed WAV {} -> {}", src.display(), path.display()))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("setting permissions on {}", path.display()))?;
+    copy_owner_file(src, &path)?;
     tracing::info!("[Daemon] kept failed WAV for recover");
     Ok(())
 }
 
-fn clear_failed_wav() {
-    if let Ok(path) = paths::last_failed_wav_path() {
-        let _ = fs::remove_file(path);
+fn update_failed_wav(
+    path: &Path,
+    src: &Path,
+    source: pipeline::Source,
+    outcome: &pipeline::Outcome,
+    transcript_safe: bool,
+) -> Result<bool> {
+    if source == pipeline::Source::Recover
+        && !outcome.keep_wav
+        && !outcome.partial
+        && transcript_safe
+        && outcome
+            .text
+            .as_ref()
+            .is_ok_and(|text| !text.trim().is_empty())
+    {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("clearing recovered audio"),
+        }
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)?
+                .sync_all()
+                .context("syncing recovered audio removal")?;
+        }
+        return Ok(false);
+    }
+    if outcome.keep_wav || source == pipeline::Source::Recover {
+        // Recovery runs on a runtime copy. Keep the already-private original
+        // instead of risking another copy of the same audio on a failed retry.
+        let retained = source == pipeline::Source::Recover
+            && fs::symlink_metadata(path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.uid() == unsafe { libc::getuid() }
+                    && metadata.permissions().mode() & 0o777 == 0o600
+            });
+        if !retained {
+            copy_owner_file(src, path)?;
+            tracing::info!("[Daemon] kept failed WAV for recover");
+        }
+        return Ok(true);
+    }
+    // Unrelated dictations and one-shot transcriptions never consume the slot.
+    Ok(false)
+}
+
+fn recovery_hint(wav_retained: bool) -> &'static str {
+    if wav_retained {
+        "audio saved — cantrip recover --local --clipboard"
+    } else {
+        "audio could not be saved; check storage before recording again"
     }
 }
 
 fn write_owner_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        paths::ensure_dir(parent.to_path_buf())?;
-    }
+    atomic_owner_file(path, |file| {
+        file.write_all(bytes).context("writing owner-private state")
+    })
+}
+
+fn copy_owner_file(src: &Path, path: &Path) -> Result<()> {
+    let mut source =
+        fs::File::open(src).with_context(|| format!("opening recording {}", src.display()))?;
+    atomic_owner_file(path, |file| {
+        std::io::copy(&mut source, file).context("copying owner-private recording")?;
+        Ok(())
+    })
+}
+
+fn atomic_owner_file(path: &Path, write: impl FnOnce(&mut fs::File) -> Result<()>) -> Result<()> {
+    let parent = path.parent().context("state path has no parent")?;
+    paths::ensure_dir(parent.to_path_buf())?;
+    let sequence = FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".cantrip-state-{}-{}-{sequence}.tmp",
+        std::process::id(),
+        unix_millis()
+    ));
     let mut file = fs::OpenOptions::new()
-        .create(true)
+        .create_new(true)
         .write(true)
-        .truncate(true)
         .mode(0o600)
-        .open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("writing {}", path.display()))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("setting permissions on {}", path.display()))?;
-    Ok(())
+        .open(&temporary)
+        .with_context(|| format!("creating {}", temporary.display()))?;
+    let result = (|| -> Result<()> {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .context("setting owner-private state permissions")?;
+        write(&mut file)?;
+        file.sync_all().context("syncing owner-private state")?;
+        fs::rename(&temporary, path).with_context(|| format!("publishing {}", path.display()))?;
+        fs::File::open(parent)?
+            .sync_all()
+            .context("syncing state directory")?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn read_last_transcript() -> Result<String> {
@@ -1229,6 +1453,63 @@ fn unix_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let sequence = FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "cantrip-daemon-test-{}-{}-{sequence}",
+                std::process::id(),
+                unix_millis()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn pipeline_outcome(
+        text: std::result::Result<String, String>,
+        partial: bool,
+    ) -> pipeline::Outcome {
+        pipeline::Outcome {
+            keep_wav: partial || text.is_err(),
+            text,
+            stt_elapsed: Duration::from_millis(10),
+            postproc: PostprocStatus::Off,
+            postproc_usage: None,
+            partial,
+            archive: pipeline::ArchiveStatus::NotApplicable,
+        }
+    }
+
+    fn worker_result(outcome: pipeline::Outcome) -> WorkerResult {
+        WorkerResult {
+            transcript_saved: outcome
+                .text
+                .as_ref()
+                .is_ok_and(|text| !text.trim().is_empty()),
+            result: outcome.text,
+            stt_elapsed: outcome.stt_elapsed,
+            postproc: outcome.postproc,
+            partial: outcome.partial,
+            capture_ms: 0,
+            postproc_usage: outcome.postproc_usage,
+            source: pipeline::Source::Dictation,
+            injection_override: None,
+            stt_model: "test-stt".to_owned(),
+            stt_remote: true,
+            cleanup_model: String::new(),
+            wav_retained: true,
+        }
+    }
 
     struct FakeRecorder {
         signal: Option<InputSignal>,
@@ -1456,14 +1737,21 @@ mod tests {
     }
 
     #[test]
-    fn processing_rejects_busy_commands_with_stable_message() {
+    fn processing_rejects_mutating_commands() {
         let commands = [
             Command::Toggle { postproc: None },
             Command::Start { postproc: None },
             Command::Stop,
             Command::Cancel,
             Command::Last,
-            Command::Recover,
+            Command::Recover {
+                local: false,
+                clipboard: false,
+            },
+            Command::Recover {
+                local: true,
+                clipboard: true,
+            },
         ];
         let (job_tx, _job_rx) = mpsc::channel::<Job>();
 
@@ -1484,55 +1772,248 @@ mod tests {
             let json = wire(reply);
             assert_eq!(json["ok"], false);
             assert_eq!(json["state"], "processing");
-            assert_eq!(json["message"], "busy: processing");
+            assert!(matches!(state, State::Processing { .. }));
         }
     }
 
     #[test]
-    fn last_outcome_success_and_notice_flags() {
-        let ok = LastOutcome::success("Pasted 3 chars");
-        assert_eq!(ok.ok, Some(true));
-        assert_eq!(ok.message.as_deref(), Some("Pasted 3 chars"));
-
-        let notice = LastOutcome::notice("Heard nothing");
-        assert_eq!(notice.ok, Some(false));
-        assert_eq!(notice.message.as_deref(), Some("Heard nothing"));
-    }
-
-    #[test]
-    fn busy_reply_rejects_with_processing_message() {
-        let reply = busy_reply(&State::Processing {
-            started: Instant::now(),
-            stage: pipeline::Stage::CleaningUp,
-        });
-        let json = serde_json::to_value(reply).expect("busy reply should serialize");
-        assert_eq!(json["ok"], false);
-        assert_eq!(json["state"], "processing");
-        assert_eq!(json["message"], "busy: processing");
-    }
-
-    #[test]
     fn write_owner_file_creates_missing_parent_with_0600() {
-        use std::os::unix::fs::PermissionsExt;
-        let unique = format!(
-            "cantrip-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+        let root = TestDir::new();
+        let path = root.0.join("state/last-transcript.txt");
+
+        write_owner_file(&path, b"hello").expect("write should create missing parent");
+
+        assert_eq!(fs::read(&path).unwrap(), b"hello");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
-        // Parent directory does not exist beforehand.
-        let root = std::env::temp_dir().join(unique).join("state");
-        let path = root.join("last-transcript.txt");
+    }
 
-        write_owner_file(&path, b"hello").expect("write_owner_file should create missing parent");
+    #[test]
+    fn retained_audio_survives_until_complete_durable_recovery() {
+        let root = TestDir::new();
+        let slot = root.0.join("state/last-failed.wav");
+        let recording = root.0.join("recording.wav");
+        fs::write(&recording, b"original failed audio").unwrap();
+        let failure = pipeline_outcome(Err("STT failed".to_owned()), false);
+        assert!(update_failed_wav(
+            &slot,
+            &recording,
+            pipeline::Source::Dictation,
+            &failure,
+            false
+        )
+        .unwrap());
 
-        assert!(path.exists(), "file should exist");
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600, "file should be owner-only");
+        let complete = pipeline_outcome(Ok("complete transcript".to_owned()), false);
+        update_failed_wav(
+            &slot,
+            &recording,
+            pipeline::Source::Dictation,
+            &complete,
+            true,
+        )
+        .unwrap();
+        update_failed_wav(
+            &slot,
+            &recording,
+            pipeline::Source::Transcribe,
+            &complete,
+            true,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&slot).unwrap(), b"original failed audio");
 
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            update_failed_wav(&slot, &root.0, pipeline::Source::Dictation, &failure, false)
+                .is_err()
+        );
+        assert_eq!(fs::read(&slot).unwrap(), b"original failed audio");
+
+        // A failed retry already owns a safe source: even a missing runtime
+        // copy must not make it rewrite or lose the retained original.
+        fs::remove_file(&recording).unwrap();
+        assert!(update_failed_wav(
+            &slot,
+            &recording,
+            pipeline::Source::Recover,
+            &failure,
+            false
+        )
+        .unwrap());
+        assert_eq!(fs::read(&slot).unwrap(), b"original failed audio");
+
+        fs::write(&recording, b"new partially transcribed audio").unwrap();
+        let partial = pipeline_outcome(Ok("partial transcript".to_owned()), true);
+        assert!(update_failed_wav(
+            &slot,
+            &recording,
+            pipeline::Source::Dictation,
+            &partial,
+            true
+        )
+        .unwrap());
+        assert_eq!(fs::read(&slot).unwrap(), b"new partially transcribed audio");
+
+        assert!(
+            update_failed_wav(&slot, &recording, pipeline::Source::Recover, &partial, true)
+                .unwrap()
+        );
+        let empty = pipeline_outcome(Ok(" \n".to_owned()), false);
+        assert!(
+            update_failed_wav(&slot, &recording, pipeline::Source::Recover, &empty, true).unwrap()
+        );
+        // Disk-full or failed archive/last-transcript writes cannot consume
+        // the audio even after STT returns a complete nonempty transcript.
+        assert!(update_failed_wav(
+            &slot,
+            &recording,
+            pipeline::Source::Recover,
+            &complete,
+            false
+        )
+        .unwrap());
+        assert_eq!(fs::read(&slot).unwrap(), b"new partially transcribed audio");
+
+        write_owner_file(&root.0.join("last-transcript.txt"), b"complete transcript").unwrap();
+        assert!(!update_failed_wav(
+            &slot,
+            &recording,
+            pipeline::Source::Recover,
+            &complete,
+            true
+        )
+        .unwrap());
+        assert!(!slot.exists());
+    }
+
+    #[test]
+    fn interrupted_owner_write_preserves_old_audio_and_removes_staging_file() {
+        let root = TestDir::new();
+        let slot = root.0.join("last-failed.wav");
+        write_owner_file(&slot, b"old audio").unwrap();
+
+        let result = atomic_owner_file(&slot, |file| {
+            assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            file.write_all(b"interrupted new audio")?;
+            anyhow::bail!("simulated disk full");
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&slot).unwrap(), b"old audio");
+        assert_eq!(fs::read_dir(&root.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn private_copy_replaces_symlink_without_touching_target() {
+        let root = TestDir::new();
+        let victim = root.0.join("unrelated.txt");
+        let source = root.0.join("recording.wav");
+        let slot = root.0.join("last-failed.wav");
+        fs::write(&victim, b"unrelated data").unwrap();
+        fs::write(&source, b"private audio").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+        std::os::unix::fs::symlink(&victim, &slot).unwrap();
+
+        copy_owner_file(&source, &slot).unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"unrelated data");
+        assert_eq!(fs::read(&slot).unwrap(), b"private audio");
+        assert!(!fs::symlink_metadata(&slot)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(&slot).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn delivered_partial_is_an_error_until_next_operation() {
+        let mut state = processing_state();
+        let config = Config::default();
+        let reporter = TelemetryReporter::spawn();
+        let private_text = "private partial dictation marker";
+        let mut last_outcome = LastOutcome::default();
+        let result = worker_result(pipeline_outcome(Ok(private_text.to_owned()), true));
+
+        handle_worker_result_with(
+            &mut state,
+            &config,
+            result,
+            &mut last_outcome,
+            &reporter,
+            |_, _| Ok(InjectionOutcome::Clipboard),
+        )
+        .unwrap();
+
+        assert!(matches!(state, State::Idle));
+        let status = wire(status_reply(&state, &last_outcome));
+        assert_eq!(status["last_ok"], false);
+        assert_eq!(status["last_error"], "stt-partial");
+        assert!(!status.to_string().contains(private_text));
+        assert_eq!(
+            wire(status_reply(&state, &last_outcome))["last_error"],
+            "stt-partial"
+        );
+
+        start_recording_with(
+            &mut state,
+            &config,
+            Path::new("/unused"),
+            &mut last_outcome,
+            None,
+            |_, _| Ok(Box::new(fake_recorder())),
+        );
+        assert!(matches!(state, State::Recording { .. }));
+        let status = wire(status_reply(&state, &last_outcome));
+        assert!(status["last"].is_null());
+        assert!(status["last_error"].is_null());
+        reporter.shutdown();
+    }
+
+    #[test]
+    fn full_stt_failure_exposes_class_without_private_error_content() {
+        let root = TestDir::new();
+        let log_path = root.0.join("daemon.log");
+        let log = fs::File::create(&log_path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(log)
+            .finish();
+        let mut state = processing_state();
+        let config = Config::default();
+        let reporter = TelemetryReporter::spawn();
+        let private_error = "private provider body marker";
+        let result = worker_result(pipeline_outcome(
+            Err(format!("endpoint returned HTTP 413: {private_error}")),
+            false,
+        ));
+        let mut last_outcome = LastOutcome::default();
+
+        tracing::subscriber::with_default(subscriber, || {
+            handle_worker_result_with(
+                &mut state,
+                &config,
+                result,
+                &mut last_outcome,
+                &reporter,
+                |_, _| panic!("failed STT must never inject text"),
+            )
+            .unwrap();
+        });
+
+        assert!(matches!(state, State::Idle));
+        let status = wire(status_reply(&state, &last_outcome));
+        assert_eq!(status["last_ok"], false);
+        assert_eq!(status["last_error"], "stt-failed");
+        assert!(!status.to_string().contains(private_error));
+        let log = fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("class=stt-failed"));
+        assert!(!log.contains(private_error));
+        reporter.shutdown();
     }
 }

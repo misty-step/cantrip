@@ -17,15 +17,17 @@ that, for text.
 - **Optional cloud lanes.** Any OpenAI-compatible STT or chat endpoint can
   replace the local models (see `docs/CONFIGURATION.md`). API keys live in
   the OS keyring, never in files.
-- **Layer-shell status HUD.** A small always-on-top capsule shows live state
-  with a centered stage word and timer. During capture, a measured waveform
-  shows the min/max PCM envelope from each new 200 ms input window and eases
-  only between those real frames. Three seconds of near-digital silence
-  flattens the trace and changes the capsule to **No mic signal** without
-  canceling the take.
-  Multi-chunk STT eases a real left-to-right fill toward each `N/M` fraction;
-  single-chunk stays on the spinner. Delivered text flashes **Success**.
-  Pure Rust, no GTK.
+- **Long dictation without oversized uploads.** Local and cloud STT split long
+  recordings into bounded chunks and deliver one finished transcript. Partial
+  failures preserve available text and the original audio for recovery.
+- **Layer-shell status HUD.** A small always-on-top segmented track shows live
+  state. During capture, a measured waveform shows the min/max PCM envelope
+  from each new 200 ms input window and eases only between real frames.
+  Three seconds of near-digital silence flattens the trace and turns it amber
+  without canceling the take. Multi-chunk STT shows measured progress;
+  single-chunk STT uses an amber sweep. Delivered text flashes green.
+  Amber notices display readable text; actionable failures stay visible until
+  another operation replaces them. Pure Rust, no GTK.
 - **Atomic paste-first injection.** The default pastes the finished text
   from the clipboard (`wl-copy` then one `Ctrl+Shift+V`), so paragraph breaks
   survive and a focus change mid-dictation cannot interrupt delivery.
@@ -89,12 +91,13 @@ keyring credential id, when needed, was stored with `cantrip key set`.
 | `cantrip settings [--screenshot PATH]` | Open the configuration window (view, edit, reload; or dump a frame) |
 | `cantrip toggle` / `start` / `stop` / `cancel` | Dictation transitions |
 | `cantrip status` / `ping` | Daemon state |
-| `cantrip transcribe <wav>` | One-shot file transcription (debug; prints to stdout) |
+| `cantrip transcribe [--local] <wav>` | One-shot file transcription; transcript-only stdout, diagnostics on stderr |
 | `cantrip models pull` / `status` | Manage local STT models |
 | `cantrip config show` / `edit` / `init` / `path` | Inspect and edit configuration |
 | `cantrip key set` / `rm` / `status <id>` | Store and manage keyring credential ids |
 | `cantrip doctor` | Environment report |
-| `cantrip last` / `recover` | Re-deliver the last transcript / re-run STT on the last fully failed WAV |
+| `cantrip last` | Re-deliver the last saved transcript (which may belong to an older dictation) |
+| `cantrip recover [--local] [--clipboard]` | Retry retained failed/partial audio; optionally use local STT or copy without sending keys |
 | `cantrip reload` | Re-read configuration in the running daemon |
 
 Two hotkeys, one with cleanup and one without: `toggle` and `start` take
@@ -104,6 +107,37 @@ dictation, overriding `[postproc].enabled`. Bind one key to
 `cantrip toggle --postproc raw`; each key starts and stops its own dictation
 mode (cleanup runs only when the capture was started with `clean`). Without
 the flag, `[postproc].enabled` decides.
+
+## Recovery
+
+Run `cantrip status` to see the last result and any retained audio, even after
+restarting the daemon. Retry with the configured provider but avoid an
+unexpected paste into the focused window:
+
+```sh
+cantrip recover --clipboard
+```
+
+For local recovery without changing your usual configuration:
+
+```sh
+cantrip models pull                 # once, if Parakeet is not installed
+cantrip recover --local --clipboard
+```
+
+Paste with Ctrl+V in a GUI or Ctrl+Shift+V in a terminal. `--local` uses installed
+Parakeet and disables cleanup for that operation; it does not change separately
+opted-in count-only telemetry. A partial result is visibly marked incomplete
+and leaves the audio available. Retrying processes the whole recording again.
+
+For an audio file outside the recovery slot:
+
+```sh
+(umask 077; cantrip transcribe --local recording.wav > recovered.txt)
+```
+
+The CLI exits unsuccessfully if only a partial transcript was produced, while
+still printing the available text. Keep the original file until satisfied.
 
 ## Configuration
 
@@ -118,10 +152,11 @@ documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 - Audio and transcripts never leave the machine in the default local lanes.
 - In-flight recordings live in `$XDG_RUNTIME_DIR/cantrip` (tmpfs, per-user
-  `0700`) and are deleted after processing. If STT fails completely, Cantrip
-  may retain one owner-only copy at
-  `~/.local/state/cantrip/last-failed.wav` for `cantrip recover`; the next full
-  failure replaces it.
+  `0700`) and are deleted after processing. If STT fails or produces only
+  partial text, Cantrip may retain one owner-only copy at
+  `~/.local/state/cantrip/last-failed.wav`. An unrelated successful dictation
+  does not erase it. A new failed/partial take replaces it; complete nonempty
+  recovery consumes it only after recovered text has been saved.
 - Every successful STT result is saved locally as an owner-only JSON record in
   `$XDG_STATE_HOME/cantrip/transcripts` (normally
   `~/.local/state/cantrip/transcripts`). This history contains sensitive text;

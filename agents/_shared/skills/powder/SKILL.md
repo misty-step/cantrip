@@ -1,44 +1,25 @@
 ---
 name: powder
-description: >
-  Powder is the exclusive-work ledger. Use when listing takeable jobs
-  for this repository, taking a job, asking the operator, or completing
-  work with proof after an approve Gate.
+description: Use Powder for cantrip work selection, claims, questions, release, and proof-backed completion.
 ---
 
-# Powder
+# Powder work ledger
 
-Powder stores jobs. Take one. Finish it. Write proof.
+Powder is the sole work ledger for `misty-step/cantrip`; there is no fallback tracker. Origin is `POWDER_URL`, else `POWDER_API_BASE_URL`; identity is `POWDER_AGENT` (`--agent` overrides it). Commands emit JSON on stdout and JSON errors with a `code` on stderr.
 
-## Origin
+When `POWDER_AGENT` is unset, do not call Powder; return a clean no-work summary.
 
-Origin is `POWDER_URL`, else `POWDER_API_BASE_URL`. Identity is
-`POWDER_AGENT`. `--agent` wins. JSON on stdout. Errors are JSON on
-stderr with `code`.
+## Lifecycle
 
-If `POWDER_AGENT` is unset, do not call Powder and stop cleanly with an exit
-summary: this repository has no fallback Tracker.
+1. `powder list --mine "$POWDER_AGENT" --repo <forest.yaml repo>` — resume one held job for this repository when no `forest/<id>/*` branch exists.
+2. `powder list --takeable --repo <repo>` — choose one eligible nonempty spec.
+3. `powder show <id>` — read the spec before taking it.
+4. `powder take <id>` — claim before branching; `already_holding` requires finishing, asking, or releasing the held job.
+5. Builders publish review-request evidence; Verifiers publish Checks/Verdict and run `powder done <id> --proof <revision>` only after approval.
 
-## Factory loop
+Keep one live lease per agent and one `POWDER_AGENT` per Kernel. Available commands:
 
-1. `powder list --mine "$POWDER_AGENT" --repo <forest.yaml repo>`
-   Continue a held job for this repository that has no
-   `forest/<id>/*` branch.
-2. `powder list --takeable --repo <forest.yaml repo>`
-3. `powder show <id>`
-   The spec is the work. Empty spec is not takeable.
-4. `powder take <id>`
-   Do this before creating a branch. `already_holding` means finish,
-   ask, or release first.
-5. Publish with schema v2 and branch `forest/<id>/<slug>`. Every Subject uses that shape, including GitHub Issue numbers.
-6. Do not `powder done` from Builder. Verifier calls
-   `powder done <id> --proof <revision>` after a successful approve.
-
-One live lease per agent. Use one `POWDER_AGENT` per Kernel.
-
-## Verbs
-
-```
+```sh
 powder list --takeable --repo REPO
 powder list --mine AGENT --repo REPO
 powder show ID

@@ -1,1 +1,1 @@
-Run one Builder pass in the assigned worktree. Follow the Builder system prompt for selection, implementation, checks, Git effects, evidence refs, Projection, and stop conditions.
+Run one Builder pass from `agent.md`: select one eligible Powder Subject, implement its spec in the assigned worktree, run the configured checks, and publish one review request for the exact revision. If no Subject is eligible, return a clean no-work summary without a Projection.

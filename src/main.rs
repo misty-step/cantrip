@@ -69,8 +69,15 @@ enum CliCommand {
     Status,
     /// Re-inject the last saved transcript.
     Last,
-    /// Re-run STT on the last fully-failed recording, if one was kept.
-    Recover,
+    /// Re-run STT on the retained failed or partial recording.
+    Recover {
+        /// Use installed local Parakeet without cloud STT or cleanup.
+        #[arg(long)]
+        local: bool,
+        /// Copy the result without sending keys to the focused application.
+        #[arg(long)]
+        clipboard: bool,
+    },
     Ping,
     /// Re-read the config file in the running daemon.
     Reload,
@@ -85,6 +92,9 @@ enum CliCommand {
     /// Transcribe one WAV file and print the transcript.
     Transcribe {
         wav: PathBuf,
+        /// Use installed local Parakeet without cloud STT or cleanup.
+        #[arg(long)]
+        local: bool,
     },
     /// Manage the local transcription model.
     Models {
@@ -143,7 +153,10 @@ fn init_tracing(dual_sink: bool) {
             return;
         }
     }
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(io::stderr)
+        .try_init();
 }
 
 fn open_runtime_log() -> Result<fs::File> {
@@ -226,12 +239,14 @@ fn run(cli: Cli) -> Result<()> {
         CliCommand::Cancel => send_command(Command::Cancel),
         CliCommand::Status => print_status(),
         CliCommand::Last => send_command(Command::Last),
-        CliCommand::Recover => send_command(Command::Recover),
+        CliCommand::Recover { local, clipboard } => {
+            send_command(Command::Recover { local, clipboard })
+        }
         CliCommand::Reload => send_command(Command::Reload),
         CliCommand::Config { command } => run_config(command),
         CliCommand::Key { command } => run_key(command),
         CliCommand::Ping => send_command(Command::Ping),
-        CliCommand::Transcribe { wav } => transcribe_file(&wav),
+        CliCommand::Transcribe { wav, local } => transcribe_file(&wav, local),
         CliCommand::Models { command } => match command {
             ModelsCommand::Pull => pull_model(),
             ModelsCommand::Status => model_status(),
@@ -417,7 +432,13 @@ fn send_command(command: Command) -> Result<()> {
 }
 
 fn print_status() -> Result<()> {
-    let status = ipc::status()?;
+    let status = match ipc::status() {
+        Ok(status) => status,
+        Err(error) => {
+            print_retained_audio();
+            return Err(error);
+        }
+    };
     println!("state: {}", status.state_name());
     match &status {
         ipc::StatusSnapshot::Recording {
@@ -438,6 +459,7 @@ fn print_status() -> Result<()> {
         ipc::StatusSnapshot::Idle { .. } | ipc::StatusSnapshot::Unknown { .. } => {}
     }
     print_outcome(status.outcome());
+    print_retained_audio();
     Ok(())
 }
 
@@ -449,27 +471,43 @@ fn print_outcome(outcome: Option<&ipc::TerminalOutcome>) {
     if let Some(error) = &outcome.error {
         println!("error: {error}");
     }
-    if !outcome.ok {
-        if paths::last_transcript_path()
+    if !outcome.ok
+        && paths::last_transcript_path()
             .ok()
             .is_some_and(|path| path.is_file())
-        {
-            println!("hint: cantrip last   # re-paste the last saved transcript");
-        }
-        if paths::last_failed_wav_path()
-            .ok()
-            .is_some_and(|path| path.is_file())
-        {
-            println!("hint: cantrip recover   # retry the last failed recording");
+    {
+        println!("hint: cantrip last   # replay saved text; it may belong to an older dictation");
+    }
+}
+
+fn print_retained_audio() {
+    if let Ok(path) = paths::last_failed_wav_path() {
+        if path.is_file() {
+            println!("retained-audio: {}", path.display());
+            println!("hint: cantrip recover   # retry with configured STT and delivery");
+            println!("hint: cantrip recover --local --clipboard   # installed Parakeet, no cleanup or keystrokes");
         }
     }
 }
 
-fn transcribe_file(wav: &std::path::Path) -> Result<()> {
-    let config = Config::load().context("loading configuration")?;
+fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
+    let mut config = Config::load().context("loading configuration")?;
+    if local {
+        config.stt = Default::default();
+        config.postproc.enabled = false;
+    }
     if config.stt.endpoint.is_none() {
         let spec = models::require(&config.stt.model)?;
-        models::ensure_model(spec).context("ensuring transcription model")?;
+        if local {
+            let expected = paths::models_dir()?.join(spec.dir_name);
+            anyhow::ensure!(
+                models::installed(spec)?.is_some(),
+                "local model not installed at {} — run: cantrip models pull",
+                expected.display()
+            );
+        } else {
+            models::ensure_model(spec).context("ensuring transcription model")?;
+        }
     }
     let mut cache = None;
     let outcome = pipeline::run(
@@ -491,6 +529,11 @@ fn transcribe_file(wav: &std::path::Path) -> Result<()> {
                 eprintln!("post-processing failed; showing the raw transcript");
             }
             println!("{text}");
+            if outcome.partial {
+                anyhow::bail!(
+                    "partial transcript only; later audio failed, original WAV is unchanged"
+                );
+            }
         }
         Err(error) => anyhow::bail!("transcribing {}: {error}", wav.display()),
     }
@@ -512,7 +555,13 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         return;
     }
     let chars = outcome.text.as_ref().map_or(0, |text| text.chars().count());
-    let error_class = outcome.text.as_ref().err().map(|_| "stt-failed".to_owned());
+    let error_class = if outcome.text.is_err() {
+        Some("stt-failed".to_owned())
+    } else if outcome.partial {
+        Some("stt-partial".to_owned())
+    } else {
+        None
+    };
     let (cleanup_state, cleanup_ms) = match &outcome.postproc {
         pipeline::PostprocStatus::Applied { ms } => ("applied", Some(*ms as u64)),
         pipeline::PostprocStatus::Failed { ms } => ("failed", Some(*ms as u64)),

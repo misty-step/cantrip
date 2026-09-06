@@ -24,8 +24,11 @@ pub enum Command {
     Cancel,
     /// Re-inject the last saved transcript (paste/clipboard).
     Last,
-    /// Re-run STT on the last fully-failed WAV, if kept.
-    Recover,
+    /// Re-run STT on the retained failed or partial WAV.
+    Recover {
+        local: bool,
+        clipboard: bool,
+    },
     Ping,
     Reload,
 }
@@ -67,7 +70,22 @@ impl Command {
             "stop" => Some(Self::Stop),
             "cancel" => Some(Self::Cancel),
             "last" => Some(Self::Last),
-            "recover" => Some(Self::Recover),
+            "recover" => Some(Self::Recover {
+                local: false,
+                clipboard: false,
+            }),
+            "recover-local" => Some(Self::Recover {
+                local: true,
+                clipboard: false,
+            }),
+            "recover-clipboard" => Some(Self::Recover {
+                local: false,
+                clipboard: true,
+            }),
+            "recover-local-clipboard" => Some(Self::Recover {
+                local: true,
+                clipboard: true,
+            }),
             "ping" => Some(Self::Ping),
             "reload" => Some(Self::Reload),
             _ => None,
@@ -93,7 +111,22 @@ impl Command {
             Self::Stop => "stop",
             Self::Cancel => "cancel",
             Self::Last => "last",
-            Self::Recover => "recover",
+            Self::Recover {
+                local: false,
+                clipboard: false,
+            } => "recover",
+            Self::Recover {
+                local: true,
+                clipboard: false,
+            } => "recover-local",
+            Self::Recover {
+                local: false,
+                clipboard: true,
+            } => "recover-clipboard",
+            Self::Recover {
+                local: true,
+                clipboard: true,
+            } => "recover-local-clipboard",
             Self::Ping => "ping",
             Self::Reload => "reload",
         }
@@ -433,7 +466,22 @@ mod tests {
             Command::Stop,
             Command::Cancel,
             Command::Last,
-            Command::Recover,
+            Command::Recover {
+                local: false,
+                clipboard: false,
+            },
+            Command::Recover {
+                local: true,
+                clipboard: false,
+            },
+            Command::Recover {
+                local: false,
+                clipboard: true,
+            },
+            Command::Recover {
+                local: true,
+                clipboard: true,
+            },
             Command::Ping,
             Command::Reload,
         ];
@@ -444,6 +492,13 @@ mod tests {
             );
         }
         assert_eq!(Request::parse("status"), Some(Request::Status));
+        assert_eq!(
+            Request::parse("recover"),
+            Some(Request::Command(Command::Recover {
+                local: false,
+                clipboard: false,
+            }))
+        );
         assert_eq!(Request::parse("unknown"), None);
     }
 

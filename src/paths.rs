@@ -70,7 +70,7 @@ pub fn transcript_history_dir() -> Result<PathBuf> {
     Ok(state_dir()?.join("transcripts"))
 }
 
-/// Last WAV that failed STT entirely. Kept for `cantrip recover`.
+/// Last WAV with failed or partial STT. Retained until successful recovery.
 pub fn last_failed_wav_path() -> Result<PathBuf> {
     Ok(state_dir()?.join("last-failed.wav"))
 }

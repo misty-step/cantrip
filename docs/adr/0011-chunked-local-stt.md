@@ -2,6 +2,9 @@
 
 Date: 2026-08-07. Status: accepted.
 
+Remote chunking and failed/partial audio retention are extended by
+[ADR 0018](0018-bounded-remote-stt-and-recovery.md).
+
 ## Problem
 
 A five-minute live dictation ended with `Transcription failed` and no

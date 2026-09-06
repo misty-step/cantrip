@@ -1,1 +1,1 @@
-Run one Fixer pass in the assigned worktree. Follow the Fixer system prompt for selection, repair, checks, branch, evidence refs, and stop conditions.
+Run one Fixer pass from `agent.md`: select one rejected revision, reproduce and repair every reported failure in its branch, run the relevant checks, and publish one fresh review request for the new revision. If none is eligible, return a clean no-work summary.

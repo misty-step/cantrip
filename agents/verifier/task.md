@@ -1,1 +1,1 @@
-Run one Verifier pass in the assigned Kernel worktree. Follow the Verifier system prompt for selection, checks, review, evidence refs, merge, and stop conditions.
+Run one Verifier pass from `agent.md`: select one exact requested revision, run its configured checks, review the changed contract, publish Checks and a truthful Verdict, and close the Powder job only after an approved merge. If no revision is eligible, return a clean no-work summary.

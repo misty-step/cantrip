@@ -54,7 +54,7 @@ pub enum ArchiveStatus {
 /// Which sub-stage of a job is running right now, observable live.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage {
-    /// Local multi-chunk STT progress (1-based).
+    /// Multi-chunk STT progress (1-based).
     Transcribing {
         chunk: u32,
         total: u32,
@@ -127,7 +127,7 @@ pub struct Outcome {
     pub postproc_usage: Option<RefinementUsage>,
     /// True when STT returned text from earlier chunks after a later failure.
     pub partial: bool,
-    /// Keep the WAV on disk for operator recovery (full STT failure).
+    /// Keep the WAV on disk for operator recovery (full or partial STT failure).
     pub keep_wav: bool,
     pub archive: ArchiveStatus,
 }
@@ -178,8 +178,9 @@ pub fn run(
     let transcription = transcribe(cache, wav, stt_cfg, vocabulary, &mut on_stage);
     let stt_elapsed = stt_started.elapsed();
 
-    let LocalOk { text: raw, partial } = match transcription {
-        Ok(transcription) => transcription,
+    let (raw, partial) = match transcription {
+        Ok(stt::Transcript::Complete(text)) => (text, false),
+        Ok(stt::Transcript::Partial { text, .. }) => (text, true),
         Err(error) => {
             return Outcome {
                 text: Err(error),
@@ -286,7 +287,7 @@ pub fn run(
         postproc,
         postproc_usage,
         partial,
-        keep_wav: false,
+        keep_wav: partial,
         archive,
     }
 }
@@ -295,27 +296,30 @@ fn duration_ms(ms: u128) -> u64 {
     u64::try_from(ms).unwrap_or(u64::MAX)
 }
 
-struct LocalOk {
-    text: String,
-    partial: bool,
-}
-
 fn transcribe(
     cache: &mut TranscriberCache,
     wav: &Path,
     stt_cfg: &SttConfig,
     vocabulary: &[String],
     on_stage: &mut impl FnMut(Stage),
-) -> Result<LocalOk, String> {
+) -> Result<stt::Transcript, String> {
+    let on_progress = |progress: stt::ChunkProgress| {
+        on_stage(Stage::Transcribing {
+            chunk: progress.index,
+            total: progress.total,
+        });
+    };
     if let Some(endpoint) = &stt_cfg.endpoint {
         let key = resolve_api_key(stt_cfg.api_key_id.as_deref()).map_err(|e| format!("{e:#}"))?;
-        let text =
-            stt::transcribe_remote(wav, endpoint, &stt_cfg.model, vocabulary, key.as_deref())
-                .map_err(|e| format!("{e:#}"))?;
-        return Ok(LocalOk {
-            text,
-            partial: false,
-        });
+        return stt::transcribe_remote(
+            wav,
+            endpoint,
+            &stt_cfg.model,
+            vocabulary,
+            key.as_deref(),
+            on_progress,
+        )
+        .map_err(|e| format!("{e:#}"));
     }
 
     let reload = cache
@@ -328,24 +332,9 @@ fn transcribe(
         .as_mut()
         .map(|(_, transcriber)| transcriber)
         .ok_or_else(|| "transcription backend has no model".to_owned())?;
-    let outcome = transcriber
-        .transcribe_wav(wav, |progress| {
-            on_stage(Stage::Transcribing {
-                chunk: progress.index,
-                total: progress.total,
-            });
-        })
-        .map_err(|e| format!("{e:#}"))?;
-    match outcome {
-        stt::LocalTranscript::Complete(text) => Ok(LocalOk {
-            text,
-            partial: false,
-        }),
-        stt::LocalTranscript::Partial { text, .. } => Ok(LocalOk {
-            text,
-            partial: true,
-        }),
-    }
+    transcriber
+        .transcribe_wav(wav, on_progress)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// Load a local model by registry name. The transcriber is cached at the

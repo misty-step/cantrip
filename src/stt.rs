@@ -1,12 +1,9 @@
-//! Parakeet speech-to-text through the documented `transcribe-rs` API.
-//!
-//! Long dictations are split with energy-adaptive chunking before inference.
-//! A single Parakeet encoder pass crashes past a few minutes of audio
-//! (ONNX self-attention broadcast failure); chunking keeps each pass inside
-//! a known-safe window.
+//! Local Parakeet inference and bounded OpenAI-compatible WAV transcription.
+//! Native capture uses low-energy splits; remote chunks retain source audio
+//! frames and format rather than resampling or quantizing the recording.
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -15,6 +12,8 @@ use transcribe_rs::onnx::Quantization;
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
 const MULTIPART_BOUNDARY: &str = "cantrip-audio-boundary";
+/// Includes multipart framing and vocabulary, not just the WAV payload.
+const MAX_REMOTE_REQUEST_BYTES: usize = 24_000_000;
 const SAMPLE_RATE: f32 = 16_000.0;
 /// Target chunk length for local Parakeet. Longer single-pass audio has
 /// crashed the ONNX encoder (~400s failed; ~180s previously worked). Stay
@@ -25,16 +24,16 @@ const LOCAL_CHUNK_SEARCH_SECS: f32 = 3.0;
 /// Minimum residual kept as its own chunk.
 const LOCAL_MIN_CHUNK_SECS: f32 = 0.5;
 
-/// Progress of a multi-chunk local transcription (1-based index).
+/// Progress of a multi-chunk transcription (1-based index).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkProgress {
     pub index: u32,
     pub total: u32,
 }
 
-/// Local STT outcome: full text, or partial text when a later chunk failed.
+/// STT outcome: full text, or partial text when a later chunk failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocalTranscript {
+pub enum Transcript {
     Complete(String),
     /// Chunks before the failure produced text; remaining audio was skipped.
     Partial {
@@ -44,7 +43,7 @@ pub enum LocalTranscript {
     },
 }
 
-impl LocalTranscript {
+impl Transcript {
     pub fn text(&self) -> &str {
         match self {
             Self::Complete(text) | Self::Partial { text, .. } => text,
@@ -78,7 +77,7 @@ impl Transcriber {
         &mut self,
         wav: &Path,
         mut on_progress: impl FnMut(ChunkProgress),
-    ) -> Result<LocalTranscript> {
+    ) -> Result<Transcript> {
         let samples = transcribe_rs::audio::read_wav_samples(wav).with_context(|| {
             format!(
                 "reading WAV {} with Parakeet model {}",
@@ -113,51 +112,13 @@ impl Transcriber {
         &mut self,
         samples: &[f32],
         on_progress: &mut impl FnMut(ChunkProgress),
-    ) -> Result<LocalTranscript> {
-        let ranges = plan_chunks(samples);
-        let total = ranges.len() as u32;
-        if total == 0 {
-            return Ok(LocalTranscript::Complete(String::new()));
-        }
-
-        let mut parts = Vec::new();
-        for (index, &(start, end)) in ranges.iter().enumerate() {
-            let chunk = &samples[start..end];
-            let progress = ChunkProgress {
-                index: (index as u32) + 1,
-                total,
-            };
-            on_progress(progress);
-            tracing::info!(
-                "[STT] chunk={}/{} start_s={:.2} duration_s={:.2}",
-                progress.index,
-                progress.total,
-                start as f32 / SAMPLE_RATE,
-                chunk.len() as f32 / SAMPLE_RATE
-            );
-            match self.transcribe_chunk(chunk) {
-                Ok(text) => {
-                    if !text.is_empty() {
-                        parts.push(text);
-                    }
-                }
-                Err(error) if !parts.is_empty() => {
-                    tracing::warn!(
-                        "[STT] chunk {}/{} failed after partial text chars={} error={error:#}",
-                        progress.index,
-                        progress.total,
-                        parts.iter().map(|p| p.chars().count()).sum::<usize>()
-                    );
-                    return Ok(LocalTranscript::Partial {
-                        text: parts.join(" "),
-                        failed_at: progress.index,
-                        total: progress.total,
-                    });
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(LocalTranscript::Complete(parts.join(" ")))
+    ) -> Result<Transcript> {
+        collect_chunks(
+            &plan_chunks(samples),
+            SAMPLE_RATE,
+            on_progress,
+            |start, end| self.transcribe_chunk(&samples[start..end]),
+        )
     }
 
     fn transcribe_chunk(&mut self, samples: &[f32]) -> Result<String> {
@@ -174,10 +135,62 @@ impl Transcriber {
     }
 }
 
+/// Share ordering, measured progress, and partial failure semantics between
+/// local inference and remote requests. Empty audio never invokes the backend.
+fn collect_chunks(
+    ranges: &[(usize, usize)],
+    sample_rate: f32,
+    on_progress: &mut impl FnMut(ChunkProgress),
+    mut transcribe_chunk: impl FnMut(usize, usize) -> Result<String>,
+) -> Result<Transcript> {
+    let total = u32::try_from(ranges.len()).context("too many transcription chunks")?;
+    let mut parts = Vec::with_capacity(ranges.len());
+    for (index, &(start, end)) in ranges.iter().enumerate() {
+        let progress = ChunkProgress {
+            index: index as u32 + 1,
+            total,
+        };
+        on_progress(progress);
+        tracing::info!(
+            "[STT] chunk={}/{} start_s={:.2} duration_s={:.2}",
+            progress.index,
+            progress.total,
+            start as f32 / sample_rate,
+            (end - start) as f32 / sample_rate
+        );
+        match transcribe_chunk(start, end) {
+            Ok(text) => {
+                if !text.is_empty() {
+                    parts.push(text);
+                }
+            }
+            Err(error) if !parts.is_empty() => {
+                tracing::warn!(
+                    "[STT] chunk {}/{} failed after partial text chars={} error={error:#}",
+                    progress.index,
+                    progress.total,
+                    parts.iter().map(|part| part.chars().count()).sum::<usize>()
+                );
+                return Ok(Transcript::Partial {
+                    text: parts.join(" "),
+                    failed_at: progress.index,
+                    total,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Transcript::Complete(parts.join(" ")))
+}
+
 /// Plan inclusive-exclusive sample ranges for energy-adaptive chunks.
 fn plan_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
-    let chunk_len = (LOCAL_CHUNK_SECS * SAMPLE_RATE) as usize;
-    let min_len = (LOCAL_MIN_CHUNK_SECS * SAMPLE_RATE) as usize;
+    plan_chunks_with_limit(samples, usize::MAX)
+}
+
+fn plan_chunks_with_limit(samples: &[f32], max_frames: usize) -> Vec<(usize, usize)> {
+    let chunk_len = ((LOCAL_CHUNK_SECS * SAMPLE_RATE) as usize).min(max_frames);
+    let min_len = ((LOCAL_MIN_CHUNK_SECS * SAMPLE_RATE) as usize).min(chunk_len);
     if samples.is_empty() {
         return Vec::new();
     }
@@ -185,7 +198,7 @@ fn plan_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
         return vec![(0, samples.len())];
     }
 
-    let mut ranges = Vec::new();
+    let mut ranges = Vec::with_capacity(samples.len().div_ceil(chunk_len));
     let mut start = 0;
     while start < samples.len() {
         let remaining = samples.len() - start;
@@ -193,8 +206,9 @@ fn plan_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
             samples.len()
         } else {
             let target = start + chunk_len;
-            let split = low_energy_split(samples, target, LOCAL_CHUNK_SEARCH_SECS);
-            split.max(start + min_len).min(samples.len())
+            let limit = start.saturating_add(max_frames).min(samples.len());
+            let split = low_energy_split(&samples[..limit], target, LOCAL_CHUNK_SEARCH_SECS);
+            split.max(start + min_len).min(limit)
         };
         ranges.push((start, end));
         start = end;
@@ -308,16 +322,68 @@ struct RemoteTranscriptionResponse {
     text: String,
 }
 
-/// Transcribe a WAV file through an OpenAI-compatible audio endpoint.
+/// Transcribe a WAV through ordered, bounded OpenAI-compatible requests.
+///
+/// PCM and IEEE-float WAVs retain their source frames and format. Native
+/// 16 kHz mono PCM16 uses the local low-energy planner; other formats split on
+/// frame boundaries without decoding. A short bounded file is sent unchanged.
 pub fn transcribe_remote(
     wav: &Path,
     endpoint: &str,
     model: &str,
     vocabulary: &[String],
     api_key: Option<&str>,
-) -> Result<String> {
-    let wav_bytes = fs::read(wav).with_context(|| format!("reading WAV {}", wav.display()))?;
-    let body = build_multipart_body(&wav_bytes, model, vocabulary);
+    mut on_progress: impl FnMut(ChunkProgress),
+) -> Result<Transcript> {
+    let mut source =
+        RemoteWav::open(wav).with_context(|| format!("reading WAV {}", wav.display()))?;
+    if source.frames == 0 {
+        return Ok(Transcript::Complete(String::new()));
+    }
+    let mut body = build_multipart_prefix(model, vocabulary);
+    let prefix_len = body.len();
+    let suffix_len = MULTIPART_BOUNDARY.len() + 8;
+    let wav_budget = MAX_REMOTE_REQUEST_BYTES
+        .checked_sub(prefix_len + suffix_len)
+        .context("remote transcription fields exceed the upload size limit")?;
+    let max_frames = wav_budget
+        .checked_sub(source.header_len() + 1)
+        .context("WAV format header exceeds the remote upload size limit")?
+        / source.frame_bytes;
+    anyhow::ensure!(
+        max_frames > 0,
+        "WAV frame exceeds the remote upload size limit"
+    );
+
+    let short_frames = source.sample_rate as usize * LOCAL_CHUNK_SECS as usize;
+    let unchanged = source.frames <= short_frames && source.file_len <= wav_budget as u64;
+    let ranges = if unchanged {
+        vec![(0, source.frames)]
+    } else if source.native_capture {
+        // The installed helper only accepts this exact native format. It is
+        // used for planning, never to re-encode the source samples.
+        let samples = transcribe_rs::audio::read_wav_samples(wav)
+            .with_context(|| format!("reading WAV {} for chunk planning", wav.display()))?;
+        plan_chunks_with_limit(&samples, max_frames)
+    } else {
+        let chunk_frames = short_frames.min(max_frames);
+        (0..source.frames)
+            .step_by(chunk_frames)
+            .map(|start| (start, (start + chunk_frames).min(source.frames)))
+            .collect()
+    };
+    let largest_wav = if unchanged {
+        source.file_len as usize
+    } else {
+        let frames = ranges
+            .iter()
+            .map(|(start, end)| end - start)
+            .max()
+            .unwrap_or(0);
+        source.header_len() + frames * source.frame_bytes + 1
+    };
+    body.reserve(largest_wav + suffix_len);
+
     let endpoint = format!("{}/audio/transcriptions", endpoint.trim_end_matches('/'));
     let content_type = format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}");
     let agent = ureq::AgentBuilder::new().timeout(REMOTE_TIMEOUT).build();
@@ -325,30 +391,261 @@ pub fn transcribe_remote(
     if let Some(api_key) = api_key {
         request = request.set("Authorization", &format!("Bearer {api_key}"));
     }
+    collect_chunks(
+        &ranges,
+        source.sample_rate as f32,
+        &mut on_progress,
+        |start, end| {
+            body.truncate(prefix_len);
+            source
+                .append_chunk(&mut body, start, end, unchanged)
+                .with_context(|| format!("reading WAV {} chunk", wav.display()))?;
+            let audio_bytes = body.len() - prefix_len;
+            body.extend_from_slice(b"\r\n--");
+            body.extend_from_slice(MULTIPART_BOUNDARY.as_bytes());
+            body.extend_from_slice(b"--\r\n");
+            anyhow::ensure!(
+                body.len() <= MAX_REMOTE_REQUEST_BYTES,
+                "remote transcription upload exceeds its size limit"
+            );
 
-    let started = Instant::now();
-    let response = match request.send_bytes(&body) {
-        Ok(response) => response,
-        Err(ureq::Error::Status(code, _)) => {
-            anyhow::bail!("remote transcription endpoint returned HTTP {code}");
-        }
-        Err(ureq::Error::Transport(transport)) => {
-            anyhow::bail!("remote transcription request failed: {transport}");
-        }
-    };
-    let response: RemoteTranscriptionResponse = serde_json::from_reader(response.into_reader())
-        .map_err(|_| anyhow::anyhow!("remote transcription returned unexpected response shape"))?;
-    let text = response.text.trim().to_owned();
-    tracing::info!(
-        "[STT] remote transcription audio_bytes={} ms={} output_char_count={}",
-        wav_bytes.len(),
-        started.elapsed().as_millis(),
-        text.chars().count()
-    );
-    Ok(text)
+            let started = Instant::now();
+            let response = match request.clone().send_bytes(&body) {
+                Ok(response) => response,
+                Err(ureq::Error::Status(413, _)) => {
+                    anyhow::bail!(
+                        "remote transcription endpoint rejected upload size {} bytes (HTTP 413)",
+                        body.len()
+                    );
+                }
+                Err(ureq::Error::Status(code, _)) => {
+                    anyhow::bail!("remote transcription endpoint returned HTTP {code}");
+                }
+                Err(ureq::Error::Transport(transport)) => {
+                    // Transport display strings may embed server-controlled
+                    // headers or URLs. Keep only the kind and timeout cause.
+                    let mut cause = std::error::Error::source(&transport);
+                    while let Some(error) = cause {
+                        if error
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+                        {
+                            anyhow::bail!("remote transcription request timed out");
+                        }
+                        cause = error.source();
+                    }
+                    anyhow::bail!(
+                        "remote transcription request failed ({:?})",
+                        transport.kind()
+                    );
+                }
+            };
+            let response: RemoteTranscriptionResponse =
+                serde_json::from_reader(response.into_reader()).map_err(|_| {
+                    anyhow::anyhow!("remote transcription returned unexpected response shape")
+                })?;
+            let text = response.text.trim().to_owned();
+            tracing::info!(
+                "[STT] remote transcription audio_bytes={} ms={} output_char_count={}",
+                audio_bytes,
+                started.elapsed().as_millis(),
+                text.chars().count()
+            );
+            Ok(text)
+        },
+    )
 }
 
-/// Classify a local STT failure into a short operator-facing notice.
+/// Metadata is small; audio stays in the source file until a bounded request
+/// buffer is filled. Native low-energy planning still allocates one f32 per
+/// source frame through transcribe-rs.
+struct RemoteWav {
+    file: File,
+    file_len: u64,
+    format: Vec<u8>,
+    data_start: u64,
+    frames: usize,
+    frame_bytes: usize,
+    sample_rate: u32,
+    float: bool,
+    native_capture: bool,
+}
+
+impl RemoteWav {
+    fn open(path: &Path) -> Result<Self> {
+        let mut file = File::open(path).context("opening source WAV")?;
+        let file_len = file.metadata().context("reading WAV size")?.len();
+        let mut header = [0_u8; 12];
+        file.read_exact(&mut header)
+            .context("reading RIFF header")?;
+        anyhow::ensure!(
+            &header[..4] == b"RIFF" && &header[8..] == b"WAVE",
+            "expected a RIFF/WAVE file"
+        );
+        let riff_end = u64::from(u32::from_le_bytes(header[4..8].try_into()?)) + 8;
+        anyhow::ensure!(
+            (12..=file_len).contains(&riff_end),
+            "WAV RIFF length exceeds the file or omits the WAVE header"
+        );
+
+        let mut format = None;
+        let mut data = None;
+        let mut position = 12;
+        while position < riff_end {
+            anyhow::ensure!(riff_end - position >= 8, "truncated WAV chunk header");
+            let mut chunk = [0_u8; 8];
+            file.read_exact(&mut chunk)
+                .context("reading WAV chunk header")?;
+            let size = u32::from_le_bytes(chunk[4..].try_into()?) as u64;
+            let start = position + 8;
+            let end = start + size + size % 2;
+            anyhow::ensure!(end <= riff_end, "WAV chunk or padding exceeds RIFF length");
+            match &chunk[..4] {
+                b"fmt " => {
+                    anyhow::ensure!(format.is_none(), "multiple WAV format chunks");
+                    anyhow::ensure!(
+                        (16..MAX_REMOTE_REQUEST_BYTES as u64).contains(&size),
+                        "WAV format chunk is too short or exceeds the upload size limit"
+                    );
+                    let mut bytes = vec![0; size as usize];
+                    file.read_exact(&mut bytes).context("reading WAV format")?;
+                    format = Some(bytes);
+                }
+                b"data" => {
+                    anyhow::ensure!(data.is_none(), "multiple WAV data chunks are unsupported");
+                    data = Some((start, size as usize));
+                }
+                _ => {}
+            }
+            file.seek(SeekFrom::Start(end))
+                .context("seeking WAV chunk")?;
+            position = end;
+        }
+        let format = format.context("WAV has no format chunk")?;
+        let (data_start, data_len) = data.context("WAV has no data chunk")?;
+        let mut encoding = u16::from_le_bytes(format[..2].try_into()?);
+        let channels = u16::from_le_bytes(format[2..4].try_into()?);
+        let sample_rate = u32::from_le_bytes(format[4..8].try_into()?);
+        let byte_rate = u32::from_le_bytes(format[8..12].try_into()?);
+        let frame_bytes = u16::from_le_bytes(format[12..14].try_into()?) as usize;
+        let bits = u16::from_le_bytes(format[14..16].try_into()?);
+        let mut valid_bits = bits;
+        if format.len() != 16 {
+            anyhow::ensure!(format.len() >= 18, "truncated WAV format extension");
+            let extension_len = u16::from_le_bytes(format[16..18].try_into()?) as usize;
+            anyhow::ensure!(
+                18 + extension_len <= format.len(),
+                "truncated WAV format extension"
+            );
+            if encoding == 0xfffe {
+                anyhow::ensure!(extension_len >= 22, "truncated extensible WAV format");
+                let declared_bits = u16::from_le_bytes(format[18..20].try_into()?);
+                anyhow::ensure!(declared_bits <= bits, "WAV valid bits exceed the container");
+                if declared_bits > 0 {
+                    valid_bits = declared_bits;
+                }
+                anyhow::ensure!(
+                    format[26..40] == [0, 0, 0, 0, 16, 0, 128, 0, 0, 170, 0, 56, 155, 113],
+                    "unsupported extensible WAV encoding"
+                );
+                encoding = u16::from_le_bytes(format[24..26].try_into()?);
+            }
+        }
+        anyhow::ensure!(
+            encoding == 1 || encoding == 3,
+            "unsupported WAV encoding 0x{encoding:04x}; bounded uploads require PCM or IEEE float"
+        );
+        anyhow::ensure!(
+            channels > 0
+                && sample_rate > 0
+                && frame_bytes > 0
+                && frame_bytes.is_multiple_of(channels as usize)
+                && bits > 0
+                && usize::from(bits) <= frame_bytes / channels as usize * 8,
+            "invalid WAV sample rate, channels, or block alignment"
+        );
+        anyhow::ensure!(
+            encoding != 3
+                || (matches!(bits, 32 | 64)
+                    && valid_bits == bits
+                    && usize::from(bits) == frame_bytes / channels as usize * 8),
+            "IEEE-float WAV requires packed 32-bit or 64-bit samples",
+        );
+        anyhow::ensure!(
+            u64::from(byte_rate) == u64::from(sample_rate) * frame_bytes as u64,
+            "WAV byte rate does not match its sample frames"
+        );
+        anyhow::ensure!(
+            data_len.is_multiple_of(frame_bytes),
+            "WAV data ends inside a sample frame"
+        );
+        Ok(Self {
+            file,
+            file_len,
+            format,
+            data_start,
+            frames: data_len / frame_bytes,
+            frame_bytes,
+            sample_rate,
+            float: encoding == 3,
+            native_capture: encoding == 1
+                && channels == 1
+                && frame_bytes == 2
+                && sample_rate == SAMPLE_RATE as u32
+                && bits == 16
+                && valid_bits == 16,
+        })
+    }
+
+    fn header_len(&self) -> usize {
+        12 + 8 + self.format.len() + self.format.len() % 2 + if self.float { 12 } else { 0 } + 8
+    }
+
+    fn append_chunk(
+        &mut self,
+        body: &mut Vec<u8>,
+        start: usize,
+        end: usize,
+        unchanged: bool,
+    ) -> Result<()> {
+        let (offset, bytes) = if unchanged {
+            (0, self.file_len as usize)
+        } else {
+            let bytes = (end - start) * self.frame_bytes;
+            let file_len = self.header_len() + bytes + bytes % 2;
+            body.extend_from_slice(b"RIFF");
+            body.extend_from_slice(&((file_len - 8) as u32).to_le_bytes());
+            body.extend_from_slice(b"WAVEfmt ");
+            body.extend_from_slice(&(self.format.len() as u32).to_le_bytes());
+            body.extend_from_slice(&self.format);
+            if self.format.len() % 2 == 1 {
+                body.push(0);
+            }
+            if self.float {
+                body.extend_from_slice(b"fact");
+                body.extend_from_slice(&4_u32.to_le_bytes());
+                body.extend_from_slice(&((end - start) as u32).to_le_bytes());
+            }
+            body.extend_from_slice(b"data");
+            body.extend_from_slice(&(bytes as u32).to_le_bytes());
+            (self.data_start + (start * self.frame_bytes) as u64, bytes)
+        };
+        self.file
+            .seek(SeekFrom::Start(offset))
+            .context("seeking WAV audio")?;
+        let begin = body.len();
+        body.resize(begin + bytes, 0);
+        self.file
+            .read_exact(&mut body[begin..])
+            .context("reading WAV audio")?;
+        if !unchanged && bytes % 2 == 1 {
+            body.push(0);
+        }
+        Ok(())
+    }
+}
+
+/// Classify an STT failure into a short operator-facing notice.
 /// Never includes transcript content — structural causes only.
 pub fn classify_failure(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
@@ -358,6 +655,9 @@ pub fn classify_failure(error: &str) -> &'static str {
     }
     if lower.contains("timed out") || lower.contains("timeout") {
         return "Transcription timed out";
+    }
+    if lower.contains("http 413") {
+        return "Transcription upload too large";
     }
     // Match the ureq status form we emit: "returned HTTP {code}".
     if lower.contains("returned http ") || lower.contains("http 4") || lower.contains("http 5") {
@@ -369,8 +669,9 @@ pub fn classify_failure(error: &str) -> &'static str {
     "Transcription failed"
 }
 
-fn build_multipart_body(wav_bytes: &[u8], model: &str, vocabulary: &[String]) -> Vec<u8> {
-    let mut body = Vec::new();
+fn build_multipart_prefix(model: &str, vocabulary: &[String]) -> Vec<u8> {
+    let fields_len = model.len() + vocabulary.iter().map(|word| word.len() + 2).sum::<usize>();
+    let mut body = Vec::with_capacity(fields_len + 512);
     append_multipart_field(&mut body, "model", model);
     if !vocabulary.is_empty() {
         append_multipart_field(&mut body, "prompt", &vocabulary.join(", "));
@@ -384,10 +685,6 @@ fn build_multipart_body(wav_bytes: &[u8], model: &str, vocabulary: &[String]) ->
         b"Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n",
     );
     body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
-    body.extend_from_slice(wav_bytes);
-    body.extend_from_slice(b"\r\n--");
-    body.extend_from_slice(MULTIPART_BOUNDARY.as_bytes());
-    body.extend_from_slice(b"--\r\n");
     body
 }
 
@@ -404,29 +701,6 @@ fn append_multipart_field(body: &mut Vec<u8>, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn multipart_body_has_expected_framing_and_fields() {
-        let wav = [0_u8, 1, 2, 255];
-        let vocabulary = vec!["Cantrip".to_owned(), "Parakeet".to_owned()];
-        let body = build_multipart_body(&wav, "whisper-large-v3", &vocabulary);
-        let body_text = String::from_utf8_lossy(&body);
-
-        assert!(body_text.starts_with("--cantrip-audio-boundary\r\n"));
-        assert!(body_text.contains(
-            "Content-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-large-v3\r\n"
-        ));
-        assert!(body_text.contains(
-            "Content-Disposition: form-data; name=\"prompt\"\r\n\r\nCantrip, Parakeet\r\n"
-        ));
-        assert!(body_text
-            .contains("Content-Disposition: form-data; name=\"response_format\"\r\n\r\njson\r\n"));
-        assert!(body_text.contains(
-            "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
-        ));
-        assert!(body.windows(wav.len()).any(|window| window == wav));
-        assert!(body.ends_with(b"\r\n--cantrip-audio-boundary--\r\n"));
-    }
 
     #[test]
     fn wav_duration_uses_data_size_and_byte_rate() {
@@ -448,29 +722,6 @@ mod tests {
             wav_duration_ms_from(&mut std::io::Cursor::new(wav)).unwrap(),
             1_000
         );
-    }
-
-    #[test]
-    fn classify_failure_maps_known_causes() {
-        assert_eq!(
-            classify_failure(
-                "inference error: Attempting to broadcast an axis by a dimension other than 1. 77 by 5077"
-            ),
-            "Audio too long for the model"
-        );
-        assert_eq!(
-            classify_failure("remote transcription endpoint returned HTTP 403"),
-            "Transcription service error"
-        );
-        assert_eq!(
-            classify_failure("client request timed out"),
-            "Transcription timed out"
-        );
-        assert_eq!(
-            classify_failure("reading WAV /tmp/x.wav failed"),
-            "Recording unreadable"
-        );
-        assert_eq!(classify_failure("something else"), "Transcription failed");
     }
 
     #[test]

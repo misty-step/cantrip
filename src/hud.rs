@@ -6,14 +6,14 @@
 //! Visual design: a 22-cell knight track floats on a fully transparent
 //! 420×56 surface. Cells carry the current state accent: eased waveform
 //! energy while recording, an amber sweep and chunk progress while
-//! transcribing, static violet mid-cells while cleaning, and full green or
-//! amber holds for terminal results. Reduced motion freezes the sweep at its
-//! midpoint while visibility and result fades still apply.
+//! transcribing, static violet mid-cells while cleaning, and a green success
+//! hold. Amber notices show readable text; actionable failures stay until the
+//! next operation. Reduced motion freezes the sweep while fades still apply.
 //!
-//! ADR 0010 is superseded by operator direction on 2026-09-04: the former
-//! capsule, text, timer, meter overlay, and perimeter trace were replaced by
-//! this track-only chip.
+//! Normal states retain the operator's 2026-09-04 track-only design. Notices
+//! are the exception: color alone cannot explain a failure or its recovery.
 
+use ab_glyph::{point, Font, FontRef, ScaleFont};
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use smithay_client_toolkit::{
@@ -73,6 +73,7 @@ const FLASH_FADE_TAIL: f32 = 0.25;
 const HUD_HEIGHT: u32 = 56;
 const FALLBACK_WIDTH: u32 = 420;
 const MAX_WIDTH: u32 = 900;
+const NOTICE_HEIGHT: u32 = 88;
 const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-18, 22],
     [-35, 41],
@@ -87,8 +88,8 @@ const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-12, 18],
 ];
 
-/// Fixed capsule container dimensions ("Warm Minimal", centered in the 420×56 surface).
-/// Sizing is rock-solid and identical across all states.
+/// Normal-state container dimensions, centered in the 420×56 surface.
+/// Notices expand vertically to fit a readable cause and recovery command.
 const CONTAINER_WIDTH: f32 = 336.0;
 const CONTAINER_HEIGHT: f32 = 44.0;
 const TRACK_WIDTH: f32 = 304.0;
@@ -246,7 +247,7 @@ pub fn run(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Resul
         screenshot,
         state,
         reduced_motion,
-    );
+    )?;
     if let Err(error) = event_queue.roundtrip(&mut hud) {
         tracing::warn!("[HUD] display disconnected during setup: {error}");
         return Ok(());
@@ -313,6 +314,24 @@ fn timed_dispatch(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum ResultVisibility {
+    Hidden,
+    FlashUntil(Instant),
+    Persistent,
+}
+
+fn result_fade(visibility: ResultVisibility, now: Instant) -> Option<f32> {
+    match visibility {
+        ResultVisibility::Hidden => None,
+        ResultVisibility::Persistent => Some(1.0),
+        ResultVisibility::FlashUntil(until) if now < until => Some(ease_out_cubic(
+            until.duration_since(now).as_secs_f32() / FLASH_FADE_TAIL,
+        )),
+        ResultVisibility::FlashUntil(_) => None,
+    }
+}
+
 struct HudState {
     registry_state: RegistryState,
     output_state: OutputState,
@@ -325,8 +344,8 @@ struct HudState {
     /// status stream, so only a changed payload should retrigger the flash.
     last_outcome: Option<TerminalOutcome>,
     outcome_seen: bool,
-    /// When the current result flash expires; None means no flash.
-    flash_until: Option<Instant>,
+    /// Failures remain visible until an operation replaces them; other results expire.
+    result_visibility: ResultVisibility,
     /// Operator-facing reason shown while a notice flash is live.
     flash_text: Option<String>,
     /// True when the flash reports a delivered dictation.
@@ -364,6 +383,7 @@ struct HudState {
     configured: bool,
     width: u32,
     height: u32,
+    notice_font: FontRef<'static>,
     visible: bool,
     daemon_available: bool,
     exit: bool,
@@ -424,7 +444,7 @@ impl HudState {
         screenshot: Option<PathBuf>,
         screenshot_state: Option<ScreenshotState>,
         reduced_motion: bool,
-    ) -> Self {
+    ) -> Result<Self> {
         // Screenshot mode skips daemon polling so the frame is stable and
         // offline; `view` renders the requested state deterministically.
         let state = if screenshot.is_some() {
@@ -436,7 +456,7 @@ impl HudState {
         } else {
             UiState::Idle
         };
-        Self {
+        Ok(Self {
             registry_state,
             output_state,
             shm,
@@ -446,7 +466,7 @@ impl HudState {
             previous_state: None,
             last_outcome: None,
             outcome_seen: false,
-            flash_until: None,
+            result_visibility: ResultVisibility::Hidden,
             flash_text: None,
             flash_ok: false,
             started_at: Instant::now(),
@@ -468,13 +488,15 @@ impl HudState {
             configured: false,
             width: FALLBACK_WIDTH,
             height: HUD_HEIGHT,
+            notice_font: FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR)
+                .context("loading bundled HUD notice font")?,
             visible: false,
             daemon_available: false,
             exit: false,
             screenshot,
             screenshot_state,
             screenshot_done: false,
-        }
+        })
     }
     /// Logical surface size for one frame: the configured size, clamped.
     fn frame_size(&self) -> (u32, u32) {
@@ -519,7 +541,8 @@ impl HudState {
 
     fn force_idle(&mut self) {
         self.state = UiState::Idle;
-        self.flash_until = None;
+        self.result_visibility = ResultVisibility::Hidden;
+        self.outcome_seen = false;
         self.flash_text = None;
         self.flash_ok = false;
         self.previous_state = Some(UiStateKind::Idle);
@@ -538,11 +561,16 @@ impl HudState {
         let now = Instant::now();
         let recording = matches!(self.state, UiState::Recording { .. });
         let processing = matches!(self.state, UiState::Processing { .. });
-        let outcome = matches!(self.state, UiState::Idle) && self.flash_until.is_some();
+        let outcome = matches!(self.state, UiState::Idle)
+            && matches!(self.result_visibility, ResultVisibility::FlashUntil(_));
         let meter_moving = (self.meter_armed && (self.meter_display - self.meter_to).abs() > 0.002)
             || self.meter_hold_until.is_some_and(|until| now < until);
         if recording || processing || outcome || meter_moving || self.waveform_moving(now) {
             METER_FRAME_INTERVAL
+        } else if matches!(self.result_visibility, ResultVisibility::Persistent)
+            && now.duration_since(self.transition_at) >= TRANSITION
+        {
+            POLL_INTERVAL
         } else {
             FRAME_INTERVAL
         }
@@ -606,6 +634,8 @@ impl HudState {
         }
 
         let outcome = status.outcome();
+        let persistent = outcome.is_some_and(|outcome| !outcome.ok && outcome.error.is_some());
+        let initial_failure = !self.outcome_seen && persistent;
         // The daemon keeps the terminal payload in every later status reply.
         // Seed the edge tracker silently, then flash only on a newly changed
         // payload; in particular this catches idle → idle rejection outcomes.
@@ -641,8 +671,12 @@ impl HudState {
             self.previous_state = Some(next_kind);
         }
 
-        if returned_to_idle || outcome_changed {
-            self.flash_until = Some(now + RESULT_FLASH);
+        if returned_to_idle || outcome_changed || initial_failure {
+            self.result_visibility = if persistent {
+                ResultVisibility::Persistent
+            } else {
+                ResultVisibility::FlashUntil(now + RESULT_FLASH)
+            };
             // Keep the daemon terminal message for logs/status; the chip
             // flash uses a short label (Success / notice text).
             self.flash_text = status.outcome().map(|outcome| outcome.message.clone());
@@ -663,9 +697,10 @@ impl HudState {
             );
         }
         self.state = next_state;
-        if matches!(self.state, UiState::Idle) && self.flash_until.is_some_and(|until| now >= until)
+        if !matches!(self.state, UiState::Idle)
+            || result_fade(self.result_visibility, now).is_none()
         {
-            self.flash_until = None;
+            self.result_visibility = ResultVisibility::Hidden;
         }
     }
 
@@ -748,28 +783,23 @@ impl HudState {
         }
         let waveform_frame = self.waveform_frame(now);
         let content = match &self.state {
-            UiState::Idle => match self.flash_until {
-                Some(until) if now < until => {
-                    // Delivered dictations flash a short word; notices keep
-                    // the operator-facing reason (Heard nothing, Cancelled).
-                    let label = if self.flash_ok {
-                        "Success".to_owned()
-                    } else {
-                        self.flash_text
-                            .clone()
-                            .unwrap_or_else(|| "Notice".to_owned())
-                    };
-                    let kind = if self.flash_ok {
-                        ChipKind::Sent
-                    } else {
-                        ChipKind::Notice
-                    };
-                    let remaining = until.duration_since(now).as_secs_f32();
-                    let fade = ease_out_cubic(remaining / FLASH_FADE_TAIL);
-                    Some((label, None, kind, fade, None, None))
-                }
-                _ => None,
-            },
+            UiState::Idle => result_fade(self.result_visibility, now).map(|fade| {
+                // Delivered dictations flash a short word; notices keep
+                // the operator-facing reason (Heard nothing, Cancelled).
+                let label = if self.flash_ok {
+                    "Success".to_owned()
+                } else {
+                    self.flash_text
+                        .clone()
+                        .unwrap_or_else(|| "Notice".to_owned())
+                };
+                let kind = if self.flash_ok {
+                    ChipKind::Sent
+                } else {
+                    ChipKind::Notice
+                };
+                (label, None, kind, fade, None, None)
+            }),
             UiState::Recording {
                 elapsed,
                 audio_waveform,
@@ -903,6 +933,13 @@ impl HudState {
     }
 
     fn draw(&mut self, view: &ChipView) -> Result<bool> {
+        let notice = view.kind == ChipKind::Notice;
+        let target_height = if notice { NOTICE_HEIGHT } else { HUD_HEIGHT };
+        if self.height != target_height {
+            self.layer.set_size(FALLBACK_WIDTH, target_height);
+            self.layer.commit();
+            return Ok(false);
+        }
         let (width, height) = self.buffer_size()?;
         let (logical_width, _) = self.frame_size();
         let output_scale = self.buffer_scale as f32;
@@ -939,8 +976,16 @@ impl HudState {
             1.0
         };
 
-        let container_width = CONTAINER_WIDTH.min(logical_width as f32 - 8.0) * output_scale;
-        let container_height = CONTAINER_HEIGHT * output_scale;
+        let container_width = if notice {
+            logical_width as f32 - 8.0
+        } else {
+            CONTAINER_WIDTH.min(logical_width as f32 - 8.0)
+        } * output_scale;
+        let container_height = if notice {
+            NOTICE_HEIGHT as f32 - 12.0
+        } else {
+            CONTAINER_HEIGHT
+        } * output_scale;
         let center_x = width as f32 / 2.0;
         let center_y = height as f32 / 2.0;
         let half_width = (container_width / 2.0) * scale_factor;
@@ -961,29 +1006,39 @@ impl HudState {
             visibility,
         );
 
-        // 2. 22-cell segmented track inside the container:
-        let progress_param = match view.kind {
-            ChipKind::Transcribing => view.meter,
-            _ => None,
-        };
-
-        knight_track(
-            canvas,
-            width,
-            height,
-            center_x,
-            center_y,
-            half_width,
-            half_height,
-            output_scale * scale_factor,
-            view.kind,
-            view.from,
-            view.progress,
-            view.phase,
-            view.waveform,
-            progress_param,
-            content_alpha,
-        );
+        if notice {
+            draw_notice(
+                canvas,
+                width,
+                height,
+                &self.notice_font,
+                &view.label,
+                output_scale * scale_factor,
+                content_alpha,
+            );
+        } else {
+            let progress_param = match view.kind {
+                ChipKind::Transcribing => view.meter,
+                _ => None,
+            };
+            knight_track(
+                canvas,
+                width,
+                height,
+                center_x,
+                center_y,
+                half_width,
+                half_height,
+                output_scale * scale_factor,
+                view.kind,
+                view.from,
+                view.progress,
+                view.phase,
+                view.waveform,
+                progress_param,
+                content_alpha,
+            );
+        }
 
         self.layer
             .wl_surface()
@@ -1308,6 +1363,87 @@ impl ProvidesRegistryState for HudState {
 }
 
 smithay_client_toolkit::delegate_dispatch2!(HudState);
+
+/// Wrap borrowed UTF-8 slices at word boundaries, splitting overlong words
+/// only when necessary. Notice layout needs no heap-allocated line strings.
+fn notice_line(text: &str, max_chars: usize) -> (&str, &str) {
+    let mut space = None;
+    for (count, (index, character)) in text.char_indices().enumerate() {
+        if character == '\n' {
+            return (&text[..index], text[index..].trim_start());
+        }
+        if count == max_chars {
+            let end = space.filter(|index| *index > 0).unwrap_or(index);
+            return (text[..end].trim_end(), text[end..].trim_start());
+        }
+        if character.is_whitespace() {
+            space = Some(index);
+        }
+    }
+    (text, "")
+}
+
+fn draw_notice(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    font: &FontRef<'_>,
+    text: &str,
+    scale: f32,
+    alpha: f32,
+) {
+    let font_size = 15.0 * scale;
+    let scaled = font.as_scaled(font_size);
+    let advance = scaled.h_advance(font.glyph_id('M'));
+    let inset = 26.0 * scale;
+    let max_chars = ((width as f32 - 2.0 * inset) / advance).max(1.0) as usize;
+    let mut lines = [""; 4];
+    let mut remaining = text.trim();
+    let mut count = 0;
+    for line in &mut lines {
+        if remaining.is_empty() {
+            break;
+        }
+        (*line, remaining) = notice_line(remaining, max_chars);
+        count += 1;
+    }
+    let line_height = 18.0 * scale;
+    let top = (height as f32 - count as f32 * line_height) / 2.0;
+    for (row, line) in lines[..count].iter().enumerate() {
+        let truncated = row + 1 == count && !remaining.is_empty();
+        let limit = if truncated {
+            max_chars.saturating_sub(1)
+        } else {
+            max_chars
+        };
+        let mut x = inset;
+        let y = top + row as f32 * line_height + scaled.ascent();
+        for character in line.chars().take(limit).chain(truncated.then_some('…')) {
+            let glyph = font
+                .glyph_id(character)
+                .with_scale_and_position(font_size, point(x, y));
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|gx, gy, coverage| {
+                    let px = bounds.min.x as i32 + gx as i32;
+                    let py = bounds.min.y as i32 + gy as i32;
+                    if px >= 0 && py >= 0 {
+                        blend_pixel(
+                            canvas,
+                            width,
+                            height,
+                            px as u32,
+                            py as u32,
+                            [255, 217, 161, 255],
+                            coverage * alpha,
+                        );
+                    }
+                });
+            }
+            x += advance;
+        }
+    }
+}
 
 fn format_elapsed(seconds: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)

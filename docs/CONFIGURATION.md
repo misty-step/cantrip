@@ -67,6 +67,37 @@ cantrip key set openai    # prompts for the key; stored in the OS keyring
 From the gauntlet, `gpt-4o-mini-transcribe` is the best accuracy-per-dollar
 cloud model (~WER 0.065 at ~$0.0003/clip).
 
+**Long recordings.** Remote PCM/IEEE-float WAVs are split before upload, keeping
+sample bytes, rate, channels, and format intact. Native Cantrip capture uses
+low-energy splits around 30 seconds (up to 33 seconds); other PCM formats split
+on frame boundaries at most 30 seconds apart. Every multipart request, including
+its headers and vocabulary, is capped at 24,000,000 bytes. Short bounded files
+are sent unchanged. Results are joined in order, with one cleanup/delivery step.
+
+This avoids OpenRouter's documented 25 MB multipart cliff without a recording
+cutoff or codec process. Providers can still impose smaller limits or time out;
+Cantrip preserves partial text and recovery audio rather than blindly retrying.
+Chunk seams can affect recognition. The remote file reader supports
+little-endian RIFF/WAVE PCM and IEEE float, including extensible variants.
+Compressed WAV encodings, RF64/RIFX, and multiple data chunks must be converted
+to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
+16 kHz mono PCM16.
+
+**Recovery.** `cantrip recover --clipboard` retries retained audio with configured
+STT while only copying the result. `cantrip recover --local --clipboard` uses
+installed default Parakeet and skips cleanup for that job, without rewriting
+this file or changing subsequent dictations. Install the model explicitly with
+`cantrip models pull` if needed. `cantrip transcribe --local <wav>` provides the
+same local recognition/cleanup override for files. Separately opted-in telemetry
+remains count-only and enabled; `--local` is not an all-network-off switch.
+
+`cantrip status` lists the retained audio path even after daemon restart.
+Operational details remain in `~/.local/state/cantrip/daemon.log`; transcripts
+never appear there. Partial text is marked incomplete and its audio is retained.
+An unrelated successful take cannot erase the recovery slot. The next
+failed/partial take can replace it, and successful complete recovery removes it
+only after text has a durable history or replay-file copy.
+
 ## `[postproc]` — cleanup
 
 The built-in prompt defines conservative transcript cleanup. Use
