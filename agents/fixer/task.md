@@ -1,1 +1,3 @@
+Act only on the current operator request or an explicit delegation from it. Without that request, report no work; do not select an old queue item.
+
 Run one Fixer pass from `agent.md`: select one rejected revision, reproduce and repair every reported failure in its branch, run the relevant checks, and publish one fresh review request for the new revision. If none is eligible, return a clean no-work summary.

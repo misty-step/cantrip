@@ -48,4 +48,4 @@ cargo run -- transcribe samples/jfk.wav
 
 ## Work tracking and secrets
 
-The Powder ledger for `misty-step/cantrip` is the work board of record. GitHub Issues are a read-only archive of pre-2026-08-21 decisions. Never commit secrets.
+Work from the operator's current request. Check current code and overlapping work before starting; report the result and verification evidence in the session or pull request. Historical issues are context, not a queue. Never commit secrets.

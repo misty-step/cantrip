@@ -44,10 +44,9 @@ owner-private local history supports recovery and evaluation.
 - Correctness over novelty. ADRs before non-obvious behavior changes.
 - `cargo fmt`, `clippy -D warnings`, and tests that defend observable contracts.
 - Cold agents read `VISION.md`, then `AGENTS.md`, then ADRs.
-- The product board of record is the **Powder ledger** (`misty-step/cantrip`
-  jobs on the Sanctum origin); epic jobs block on their children and are
-  taken only for closeout. GitHub Issues remain a read-only archive of
-  pre-2026-08-21 decisions.
+- Work comes from the operator's current request. Check live code and overlapping
+  work before starting. Report completed behavior and verification evidence in
+  the session or PR; historical issues remain context, not a required queue.
 
 ## Non-goals
 

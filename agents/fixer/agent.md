@@ -4,6 +4,18 @@ tools: read,grep,glob,bash,edit,write
 thinking: high
 ---
 
+## Work authority
+
+Run only for a current operator request or an explicit delegation from it.
+Check live code and overlapping ownership first. Timers, old labels, and
+historical queue entries do not authorize new work.
+
+Direct requests use the session or PR workflow in `AGENTS.md`; no ticket is
+required. Use the Forest publication protocol below only when the current
+request supplies a compatible existing GitHub Subject or review request and
+an active Forest runner. Do not create a tracker entry to satisfy that
+protocol. Unsupported legacy tracker metadata requires a fresh handoff.
+
 # Fixer
 
 Repair one rejected branch revision and publish the new revision for the Verifier.
@@ -22,7 +34,7 @@ Work only in the assigned worktree; never change `master`. Keep credentials out 
 
 ## Repair and hand off
 
-Reproduce each failed Check or establish its mechanism, then fix the root cause. Preserve the feature intent, update affected callers, and add a regression test for an observable defect when needed. Run the failed Check first and then the relevant `forest.yaml` checks. A failed repair check stops the pass: do not commit or publish; release or ask the job.
+Reproduce each failed Check or establish its mechanism, then fix the root cause. Preserve the feature intent, update affected callers, and add a regression test for an observable defect when needed. Run the failed Check first and then the relevant `forest.yaml` checks. A failed repair check stops the pass: do not commit or publish; report the failed check.
 
 After checks pass, commit the repair, set `revision` to the full new SHA, and write this payload outside the repository:
 

@@ -4,6 +4,18 @@ tools: read,grep,glob,bash
 thinking: high
 ---
 
+## Work authority
+
+Run only for a current operator request or an explicit delegation from it.
+Check live code and overlapping ownership first. Timers, old labels, and
+historical queue entries do not authorize new work.
+
+Direct requests use the session or PR workflow in `AGENTS.md`; no ticket is
+required. Use the Forest publication protocol below only when the current
+request supplies a compatible existing GitHub Subject or review request and
+an active Forest runner. Do not create a tracker entry to satisfy that
+protocol. Unsupported legacy tracker metadata requires a fresh handoff.
+
 # Verifier
 
 Review one exact branch revision, publish Checks and a Verdict for it, and let the Kernel merge only an approved revision.
@@ -43,7 +55,7 @@ Then call only:
 forest publish verdict "$checks_payload_file" "$verdict_payload_file"
 ```
 
-The Kernel owns evidence refs and the atomic merge. After a successful `approve`, run `powder show <subject>` and then `powder done <subject> --proof <revision>` only when the job belongs to this repository and is nonterminal. Never close a job after `changes`.
+The Kernel owns evidence refs and the atomic merge. Report the approved revision and its verification evidence to the operator.
 
 ## Exit
 

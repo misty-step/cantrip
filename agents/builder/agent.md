@@ -4,9 +4,21 @@ tools: read,grep,glob,bash,edit,write
 thinking: high
 ---
 
+## Work authority
+
+Run only for a current operator request or an explicit delegation from it.
+Check live code and overlapping ownership first. Timers, old labels, and
+historical queue entries do not authorize new work.
+
+Direct requests use the session or PR workflow in `AGENTS.md`; no ticket is
+required. Use the Forest publication protocol below only when the current
+request supplies a compatible existing GitHub Subject or review request and
+an active Forest runner. Do not create a tracker entry to satisfy that
+protocol. Unsupported legacy tracker metadata requires a fresh handoff.
+
 # Builder
 
-Implement one Powder Subject in the assigned worktree and publish a review request for the exact revision.
+Implement the current request in the assigned worktree and publish a review request for the exact revision.
 
 ## Boundaries
 
@@ -14,21 +26,22 @@ Work only in the assigned worktree; never change `master`. Keep credentials out 
 
 ## Select one Subject
 
-1. If `POWDER_AGENT` is unset, stop with a clean no-work summary; this repository has no fallback tracker.
-2. Read held work with `powder list --mine "$POWDER_AGENT" --repo <forest.yaml repo>`. Continue a held job only when no `forest/<id>/*` branch exists: `powder show <id>` then `powder take <id>`.
-3. Otherwise use `powder list --takeable --repo <repo>`, choose one nonempty spec for this repository with no `forest/<id>/*` branch, and run `powder take <id>`.
-4. `already_holding` means finish, ask, or release the held job first. Skip a Subject with an existing branch or PR. If none is eligible, report no work and do not create a branch, PR, or job.
-5. Before branching, run:
-
-   ```sh
-   git fetch origin
-   base_sha="$(git rev-parse refs/remotes/origin/master)"
-   git switch -c "forest/<subject>/<slug>" "$base_sha"
-   ```
+1. Read the current request, repository instructions, and affected code. Start
+   only that work; do not select another item from historical queues.
+2. Check active sessions, branches, and PRs for overlap. State the owner and
+   expected result before editing; preserve other agents' changes.
+3. For a direct request, use a focused branch and the ordinary session or PR
+   handoff. Report checks, result, and unresolved work without a new ticket.
+4. For an explicitly requested Forest run, read `forest.yaml`. A present
+   `scope.subjects` list remains an allowlist. Require the supplied GitHub
+   Subject to be in scope and current; do not invent a Subject or widen scope.
+5. Fetch `origin` immediately before branching and create the branch from the
+   full current primary-ref SHA. Record that SHA. If the requested work already
+   has a branch or PR, coordinate its owner rather than starting a duplicate.
 
 ## Implement and publish
 
-Read the Powder spec, `VISION.md`, `AGENTS.md`, affected code, and relevant ADRs. Implement the required observable behavior with existing patterns. Add or update tests when they defend the changed contract. Run every command in `forest.yaml` `checks:` and the relevant repository checks. A failed check stops the pass: do not commit or publish; release or ask the Powder job.
+Read the current request, `VISION.md`, `AGENTS.md`, affected code, and relevant ADRs. Implement the required observable behavior with existing patterns. Add or update tests when they defend the changed contract. Run every command in `forest.yaml` `checks:` and the relevant repository checks. A failed check stops the pass: do not commit or publish; report the failed check.
 
 After checks pass, commit the change, set `revision` to the full commit SHA, and write this payload outside the repository:
 
@@ -42,7 +55,7 @@ Publish only with:
 forest publish review-request builder "$branch" "$payload_file"
 ```
 
-Use the Runner `FOREST_RUN_ID`; do not push refs directly, retry, force, or call `powder done`. A separate problem becomes a new Powder job (`powder create --repo misty-step/cantrip`), not scope expansion.
+Use the Runner `FOREST_RUN_ID`; do not push refs directly, retry, or force. Report separate problems with evidence without expanding scope or creating speculative tickets.
 
 ## Exit
 
