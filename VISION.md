@@ -34,6 +34,66 @@ OpenAI-compatible cloud STT and cleanup are escapes, not the identity. Keys live
 in the OS keyring. Transcript content is absent from operational logs; an
 owner-private local history supports recovery and evaluation.
 
+## Accepted product direction
+
+This describes the destination, not a list of shipped features. The
+[README](README.md) owns current capabilities and executable procedures; Linear
+owns sequencing, acceptance, and unresolved proposals.
+
+### Native identity and themes
+
+Cantrip's own interaction design is a reason to build it, not something that
+needs justification through feature parity with another dictation app. Preserve
+the current native, pixelated, smooth desktop experience as the visual reference.
+The old marketing scaffold is not the brand direction for the new site.
+
+Keep desktop palette integration and make the choice explicit: Follow desktop
+alongside selectable Tokyo Night, Rosé Pine, Catppuccin, and Gruvbox palettes.
+Build on the existing palette boundary rather than adding a theme engine.
+
+### Agent-first operation and first use
+
+Agents should be able to install, configure, inspect, diagnose, and help repair
+Cantrip through stable commands and useful machine-readable results. Cover local
+models, opt-in cloud configuration, keyring credential management, active versus
+saved settings, and privacy-safe diagnostics suitable for a bug report.
+Automation must retain operator approval and verified desktop/session boundaries;
+it must not expose credential values or private dictation to become convenient.
+
+Keep a thoughtful human interface over those same capabilities. First use should
+form one complete journey: install without a Rust toolchain, understand desktop
+support, deliberately install a model, establish one startup owner, configure a
+shortcut, and dictate into the intended application. Explain retained recordings
+and recovery without obstructing the first successful dictation. Reuse existing
+Actions, Settings, doctor, and CLI mechanisms; do not add a competing setup ledger.
+
+### Public site and documentation
+
+Replace the old landing page with a branded, statically generated Astro site at
+`cantrip.mistystep.io`, hosted with Cloudflare Workers Static Assets. The website
+is a separate build surface, not a React application, SSR service, CMS, database,
+account system, or change to the native runtime.
+
+Show the real application: public or synthetic speech, the actual HUD, and text
+appearing in an ordinary application. Demonstrations need captions, playback
+controls, and a reduced-motion alternative, not an animated imitation of the HUD.
+Keep installation, supported desktops, configuration, recovery, privacy, and
+release documentation consistent with the downloadable binary. Render
+repository-owned documentation rather than maintaining duplicate manuals.
+
+### Public distribution and releases
+
+Use Landmark's release tooling with conventional commits to produce coherent
+versions, technical changelogs, and public-facing release notes. Build and verify
+the downloadable artifact before publication. Binaries, checksums, build
+provenance, and release notes must identify the same source revision; the site's
+`/releases` surface should consume the same release data.
+
+Begin with one explicitly supported CPU-only Linux x86-64 artifact and a defined
+runtime/ABI baseline. Installation, update, uninstall, and rollback must preserve
+configuration, models, credentials, and recording history. Package formats and
+additional platforms should follow demonstrated need, not launch simultaneously.
+
 ## Fundamentals (keep true when code changes)
 
 1. **Local by default.** Speech stays on the machine unless the operator opts in.
@@ -55,9 +115,18 @@ Correctness over novelty. Record non-obvious accepted decisions with their
 rationale; keep executable checks and contributor procedures in
 [README.md](README.md#development), not a second workflow in this vision.
 
+Preserve the proven dictation path. Reduce competing policy owners and unclear
+boundaries before splitting files or replacing components to reach a line-count
+target. Prefer consequential regression checks and observable user journeys over
+wording tests or test counts. Measure stop-to-outcome latency and resource use
+before replacing the inference engine, file store, or process model; warm
+short-clip inference timings are not universal end-to-end performance claims.
+
 ## Non-goals
 
-- macOS/Windows ports, mobile, or a hosted multi-tenant service.
+- macOS/Windows ports and mobile in the current Linux/Omarchy release scope;
+  cross-platform remains possible later, not a prerequisite for this direction.
+- A hosted multi-tenant service or cloud identity.
 - GTK/Electron shells, always-on ambient listening, or always-on mic UX.
 - Fake progress, notification spam, or a second durable work ledger in-repo.
 - Provider-specific SDKs (OpenAI-compatible HTTP only).
@@ -84,6 +153,7 @@ boring ops (timeouts, doctor truth, no hung inject children), and a public story
 ## Decision lens
 
 Prefer the change that keeps speech local, delivery atomic, progress honest, and
-the daemon unblocked. Reject scope that adds platforms, UI frameworks, or cloud
-identity. Lies about outcomes, hangs, and privacy holes are product risks, not
-a priority queue maintained in this file.
+the daemon unblocked. Keep native-platform expansion and native UI-framework
+replacement outside the current direction; the static website does not change
+the dictation runtime. Lies about outcomes, hangs, and privacy holes are product
+risks, not a priority queue maintained in this file.
