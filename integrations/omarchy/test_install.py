@@ -1,13 +1,18 @@
+from contextlib import contextmanager, redirect_stdout
 import copy
 import errno
 import json
+from io import StringIO
 import os
 from pathlib import Path
+import socket
+import subprocess
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
-from install import PLUGIN_ID, apply_plan, atomic_write, menu_insert, merge_layout, parse_jsonc, plan, safe_path
+from install import PLUGIN_ID, apply_plan, atomic_write, main, menu_insert, merge_layout, parse_jsonc, plan, safe_path, tree_snapshot, write_private
 
 
 class InstallationContracts(unittest.TestCase):
@@ -93,9 +98,9 @@ class InstallationContracts(unittest.TestCase):
 
 
 class PluginPublicationContracts(unittest.TestCase):
-    def installation(self, directory):
+    def installation(self, directory, config_name="config"):
         root = Path(directory)
-        config = root / "config"
+        config = root / config_name
         defaults = root / "omarchy/config/omarchy/shell.json"
         defaults.parent.mkdir(parents=True)
         defaults.write_text('{"bar":{"layout":{"right":[{"id":"omarchy.power"}]}}}')
@@ -196,6 +201,180 @@ class PluginPublicationContracts(unittest.TestCase):
             shell.write_text(user_contents)
             apply_plan(plan(root / "config", root / "omarchy", None))
             self.assertEqual(shell.read_text(), user_contents)
+
+    @contextmanager
+    def live_installation(self, directory):
+        root = Path(directory)
+        installation, old_files = self.installation(directory, ".config")
+        runtime = root / "runtime"
+        control_dir = runtime / "hypr/test_session"
+        control_dir.mkdir(parents=True)
+        environment = {
+            "HOME": str(root), "XDG_CONFIG_HOME": str(root / ".config"),
+            "XDG_RUNTIME_DIR": str(runtime), "HYPRLAND_INSTANCE_SIGNATURE": "test_session",
+            "WAYLAND_DISPLAY": "wayland-test", "OMARCHY_PATH": str(root / "omarchy"),
+        }
+        state = {
+            "compositor": b'{"locked":false}',
+            "shell": {key: False for key in ("locked", "requested", "pending", "sessionLocked", "secure")},
+            "instances": [{"id": "test-shell", "pid": os.getpid(),
+                           "config_path": str(root / "omarchy/shell/shell.qml")}],
+            "environment": environment.copy(),
+        }
+
+        def qs(command, **kwargs):
+            if "error" in state:
+                raise state["error"]
+            payload = state["instances"] if command[1] == "list" else state["shell"]
+            output = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            return subprocess.CompletedProcess(command, state.get("returncode", 0), output, b"")
+
+        stopped = threading.Event()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wayland, \
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as control:
+            wayland.bind(str(runtime / "wayland-test"))
+            wayland.listen()
+            control.bind(str(control_dir / ".socket.sock"))
+            control.listen()
+            control.settimeout(0.05)
+
+            def compositor():
+                while not stopped.is_set():
+                    try:
+                        connection, _ = control.accept()
+                    except TimeoutError:
+                        continue
+                    with connection:
+                        connection.settimeout(1)
+                        try:
+                            if connection.recv(128) == b"j/locked":
+                                connection.sendall(state["compositor"])
+                        except OSError:
+                            pass
+
+            server = threading.Thread(target=compositor)
+            server.start()
+            try:
+                with patch.dict(os.environ, environment, clear=True), \
+                        patch("install.subprocess.run", side_effect=qs), \
+                        patch("install.process_environment", side_effect=lambda pid: state["environment"]):
+                    yield installation, old_files, state
+            finally:
+                stopped.set()
+                server.join()
+
+    def test_unsafe_live_states_leave_the_entire_configuration_unchanged(self):
+        cases = [
+            ("compositor", b'{"locked":true}'),
+            ("compositor", b'{"locked":0}'),
+            ("compositor", b'{"locked":true,"locked":false}'),
+            ("compositor", b"unknown request"),
+            ("shell", {}),
+            ("shell", b'{"locked":false'),
+            ("returncode", 1),
+            ("error", FileNotFoundError("qs unavailable")),
+            ("error", subprocess.TimeoutExpired("qs", 2)),
+        ]
+        for key in ("locked", "requested", "pending", "sessionLocked", "secure"):
+            cases.append(("shell", {field: field == key for field in
+                                   ("locked", "requested", "pending", "sessionLocked", "secure")}))
+        for key, value in cases:
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as directory:
+                with self.live_installation(directory) as (installation, _, state):
+                    state[key] = value
+                    config = Path(directory) / ".config"
+                    before = tree_snapshot(config)
+                    with self.assertRaises(ValueError):
+                        apply_plan(installation)
+                    self.assertEqual(tree_snapshot(config), before)
+
+    def test_unidentified_live_sessions_leave_the_entire_configuration_unchanged(self):
+        for case in ("missing-display", "forwarded-socket", "wrong-shell-display", "ambiguous-shell"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                with self.live_installation(directory) as (installation, _, state):
+                    if case == "missing-display":
+                        del os.environ["WAYLAND_DISPLAY"]
+                    elif case == "forwarded-socket":
+                        os.environ["WAYLAND_SOCKET"] = "3"
+                    elif case == "wrong-shell-display":
+                        state["environment"]["WAYLAND_DISPLAY"] = "wayland-other"
+                    else:
+                        state["instances"].append(dict(state["instances"][0], id="other-shell"))
+                    config = Path(directory) / ".config"
+                    before = tree_snapshot(config)
+                    with self.assertRaises(ValueError):
+                        apply_plan(installation)
+                    self.assertEqual(tree_snapshot(config), before)
+
+    def test_initial_live_refusal_does_not_even_create_the_configuration_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            defaults = root / "omarchy/config/omarchy/shell.json"
+            defaults.parent.mkdir(parents=True)
+            defaults.write_text('{"bar":{"layout":{"right":[]}}}')
+            config = root / ".config"
+            with patch.dict(os.environ, {"HOME": str(root)}, clear=True):
+                with self.assertRaises(ValueError):
+                    apply_plan(plan(config, root / "omarchy", None))
+            self.assertFalse(config.exists())
+
+    def test_changed_xdg_directory_does_not_make_the_live_home_configuration_offline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.live_installation(directory) as (installation, _, state):
+                os.environ["XDG_CONFIG_HOME"] = str(Path(directory) / "offline")
+                state["shell"]["pending"] = True
+                before = tree_snapshot(Path(directory) / ".config")
+                with self.assertRaises(ValueError):
+                    apply_plan(installation)
+                self.assertEqual(tree_snapshot(Path(directory) / ".config"), before)
+
+    def test_lock_requested_during_staging_prevents_live_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.live_installation(directory) as (installation, old_files, state):
+                def request_lock(path, contents):
+                    write_private(path, contents)
+                    if path.name == "Status.js":
+                        state["shell"]["requested"] = True
+
+                with patch("install.write_private", side_effect=request_lock):
+                    with self.assertRaises(ValueError):
+                        apply_plan(installation)
+                for path, contents in old_files.items():
+                    self.assertEqual(path.read_text(), contents)
+                self.assertEqual(tree_snapshot(installation.plugin), installation.previous_plugin)
+                self.assertEqual({path.name for path in installation.plugin.parent.iterdir()}, {PLUGIN_ID})
+
+    def test_explicitly_unlocked_live_install_and_locked_noop_preserve_their_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.live_installation(directory) as (installation, old_files, state):
+                apply_plan(installation)
+                for path, contents, _ in installation.writes:
+                    self.assertEqual(path.read_text(), contents)
+                personal = installation.plugin / "Personal.qml"
+                self.assertEqual(personal.read_text(), old_files[personal])
+                state["shell"]["locked"] = True
+                config = Path(directory) / ".config"
+                before = tree_snapshot(config)
+                apply_plan(plan(config, Path(directory) / "omarchy", None))
+                self.assertEqual(tree_snapshot(config), before)
+
+    def test_locked_live_dry_run_remains_read_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.live_installation(directory) as (_, _, state):
+                state["shell"]["locked"] = True
+                config = Path(directory) / ".config"
+                before = tree_snapshot(config)
+                with patch("sys.argv", ["install.py", "--config-dir", str(config)]), redirect_stdout(StringIO()):
+                    main()
+                self.assertEqual(tree_snapshot(config), before)
+
+    def test_offline_fixture_install_does_not_require_a_desktop_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            installation, _ = self.installation(directory)
+            with patch.dict(os.environ, {"HOME": str(Path(directory) / "home")}, clear=True):
+                apply_plan(installation)
+            for path, contents, _ in installation.writes:
+                self.assertEqual(path.read_text(), contents)
 
 
 if __name__ == "__main__":

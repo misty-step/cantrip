@@ -14,14 +14,166 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import shutil
+import socket
 import stat
+import struct
+import subprocess
 import tempfile
 import time
 
 PLUGIN_ID = "cantrip.dictation"
 BEGIN = "\n  // cantrip:begin managed menu\n"
 END = "\n  // cantrip:end managed menu\n"
+
+SESSION_PROBE_SECONDS = 2.0
+SESSION_REPLY_LIMIT = 64 * 1024
+
+
+def is_live_config(config_dir):
+    # Omarchy currently reads HOME/.config even when XDG_CONFIG_HOME differs.
+    # Neither an explicit --config-dir nor a changed HOME makes that offline.
+    homes = {Path.home(), Path(pwd.getpwuid(os.getuid()).pw_dir)}
+    live = {home / ".config" for home in homes}
+    if os.environ.get("XDG_CONFIG_HOME"):
+        live.add(Path(os.environ["XDG_CONFIG_HOME"]))
+    return config_dir.resolve() in {path.resolve() for path in live}
+
+
+def session_json(contents):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate session-state field: " + key)
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError("Invalid session-state value: " + value)
+
+    if len(contents) > SESSION_REPLY_LIMIT:
+        raise ValueError("Session-state response is too large")
+    return json.loads(contents, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+
+
+def process_environment(pid):
+    process = Path("/proc") / str(pid)
+    if process.stat().st_uid != os.getuid():
+        raise ValueError("Omarchy shell belongs to another user")
+    with (process / "environ").open("rb") as stream:
+        contents = stream.read(SESSION_REPLY_LIMIT + 1)
+    if len(contents) > SESSION_REPLY_LIMIT or not contents.endswith(b"\0"):
+        raise ValueError("Cannot read a trustworthy Omarchy shell environment")
+    pairs = [entry.split(b"=", 1) for entry in contents[:-1].split(b"\0")]
+    if any(len(pair) != 2 for pair in pairs) or len({pair[0] for pair in pairs}) != len(pairs):
+        raise ValueError("Malformed Omarchy shell environment")
+    return {os.fsdecode(key): os.fsdecode(value) for key, value in pairs}
+
+
+def require_unlocked_session(config_dir, expected=None):
+    """Observe one identified live session; this is not a lock inhibitor."""
+    deadline = time.monotonic() + SESSION_PROBE_SECONDS
+
+    def remaining():
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise ValueError("Session-state probe timed out")
+        return seconds
+
+    def connect(path):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            connection.settimeout(remaining())
+            connection.connect(str(path))
+            pid, uid, _ = struct.unpack("3i", connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+            if pid <= 0 or uid != os.getuid():
+                raise ValueError("Session socket belongs to an unidentified compositor")
+            return connection, pid
+        except BaseException:
+            connection.close()
+            raise
+
+    def query(command):
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                timeout=remaining(), check=False)
+        if result.returncode != 0 or result.stderr.strip():
+            raise ValueError("Quickshell session-state probe failed")
+        return session_json(result.stdout)
+
+    try:
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR", ""))
+        signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        display = os.environ.get("WAYLAND_DISPLAY", "")
+        omarchy = Path(os.environ.get("OMARCHY_PATH", ""))
+        if (not runtime.is_absolute() or not signature or not signature.isascii()
+                or not all(char.isalnum() or char == "_" for char in signature)
+                or not display or "WAYLAND_SOCKET" in os.environ or not omarchy.is_absolute()):
+            raise ValueError("Cannot identify the running Hyprland/Omarchy session from its environment")
+        wayland = Path(display)
+        if not wayland.is_absolute():
+            if wayland.name != display or display in (".", ".."):
+                raise ValueError("Invalid Wayland display")
+            wayland = runtime / wayland
+        if runtime.stat().st_uid != os.getuid():
+            raise ValueError("Session runtime directory belongs to another user")
+
+        # Match the Wayland and control socket peers, as Cantrip's desktop
+        # monitor does. Never guess the newest socket from an SSH/TTY session.
+        connection, compositor = connect(wayland)
+        connection.close()
+        connection, control_peer = connect(runtime / "hypr" / signature / ".socket.sock")
+        with connection:
+            if control_peer != compositor:
+                raise ValueError("Wayland display and Hyprland instance do not identify the same session")
+            connection.settimeout(remaining())
+            connection.sendall(b"j/locked")
+            response = bytearray()
+            while True:
+                connection.settimeout(remaining())
+                chunk = connection.recv(min(4096, SESSION_REPLY_LIMIT + 1 - len(response)))
+                if not chunk:
+                    break
+                response.extend(chunk)
+                if len(response) > SESSION_REPLY_LIMIT:
+                    raise ValueError("Compositor session-state response is too large")
+        locked = session_json(response)
+        if not isinstance(locked, dict) or locked.get("locked") is not False:
+            raise ValueError("Hyprland is locked or its lock state is unknown")
+
+        # omarchy-shell normally guesses a display and chooses the newest
+        # shell. Instead require exactly one instance, verify its environment,
+        # and address it directly. Shared config can reload on other displays.
+        instances = query(["qs", "list", "-p", str(omarchy / "shell"), "--any-display", "--json"])
+        if not isinstance(instances, list) or len(instances) != 1 or not isinstance(instances[0], dict):
+            raise ValueError("Cannot identify a unique running Omarchy shell")
+        instance = instances[0]
+        pid = instance.get("pid")
+        identity = instance.get("id")
+        if type(pid) is not int or pid <= 0 or not isinstance(identity, str) or not identity:
+            raise ValueError("Omarchy shell identity is malformed")
+        if instance.get("config_path") != str(omarchy / "shell/shell.qml"):
+            raise ValueError("Omarchy shell configuration does not match the session")
+        shell_env = process_environment(pid)
+        if any(shell_env.get(key) != os.environ.get(key)
+               for key in ("HYPRLAND_INSTANCE_SIGNATURE", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR")):
+            raise ValueError("Omarchy shell and compositor do not identify the same session")
+        if not shell_env.get("HOME") or (Path(shell_env["HOME"]) / ".config").resolve() != config_dir.resolve():
+            raise ValueError("Omarchy shell does not use the installation's configuration directory")
+        state = query(["qs", "ipc", "--id", identity, "call", "--", "lock", "status"])
+        if not isinstance(state, dict) or any(
+                state.get(key) is not False for key in ("locked", "requested", "pending", "sessionLocked", "secure")):
+            raise ValueError("Omarchy shell is locked, locking, or its lock state is unknown")
+        current = (compositor, pid, identity)
+        if expected is not None and current != expected:
+            raise ValueError("The live session changed during installation")
+        remaining()
+        return current
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError) as error:
+        raise ValueError("Refusing live Omarchy installation: " + str(error)
+                         + "; apply only from an attended, unlocked graphical session") from None
 
 
 def tokens(text):
@@ -279,6 +431,8 @@ def apply_plan(installation):
     changes = [(path, content, old) for path, content, old in installation.writes if content != old]
     if not changes:
         return
+    config_dir = installation.plugin.parent.parent.parent
+    session = require_unlocked_session(config_dir) if is_live_config(config_dir) else None
     plugin = installation.plugin
     plugin_changes = [change for change in changes if change[0].parent == plugin]
     references = [change for change in changes if change[0].parent != plugin]
@@ -322,11 +476,15 @@ def apply_plan(installation):
             new_snapshot = tree_snapshot(staged)
             if tree_snapshot(plugin) != installation.previous_plugin:
                 raise ValueError("Plugin changed during staging; installation was not published")
+            if session is not None:
+                require_unlocked_session(config_dir, session)
             rename_atomic(staged, plugin, exchange=installation.previous_plugin is not None)
             published = True
             sync_directory(plugin.parent)
             sync_directory(workspace)
         for change in prepared:
+            if session is not None:
+                require_unlocked_session(config_dir, session)
             change.publish()
         if published and installation.previous_plugin is not None:
             preserve_workspace = True

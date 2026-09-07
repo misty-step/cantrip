@@ -171,13 +171,31 @@ still printing the available text. Keep the original file until satisfied.
 
 ## Omarchy integration
 
-The repository includes a status badge and menu route. Review the dry run first:
+The repository includes a status badge and menu route. Deploy only while attending
+the unlocked graphical session; review the dry run first:
 
 ```sh
 python3 integrations/omarchy/install.py
 python3 integrations/omarchy/install.py --apply
 omarchy menu summon cantrip
 ```
+
+Live `--apply` fails closed unless bounded, read-only probes identify the same
+Hyprland/Omarchy session and both explicitly report unlocked, with no requested
+or pending lock. Locked, unavailable, ambiguous, malformed, or timed-out state
+refuses installation before staging or backups. Run from a terminal in that
+graphical session: the installer will not guess a display from SSH/TTY, disable
+locking, unlock automatically, or provide a live bypass. Passing `--config-dir`
+for the live configuration does not skip these checks.
+
+The installer checks again before publishing the staged plugin and each changed
+configuration file. If safety changes during staging/publication, existing
+rollback preserves installed content (and may retain private backups). These
+checks are defense in depth, **not a guarantee against a check-to-lock race**:
+only the shell can coordinate hot reload with locking and fully close that race.
+Do not use unattended live deployment. Dry runs and already-current no-ops remain
+non-mutating without requiring a session probe; a distinct offline `--config-dir`
+fixture can still be installed without a running desktop.
 
 If replacing an existing personal badge, add `--replace-widget OLD_PLUGIN_ID`
 to both installer commands. Left-click keeps raw dictation; right-click opens
