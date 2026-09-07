@@ -246,7 +246,10 @@ def verify(args):
             built = True
             for mode, home_name, network in (("download-model", "download-home", "bridge"), ("smoke", "runtime-home", "none")):
                 home = root / home_name
-                (home / "data/cantrip/models").mkdir(parents=True, mode=0o700)
+                for relative in ("config", "data/cantrip/models", "state", "runtime"):
+                    path = home / relative
+                    path.mkdir(parents=True, exist_ok=True)
+                    path.chmod(0o700)
                 command = ["docker", "run", "--rm", "--platform", "linux/amd64", "--runtime=runc", f"--network={network}", "--user", f"{os.getuid()}:{os.getgid()}"]
                 mounts = [(directory, "/artifacts", True), (script, "/verify-release", True), (home, "/home/cantrip", False), (root / "models", "/home/cantrip/data/cantrip/models", mode == "smoke"), (root / "evidence", "/evidence", False)]
                 if args.previous_directory:
@@ -255,7 +258,10 @@ def verify(args):
                     command += ["--mount", f"type=bind,src={source},dst={target}" + (",readonly" if readonly else "")]
                 for key, value in {"HOME": "/home/cantrip", "XDG_CONFIG_HOME": "/home/cantrip/config", "XDG_DATA_HOME": "/home/cantrip/data", "XDG_STATE_HOME": "/home/cantrip/state", "XDG_RUNTIME_DIR": "/home/cantrip/runtime"}.items():
                     command += ["--env", f"{key}={value}"]
-                command += [image, "dbus-run-session", "--", "python3", "/verify-release", "--inside", mode]
+                inner = ["python3", "/verify-release", "--inside", mode]
+                if mode == "smoke":
+                    inner = ["dbus-run-session", "--", *inner]
+                command += [image, *inner]
                 result = run(*command, timeout=1200)
                 print(result.stdout.strip())
             proof = json.loads((root / "evidence/runtime.json").read_text())
