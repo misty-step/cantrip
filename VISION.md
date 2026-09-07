@@ -1,5 +1,9 @@
 # Cantrip — vision
 
+Optional product context, not a required workflow, live backlog, or authority over
+the user's current request. This file records product constraints and rationale;
+[README.md](README.md#work-and-documentation-ownership) explains work ownership.
+
 ## What this is
 
 Cantrip is local-first dictation for Linux on Wayland. You hold a key, speak,
@@ -45,14 +49,11 @@ owner-private local history supports recovery and evaluation.
 7. **Verified destination.** Focus and session uncertainty defer delivery; an
    uncertain keyboard or clipboard handoff never triggers an automatic retry.
 
-## Standards
+## Engineering posture
 
-- Correctness over novelty. ADRs before non-obvious behavior changes.
-- `cargo fmt`, `clippy -D warnings`, and tests that defend observable contracts.
-- Cold agents read `VISION.md`, then `AGENTS.md`, then ADRs.
-- Work comes from the operator's current request. Check live code and overlapping
-  work before starting. Report completed behavior and verification evidence in
-  the session or PR; historical issues remain context, not a required queue.
+Correctness over novelty. Record non-obvious accepted decisions with their
+rationale; keep executable checks and contributor procedures in
+[README.md](README.md#development), not a second workflow in this vision.
 
 ## Non-goals
 
@@ -71,11 +72,11 @@ owner-private local history supports recovery and evaluation.
 
 ## Excellent outcomes
 
-**Near (weeks):** Install, doctor, hotkey, dictate a paragraph with guarded
+**Core experience:** Install, doctor, hotkey, dictate a paragraph with guarded
 paste-first delivery and a legible outcome. Failures leave independently
 recoverable recordings. Repository checks prove the contracts above.
 
-**Horizon (~6–12 months):** Indispensable daily driver on mainstream Wayland
+**Long-term product aim:** Indispensable daily driver on mainstream Wayland
 setups: reliable long-form dictation, configurable cleanup without drama,
 boring ops (timeouts, doctor truth, no hung inject children), and a public story
 (README + site) that matches the binary. Still one crate. Still local-first.
@@ -84,5 +85,5 @@ boring ops (timeouts, doctor truth, no hung inject children), and a public story
 
 Prefer the change that keeps speech local, delivery atomic, progress honest, and
 the daemon unblocked. Reject scope that adds platforms, UI frameworks, or cloud
-identity. When two tickets both help, pick the one that removes a lie, a hang,
-or a privacy hole before polish.
+identity. Lies about outcomes, hangs, and privacy holes are product risks, not
+a priority queue maintained in this file.

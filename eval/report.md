@@ -1,5 +1,11 @@
 # Cantrip transcription + post-processing gauntlet — findings (updated 2026-08-13)
 
+Historical result interpretation for the dated corpus, provider prices, model
+versions, and host conditions below. These rankings are not current universal
+model guidance or a new evaluation run. Keep this report and its baseline
+identity intact; [the evaluation guide](../docs/EVALUATION.md) separates current
+procedures, accepted contracts, and proposed evaluation design.
+
 ## Setup
 
 - 5 clips (16 kHz mono WAV, 5-20 s): `jfk` (public domain, loud), LibriSpeech

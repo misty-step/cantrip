@@ -78,8 +78,10 @@ deterministic Rust pipeline. Extend `examples/eval` with pure graders. Add a
 separate Harbor package only if a later requirement evaluates interactive
 daemon behavior in an isolated keyboard/clipboard/PipeWire environment.
 
-The first implementation slice is limited to the behavior manifest schema,
-pure deterministic graders, split filtering, per-dimension result/board
-output, and self-describing `run.json`. Do not change production fallback
-heuristics, add cloud lanes, or promote a new baseline until the existing
-24-case regression set has been reviewed under the new grader.
+The amendment records an accepted evaluation contract, not an active execution
+checklist or proof that every grader and report field has shipped.
+[The evaluation guide](../EVALUATION.md) retains the proposed corpus/reporting
+design, reproducibility procedures, and baseline protections. Linear owns any
+selected implementation work. Grader changes remain outside production
+post-processing heuristics, and baseline promotion requires review of the
+existing regression cases under the new scorer.

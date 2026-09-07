@@ -245,7 +245,8 @@ documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 `examples/eval` is a reproducible harness that scores any configured STT and
 post-proc lane over a 5-clip reference set (WER/CER, latency, cost) and ranks
-arrangements. Findings and reproduction steps: [`docs/EVALUATION.md`](docs/EVALUATION.md).
+arrangements. Reproduction procedures, accepted evaluation contracts, and clearly
+separated historical findings/design proposals: [`docs/EVALUATION.md`](docs/EVALUATION.md).
 
 ## Development
 
@@ -274,6 +275,24 @@ installer safety tests, stopping at the first red gate.
 - Architecture decisions: [`docs/adr/`](docs/adr/). Log tags: `[Daemon]`
   `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 
+## Work and documentation ownership
+
+Work starts from the user's current request, checked against live code and
+overlapping work. Linear owns current work, prioritization, and selected unresolved
+opportunities; neither an old issue nor a document authorizes automatic intake.
+Powder is retired. [ADR 0017](docs/adr/0017-powder-board-of-record.md) preserves
+the earlier migration and its rejection of duplicate boards, not live routing.
+GitHub issue history remains context rather than a second backlog.
+
+The repository owns version-bound product/system contracts, accepted technical
+decisions, portable procedures, and curated public/synthetic eval inputs and
+baselines. Linear holds safe work summaries and links to proof; raw, large, or
+sensitive run output belongs in approved retained artifact storage, subject to
+the existing privacy boundary. Owner-private recording history stays local and
+never becomes a repository fixture or work attachment automatically.
+[VISION.md](VISION.md) is optional product rationale, not mandatory reading or
+a higher authority than the request.
+
 ## Prior art & credits
 
 Design informed by [Handy](https://github.com/cjpais/Handy) (and its
@@ -289,5 +308,12 @@ architecture and privacy rules carry over.
 
 - [Configuration](docs/CONFIGURATION.md)
 - [Evaluation gauntlet](docs/EVALUATION.md)
-- [Architecture decisions](docs/adr/)
+- [Architecture decisions](docs/adr/) — chronological rationale, not a flat list
+  of current implementation requirements. Older decisions retain their original
+  evidence and link forward where superseded.
+  - [Per-take recovery and verified delivery](docs/adr/0019-per-take-recovery-and-verified-delivery.md),
+    refined by [local completion and explicit audio deletion](docs/adr/0020-local-completion-and-explicit-audio-deletion.md)
+    and the [signed waveform contract](docs/adr/0021-signed-pixel-waveform.md).
+  - [Private history and fixture promotion](docs/adr/0013-local-transcript-history.md)
+    and [eval-driven post-processing](docs/adr/0012-eval-driven-postprocessing.md).
 - Marketing/docs site scaffold: [`site/`](site/)

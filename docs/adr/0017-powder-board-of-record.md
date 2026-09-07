@@ -1,6 +1,18 @@
 # ADR 0017: Powder is the board of record
 
-Date: 2026-08-21. Status: accepted (operator decision, same day).
+Date: 2026-08-21. Status: superseded for current work routing (2026-09-07);
+accepted as an operator decision on the original date.
+
+Powder is retired. The user's current request remains authority; Linear owns
+current work, prioritization, and selected unresolved opportunities. See
+[README.md](../../README.md#work-and-documentation-ownership). This record does
+not instruct agents to poll Powder, revive GitHub intake, run the old factory,
+or re-import historical jobs. The reason for one work ledger rather than
+duplicate boards still applies.
+
+The decision and verification below describe the 2026-08-21 migration. They are
+preserved historical claims, not a fresh check of services, repository settings,
+or board state.
 
 ## Problem
 
@@ -14,7 +26,7 @@ selected only `forest:ready` GitHub Issues, wrote
 a Powder job. The local Kernel binary predated even `agents:` in
 `forest.yaml` and failed to parse the repository configuration.
 
-## Decision
+## Original decision (superseded)
 
 1. **Powder owns scheduling.** Every open GitHub Issue became a Powder job
    `cantrip-<n>-<slug>` in repository `misty-step/cantrip` on the Sanctum
@@ -41,7 +53,7 @@ a Powder job. The local Kernel binary predated even `agents:` in
    (`~/.config/iron-forest/cantrip.env`) sets `POWDER_AGENT=forest-cantrip`,
    one identity for this Kernel, not shared across repositories.
 
-## Consequences
+## Consequences at the time
 
 There is one board. Poll wakes on takeable Powder jobs for
 `repo: misty-step/cantrip` with a nonempty spec; leftover
@@ -51,7 +63,7 @@ trivial. The cost is that GitHub stars, watchers, and external issue
 traffic no longer feed the factory automatically; humans who find a bug
 need Powder access or an intermediary.
 
-## Verification
+## Historical verification (2026-08-21)
 
 - All 37 jobs created; blockers wired (#59 → ten children, #47 → #55,
   #63 → #66, #71 → #68, #72 → Langfuse project gate, #15/#19 → test

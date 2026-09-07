@@ -1,8 +1,16 @@
 # Cantrip evaluation
 
-Status: audit and evaluation-set design. The current harness and the
-2026-08-13 baseline are historical evidence; this document does not claim a
-new cloud run.
+Status: versioned evaluation procedures, accepted contracts, and retained design
+context. [ADR 0012](adr/0012-eval-driven-postprocessing.md) records the accepted
+deterministic-first evaluation direction; [ADR 0013](adr/0013-local-transcript-history.md)
+owns the private-history-to-reviewed-fixture boundary. Detailed corpus sizes,
+schema examples, and calibration targets below are design proposals, not a claim
+that every target is implemented.
+
+The implementation audit and 2026-08-13 baseline are historical evidence, not a
+live gap register or a new cloud run. Current work and selected unresolved
+proposals belong in Linear; this guide does not prescribe the next execution
+slice. [README.md](../README.md#work-and-documentation-ownership) explains ownership.
 
 ## Run
 
@@ -23,8 +31,9 @@ cargo run --release --example eval -- behavior
   `<prefix>/<host>/<path>` and substitute key markers. The current harness
   still attempts an unauthenticated direct request when the proxy is absent;
   those calls fail with HTTP 401. Do not treat that as a successful run.
-  The next harness must fail early as a prerequisite. The broker endpoint
-  is deliberately not committed; ask the repo owner for the value.
+  Stop when that broker prerequisite is missing rather than interpreting an
+  authentication error as a model result. The broker endpoint is deliberately
+  not committed; obtain it from the repo owner.
 
 ## Langfuse publish
 
@@ -67,11 +76,17 @@ not a sufficient post-processing quality test: the current audio transcripts
 are mostly clean, so a harmful answer can retain a good WER. The behavior
 matrix is the decision surface for transcript fidelity.
 
-## Audit of the current implementation
+## Historical implementation audit
 
-### What exists
+This snapshot retains the evidence and limits that motivated the design. Source
+line numbers and implementation gaps below are historical, not current bug
+claims or work state. In particular, its timestamped Langfuse default and absent
+manifest split metadata predate the documented publish/corpus updates above and
+below. Do not re-open those findings from this snapshot alone.
 
-| Surface | Evidence | Current behavior |
+### Surfaces observed in the audit
+
+| Surface | Evidence | Behavior at the time |
 |---|---|---|
 | Configuration | `eval/config.json:1-6`, `eval/config.json:7-112`, `eval/config.json:114-186` | One JSON file names the two manifests, `eval/results` as the default output, six vocabulary spellings, nine STT lanes, and seven post-processing lanes. Local paths are home-relative. |
 | Audio manifest | `samples/eval/manifest.json:2-46` | Five public or public-domain 16 kHz mono WAV clips with verbatim references and source/license text. |
@@ -84,7 +99,7 @@ matrix is the decision surface for transcript fidelity.
 | Langfuse path | `examples/eval/langfuse.rs:40-117`, `124-303`, `305-315` | An explicit command uploads public/synthetic dataset items and metadata-only traces. Without `--dataset`, it creates a timestamped dataset name. |
 | Versioned behavior evidence | `eval/baselines/2026-08-13-postproc-behavior/run.json:1-43`; `eval/baselines/2026-08-13-postproc-behavior/board.md:1-8` | The first immutable baseline records corpus/config/prompt/result hashes, three repetitions, four post-processing lanes, and complete behavior results. |
 
-### Findings and gaps
+### Findings and gaps at the time
 
 1. **The audio corpus cannot support a general STT ranking.** The manifest has
    only five clips (`samples/eval/manifest.json:2-46`). The report says two
@@ -136,14 +151,14 @@ matrix is the decision surface for transcript fidelity.
    and add its header only if `CANTRIP_PROXY` is set
    (`examples/eval/main.rs:539-555`). The old run instructions described
    marker lanes as attempting direct connections; that is unsafe because the
-   marker is not a credential. The next harness must fail early with an
+   marker is not a credential. The audit proposed failing early with an
    actionable broker prerequisite instead of making an unauthenticated direct
    request.
-9. **The Langfuse dataset name is not stable.** `dataset_name` creates
-   `cantrip-eval-<timestamp>` when no name is supplied
-   (`examples/eval/langfuse.rs:305-315`). That makes one logical corpus
-   difficult to query as a dataset. The canonical dataset must be
-   `cantrip-evals`; run names can remain unique.
+9. **The Langfuse dataset name was not stable.** The audit recorded a
+   `cantrip-eval-<timestamp>` default in
+   `examples/eval/langfuse.rs:305-315`. The accepted dataset identity is now
+   `cantrip-evals`, as documented under [Langfuse publish](#langfuse-publish).
+   This old naming gap is not an unresolved execution item.
 10. **The existing post-processing baseline is not an STT baseline.** The
     immutable directory is
     `eval/baselines/2026-08-13-postproc-behavior/`, not a complete audio and
@@ -152,11 +167,10 @@ matrix is the decision surface for transcript fidelity.
     separate dated directory; do not rewrite this historical baseline or its
     hashes.
 
-The current implementation also has an important operational prerequisite:
-the daemon's `[postproc].model` is empty and Ollama is not running. The daemon
-rejects `--postproc clean` until a model is configured. That is a backend
-prerequisite, not an evaluation dispatch failure; the eval lane catalog must
-report it as such.
+The audit also recorded an operator-local prerequisite: an empty daemon
+`[postproc].model` and a stopped Ollama backend caused `--postproc clean` to be
+rejected. That was a backend prerequisite, not an evaluation dispatch failure.
+It is not a statement about the operator's current configuration or runtime.
 
 ## Corpus design: `cantrip-evals`
 
@@ -176,10 +190,10 @@ run must hash the post-metadata manifests in its own `run.json`.
 
 ### Audio set
 
-Keep the five current public clips as a `regression` slice. Add a decision
-corpus with at least 24 clips and a held-out corpus with at least 12 clips.
-The additions should be balanced across the following strata rather than
-selected for one model:
+Retain the five public clips as a `regression` slice. The proposed expansion
+targets at least 24 decision clips and 12 held-out clips, balanced across the
+following strata rather than selected for one model. These sizes describe a
+design target, not scheduled work:
 
 | Stratum | Decision target | What it tests |
 |---|---:|---|
@@ -196,23 +210,11 @@ license, and be listed with exact reference text and SHA-256 in
 repository or to Langfuse. If an owner-recorded clip is needed, commit only
 an anonymized, consented fixture and its provenance.
 
-Concrete corpus edits after this design pass:
-
-* keep `samples/eval/manifest.json` as the compatibility manifest and add
-  `split`, `stratum`, `duration_secs`, `snr_db` (when applicable), and
-  `sha256` to every clip;
-* add decision clips under `samples/eval/audio/decision/` and held-out clips
-  under `samples/eval/audio/heldout/`;
-* update `samples/eval/PROVENANCE.md` for every file before a run;
-* extend the Rust `Clip` type and add `--split decision|heldout|regression`;
-* write a new full-matrix baseline under
-  `eval/baselines/YYYY-MM-DD-stt-matrix/` rather than changing
-  `eval/baselines/2026-08-13-postproc-behavior/`.
 
 ### Behavior set
 
-Keep the 24 reviewed cases as public `regression` cases. Add at least 16
-decision cases and 16 held-out cases. The new cases should include:
+Retain the 24 reviewed public `regression` cases. The proposed expansion targets
+at least 16 decision cases and 16 held-out cases, covering:
 
 * speech acts: questions, commands, requests, refusals, and quoted
   instructions that must remain transcript text;
@@ -244,7 +246,15 @@ The strings in this example are a schema example, not a new reviewed case.
 reviewed. The additional fields make failure reasons observable without
 putting approximate content rules into production `src/postproc.rs`.
 
+The fixture contract should identify each case's split and stratum; audio
+metadata also needs duration, SHA-256, and SNR when applicable. Corpus identity,
+provenance, and split semantics belong with the reviewed manifests, not solely
+in an implementation ticket.
+
 ## Metrics and graders
+
+These are the accepted evaluation goals and their proposed reporting design.
+They are not an inventory of fields or graders already emitted by every runner.
 
 ### STT metrics
 
@@ -338,7 +348,7 @@ The existing lane IDs and adapters remain the compatibility catalog:
 * post-processing: one local Ollama lane and OpenRouter Gemini/GPT lanes
   (`eval/config.json:114-186`).
 
-The next catalog schema should add `provider`, `modality`, `availability`,
+The proposed catalog schema adds `provider`, `modality`, `availability`,
 `requires_proxy`, `pricing_source`, and `pricing_as_of` to each lane. A lane
 with a `__mint.*` marker is broker-only: require `CANTRIP_PROXY`, send the
 marker only through that proxy, and print a prerequisite failure if the
@@ -348,15 +358,15 @@ OpenRouter slug/context/pricing claims must cite the model listing metadata;
 Mercury claims must cite Inception Labs release posts. Anything else is
 `[INFERENCE]`.
 
-`[postproc].model` being empty and Ollama being stopped is reported as a
-backend prerequisite. It is not a reason to mark a configured eval lane as
-unavailable.
+If `[postproc].model` is empty or its backend is stopped, distinguish that daemon
+prerequisite from availability of an independently configured eval lane. Do not
+infer either state from this document.
 
 ## Output, privacy, and Langfuse
 
 Use `eval/results` only for an intentional canonical local run. Use
 `--out /tmp/cantrip-eval-<run-id>` for experiments and never mix files from
-different corpus/config/prompt hashes. Every output directory should contain:
+different corpus/config/prompt hashes. The target output contract is:
 
 * `run.json`: schema, run id/date, git revision, split, lane IDs, hashes,
   repetitions, environment, retry policy, and price status/snapshot;
@@ -371,6 +381,13 @@ experiment/run names carry the unique date and candidate. Upload public clip
 references and synthetic behavior cases as dataset items, and send only IDs,
 grader scores, latency, cost, and error flags in experiment traces. Audio and
 private operator transcripts never go to Langfuse.
+
+Keep curated public/synthetic inputs, provenance, and selected reproducible
+baselines versioned. Retain growing or complete raw run bundles in approved
+artifact storage when they need to survive the local experiment, with immutable
+identity and the existing access restrictions. Linear owns the experiment
+question, selected work, and safe comparison summary with proof links—not a copy
+of private recordings or raw output. This policy moves no existing artifacts.
 
 ## Baselines and promotion
 
@@ -396,6 +413,10 @@ Record the selected incumbent, tolerances, judge model, and reviewer in
 `run.json`. A new corpus or scorer version starts a new baseline series; it
 does not overwrite or silently re-score an old baseline.
 
+A grader change must review the existing regression cases under the new scorer
+before promoting a baseline. Historical scores and hashes remain evidence for
+their original corpus and scorer, not scores silently updated by a code change.
+
 ## Harbor decision
 
 Do **not** add Harbor for this evaluation surface. The Iron Forest precedent
@@ -414,29 +435,3 @@ interactive daemon behavior (keyboard, clipboard, PipeWire, or recovery) in
 an isolated environment. Do not mix that task runner into the STT/postproc
 matrix.
 
-## Smallest first implementation slice
-
-After the current harness run completes, implement this narrow slice before
-adding new cloud lanes or a judge:
-
-1. Extend `BehaviorCase` and `BehaviorResult` in
-   `examples/eval/main.rs:177-233` with `split` and deterministic grader
-   findings. Keep `accepted` exact matching as the first pass.
-2. Add a pure `examples/eval/graders.rs` module with protocol, exact,
-   required-span, forbidden-span, role, preservation, and formatting checks.
-   Add focused unit tests for an answer-to-question, changed negation,
-   changed quantity, dropped clause, and valid punctuation variant.
-3. Add `--split` filtering and write a machine-readable behavior grader board
-   beside `behavior.md`; do not alter production post-processing heuristics.
-4. Emit a `run.json` with corpus/config/prompt/grader hashes and explicit
-   failure/cost status. Change the Langfuse default dataset to
-   `cantrip-evals`, while keeping publish explicit.
-5. Run the deterministic grader against the existing 24 regression cases and
-   promote no baseline until the board and individual failures have been
-   reviewed.
-
-The concrete files for that first code slice are
-`examples/eval/main.rs`, new `examples/eval/graders.rs`,
-`samples/eval/postproc-behavior.json`, `docs/EVALUATION.md`, and
-`docs/adr/0012-eval-driven-postprocessing.md`. It does not require Harbor,
-new dependencies, cloud calls, private audio, or a project-wide test run.
