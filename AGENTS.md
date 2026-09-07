@@ -1,6 +1,9 @@
 # Cantrip
 
-Cantrip is a local-first Linux dictation app: one Rust crate and the `cantrip` binary. Read [`VISION.md`](VISION.md) before changing product behavior; add an ADR in `docs/adr/` for a non-obvious architectural decision.
+Cantrip is a local-first Linux dictation app: one Rust crate and the `cantrip`
+binary. Start with [`README.md`](README.md) and the contract relevant to the
+request. `VISION.md` is optional context, not a required first read or product
+lock. Preserve non-obvious architectural decisions in `docs/adr/`.
 
 ## Code map
 
@@ -17,6 +20,7 @@ Cantrip is a local-first Linux dictation app: one Rust crate and the `cantrip` b
 - `src/pipeline.rs` — shared STT/postproc pipeline for the daemon and `transcribe`
 - `src/hud.rs` — layer-shell status HUD (`cantrip hud`)
 - `src/actions.rs` — explicit recording recovery and setup window
+- `src/settings.rs` — native configuration editor (`cantrip settings`)
 - `src/archive.rs`, `src/recovery.rs` — owner-private per-take history and retained audio
 - `src/theme.rs` — shared desktop palette
 - `src/telemetry.rs` — opt-in Langfuse OTLP export
@@ -54,4 +58,7 @@ cargo run -- transcribe samples/jfk.wav
 
 ## Work tracking and secrets
 
-Work from the operator's current request. Check current code and overlapping work before starting; report the result and verification evidence in the session or pull request. Historical issues are context, not a queue. Never commit secrets.
+Work from the operator's current request. Check current code and overlapping
+work before starting. Linear owns selected work and priorities; link the result
+and sanitized verification evidence from the work record and PR/session.
+Historical issues are context, not an intake queue. Never commit secrets.

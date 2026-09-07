@@ -1,7 +1,7 @@
 //! Cantrip: local-first dictation for Linux.
 //!
 //! Pipeline: trigger -> capture (pw-record) -> STT (Parakeet via transcribe-rs)
-//! -> inject (wtype | ydotool | clipboard).
+//! -> optional cleanup -> guarded native Wayland delivery (paste | type | clipboard).
 //!
 //! Privacy rule (inherited from Vox): never log transcript content, only
 //! character counts. Log tags use brackets: `[Daemon]`, `[Capture]`, `[STT]`,
