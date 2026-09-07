@@ -133,10 +133,9 @@ def inside(mode):
     require(config_file.is_file(), "native configuration initialization did not produce its configuration")
     protected[config_file] = sha256(config_file)
 
-    # The bus/keyring are private to this container; no operator credentials enter it.
-    run("gnome-keyring-daemon", "--unlock", "--components=secrets", input=secrets.token_hex(24) + "\n")
     credential = secrets.token_hex(24)
     run(str(installed), "key", "set", "release-verification", input=credential + "\n")
+    require(installed.is_file(), "installed executable vanished after keyring store")
     require(run(str(installed), "key", "status", "release-verification").stdout.strip() == "present", "native keyring store did not report the test credential")
     require(run("secret-tool", "lookup", "service", "cantrip", "username", "release-verification").stdout.rstrip("\n") == credential, "Secret Service did not retain the native credential")
 
@@ -260,7 +259,12 @@ def verify(args):
                     command += ["--env", f"{key}={value}"]
                 inner = ["python3", "/verify-release", "--inside", mode]
                 if mode == "smoke":
-                    inner = ["dbus-run-session", "--", *inner]
+                    password = secrets.token_hex(24)
+                    command += ["--env", f"CANTRIP_KEYRING_PASSWORD={password}"]
+                    inner = [
+                        "dbus-run-session", "--", "bash", "-euc",
+                        'eval "$(printf "%s\\n" "$CANTRIP_KEYRING_PASSWORD" | gnome-keyring-daemon --start --components=secrets --unlock)" && exec python3 /verify-release --inside smoke',
+                    ]
                 command += [image, *inner]
                 result = run(*command, timeout=1200)
                 print(result.stdout.strip())
