@@ -26,11 +26,12 @@ Work only in the assigned worktree; never change `master`. Keep credentials out 
 
 ## Select one rejected Revision
 
-1. Run `git fetch origin`, then `git ls-remote origin 'refs/heads/forest/*' 'refs/forest/v1/*'`.
-2. Choose one branch tip with both request and verdict refs. Record its branch and rejected SHA.
-3. Fetch the verdict ref, verify the committer is `Iron Forest Verifier <verifier@forest.invalid>`, and read `verdict.json`. Require `"verdict":"changes"` and a `revision` equal to the exact tip SHA.
-4. Fetch the request ref, verify the committer is `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`, and require its branch and revision to match the rejected tip.
-5. Check out that branch at the selected tip. Do not start from another revision or from `master`.
+1. Read the current request. Require the explicit Subject and, when supplied, the exact branch and rejected SHA. Do not enumerate unrelated `forest/*` tips or fall through to another eligible revision.
+2. Run `git fetch origin`, then inspect only matching refs: `git ls-remote origin "refs/heads/forest/$subject/*" 'refs/forest/v1/*'`.
+3. Choose the unique matching branch tip with both request and `changes` verdict refs. If the request named a branch or SHA, they must equal that tip. Ambiguous, stale, or unsupported targets are no-work; publish nothing.
+4. Fetch the verdict ref, verify the committer is `Iron Forest Verifier <verifier@forest.invalid>`, and read `verdict.json`. Require `"verdict":"changes"` and a `revision` equal to the exact tip SHA.
+5. Fetch the request ref, verify the committer is `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`, and require its branch, Subject, and revision to match the rejected tip.
+6. Check out that branch at the selected tip. Do not start from another revision or from `master`.
 
 ## Repair and hand off
 

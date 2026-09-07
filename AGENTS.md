@@ -5,40 +5,6 @@ binary. Start with [`README.md`](README.md) and the contract relevant to the
 request. `VISION.md` is optional context, not a required first read or product
 lock. Preserve non-obvious architectural decisions in `docs/adr/`.
 
-## Code map
-
-- `src/main.rs` — clap CLI (daemon and client subcommands)
-- `src/daemon.rs` — Idle/Recording/Processing state machine, socket server, worker
-- `src/ipc.rs` — Unix-socket `Command`/`Reply` protocol
-- `src/capture.rs` — `pw-record` child process
-- `src/stt.rs` — Parakeet via transcribe-rs
-- `src/models.rs` — model download and verification (`~/.local/share/cantrip/models`)
-- `src/inject.rs`, `src/desktop.rs` — bounded native Wayland delivery and verified focus/session permits
-- `src/config.rs`, `src/paths.rs` — TOML config and XDG paths
-- `src/postproc.rs` — OpenAI-compatible transcript cleanup
-- `src/keys.rs` — OS keyring API-key access
-- `src/pipeline.rs` — shared STT/postproc pipeline for the daemon and `transcribe`
-- `src/hud.rs` — layer-shell status HUD (`cantrip hud`)
-- `src/actions.rs` — explicit recording recovery and setup window
-- `src/settings.rs` — native configuration editor (`cantrip settings`)
-- `src/archive.rs`, `src/recovery.rs` — owner-private per-take history and retained audio
-- `src/theme.rs` — shared desktop palette
-- `src/telemetry.rs` — opt-in Langfuse OTLP export
-
-## Commands
-
-The exact toolchain version is pinned in `rust-toolchain.toml` with rustfmt and clippy components.
-
-```sh
-cargo build --locked
-cargo test --locked
-cargo clippy --locked --all-targets -- -D warnings
-cargo fmt --check
-cargo run -- transcribe samples/jfk.wav
-./scripts/check
-```
-
-`scripts/check` is the CI-equivalent sequence: fmt check, clippy `-D warnings`, tests, and installer/release safety tests.
 
 ## Contracts
 
@@ -53,8 +19,11 @@ cargo run -- transcribe samples/jfk.wav
 - Dismissal acknowledges feedback, never deletes artifacts. Forget requires explicit confirmation and removes only the selected take's retained audio and incomplete text; complete archived text stays.
 - Automatic delivery requires uninterrupted verified destination/session history. Unknown focus, lock, suspend, or reconnection defers; potentially completed handoffs are uncertain and never retried through another backend.
 - Keep the std-thread + mpsc process model; do not add an async runtime or a second durable work ledger.
-- Use `anyhow` context for fallible operations and reserve `unwrap()` for tests.
-- Use Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`) on the `master` branch.
+
+## Proof
+
+`./scripts/check` is the canonical CI-equivalent local gate and owns its
+contents. Choose a smaller command only for a named, changed surface.
 
 ## Work tracking and secrets
 

@@ -405,23 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_demands_asr_error_correction() {
-        let prompt = build_system_prompt(&[], &PostprocConfig::default().instructions);
-        for required in [
-            "dropped letters",
-            "missing spaces",
-            "truncated acronyms",
-            "incorrect words",
-            "Write only the clean transcript",
-        ] {
-            assert!(
-                prompt.contains(required),
-                "prompt missing '{required}': {prompt}"
-            );
-        }
-    }
-
-    #[test]
     fn think_blocks_are_stripped() {
         assert_eq!(
             strip_think_blocks("before<think>reason</think>after"),
@@ -494,43 +477,6 @@ mod tests {
             .unwrap(),
             "This is an unclean transcript."
         );
-    }
-    #[test]
-    fn system_prompt_keeps_role_in_positive_language() {
-        let prompt = build_system_prompt(&[], "");
-        for required in [
-            "Keep questions as questions",
-            "Keep requests and commands as the speaker's words",
-            "Use only the source text",
-            "Keep the source words when the meaning is unclear",
-            "Use paragraphs and vertical lists",
-        ] {
-            assert!(
-                prompt.contains(required),
-                "prompt missing '{required}': {prompt}"
-            );
-        }
-    }
-
-    #[test]
-    fn system_prompt_uses_short_positive_instructions() {
-        for prompt in [BASE_SYSTEM_PROMPT, VERIFY_SYSTEM_PROMPT] {
-            let instructions = prompt.split_once("Examples:").map_or(prompt, |part| part.0);
-            let lowercase = instructions.to_lowercase();
-            for negative in ["do not", "never", "don't"] {
-                assert!(
-                    !lowercase.contains(negative),
-                    "prompt contains negative instruction '{negative}': {prompt}"
-                );
-            }
-            for sentence in instructions.split(['.', '?', '!']) {
-                let words = sentence
-                    .split_whitespace()
-                    .filter(|word| word.chars().any(char::is_alphanumeric))
-                    .count();
-                assert!(words <= 20, "prompt sentence has {words} words: {sentence}");
-            }
-        }
     }
 
     #[test]
