@@ -93,6 +93,160 @@ keyring credential id, when needed, was stored with `cantrip key set`.
 Cancellation prevents later chunks, local fallback, cleanup requests, and delivery;
 an already-running provider request may need to return before the worker settles.
 
+## User service (graphical session)
+
+[`contrib/cantrip.service`](contrib/cantrip.service) provides optional systemd
+startup. `cantrip actions` uses an installed service, even when disabled; it
+does not enable it or start a competing daemon. Without a service, Actions can
+start a direct process. Neither path changes hotkeys.
+
+**Supported:** systemd 246 or newer, one Wayland session per Unix user, and a
+session manager that refreshes its environment before starting
+`graphical-session.target` and stops that target on logout. From the attended,
+unlocked graphical session, check:
+
+```sh
+systemctl --user is-active graphical-session.target
+systemctl --user show cantrip.service \
+  --property=LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState
+```
+
+If the target is inactive or the desktop does not manage its login/logout
+lifecycle, use Actions or the first-session terminal instead. Do not manually
+start the target or enable lingering to bypass missing session integration.
+If a personal/package service or compositor autostart already owns Cantrip,
+keep that owner or deliberately migrate it; do not install a second one.
+
+### Fresh installation
+
+Complete the first-session setup above. Finish or cancel the current take and
+stop its daemon through its existing owner; Ctrl+C stops a foreground daemon.
+`cantrip stop` ends recording, not the daemon. For an Actions-started process,
+identify its executable and PID before sending that specific process SIGTERM
+and waiting for exit; do not use a broad `pkill` or delete its socket.
+
+From the repository root, this block refuses existing binaries, units, masks,
+symlinks, and personal drop-in directories:
+
+```sh
+(
+  set -eu
+  unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  if [ "$(systemctl --user show cantrip.service --property=LoadState --value)" != not-found ]; then
+    printf '%s\n' 'Existing or unknown service owner; inspect it before replacing it.' >&2
+    exit 1
+  fi
+  for path in "$HOME/.local/bin/cantrip" "$unit_dir/cantrip.service" "$unit_dir/cantrip.service.d"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      printf 'Refusing to replace %s\n' "$path" >&2
+      exit 1
+    fi
+  done
+  mkdir -p "$HOME/.local/bin" "$unit_dir"
+  install -m755 ./target/release/cantrip "$HOME/.local/bin/cantrip"
+  install -m644 contrib/cantrip.service "$unit_dir/cantrip.service"
+  systemctl --user daemon-reload
+  systemctl --user cat cantrip.service
+)
+```
+
+Review the effective unit and any inherited drop-ins. It runs
+`%h/.local/bin/cantrip`, not a login-shell `PATH` lookup. To retain another
+executable location, skip the binary copy and use
+`systemctl --user edit cantrip.service` to set:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/absolute/path/to/cantrip daemon
+```
+
+### Environment and readiness
+
+Services inherit the user manager's environment, not the invoking terminal's.
+The session manager must supply the current `WAYLAND_DISPLAY` and, on Hyprland,
+`HYPRLAND_INSTANCE_SIGNATURE` before startup. Do not hard-code or guess them.
+To repair this login from its graphical terminal, before starting Cantrip:
+
+```sh
+systemctl --user import-environment WAYLAND_DISPLAY
+# On Hyprland:
+systemctl --user import-environment HYPRLAND_INSTANCE_SIGNATURE
+```
+
+A one-time import does not configure future logins; the session manager must
+refresh these values each login and retire them on logout. Import
+`XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE` if supplied by that session.
+`WAYLAND_SOCKET` must be absent. Keep the manager's runtime directory and D-Bus
+address; never import an entire shell environment or put keys in a unit.
+Custom XDG config/data/state paths and tool `PATH` must agree with the existing
+installation so models and recordings do not appear missing. Environment
+changes affect newly started processes, not an already-running daemon.
+
+After reviewing the environment:
+
+```sh
+systemctl --user enable cantrip.service
+systemctl --user start cantrip.service
+"$HOME/.local/bin/cantrip" ping
+"$HOME/.local/bin/cantrip" status --json
+"$HOME/.local/bin/cantrip" doctor
+```
+
+Use the overridden executable path if applicable. An active service is not
+dictation readiness: wait for successful IPC, inspect prerequisites, and make
+an attended trial in a safe destination. Diagnose failures with
+`journalctl --user -u cantrip.service -b --no-pager` and Actions, not a second
+daemon. After repairing repeated startup failures, run
+`systemctl --user reset-failed cantrip.service` before starting again.
+
+### Stop, update, and remove
+
+Finish/cancel a take and wait for Idle before routine maintenance:
+
+```sh
+systemctl --user stop cantrip.service          # stop now
+systemctl --user disable --now cantrip.service # also remove login enablement
+```
+
+The unit follows the [graphical-session lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemd.special.html#graphical-session.target).
+Explicit stops are not failure-restarted. `KillMode=mixed` lets the daemon stop
+`pw-record` with SIGINT and retain audio before terminating remaining children.
+A stuck shutdown is force-killed after 90 seconds; inspect failures rather than
+assuming runtime-only audio became durable. No unit action deletes retained data.
+
+For an update, build first, record the current enabled/running state, and make
+a private backup of the binary, unit, and drop-ins. Stop the existing owner
+and require a clean inactive result before replacement. For a regular binary
+at the default location, stage beside it and rename atomically:
+
+```sh
+(
+  set -eu
+  binary="$HOME/.local/bin/cantrip"
+  [ -f "$binary" ] && [ ! -L "$binary" ]
+  staged="$(mktemp "$HOME/.local/bin/.cantrip.XXXXXX")"
+  trap 'rm -f -- "$staged"' EXIT
+  install -m755 ./target/release/cantrip "$staged"
+  mv -T -- "$staged" "$binary"
+)
+```
+
+Use the package owner's procedure for package-managed installations. Leave
+unchanged units and personal drop-ins alone. When deliberately replacing a
+unit, disable its old enablement first, review/merge overrides, install the
+replacement, reload the manager, and restore the intended enablement. Recheck
+environment, IPC, and dictation. Roll back using the backed-up binary and only
+the changed unit settings; never restore whole directories over later edits.
+Binary rollback does not itself prove history-schema compatibility.
+
+To remove only the unit installed by this guide, disable it, remove its
+reviewed file at `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/cantrip.service`,
+and run `systemctl --user daemon-reload`. Inspect whether a lower-priority
+packaged unit becomes visible. Remove only drop-ins you deliberately created;
+keep the binary if bindings still use it. Configuration, models, keyring
+entries, runtime leftovers, and transcript history remain untouched.
+
 ## CLI
 
 | Command | Purpose |
@@ -263,8 +417,9 @@ cargo build
 ```
 
 `scripts/check` is the clone-to-green command: it runs `cargo fmt --check`,
-`cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Omarchy
-installer safety tests, stopping at the first red gate.
+`cargo clippy --all-targets -- -D warnings`, `cargo test`, the offline
+`cargo test --example eval` suite, and Omarchy installer safety tests,
+stopping at the first red gate. The example tests do not contact providers.
 
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`

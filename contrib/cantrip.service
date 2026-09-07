@@ -1,0 +1,23 @@
+[Unit]
+Description=Cantrip dictation daemon
+Documentation=https://github.com/misty-step/cantrip#user-service-graphical-session
+# The desktop owns this target; starting Cantrip must not create a session.
+Requisite=graphical-session.target
+After=graphical-session.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=exec
+ExecStart=%h/.local/bin/cantrip daemon
+Restart=on-failure
+RestartSec=5s
+# Let the daemon stop pw-record with SIGINT and retain the finalized take first.
+KillMode=mixed
+TimeoutStopSec=90s
+# No RuntimeDirectory=: runtime leftovers belong to Cantrip's recovery path.
+
+[Install]
+WantedBy=graphical-session.target
