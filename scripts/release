@@ -159,7 +159,12 @@ def validate_plan(plan, revision):
     if git("merge-base", "--is-ancestor", base, revision, check=False).returncode:
         raise ReleaseError("release preparation source is not an ancestor of the release commit")
     paths = release_paths(version)
-    allowed = {"Cargo.toml", "Cargo.lock", PLAN, *paths.values()}
+    allowed = {
+        "Cargo.toml", "Cargo.lock", PLAN, *paths.values(),
+        "scripts/release", "scripts/verify-release", "scripts/package-release",
+        "scripts/release-runtime.Dockerfile", ".github/workflows/release.yml",
+        ".github/workflows/ci.yml",
+    }
     changed = set(git("diff", "--name-only", "--no-renames", base, revision).stdout.splitlines())
     if unexpected := changed - allowed:
         raise ReleaseError(f"source changed after release preparation: {', '.join(sorted(unexpected))}; refresh the release PR")

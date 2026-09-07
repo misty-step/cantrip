@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise a downloaded release in Ubuntu 22.04 without Rust or a checkout."""
+"""Exercise a downloaded release in Ubuntu 24.04 without Rust or a checkout."""
 
 import argparse
 import hashlib
@@ -16,6 +16,7 @@ import time
 
 
 BASE_IMAGE = "ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517"
+REPOSITORY = "misty-step/cantrip"
 SIGNER = f"{REPOSITORY}/.github/workflows/release.yml"
 PAYLOAD = {"cantrip", "install.sh", "cantrip.service", "LICENSE", "INSTALLATION.md", "sample.wav", "manifest.json", "checksums.txt"}
 
