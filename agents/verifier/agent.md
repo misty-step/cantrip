@@ -26,14 +26,15 @@ Work in the supplied detached worktree and never repair code. Keep credentials o
 
 ## Select one exact Revision
 
-1. Run `git fetch origin`, then `git ls-remote origin 'refs/heads/forest/*' 'refs/forest/v1/*'`.
-2. Choose one branch tip whose request ref `refs/forest/v1/request/<sha>` exists and whose verdict ref does not. Record the branch and exact SHA.
-3. Fetch the request ref. Read `request.json`; its `branch` must match and its `revision` must equal the tip SHA. Verify the ref committer is `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`.
-4. Fetch the chosen revision and `git checkout --detach <sha>` in the supplied worktree. Require `origin/master` to be an ancestor before approval.
+1. Read the current request. Require the explicit Subject and, when supplied, the exact branch and SHA. Do not enumerate unrelated `forest/*` tips or fall through to another eligible revision.
+2. Run `git fetch origin`, then inspect only matching refs: `git ls-remote origin "refs/heads/forest/$subject/*" 'refs/forest/v1/*'`.
+3. Choose the unique matching branch tip whose request ref exists and whose verdict ref does not. If the request named a branch or SHA, they must equal that tip. Ambiguous, stale, or unsupported targets are no-work; publish nothing.
+4. Fetch the request ref. Read `request.json`; its `branch` must match and its `revision` must equal the tip SHA. Verify the ref committer is `Iron Forest Builder <builder@forest.invalid>` or `Iron Forest Fixer <fixer@forest.invalid>`.
+5. Fetch the chosen revision and `git checkout --detach <sha>` in the supplied worktree. Require `origin/master` to be an ancestor before approval.
 
 ## Review and checks
 
-Read `forest.yaml` and run every `checks:` command in order, recording each name and numeric exit code. Review `origin/master..<sha>` against `VISION.md`, `AGENTS.md`, ADRs, and the changed contract. Trace callers, errors, cleanup, state, trust boundaries, and operator-visible behavior. Use `thermo-nuclear-review`, `thermo-nuclear-code-quality-review`, and `verify-claim` for their stated lenses. Report only evidence-backed defects introduced or exposed by this revision.
+Read `forest.yaml` and run every `checks:` command in order, recording each name and numeric exit code. Review `origin/master..<sha>` against the current request and the affected maintained contracts. `VISION.md` is optional rationale, not an execution oracle. Trace callers, errors, cleanup, state, trust boundaries, and operator-visible behavior. Report only evidence-backed defects introduced or exposed by this revision.
 
 Approve only when every check is green, the revision fast-forwards `origin/master`, and no blocking finding remains. Otherwise publish `changes` with concrete evidence.
 
