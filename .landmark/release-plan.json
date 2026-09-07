@@ -1,0 +1,54 @@
+{
+  "base_revision": "c7ef04a1f3a836f090141d8c6a282a5269b2879b",
+  "landmark_sha256": "d3e7400abcf72428f801aae3d9ed74412d5ced31eecc6be753a48027a6441ed9",
+  "landmark_version": "0.28.7",
+  "previous_tag": "",
+  "schema_version": 1,
+  "tag": "v0.1.0",
+  "technical_changelog_sha256": "b31a636309772835058d5f22a0d10c6885975d3e1e3ebfdbfab8109260b89c15",
+  "version": "0.1.0",
+  "version_decision": {
+    "api_evidence": {
+      "baseline": "",
+      "bump": "none",
+      "command": "cargo semver-checks --baseline-rev ",
+      "exit_code": 0,
+      "failure_message": "",
+      "findings": [],
+      "provider": "cargo-semver-checks",
+      "status": "skipped",
+      "summary": "no previous release tag; cargo-semver-checks needs a baseline",
+      "target": "HEAD"
+    },
+    "api_evidence_bump": "none",
+    "bump": "patch",
+    "commit_bump": "minor",
+    "commit_count": 112,
+    "conventional_commit_count": 106,
+    "decisive_commit": "1fb30a0 feat: milestone 1 \u2014 local dictation daemon (pw-record \u2192 Parakeet \u2192 inject)",
+    "decisive_signals": [
+      "commit:1fb30a0 feat: milestone 1 \u2014 local dictation daemon (pw-record \u2192 Parakeet \u2192 inject)",
+      "api-evidence:cargo-semver-checks skipped no previous release tag; cargo-semver-checks needs a baseline"
+    ],
+    "latest_tag": "",
+    "range": "HEAD",
+    "raw_bump": "minor",
+    "reconciliation": "unavailable",
+    "stability": "pre-stable",
+    "unknown_commits": [
+      "daf82c0 Import organization root context into AGENTS.md",
+      "15d20bb Enable auto-merge now that the toolchain path is proven",
+      "beaecea Keep Iron Forest's run artifacts out of this repository's gates",
+      "a914371 Merge pull request #58 from misty-step/forest/onboard-current-kernel",
+      "1488eb1 Merge remote-tracking branch 'origin/master'",
+      "50e889b Merge remote-tracking branch 'origin/master' into forest/cantrip-20-daemon-state-machine-and-socket-integration-test/recorder-boundary-tests"
+    ],
+    "waiver": {
+      "kind": "",
+      "reason": "",
+      "required": false,
+      "status": "not-required"
+    }
+  },
+  "version_origin": "initial Cargo package version"
+}
