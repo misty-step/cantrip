@@ -301,9 +301,13 @@ def decide():
     release = release_by_tag(f"v{version}")
     if (ROOT / PLAN).is_file() and not (release and not release["draft"]):
         plan = json.loads((ROOT / PLAN).read_text())
-        validate_plan(plan, revision)
-        emit(mode="publish", version=version, source_revision=revision, previous_tag=plan.get("previous_tag") or "")
-        return
+        try:
+            validate_plan(plan, revision)
+        except ReleaseError:
+            pass
+        else:
+            emit(mode="publish", version=version, source_revision=revision, previous_tag=plan.get("previous_tag") or "")
+            return
     with landmark() as binary:
         run(binary, "doctor", "--format", "json")
         evidence = json.loads(run(binary, "run", "--provider", "local", "--repository", REPOSITORY, "--dry-run").stdout)
