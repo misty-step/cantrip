@@ -44,7 +44,7 @@ min_chars = 40            # skip cleanup under this length; 0 = never skip
 instructions = ""         # optional extra style guidance
 
 [hud]
-labels = false             # show stage labels continuously
+labels = false             # true = continuous accessibility stage labels
 # reduced_motion = true    # true/false override; omit to follow desktop preference
 ```
 
@@ -219,11 +219,27 @@ the destination before retrying. Cantrip never retries an uncertain handoff.
 
 ## `[hud]` — passive status
 
-`labels = true` keeps stage text visible. `reduced_motion = true` or `false`
-overrides the desktop preference; omit it to follow the desktop. The HUD never
-takes focus or accepts pointer input. Waveform and chunk progress come from the
-daemon's measurements; a stale connection is shown as unknown, not Ready.
+Default words are reserved for actionable exceptions: unavailable input,
+cancellation, failed or partial outcomes, uncertain or deferred delivery, and
+manual-paste feedback. There is no timed reveal, long-recording label or latched
+caption. `labels = true` keeps stage text visible as an accessibility override.
+
+Listening shows 60 independent signed PCM pixel columns, sampled every 100 ms.
+A fixed 1.6× gain before square-root scaling makes quiet speech more visible
+without changing the silence floor. Each side attacks quickly and releases more
+slowly to silence; neighboring columns are never blended.
+
+Transcription uses a broad flowing ripple; finishing, finalizing and delivery
+use slower centered breathing. Both indicate indeterminate activity, not a timer
+or completion estimate. Phase changes crossfade from the last presented frame.
+Only measured chunk reports advance the center-row progress fill.
+
+`reduced_motion = true` or `false` overrides the desktop preference; omit it to
+follow the desktop. Reduced motion freezes indeterminate activity and presents
+measurements directly. Stale or disconnected status stops live animation and
+shows unknown, not Ready. The HUD never takes focus or accepts pointer input.
 HUD, Actions, and Settings use the active Omarchy palette when available.
+See [ADR 0021](adr/0021-signed-pixel-waveform.md) for the rendering contract.
 
 ## Opt-in telemetry (`[telemetry]`)
 

@@ -35,7 +35,8 @@ owner-private local history supports recovery and evaluation.
 1. **Local by default.** Speech stays on the machine unless the operator opts in.
    Installed local recognition is the automatic safety net for cloud failures.
 2. **Paste-first delivery.** Paragraphs survive; type mode never touches the clipboard.
-3. **Honest HUD.** Static phases; determinate fill only from measured multi-chunk STT.
+3. **Honest HUD.** Indeterminate activity stays distinct from progress; determinate
+   fill advances only from measured multi-chunk STT.
 4. **Small process model.** No async runtime; std threads + mpsc; one warm worker.
 5. **Operator evidence.** Each stopped recording and its saved text remain
    independently recoverable in owner-private history. Cancellation and successful

@@ -14,7 +14,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub type AudioWaveform = [[i8; 2]; AUDIO_WAVEFORM_BINS];
+/// Chronological `[minimum, maximum]` raw signed 16-bit PCM samples.
+pub type AudioWaveform = [[i16; 2]; AUDIO_WAVEFORM_BINS];
 pub(crate) const REQUEST_LIMIT: usize = 4_096;
 pub(crate) const REPLY_LIMIT: usize = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -211,7 +212,56 @@ pub struct Capabilities {
 pub struct AudioSignal {
     pub level: u8,
     pub silent: bool,
+    #[serde(
+        serialize_with = "serialize_waveform",
+        deserialize_with = "deserialize_waveform"
+    )]
     pub waveform: AudioWaveform,
+}
+
+fn serialize_waveform<S: Serializer>(
+    waveform: &AudioWaveform,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    waveform.as_slice().serialize(serializer)
+}
+
+fn deserialize_waveform<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<AudioWaveform, D::Error> {
+    struct WaveformVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for WaveformVisitor {
+        type Value = AudioWaveform;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "exactly {AUDIO_WAVEFORM_BINS} pairs of signed 16-bit PCM samples"
+            )
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut waveform = [[0, 0]; AUDIO_WAVEFORM_BINS];
+            for (index, pair) in waveform.iter_mut().enumerate() {
+                *pair = sequence
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(index, &self))?;
+            }
+            if sequence.next_element::<[i16; 2]>()?.is_some() {
+                return Err(serde::de::Error::invalid_length(
+                    AUDIO_WAVEFORM_BINS + 1,
+                    &self,
+                ));
+            }
+            Ok(waveform)
+        }
+    }
+
+    deserializer.deserialize_seq(WaveformVisitor)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +501,61 @@ mod tests {
     #[test]
     fn incomplete_audio_signal_is_rejected() {
         assert!(serde_json::from_str::<AudioSignal>(r#"{"level":72,"silent":false}"#).is_err());
+    }
+
+    #[test]
+    fn audio_signal_wire_preserves_full_range_pcm_pairs() {
+        let waveform = std::array::from_fn(|index| {
+            let index = i16::try_from(index).expect("test bucket fits i16");
+            [i16::MIN + index, i16::MAX - index]
+        });
+        let signal = AudioSignal {
+            level: 100,
+            silent: false,
+            waveform,
+        };
+        let wire = serde_json::json!({
+            "level": 100,
+            "silent": false,
+            "waveform": waveform.as_slice(),
+        });
+        assert_eq!(wire["waveform"].as_array().unwrap().len(), 60);
+        assert_eq!(serde_json::to_value(signal).unwrap(), wire);
+        assert_eq!(serde_json::from_value::<AudioSignal>(wire).unwrap(), signal);
+    }
+
+    #[test]
+    fn audio_signal_rejects_wrong_waveform_lengths() {
+        for length in [59, 61] {
+            let wire = serde_json::json!({
+                "level": 0,
+                "silent": true,
+                "waveform": vec![[0, 0]; length],
+            });
+            assert!(
+                serde_json::from_value::<AudioSignal>(wire).is_err(),
+                "a waveform with {length} pairs must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_signal_rejects_malformed_or_out_of_range_pairs() {
+        for invalid_pair in [
+            serde_json::json!([0]),
+            serde_json::json!([0, 0, 0]),
+            serde_json::json!([-32_769, 0]),
+            serde_json::json!([0, 32_768]),
+        ] {
+            let mut waveform = vec![serde_json::json!([0, 0]); 60];
+            waveform[59] = invalid_pair;
+            let wire = serde_json::json!({
+                "level": 0,
+                "silent": true,
+                "waveform": waveform,
+            });
+            assert!(serde_json::from_value::<AudioSignal>(wire).is_err());
+        }
     }
 
     #[test]

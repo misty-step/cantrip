@@ -2,6 +2,10 @@
 
 Date: 2026-08-14. Status: accepted.
 
+The measurement window, waveform representation and rendering described here are
+superseded by [ADR 0021](0021-signed-pixel-waveform.md). The shared capture stream,
+cached observations and signal-health contract remain.
+
 ## Problem
 
 The existing recording capsule proves that `pw-record` started and shows elapsed

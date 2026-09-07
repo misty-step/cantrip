@@ -127,7 +127,8 @@ enum State {
         wav: PathBuf,
         config: Box<Config>,
         started: Instant,
-        signal: Option<InputSignal>,
+        // Allocate the waveform cache once per take, not on each signal update.
+        signal: Box<Option<InputSignal>>,
         next_signal_sample: Instant,
     },
     Processing {
@@ -1014,7 +1015,7 @@ fn start_recording(
                 wav,
                 config: Box::new(config),
                 started,
-                signal: None,
+                signal: Box::new(None),
                 next_signal_sample: started,
             };
             tracing::info!("[Daemon] state idle -> recording");
@@ -1333,7 +1334,7 @@ fn refresh_recording_signal(state: &mut State) {
     if now < *next_signal_sample {
         return;
     }
-    *signal = recorder.input_signal();
+    **signal = recorder.input_signal();
     *next_signal_sample = now + SIGNAL_SAMPLE_INTERVAL;
 }
 
@@ -2286,7 +2287,7 @@ mod tests {
             wav: PathBuf::from("/tmp/unused.wav"),
             config: Box::new(Config::default()),
             started: Instant::now(),
-            signal: None,
+            signal: Box::new(None),
             next_signal_sample: Instant::now() + Duration::from_secs(30),
         };
         assert!(daemon.snapshot().signal.is_none());
@@ -2346,7 +2347,7 @@ mod tests {
             wav: PathBuf::from("/tmp/unused.wav"),
             config: Box::new(Config::default()),
             started: Instant::now(),
-            signal: None,
+            signal: Box::new(None),
             next_signal_sample: Instant::now(),
         };
         let (sender, receiver) = mpsc::channel();
@@ -2692,7 +2693,7 @@ mod tests {
             wav: PathBuf::from("/unused-test-capture.wav"),
             config: Box::new(daemon.config.clone()),
             started: Instant::now(),
-            signal: None,
+            signal: Box::new(None),
             next_signal_sample: Instant::now(),
         };
         daemon.config.injection = InjectionMode::Clipboard;

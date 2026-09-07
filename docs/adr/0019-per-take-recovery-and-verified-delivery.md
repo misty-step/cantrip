@@ -2,6 +2,13 @@
 
 Date: 2026-09-06. Status: accepted.
 
+The per-take identity, privacy, and verified-delivery boundaries remain accepted.
+[ADR 0020](0020-local-completion-and-explicit-audio-deletion.md) supersedes this
+record's permission to remove audio after successful delivery: only explicit
+confirmed Forget deletes retained audio. [ADR 0021](0021-signed-pixel-waveform.md)
+refines the waveform representation. Original rationale and verification below
+are retained without claiming those checks have run again.
+
 ## Problem
 
 A single failed-audio slot can replace an older unresolved recording. A generic
@@ -78,11 +85,24 @@ helper acknowledgement is not proof of application receipt.
 ### Passive status, deliberate actions
 
 The bottom-anchored HUD remains pointer-transparent and keyboard-noninteractive.
-Only measured microphone activity and chunk progress animate; stale observations
-stop presenting live state. Recovery, cancellation, setup, and confirmed deletion
+Measured microphone activity and explicitly indeterminate phase activity may
+animate; only measured chunk reports advance determinate fill. Stale or
+disconnected status stops live activity instead of implying Ready. Recovery,
+cancellation, setup, and confirmed deletion
 belong in the native `cantrip actions` window. Actions and Settings share the
 installed desktop palette; Settings rejects concurrent disk edits and overlapping
-reloads. Reduced motion and persistent labels are configurable.
+reloads. Routine stages are wordless by default; actionable exceptions stay labelled.
+`hud.labels = true` enables continuous accessibility labels without a timed reveal,
+long-recording label or caption latch.
+
+Listening uses independent signed PCM columns with fast per-side attack and a
+longer release to silence, never synthetic audio or spatial blending. Transcription
+uses a broad flowing ripple; finishing, finalizing and delivery use slower centered
+breathing. These indicate ongoing work, not elapsed-time progress. Transitions
+crossfade from the last presented frame. Wayland frame callbacks pace presentation
+while input polling stays responsive. Reduced motion freezes phase activity and
+presents measured data directly. [ADR 0021](0021-signed-pixel-waveform.md) details
+the signed pixel waveform and motion contract.
 
 The Omarchy badge delegates protocol framing and deadlines to the installed CLI.
 Lost status means unknown state; the last pending count remains explicitly last

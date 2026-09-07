@@ -15,12 +15,12 @@ const NO_SIGNAL_GRACE: Duration = Duration::from_secs(3);
 /// `20 * log10(32 / i16::MAX)` is approximately -60 dBFS.
 const SIGNAL_FLOOR: u16 = 32;
 const WAV_HEADER_SCAN_LIMIT: usize = 4_096;
-/// 16 kHz mono PCM samples in the newest fixed 200 ms monitoring window.
-const SIGNAL_WINDOW_SAMPLES: usize = 3_200;
+/// 16 kHz mono PCM samples in the newest at-most-100 ms monitoring window.
+const SIGNAL_WINDOW_SAMPLES: usize = 1_600;
 const SIGNAL_WINDOW_BYTES: u64 = (SIGNAL_WINDOW_SAMPLES * std::mem::size_of::<i16>()) as u64;
-/// Chronological min/max buckets in each daemon-owned 200 ms sample window.
-pub const AUDIO_WAVEFORM_BINS: usize = 11;
-pub(crate) type InputWaveform = [[i8; 2]; AUDIO_WAVEFORM_BINS];
+/// Chronological raw PCM min/max buckets in each fresh monitoring window.
+pub const AUDIO_WAVEFORM_BINS: usize = 60;
+pub(crate) type InputWaveform = [[i16; 2]; AUDIO_WAVEFORM_BINS];
 
 /// A running `pw-record` process and its output path.
 ///
@@ -148,8 +148,8 @@ impl Drop for Recorder {
 pub(crate) struct InputSignal {
     /// Peak level for the newest samples, mapped logarithmically to 0..=100.
     pub(crate) level: u8,
-    /// Chronological signed min/max levels downsampled from the same PCM
-    /// window. Each bin is `[minimum, maximum]` on a -100..=100 scale.
+    /// Chronological `[minimum, maximum]` raw signed 16-bit PCM samples from
+    /// the same fresh window, capped at 100 ms. Empty bins contain `[0, 0]`.
     pub(crate) waveform: InputWaveform,
     /// True after PCM has remained at or below approximately -60 dBFS for
     /// `NO_SIGNAL_GRACE`.
@@ -226,8 +226,7 @@ impl SignalMonitor {
         let available = usize::try_from(available)
             .context("live WAV sample window does not fit memory size")?;
         let total_samples = (available + usize::from(self.trailing_byte.is_some())) / 2;
-        let mut minima = [i16::MAX; AUDIO_WAVEFORM_BINS];
-        let mut maxima = [i16::MIN; AUDIO_WAVEFORM_BINS];
+        let mut waveform = [[i16::MAX, i16::MIN]; AUDIO_WAVEFORM_BINS];
         let mut peak = 0_u16;
         let mut sample_index = 0_usize;
         let mut observe = |sample: i16| {
@@ -237,13 +236,14 @@ impl SignalMonitor {
             }
             let bucket =
                 (sample_index * AUDIO_WAVEFORM_BINS / total_samples).min(AUDIO_WAVEFORM_BINS - 1);
-            minima[bucket] = minima[bucket].min(sample);
-            maxima[bucket] = maxima[bucket].max(sample);
+            let extremes = &mut waveform[bucket];
+            extremes[0] = extremes[0].min(sample);
+            extremes[1] = extremes[1].max(sample);
             sample_index += 1;
         };
 
         let mut remaining = available;
-        let mut buffer = [0_u8; 8_192];
+        let mut buffer = [0_u8; SIGNAL_WINDOW_BYTES as usize + 1];
         while remaining > 0 {
             let request = remaining.min(buffer.len());
             let read = file
@@ -277,13 +277,12 @@ impl SignalMonitor {
         } else {
             0
         };
-        let waveform = std::array::from_fn(|index| {
-            if minima[index] == i16::MAX {
-                [0, 0]
-            } else {
-                [signed_level(minima[index]), signed_level(maxima[index])]
+        for extremes in &mut waveform {
+            // An inverted range is empty; either PCM extreme is valid data.
+            if extremes[0] > extremes[1] {
+                *extremes = [0, 0];
             }
-        });
+        }
         Ok(Some(InputSignal {
             level,
             waveform,
@@ -330,15 +329,6 @@ fn find_live_wav_data(file: &mut File) -> Result<Option<u64>> {
     }
     Ok(None)
 }
-fn signed_level(sample: i16) -> i8 {
-    let level = peak_level(sample.unsigned_abs()) as i8;
-    if sample < 0 {
-        -level
-    } else {
-        level
-    }
-}
-
 fn peak_level(peak: u16) -> u8 {
     if peak <= SIGNAL_FLOOR {
         return 0;
@@ -472,7 +462,7 @@ pub(crate) fn remove_recording(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{peak_level, SignalMonitor, AUDIO_WAVEFORM_BINS, SIGNAL_WINDOW_SAMPLES};
+    use super::{peak_level, SignalMonitor, AUDIO_WAVEFORM_BINS};
     use std::fs::{self, OpenOptions};
     use std::io::Write;
     use std::path::PathBuf;
@@ -683,9 +673,19 @@ mod tests {
             .expect("sample active WAV")
             .expect("WAV header is ready");
         assert!(active.level >= 85, "half-scale PCM should render high");
-        assert!(active.waveform.iter().flatten().any(|level| *level > 0));
-        assert!(active.waveform.iter().flatten().any(|level| *level < 0));
+        let mut expected = [[0, 0]; AUDIO_WAVEFORM_BINS];
+        expected[AUDIO_WAVEFORM_BINS / 3] = [16_384, 16_384];
+        expected[2 * AUDIO_WAVEFORM_BINS / 3] = [-8_192, -8_192];
+        assert_eq!(active.waveform, expected);
         assert!(!active.silent);
+
+        let no_fresh_data = monitor
+            .sample(&path, started + Duration::from_secs(2))
+            .expect("sample unchanged WAV")
+            .expect("WAV header remains ready");
+        assert_eq!(no_fresh_data.level, 0);
+        assert_eq!(no_fresh_data.waveform, [[0, 0]; AUDIO_WAVEFORM_BINS]);
+        assert!(!no_fresh_data.silent);
 
         let mut file = OpenOptions::new()
             .append(true)
@@ -707,7 +707,7 @@ mod tests {
             .expect("sample restored WAV")
             .expect("WAV header remains ready");
         assert!(restored.level > 0);
-        assert!(restored.waveform.iter().flatten().any(|level| *level < 0));
+        assert_eq!(restored.waveform[0], [-1_000, -1_000]);
         assert!(
             !restored.silent,
             "signal must clear the warning immediately"
@@ -717,42 +717,41 @@ mod tests {
     }
 
     #[test]
-    fn live_signal_downsamples_chronological_min_max_bins() {
-        let samples: Vec<i16> = (1..=AUDIO_WAVEFORM_BINS)
-            .flat_map(|index| {
-                let amplitude = i16::try_from(index * 2_000).expect("test amplitude fits i16");
-                [-amplitude, amplitude]
-            })
+    fn live_signal_downsamples_independent_raw_min_max_bins() {
+        let expected = std::array::from_fn(|index| match index {
+            0 => [i16::MAX, i16::MAX],
+            1 => [i16::MIN, i16::MIN],
+            2 => [i16::MIN, i16::MAX],
+            _ => {
+                let index = i16::try_from(index).expect("test bucket fits i16");
+                [-index * 300, index * 500]
+            }
+        });
+        let samples: Vec<i16> = expected
+            .iter()
+            .flat_map(|[minimum, maximum]| [*maximum, *minimum])
             .collect();
-        let path = wav_path("envelope");
-        fs::write(&path, wav(&samples)).expect("write envelope WAV");
+        let path = wav_path("raw-extrema");
+        fs::write(&path, wav(&samples)).expect("write raw extrema WAV");
         let started = Instant::now();
         let signal = SignalMonitor::new(started)
             .sample(&path, started + Duration::from_secs(1))
-            .expect("sample envelope WAV")
+            .expect("sample raw extrema WAV")
             .expect("WAV header is ready");
 
-        assert!(
-            signal
-                .waveform
-                .iter()
-                .all(|[minimum, maximum]| *minimum == -*maximum),
-            "each bin must preserve both measured PCM edges"
-        );
-        assert!(
-            signal
-                .waveform
-                .windows(2)
-                .all(|pair| pair[0][1] < pair[1][1]),
-            "bins must remain chronological"
+        assert_eq!(
+            signal.waveform, expected,
+            "bins must retain their own measured extrema without mixing neighbors"
         );
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn live_signal_discards_backlog_before_newest_fixed_window() {
+    fn live_signal_caps_backlog_at_100_ms_and_preserves_split_samples() {
         let path = wav_path("backlog");
-        fs::write(&path, wav(&[1_000, -1_000])).expect("write initial WAV");
+        let mut initial = wav(&[1_000, -1_000]);
+        initial.push(i16::MAX.to_le_bytes()[0]);
+        fs::write(&path, initial).expect("write initial WAV with split sample");
         let started = Instant::now();
         let mut monitor = SignalMonitor::new(started);
         monitor
@@ -760,30 +759,54 @@ mod tests {
             .expect("sample initial WAV")
             .expect("WAV header is ready");
 
-        let mut backlog = vec![i16::MAX; SIGNAL_WINDOW_SAMPLES];
-        backlog.extend(std::iter::repeat_n(0, SIGNAL_WINDOW_SAMPLES));
-        let bytes: Vec<u8> = backlog.into_iter().flat_map(i16::to_le_bytes).collect();
+        // Complete the old split sample, then append 100 ms each of loud PCM
+        // and silence. Only the newest 1,600 complete samples may be observed.
+        let mut bytes = vec![i16::MAX.to_le_bytes()[1]];
+        bytes.extend(std::iter::repeat_n(i16::MAX, 1_600).flat_map(i16::to_le_bytes));
+        bytes.extend_from_slice(&[0; 3_200]);
+        let split_sample = (-12_345_i16).to_le_bytes();
+        bytes.push(split_sample[0]);
         let mut file = OpenOptions::new()
             .append(true)
             .open(&path)
             .expect("open WAV append");
         file.write_all(&bytes)
-            .expect("append stalled-reader backlog");
+            .expect("append stalled-reader backlog with split sample");
 
         let newest = monitor
             .sample(&path, started + Duration::from_secs(4))
-            .expect("sample newest fixed window")
+            .expect("sample newest 100 ms window")
             .expect("WAV header remains ready");
         assert_eq!(newest.level, 0, "older loud PCM must not affect the peak");
         assert_eq!(
             newest.waveform,
             [[0, 0]; AUDIO_WAVEFORM_BINS],
-            "older loud PCM must not affect the envelope"
+            "older loud PCM and its trailing byte must not affect the waveform"
         );
         assert!(
             newest.silent,
             "silence timing must follow the newest fixed window"
         );
+
+        let no_fresh_data = monitor
+            .sample(&path, started + Duration::from_millis(4_500))
+            .expect("sample unchanged WAV with pending byte")
+            .expect("WAV header remains ready");
+        assert_eq!(no_fresh_data.level, 0);
+        assert_eq!(no_fresh_data.waveform, [[0, 0]; AUDIO_WAVEFORM_BINS]);
+        assert!(no_fresh_data.silent);
+
+        file.write_all(&split_sample[1..])
+            .expect("complete newest split sample");
+        let completed = monitor
+            .sample(&path, started + Duration::from_secs(5))
+            .expect("sample completed split sample")
+            .expect("WAV header remains ready");
+        let mut expected = [[0, 0]; AUDIO_WAVEFORM_BINS];
+        expected[0] = [-12_345, -12_345];
+        assert_eq!(completed.waveform, expected);
+        assert!(completed.level > 0);
+        assert!(!completed.silent);
         drop(file);
         let _ = fs::remove_file(path);
     }
