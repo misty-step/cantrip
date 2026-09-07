@@ -1,11 +1,11 @@
 {
-  "base_revision": "c7ef04a1f3a836f090141d8c6a282a5269b2879b",
+  "base_revision": "22ca04d5a0a5904a8a96394fc2b8b83bbd5063f4",
   "landmark_sha256": "d3e7400abcf72428f801aae3d9ed74412d5ced31eecc6be753a48027a6441ed9",
   "landmark_version": "0.28.7",
   "previous_tag": "",
   "schema_version": 1,
   "tag": "v0.1.0",
-  "technical_changelog_sha256": "b31a636309772835058d5f22a0d10c6885975d3e1e3ebfdbfab8109260b89c15",
+  "technical_changelog_sha256": "5686869f23bcc97fa5807fda96c179f7153f3964251482e6483b169f3310106a",
   "version": "0.1.0",
   "version_decision": {
     "api_evidence": {
@@ -23,8 +23,8 @@
     "api_evidence_bump": "none",
     "bump": "patch",
     "commit_bump": "minor",
-    "commit_count": 112,
-    "conventional_commit_count": 106,
+    "commit_count": 117,
+    "conventional_commit_count": 111,
     "decisive_commit": "1fb30a0 feat: milestone 1 \u2014 local dictation daemon (pw-record \u2192 Parakeet \u2192 inject)",
     "decisive_signals": [
       "commit:1fb30a0 feat: milestone 1 \u2014 local dictation daemon (pw-record \u2192 Parakeet \u2192 inject)",
