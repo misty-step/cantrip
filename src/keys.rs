@@ -50,3 +50,35 @@ pub fn exists(id: &str) -> Result<bool> {
         Err(error) => Err(error).with_context(|| format!("checking key '{id}' in OS keyring")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_secret;
+
+    #[test]
+    fn credentials_require_nonempty_visible_ascii() {
+        let visible_ascii: String = (b'!'..=b'~').map(char::from).collect();
+        assert!(validate_secret("test-key", &visible_ascii).is_ok());
+
+        for secret in [
+            "",
+            "token value",
+            "token\tvalue",
+            "token\r\nvalue",
+            "token\0value",
+            "token\u{7f}",
+            "tokené",
+        ] {
+            assert!(validate_secret("test-key", secret).is_err());
+        }
+    }
+
+    #[test]
+    fn rejected_credentials_identify_the_key_without_disclosing_the_secret() {
+        let error = validate_secret("cleanup-key", "synthetic-private-credential\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cleanup-key"));
+        assert!(!error.contains("synthetic-private-credential"));
+    }
+}
