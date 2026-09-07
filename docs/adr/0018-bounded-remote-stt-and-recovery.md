@@ -2,6 +2,14 @@
 
 Date: 2026-09-06. Status: accepted.
 
+The bounded remote-request decision remains accepted. The single recovery slot
+and earlier notice presentation below were superseded by
+[ADR 0019](0019-per-take-recovery-and-verified-delivery.md).
+[ADR 0020](0020-local-completion-and-explicit-audio-deletion.md) supersedes the
+rejection of automatic local fallback and defines explicit audio deletion.
+Read those decisions for current recovery and retention; the alternatives and
+proof below retain their original scope.
+
 ## Problem
 
 An 888-second dictation produced a 28.4 MB WAV. The configured OpenRouter

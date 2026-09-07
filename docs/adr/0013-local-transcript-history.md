@@ -2,6 +2,13 @@
 
 Date: 2026-08-13. Status: accepted.
 
+The private-history and reviewed-fixture boundary remains accepted.
+[ADR 0019](0019-per-take-recovery-and-verified-delivery.md) supersedes the
+single failed-audio slot with per-take recovery, and
+[ADR 0020](0020-local-completion-and-explicit-audio-deletion.md) supersedes
+ephemeral/success-deleted audio with retention until explicit confirmed Forget.
+Those later recording lifecycles do not relax the privacy rules below.
+
 ## Problem
 
 Cantrip keeps only `last-transcript.txt`. That supports immediate recovery but

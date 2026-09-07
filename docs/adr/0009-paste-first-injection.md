@@ -1,6 +1,13 @@
 # ADR 0009: Paste-first injection
 
-Date: 2026-08-05. Status: accepted.
+Date: 2026-08-05. Status: accepted in part; delivery implementation and atomicity
+claims superseded by [ADR 0019](0019-per-take-recovery-and-verified-delivery.md).
+
+The paste-first rationale, paragraph preservation, and strict Type/clipboard
+separation remain useful. The subprocess chain, automatic fallback ordering,
+and guarantee that a single paste proves atomic application receipt below are
+historical. ADR 0019 defines guarded native delivery and explicit uncertainty;
+[README.md](../../README.md) describes current use.
 
 ## Problem
 
