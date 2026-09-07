@@ -76,17 +76,29 @@ its headers and vocabulary, is capped at 24,000,000 bytes. Short bounded files
 are sent unchanged. Results are joined in order, with one cleanup/delivery step.
 
 This avoids OpenRouter's documented 25 MB multipart cliff without a recording
-cutoff or codec process. Providers can still impose smaller limits or time out;
-Cantrip preserves partial text and recovery audio rather than blindly retrying.
+cutoff or codec process. Providers can still impose smaller limits or time out.
 Chunk seams can affect recognition. The remote file reader supports
 little-endian RIFF/WAVE PCM and IEEE float, including extensible variants.
 Compressed WAV encodings, RF64/RIFX, and multiple data chunks must be converted
 to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
 16 kHz mono PCM16.
 
+**Automatic local fallback.** A cloud error (including unavailable credentials),
+partial transcript, or empty recognition of nonempty audio triggers one whole-take
+attempt with installed default Parakeet. A complete local transcript replaces
+the cloud prefix; alternate passes are never concatenated. If local fallback
+cannot complete, useful cloud text is preserved. Configured cleanup runs once on
+the selected transcript, not on each attempt. Cancellation prevents starting a
+fallback or subsequent cleanup request; already-running requests may finish.
+There are no automatic downloads or switches to another cloud provider.
+Install the safety-net model with `cantrip models pull`; `cantrip doctor` reports
+readiness. With `keep_warm = true`, cloud-configured daemons preload local Parakeet
+too. External files outside Parakeet's native audio format can still fail locally;
+retain or convert the original file.
+
 **Recovery.** `cantrip recover --id ID --clipboard` retries the selected retained
 recording with configured STT while only copying the result. Omit `--id` to select
-the newest retained audio. `cantrip recover --id ID --local --clipboard` uses
+the newest unresolved take with retained audio. `cantrip recover --id ID --local --clipboard` uses
 installed default Parakeet and skips cleanup for that job, without rewriting
 this file or changing subsequent dictations. Install the model explicitly with
 `cantrip models pull` if needed. `cantrip transcribe --local <wav>` provides the
@@ -97,10 +109,12 @@ remains count-only and enabled; `--local` is not an all-network-off switch.
 availability after daemon restart. `cantrip actions` exposes the same metadata,
 explicit copy/recovery, and confirmed Forget without showing transcript text.
 Operational details remain in `~/.local/state/cantrip/daemon.log`; transcripts
-never appear there. Each pending take has independent retained audio; unrelated
-successes or later failures cannot erase it. Complete recovery removes audio only
-after durable text and successful delivery. Dismissal never deletes artifacts.
-Copying saved text does not resolve or delete the retained recording.
+never appear there. Every stopped take has independent retained audio; unrelated
+successes or later failures cannot erase it. Successful recovery marks it resolved
+without deleting audio. Cancellation retains capture before skipping inference.
+Graceful shutdown retains live capture; startup imports trusted finalized runtime
+leftovers. Dismissal and Copy never delete artifacts. Only confirmed Forget removes
+retained audio and incomplete text; complete archived text remains.
 
 ## `[postproc]` — cleanup
 
@@ -142,12 +156,14 @@ directory is:
 ~/.local/state/cantrip/transcripts/
 ```
 
-`$XDG_STATE_HOME` replaces `~/.local/state` when set. Each immutable JSON file
-links the raw and post-processed transcript under one session id. It also records
+`$XDG_STATE_HOME` replaces `~/.local/state` when set. Each JSON record
+links raw and post-processed text under one immutable take ID. It also records
 the completion timestamp, source, audio duration, total pipeline latency, STT
 model/backend/latency, cleanup model/status/latency/prompt version, and available
-token and billing usage. Local STT has zero API cost. Cloud STT cost is omitted
-until its compatible response reports it. Post-processing
+token and billing usage. The selected STT backend/model is recorded, with
+`stt.fallback_from_model` identifying the cloud model when local fallback is used.
+Pure local STT has zero API cost; any configured-cloud attempt leaves STT cost
+unknown, even when local fallback succeeds. Post-processing
 `reported_cost_usd` is stored only when the provider returns the charge; Cantrip
 does not estimate cost from prices that can change later.
 
@@ -157,6 +173,9 @@ An archive write failure is reported but never drops a valid dictation.
 This is sensitive plaintext history, retained until you delete it. It is not
 written to operational logs, uploaded, indexed, summarized, or committed by
 Cantrip. Review backup and home-directory sync policies before relying on it.
+Audio remains even after successful delivery: about 1.92 MB/minute (115 MB/hour)
+for native capture. Use confirmed Forget to reclaim selected audio. Disk failures
+are explicit; active/runtime-only recordings do not survive reboot or power loss.
 
 For example, inspect raw and cleaned pairs locally with `jq`:
 

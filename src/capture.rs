@@ -24,9 +24,9 @@ pub(crate) type InputWaveform = [[i8; 2]; AUDIO_WAVEFORM_BINS];
 
 /// A running `pw-record` process and its output path.
 ///
-/// `stop` and `cancel` consume the recorder. Dropping an abandoned capture
-/// stops the child and removes its partial recording. A retained stop request
-/// transfers WAV ownership even if its worker disappears before finalization.
+/// `stop` consumes the recorder and transfers its completed WAV path. Dropping
+/// an abandoned capture also stops the child, retaining any available audio
+/// for startup recovery even when finalization fails.
 pub struct Recorder {
     child: Child,
     wav_path: PathBuf,
@@ -35,8 +35,6 @@ pub struct Recorder {
     signal_monitor_warned: bool,
     disarmed: bool,
     stop_requested: bool,
-    /// A retained stop transfers WAV cleanup even when finalization fails.
-    preserve_wav: bool,
 }
 
 impl Recorder {
@@ -61,7 +59,6 @@ impl Recorder {
             signal_monitor_warned: false,
             disarmed: false,
             stop_requested: false,
-            preserve_wav: false,
         })
     }
     /// Measure the newest PCM appended by `pw-record`.
@@ -83,10 +80,8 @@ impl Recorder {
 
     /// Request capture termination immediately; the worker still owns reaping
     /// and WAV finalization. Repeated requests never interrupt finalization.
-    /// Retained stops preserve the WAV if a queued worker disappears; explicit
-    /// discards leave cleanup with the recorder.
-    pub fn request_stop(&mut self, preserve_wav: bool) -> Result<()> {
-        self.preserve_wav = preserve_wav;
+    /// The WAV is always retained, including when a queued worker disappears.
+    pub fn request_stop(&mut self) -> Result<()> {
         self.signal_stop()
     }
 
@@ -126,7 +121,6 @@ impl Recorder {
     /// On error the caller still owns the WAV at the original path; cleanup must
     /// not erase the only recording before recovery can preserve it.
     pub fn stop(mut self) -> Result<PathBuf> {
-        self.preserve_wav = true;
         self.finish_stop().with_context(|| "stopping pw-record")?;
         verify_wav(&self.wav_path)?;
         self.disarmed = true;
@@ -135,30 +129,6 @@ impl Recorder {
             self.started_at.elapsed().as_millis()
         );
         Ok(std::mem::take(&mut self.wav_path))
-    }
-
-    /// Stop the process and remove its partial recording.
-    pub fn cancel(mut self) -> Result<()> {
-        self.disarmed = true;
-        let elapsed = self.started_at.elapsed();
-        let stop_result = self.finish_stop();
-        if let Err(error) = stop_result {
-            if let Err(remove_error) = remove_recording(&self.wav_path) {
-                tracing::warn!(
-                    "[Capture] failed to remove canceled recording {}: {}",
-                    self.wav_path.display(),
-                    remove_error
-                );
-            }
-            return Err(error).context("canceling pw-record");
-        }
-        remove_recording(&self.wav_path)?;
-
-        tracing::info!(
-            "[Capture] recording canceled after {} ms",
-            elapsed.as_millis()
-        );
-        Ok(())
     }
 }
 
@@ -171,16 +141,6 @@ impl Drop for Recorder {
         if self.finish_stop().is_err() {
             let _ = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGKILL) };
             let _ = self.child.wait();
-        }
-        if self.preserve_wav {
-            return;
-        }
-        if let Err(error) = remove_recording(&self.wav_path) {
-            tracing::warn!(
-                "[Capture] failed to remove abandoned recording {}: {}",
-                self.wav_path.display(),
-                error
-            );
         }
     }
 }
@@ -557,7 +517,6 @@ mod tests {
             signal_monitor_warned: false,
             disarmed: false,
             stop_requested: false,
-            preserve_wav: false,
         }
     }
 
@@ -575,14 +534,57 @@ mod tests {
     }
 
     #[test]
-    fn abandoning_capture_without_stop_still_removes_audio() {
+    fn abandoning_capture_finalizes_and_preserves_audio() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+
         let path = wav_path("abandoned-capture");
-        fs::write(&path, wav(&[1000, -1000])).expect("write abandoned recording");
-        drop(recorder_for_test(path.clone()));
-        assert!(
-            !path.exists(),
-            "unrequested capture must not leave audio behind"
+        let finalized = wav_path("abandoned-capture-finalized");
+        let audio = wav(&[1000, -1000]);
+        fs::write(&path, b"unfinished WAV header").expect("write live recording");
+        fs::write(&finalized, &audio).expect("write finalized recording fixture");
+        let mut child = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "trap 'cat \"$1\" > \"$2\"; exit 0' INT; printf 'ready\\n'; while :; do read -r pending; done",
+                "recorder-fixture",
+            ])
+            .arg(&finalized)
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("start recorder finalization fixture");
+        let stdout = child.stdout.take().expect("fixture output");
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let mut ready = String::new();
+            BufReader::new(stdout).read_line(&mut ready).unwrap();
+            let _ = sender.send(ready);
+        });
+        let started_at = Instant::now();
+        let recorder = super::Recorder {
+            child,
+            wav_path: path.clone(),
+            started_at,
+            signal_monitor: SignalMonitor::new(started_at),
+            signal_monitor_warned: false,
+            disarmed: false,
+            stop_requested: false,
+        };
+        assert_eq!(
+            receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "ready\n"
         );
+        drop(recorder);
+        reader.join().unwrap();
+        assert_eq!(
+            fs::read(&path).expect("finalized recording survives recorder drop"),
+            audio
+        );
+        fs::remove_file(path).expect("remove retained fixture");
+        fs::remove_file(finalized).expect("remove finalized fixture");
     }
 
     #[test]
@@ -591,7 +593,7 @@ mod tests {
         let audio = wav(&[1000, -1000]);
         fs::write(&path, &audio).expect("write stopped recording");
         let mut recorder = recorder_for_test(path.clone());
-        recorder.request_stop(true).expect("request capture stop");
+        recorder.request_stop().expect("request capture stop");
         let (sender, receiver) = std::sync::mpsc::channel();
         assert!(sender.send(recorder).is_ok());
         drop(receiver);
@@ -600,23 +602,6 @@ mod tests {
             audio
         );
         fs::remove_file(path).expect("remove retained fixture");
-    }
-
-    #[test]
-    fn requested_discard_removes_audio_if_the_worker_queue_disappears() {
-        let path = wav_path("abandoned-discarded-capture");
-        fs::write(&path, wav(&[1000, -1000])).expect("write discarded recording");
-        let mut recorder = recorder_for_test(path.clone());
-        recorder
-            .request_stop(false)
-            .expect("request capture discard");
-        let (sender, receiver) = std::sync::mpsc::channel();
-        assert!(sender.send(recorder).is_ok());
-        drop(receiver);
-        assert!(
-            !path.exists(),
-            "explicitly discarded capture must not be retained"
-        );
     }
 
     #[test]
@@ -651,7 +636,6 @@ mod tests {
             signal_monitor_warned: false,
             disarmed: false,
             stop_requested: false,
-            preserve_wav: false,
         };
         assert_eq!(
             receiver
@@ -661,7 +645,7 @@ mod tests {
             "ready"
         );
         recorder
-            .request_stop(true)
+            .request_stop()
             .expect("request without waiting for finalization");
         assert_eq!(
             receiver
@@ -674,7 +658,7 @@ mod tests {
             recorder.child.try_wait().unwrap().is_none(),
             "worker has not finalized yet"
         );
-        recorder.request_stop(true).expect("repeated stop request");
+        recorder.request_stop().expect("repeated stop request");
         recorder
             .child
             .stdin

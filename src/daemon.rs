@@ -39,7 +39,6 @@ const HUD_SPAWN_COOLDOWN: Duration = Duration::from_secs(30);
 /// Only the daemon consumes capture samples; status clients share this cache.
 const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 const CAPABILITY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const MEANINGFUL_CAPTURE_MS: u64 = 3_000;
 const CANCEL_OPEN: u8 = 0;
 const CANCEL_REQUESTED: u8 = 1;
 const CANCEL_SEALED: u8 = 2;
@@ -48,9 +47,8 @@ static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 trait RecorderBoundary: Send {
     fn input_signal(&mut self) -> Option<InputSignal>;
-    fn request_stop(&mut self, preserve_wav: bool) -> Result<()>;
+    fn request_stop(&mut self) -> Result<()>;
     fn stop(self: Box<Self>) -> Result<PathBuf>;
-    fn cancel(self: Box<Self>) -> Result<()>;
 }
 
 impl RecorderBoundary for capture::Recorder {
@@ -58,16 +56,12 @@ impl RecorderBoundary for capture::Recorder {
         capture::Recorder::input_signal(self)
     }
 
-    fn request_stop(&mut self, preserve_wav: bool) -> Result<()> {
-        capture::Recorder::request_stop(self, preserve_wav)
+    fn request_stop(&mut self) -> Result<()> {
+        capture::Recorder::request_stop(self)
     }
 
     fn stop(self: Box<Self>) -> Result<PathBuf> {
         capture::Recorder::stop(*self)
-    }
-
-    fn cancel(self: Box<Self>) -> Result<()> {
-        capture::Recorder::cancel(*self)
     }
 }
 
@@ -111,8 +105,8 @@ impl Operation {
         }
     }
 
-    /// Cancellation and irreversible cleanup have one atomic ordering. Once
-    /// cleanup commits, a later Cancel is rejected rather than acknowledged.
+    /// Cancellation and successful settlement have one atomic ordering. Once
+    /// settlement commits, a later Cancel is rejected rather than acknowledged.
     fn seal(&self) -> bool {
         self.lifecycle
             .compare_exchange(
@@ -174,7 +168,6 @@ impl State {
 enum WorkKind {
     Transcription,
     Delivery,
-    Discard,
     Forget,
     Retain,
 }
@@ -184,7 +177,6 @@ enum Work {
         recorder: Box<dyn RecorderBoundary>,
         wav: PathBuf,
         duration_ms: u64,
-        discard: bool,
     },
     Recover,
     Text,
@@ -438,11 +430,12 @@ pub fn run(config: Config, preload: bool) -> Result<()> {
         .context("enabling non-blocking daemon socket")?;
 
     let import_failed = recovery::import_legacy().is_err();
+    let runtime_import_failed = recovery::import_runtime(&runtime_dir).is_err();
     let recordings = recovery::list();
     let list_failed = recordings.is_err();
     let local_model = local_model_ready(&SttConfig::default());
     let mut daemon = Daemon::new(config, recordings.unwrap_or_default(), local_model);
-    if import_failed || list_failed {
+    if import_failed || runtime_import_failed || list_failed {
         tracing::warn!("[Daemon] recovery discovery incomplete class=storage-failed");
         daemon.notice(
             "Saved recordings could not all be loaded; check storage and refresh.",
@@ -580,8 +573,13 @@ fn spawn_worker(warm: bool, warm_stt: SttConfig) -> WorkerChannels {
     let (stage_tx, stage_rx) = mpsc::channel::<StageEvent>();
     let worker = thread::spawn(move || {
         let mut transcriber: pipeline::TranscriberCache = None;
-        if warm && warm_stt.endpoint.is_none() {
-            match pipeline::load_transcriber(&warm_stt.model) {
+        if warm {
+            let model = if warm_stt.endpoint.is_some() {
+                models::PARAKEET_V3_INT8.dir_name
+            } else {
+                &warm_stt.model
+            };
+            match pipeline::load_transcriber(model) {
                 Ok(loaded) => transcriber = Some(loaded),
                 Err(error) => tracing::warn!(
                     "[Models] warm load skipped class=local-model-unavailable error={error:#}"
@@ -998,10 +996,11 @@ fn start_recording(
             Some("local-model-unavailable"),
         );
     }
-    let wav = runtime_dir.join(format!("rec-{}.wav", recovery::new_id()));
+    let take_id = recovery::new_id();
+    let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
     match capture::Recorder::start(&wav, daemon.config.audio_source.as_deref()) {
         Ok(recorder) => {
-            let operation = daemon.operation(recovery::new_id(), Some(OperationKind::Dictation));
+            let operation = daemon.operation(take_id, Some(OperationKind::Dictation));
             let mut config = daemon.config.clone();
             if let Some(enabled) = postproc {
                 config.postproc.enabled = enabled;
@@ -1031,7 +1030,7 @@ fn start_recording(
     }
 }
 
-fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, discard: bool) -> CommandReply {
+fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, cancel: bool) -> CommandReply {
     let State::Recording {
         operation,
         mut recorder,
@@ -1044,8 +1043,11 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, discard: bool) -> C
         unreachable!("stop_recording called outside recording");
     };
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let guard = (!discard).then(DeliveryGuard::capture);
-    if recorder.request_stop(!discard).is_err() {
+    if cancel {
+        operation.request_cancel();
+    }
+    let guard = (!cancel).then(DeliveryGuard::capture);
+    if recorder.request_stop().is_err() {
         tracing::warn!(
             "[Capture] immediate stop request failed; finalization will retry class=capture-failed"
         );
@@ -1058,15 +1060,9 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, discard: bool) -> C
             recorder,
             wav,
             duration_ms,
-            discard,
         },
     };
-    let kind = if discard {
-        WorkKind::Discard
-    } else {
-        WorkKind::Transcription
-    };
-    let stage = if discard {
+    let stage = if cancel {
         Stage::Cancelling
     } else {
         Stage::FinalizingAudio
@@ -1092,9 +1088,9 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, discard: bool) -> C
             Some("worker-failed"),
         );
     }
-    daemon.begin(operation, stage, kind);
+    daemon.begin(operation, stage, WorkKind::Transcription);
     tracing::info!("[Daemon] state recording -> processing");
-    if discard {
+    if cancel {
         daemon.reply(true, "cancelling", None)
     } else {
         daemon.reply(true, "processing", None)
@@ -1456,9 +1452,28 @@ fn apply_worker_result(
 
 fn shutdown_state(state: &mut State) {
     match std::mem::replace(state, State::Idle) {
-        State::Recording { recorder, .. } => {
-            if recorder.cancel().is_err() {
-                tracing::warn!("[Capture] shutdown cancellation failed class=capture-failed");
+        State::Recording {
+            operation,
+            recorder,
+            wav,
+            started,
+            ..
+        } => {
+            let duration_ms = milliseconds(started.elapsed().as_millis());
+            let wav = recorder.stop().unwrap_or(wav);
+            let saved = persist_attempt(
+                &operation.identity.take_id,
+                duration_ms,
+                None,
+                Some(&wav),
+                false,
+                true,
+            );
+            if saved.warning {
+                tracing::warn!("[Capture] shutdown retention incomplete class=storage-failed");
+            }
+            if saved.durable_audio && capture::remove_recording(&wav).is_err() {
+                tracing::warn!("[Capture] shutdown runtime cleanup failed class=storage-failed");
             }
         }
         State::Processing { operation, .. } => {
@@ -1478,36 +1493,28 @@ fn retain_rejected_capture(job: Job) -> TerminalOutcome {
         recorder,
         wav,
         duration_ms,
-        discard,
     } = job.work
     {
-        if discard {
-            if recorder.cancel().is_err() {
-                outcome.error = Some("capture-cancel-failed".to_owned());
-                outcome.message =
-                    "Recording cancellation did not complete; check runtime storage.".to_owned();
-            } else {
-                outcome.completeness = Completeness::Cancelled;
-                outcome.delivery = Delivery::Cancelled;
-                outcome.message = "Cancelled; the transcription worker is unavailable.".to_owned();
-                outcome.error = None;
-            }
-        } else {
-            let wav = recorder.stop().unwrap_or(wav);
-            let saved = persist_attempt(
-                &job.operation.identity.take_id,
-                duration_ms,
-                None,
-                Some(&wav),
-                false,
-                true,
-            );
-            outcome.artifacts = saved.artifacts;
-            describe_artifacts(&mut outcome);
-            storage_warning(&mut outcome, saved.warning);
-            if saved.durable_audio {
-                remove_runtime(&wav, &mut outcome);
-            }
+        let wav = recorder.stop().unwrap_or(wav);
+        let saved = persist_attempt(
+            &job.operation.identity.take_id,
+            duration_ms,
+            None,
+            Some(&wav),
+            false,
+            true,
+        );
+        if job.operation.cancel.load(Ordering::Acquire) {
+            outcome.completeness = Completeness::Cancelled;
+            outcome.delivery = Delivery::Cancelled;
+            outcome.message = "Cancelled; transcription did not start.".to_owned();
+            outcome.error = None;
+        }
+        outcome.artifacts = saved.artifacts;
+        describe_artifacts(&mut outcome);
+        storage_warning(&mut outcome, saved.warning);
+        if saved.durable_audio {
+            remove_runtime(&wav, &mut outcome);
         }
     }
     job.operation
@@ -1601,54 +1608,30 @@ fn run_job(
             recorder,
             wav,
             duration_ms,
-            discard,
-        } => {
-            if discard {
-                let mut outcome = context.outcome(Completeness::Cancelled, Delivery::Cancelled);
-                outcome.artifacts = Artifacts::default();
-                if recorder.cancel().is_err() {
-                    outcome.completeness = Completeness::Failed;
-                    outcome.delivery = Delivery::None;
-                    outcome.message =
-                        "Recording cancellation did not complete; check runtime storage."
-                            .to_owned();
-                    outcome.error = Some("capture-cancel-failed".to_owned());
+        } => match recorder.stop() {
+            Ok(wav) => process_audio(
+                &context,
+                transcriber,
+                wav,
+                duration_ms,
+                pipeline::Source::Dictation,
+            ),
+            Err(_) => {
+                // Finalization failure never authorizes deleting available audio.
+                let saved =
+                    persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
+                let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
+                outcome.message = "Recording could not be finalized.".to_owned();
+                outcome.error = Some("capture-failed".to_owned());
+                outcome.artifacts = saved.artifacts;
+                describe_artifacts(&mut outcome);
+                storage_warning(&mut outcome, saved.warning);
+                if saved.durable_audio {
+                    remove_runtime(&wav, &mut outcome);
                 }
                 (outcome, None)
-            } else {
-                match recorder.stop() {
-                    Ok(wav) => process_audio(
-                        &context,
-                        transcriber,
-                        wav,
-                        duration_ms,
-                        pipeline::Source::Dictation,
-                    ),
-                    Err(_) => {
-                        // Recorder::stop preserves its original WAV even when
-                        // finalization fails. Never infer a valid complete WAV.
-                        let saved = persist_attempt(
-                            context.id(),
-                            duration_ms,
-                            None,
-                            Some(&wav),
-                            false,
-                            true,
-                        );
-                        let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
-                        outcome.message = "Recording could not be finalized.".to_owned();
-                        outcome.error = Some("capture-failed".to_owned());
-                        outcome.artifacts = saved.artifacts;
-                        describe_artifacts(&mut outcome);
-                        storage_warning(&mut outcome, saved.warning);
-                        if saved.durable_audio {
-                            remove_runtime(&wav, &mut outcome);
-                        }
-                        (outcome, None)
-                    }
-                }
             }
-        }
+        },
         Work::Recover => match recovery::audio_path(context.id()) {
             Ok(wav) => {
                 let duration = stt::wav_duration_ms(&wav).unwrap_or(0);
@@ -1883,32 +1866,16 @@ fn finish_audio(
     } else {
         Completeness::Complete
     };
-    let short_empty = completeness == Completeness::Empty
-        && !pipeline.keep_wav
-        && duration_ms < MEANINGFUL_CAPTURE_MS
-        && source == pipeline::Source::Dictation
-        && context.operation.seal();
     let mut outcome = context.outcome(completeness, Delivery::None);
     outcome.cleanup = cleanup_from(&pipeline.postproc);
-    let mut saved = if short_empty {
-        let removed = recovery::forget(context.id()).is_ok();
-        SavedArtifacts {
-            artifacts: facts(context.id()),
-            durable_audio: false,
-            durable_text: false,
-            audio_conflict: false,
-            warning: !removed,
-        }
-    } else {
-        persist_attempt(
-            context.id(),
-            duration_ms,
-            text,
-            Some(wav),
-            pipeline.partial || cancelled,
-            true,
-        )
-    };
+    let mut saved = persist_attempt(
+        context.id(),
+        duration_ms,
+        text,
+        Some(wav),
+        pipeline.partial || cancelled,
+        true,
+    );
     let mut report = DeliveryReport::none();
     if completeness == Completeness::Cancelled {
         report.delivery = Delivery::Cancelled;
@@ -1925,8 +1892,7 @@ fn finish_audio(
             && context.operation.seal()
         {
             let resolved = recovery::resolve(context.id()).is_ok();
-            // A failed resolve may have unlinked the audio then failed fsync.
-            // Confirm again before using old durability to delete the source.
+            // Re-confirm durability after updating the take's resolution.
             let confirmed = recovery::confirm(context.id());
             saved = saved_artifacts(
                 context.id(),
@@ -1974,6 +1940,11 @@ fn finish_audio(
     if !report.delivered() || outcome.completeness == Completeness::Partial {
         describe_artifacts(&mut outcome);
     }
+    if pipeline.local_fallback {
+        outcome
+            .message
+            .push_str(" Used local transcription after cloud failure.");
+    }
     if outcome.cleanup == Cleanup::Failed {
         outcome
             .message
@@ -1993,13 +1964,7 @@ fn finish_audio(
             .message
             .push_str(" Detailed transcript history could not be saved.");
     }
-    let may_remove = saved.durable_audio
-        || (completeness == Completeness::Complete
-            && saved.durable_text
-            && report.delivered()
-            && context.operation.lifecycle.load(Ordering::Acquire) == CANCEL_SEALED)
-        || (short_empty && !saved.warning);
-    if source == pipeline::Source::Dictation && may_remove {
+    if source == pipeline::Source::Dictation && saved.durable_audio {
         remove_runtime(wav, &mut outcome);
     }
     let metadata = context.config.telemetry.enabled.then(|| {
@@ -2018,8 +1983,12 @@ fn finish_audio(
             source: source.as_str(),
             capture_ms,
             stt_ms: milliseconds(pipeline.stt_elapsed.as_millis()),
-            stt_model: context.config.stt.model.clone(),
-            stt_remote: context.config.stt.endpoint.is_some(),
+            stt_model: if pipeline.local_fallback {
+                models::PARAKEET_V3_INT8.dir_name.to_owned()
+            } else {
+                context.config.stt.model.clone()
+            },
+            stt_remote: context.config.stt.endpoint.is_some() && !pipeline.local_fallback,
             chars: text.map_or(0, |text| text.chars().count()),
             partial: pipeline.partial,
             cleanup_state: match outcome.cleanup {
@@ -2367,6 +2336,34 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_capture_revokes_delivery_before_finalization() {
+        let mut daemon = idle_daemon();
+        let operation =
+            daemon.operation("cancelled-take".to_owned(), Some(OperationKind::Dictation));
+        daemon.state = State::Recording {
+            operation,
+            recorder: Box::new(FakeRecorder::default()),
+            wav: PathBuf::from("/tmp/unused.wav"),
+            config: Box::new(Config::default()),
+            started: Instant::now(),
+            signal: None,
+            next_signal_sample: Instant::now(),
+        };
+        let (sender, receiver) = mpsc::channel();
+        assert!(cancel_command(&mut daemon, &sender).ok);
+        let job = receiver.try_recv().unwrap();
+        let report = deliver_with(
+            "must remain saved",
+            InjectionMode::Clipboard,
+            false,
+            &job.operation.cancel,
+            |_, _| panic!("cancelled capture must not reach desktop delivery"),
+        );
+        assert_eq!(report.delivery, Delivery::Cancelled);
+        assert_eq!(daemon.snapshot().stage, Some(Stage::Cancelling));
+    }
+
+    #[test]
     fn stale_worker_result_cannot_replace_a_newer_operation() {
         let (mut daemon, old) = processing(WorkKind::Transcription);
         let reporter = TelemetryReporter::spawn();
@@ -2646,7 +2643,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_cancellation_prevents_irreversible_audio_cleanup() {
+    fn accepted_cancellation_prevents_successful_settlement() {
         let (mut daemon, operation) = processing(WorkKind::Transcription);
         let (sender, _) = mpsc::channel();
         assert!(cancel_command(&mut daemon, &sender).ok);
@@ -2701,7 +2698,7 @@ mod tests {
         daemon.config.injection = InjectionMode::Clipboard;
         daemon.config.hud.labels = false;
         let (sender, receiver) = mpsc::channel();
-        assert!(stop_recording(&mut daemon, &sender, true).ok);
+        assert!(stop_recording(&mut daemon, &sender, false).ok);
         assert!(stop_requested.load(Ordering::Acquire));
         assert!(daemon.snapshot().hud.labels);
         let job = receiver.try_recv().unwrap();
@@ -2759,7 +2756,6 @@ mod tests {
         signal: Option<InputSignal>,
         stop_requested: Arc<AtomicBool>,
         stop_result: Result<PathBuf>,
-        cancel_result: Result<()>,
     }
 
     impl Default for FakeRecorder {
@@ -2768,7 +2764,6 @@ mod tests {
                 signal: None,
                 stop_requested: Arc::new(AtomicBool::new(false)),
                 stop_result: Ok(PathBuf::from("/tmp/unused.wav")),
-                cancel_result: Ok(()),
             }
         }
     }
@@ -2777,15 +2772,12 @@ mod tests {
         fn input_signal(&mut self) -> Option<InputSignal> {
             self.signal
         }
-        fn request_stop(&mut self, _preserve_wav: bool) -> Result<()> {
+        fn request_stop(&mut self) -> Result<()> {
             self.stop_requested.store(true, Ordering::Release);
             Ok(())
         }
         fn stop(self: Box<Self>) -> Result<PathBuf> {
             self.stop_result
-        }
-        fn cancel(self: Box<Self>) -> Result<()> {
-            self.cancel_result
         }
     }
 }

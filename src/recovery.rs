@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -108,6 +108,12 @@ pub fn import_legacy() -> Result<()> {
     import_legacy_in(&paths::state_dir()?, &paths::transcript_history_dir()?)
 }
 
+/// Import finalized recordings left in the private runtime directory. Startup
+/// must call this before capture starts; live WAV headers are not repaired.
+pub fn import_runtime(runtime: &Path) -> Result<()> {
+    import_runtime_in(runtime, &paths::transcript_history_dir()?)
+}
+
 fn list_in(store: &Store) -> Result<Vec<Take>> {
     let ids: BTreeSet<_> = store
         .names()?
@@ -166,13 +172,11 @@ fn get_in(store: &Store, id: &str) -> Result<Take> {
         text_available: record.as_ref().and_then(archive::final_text).is_some(),
         audio_available: audio_duration.is_some(),
         partial: record.as_ref().is_some_and(archive::partial),
-        unresolved: audio_file.is_some()
-            || record.is_none()
-            || record
-                .as_ref()
-                .and_then(|record| record.pointer("/recovery/unresolved"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+        unresolved: record
+            .as_ref()
+            .and_then(|record| record.pointer("/recovery/unresolved"))
+            .and_then(Value::as_bool)
+            .unwrap_or(audio_file.is_some() || record.is_none()),
     })
 }
 
@@ -416,9 +420,7 @@ fn resolve_in(store: &Store, id: &str) -> Result<()> {
         record["recovery"] = json!({});
     }
     record["recovery"]["unresolved"] = json!(false);
-    // Re-publish/fsync the complete text before removing its recovery audio.
-    store.write_record(id, &record)?;
-    store.remove(&format!("{id}.wav"))
+    store.write_record(id, &record)
 }
 
 fn forget_in(store: &Store, id: &str) -> Result<()> {
@@ -448,6 +450,77 @@ fn forget_in(store: &Store, id: &str) -> Result<()> {
     {
         store.remove(&name)?;
     }
+    Ok(())
+}
+
+fn import_runtime_in(runtime: &Path, history: &Path) -> Result<()> {
+    let originals = Store::open(runtime)?;
+    let store = Store::open(history)?;
+    let mut errors = Vec::new();
+    for name in originals.names()? {
+        let Some(id) = name
+            .strip_prefix("rec-")
+            .and_then(|name| name.strip_suffix(".wav"))
+        else {
+            continue;
+        };
+        let result = (|| -> Result<()> {
+            archive::validate_id(id)?;
+            let source = runtime.join(&name);
+            let mut original = archive::open_source(&source)?;
+            // Older pw-record versions inherit the daemon's umask. The
+            // directory is private, but normalize the owned, exclusive file
+            // before using the store's stricter fd-relative checks.
+            if original.metadata()?.permissions().mode() & 0o777 != 0o600 {
+                original
+                    .set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .context("setting runtime recording permissions")?;
+            }
+            let metadata = original.metadata().context("checking runtime recording")?;
+            let current = originals
+                .open_file(&name)?
+                .context("runtime recording disappeared")?;
+            ensure!(
+                same_file_version(&metadata, &current.metadata()?),
+                "runtime recording changed before migration"
+            );
+            let duration = audio_duration(&mut original)
+                .context("runtime recording is not a finalized nonempty WAV")?;
+            original.seek(SeekFrom::Start(4))?;
+            let mut riff_size = [0_u8; 4];
+            original.read_exact(&mut riff_size)?;
+            ensure!(
+                u64::from(u32::from_le_bytes(riff_size)) + 8 == metadata.len(),
+                "runtime recording has an unfinished WAV length"
+            );
+            if store.open_file(&format!("{id}.wav"))?.is_none() {
+                let unresolved = get_in(&store, id)
+                    .map(|take| take.unresolved)
+                    .unwrap_or(true);
+                persist_in(&store, id, duration, None, Some(&source), false, unresolved)?;
+            }
+            // Existing audio can be an interrupted import, or a successful
+            // resolved take whose runtime unlink failed. Confirm it without
+            // changing completion state or associating it with another ID.
+            ensure!(
+                confirm_audio_in(&store, id, &source)?.audio_available,
+                "runtime recording was not durably imported"
+            );
+            let current = originals
+                .open_file(&name)?
+                .context("runtime recording disappeared")?;
+            ensure!(
+                same_file_version(&metadata, &current.metadata()?)
+                    && same_file_version(&metadata, &original.metadata()?),
+                "runtime recording changed during migration"
+            );
+            originals.remove(&name)
+        })();
+        if let Err(error) = result {
+            errors.push(format!("runtime recording {name}: {error:#}"));
+        }
+    }
+    ensure!(errors.is_empty(), "{}", errors.join("; "));
     Ok(())
 }
 
@@ -680,9 +753,21 @@ mod tests {
         resolve_in(&store, &id).unwrap();
         let take = get_in(&store, &id).unwrap();
         assert!(take.text_available);
-        assert!(!take.audio_available);
+        assert!(take.audio_available);
         assert!(!take.partial);
         assert!(!take.unresolved);
+        assert_eq!(fs::read(&retained).unwrap(), original_bytes);
+        assert_eq!(
+            read_text_in(&store, &id).unwrap(),
+            "complete recovered text"
+        );
+        forget_in(&store, &id).unwrap();
+        assert!(!get_in(&store, &id).unwrap().audio_available);
+        assert!(!retained.exists());
+        assert_eq!(
+            read_text_in(&store, &id).unwrap(),
+            "complete recovered text"
+        );
     }
 
     #[test]
@@ -953,6 +1038,224 @@ mod tests {
         .unwrap();
         forget_in(&store, &incomplete).unwrap();
         assert!(get_in(&store, &incomplete).is_err());
+    }
+
+    #[test]
+    fn runtime_import_preserves_recording_ids_without_guessing_old_take_associations() {
+        let fixture = Fixture::new();
+        let queued_id = new_id();
+        let old_runtime_id = new_id();
+        let unrelated_id = new_id();
+        let queued = fixture.root.join(format!("rec-{queued_id}.wav"));
+        let old_runtime = fixture.root.join(format!("rec-{old_runtime_id}.wav"));
+        fs::copy(&fixture.wav, &queued).unwrap();
+        fs::copy(&fixture.wav, &old_runtime).unwrap();
+        fs::set_permissions(&old_runtime, fs::Permissions::from_mode(0o644)).unwrap();
+        {
+            let store = fixture.store();
+            persist_in(&store, &queued_id, 10, None, None, false, true).unwrap();
+            persist_in(
+                &store,
+                &unrelated_id,
+                10,
+                Some("unrelated completed take"),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        }
+        import_runtime_in(&fixture.root, &fixture.history).unwrap();
+        assert!(!queued.exists());
+        assert!(!old_runtime.exists());
+        let first_takes;
+        {
+            let store = fixture.store();
+            for id in [&queued_id, &old_runtime_id] {
+                let take = get_in(&store, id).unwrap();
+                assert!(take.audio_available && take.unresolved);
+                assert!(!take.text_available);
+                assert_eq!(
+                    fs::read(fixture.history.join(format!("{id}.wav"))).unwrap(),
+                    fs::read(&fixture.wav).unwrap()
+                );
+            }
+            let unrelated = get_in(&store, &unrelated_id).unwrap();
+            assert!(unrelated.text_available);
+            assert!(!unrelated.audio_available && !unrelated.unresolved);
+            assert_eq!(
+                read_text_in(&store, &unrelated_id).unwrap(),
+                "unrelated completed take"
+            );
+            first_takes = list_in(&store).unwrap();
+            assert_eq!(first_takes.len(), 3);
+        }
+        // Simulate a restart after canonical publication but before unlink.
+        fs::copy(&fixture.wav, &queued).unwrap();
+        import_runtime_in(&fixture.root, &fixture.history).unwrap();
+        assert!(!queued.exists());
+        import_runtime_in(&fixture.root, &fixture.history).unwrap();
+        assert_eq!(list_in(&fixture.store()).unwrap(), first_takes);
+    }
+
+    #[test]
+    fn runtime_import_does_not_reopen_successfully_resolved_recordings() {
+        let fixture = Fixture::new();
+        let id = new_id();
+        let source = fixture.root.join(format!("rec-{id}.wav"));
+        fs::copy(&fixture.wav, &source).unwrap();
+        let before;
+        {
+            let store = fixture.store();
+            persist_in(
+                &store,
+                &id,
+                10,
+                Some("successfully delivered text"),
+                Some(&source),
+                false,
+                true,
+            )
+            .unwrap();
+            resolve_in(&store, &id).unwrap();
+            before = get_in(&store, &id).unwrap();
+        }
+        import_runtime_in(&fixture.root, &fixture.history).unwrap();
+        assert!(!source.exists());
+        let store = fixture.store();
+        let imported = get_in(&store, &id).unwrap();
+        assert_eq!(imported, before);
+        assert!(imported.audio_available && imported.text_available);
+        assert!(!imported.unresolved);
+        assert_eq!(
+            read_text_in(&store, &id).unwrap(),
+            "successfully delivered text"
+        );
+    }
+
+    #[test]
+    fn runtime_conflicts_and_unfinalized_wavs_do_not_block_safe_imports() {
+        let fixture = Fixture::new();
+        let conflict_id = new_id();
+        let truncated_id = new_id();
+        let unfinished_id = new_id();
+        let safe_id = new_id();
+        let conflict = fixture.root.join(format!("rec-{conflict_id}.wav"));
+        let truncated = fixture.root.join(format!("rec-{truncated_id}.wav"));
+        let unfinished = fixture.root.join(format!("rec-{unfinished_id}.wav"));
+        let safe = fixture.root.join(format!("rec-{safe_id}.wav"));
+        write_wav(&conflict, 43);
+        let complete_audio = fs::read(&fixture.wav).unwrap();
+        fs::write(&truncated, &complete_audio[..complete_audio.len() - 2]).unwrap();
+        let mut unfinished_audio = complete_audio.clone();
+        unfinished_audio.extend_from_slice(&44_i16.to_le_bytes());
+        fs::write(&unfinished, &unfinished_audio).unwrap();
+        fs::copy(&fixture.wav, &safe).unwrap();
+        {
+            let store = fixture.store();
+            persist_in(
+                &store,
+                &conflict_id,
+                10,
+                Some("original take"),
+                Some(&fixture.wav),
+                false,
+                true,
+            )
+            .unwrap();
+        }
+        let conflicting_audio = fs::read(&conflict).unwrap();
+        let error = import_runtime_in(&fixture.root, &fixture.history).unwrap_err();
+        let errors = error.to_string();
+        for id in [&conflict_id, &truncated_id, &unfinished_id] {
+            assert!(errors.contains(id));
+        }
+        assert_eq!(fs::read(&conflict).unwrap(), conflicting_audio);
+        assert_eq!(
+            fs::read(&truncated).unwrap(),
+            complete_audio[..complete_audio.len() - 2]
+        );
+        assert_eq!(fs::read(&unfinished).unwrap(), unfinished_audio);
+        assert!(!safe.exists());
+        let store = fixture.store();
+        assert!(get_in(&store, &safe_id).unwrap().audio_available);
+        assert_eq!(
+            fs::read(fixture.history.join(format!("{conflict_id}.wav"))).unwrap(),
+            complete_audio
+        );
+        assert_eq!(read_text_in(&store, &conflict_id).unwrap(), "original take");
+        assert!(get_in(&store, &truncated_id).is_err());
+        assert!(get_in(&store, &unfinished_id).is_err());
+    }
+
+    #[test]
+    fn runtime_import_rejects_untrusted_entries_without_following_links() {
+        let fixture = Fixture::new();
+        let symbolic_id = new_id();
+        let hardlink_id = new_id();
+        let directory_id = new_id();
+        let safe_id = new_id();
+        let symbolic = fixture.root.join(format!("rec-{symbolic_id}.wav"));
+        let hardlink = fixture.root.join(format!("rec-{hardlink_id}.wav"));
+        let directory = fixture.root.join(format!("rec-{directory_id}.wav"));
+        let invalid = fixture.root.join("rec-invalid.name.wav");
+        let safe = fixture.root.join(format!("rec-{safe_id}.wav"));
+        let linked_directory = fixture.root.join("runtime-link");
+        symlink(&fixture.wav, &symbolic).unwrap();
+        fs::hard_link(&fixture.wav, &hardlink).unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::copy(&fixture.wav, &invalid).unwrap();
+        fs::copy(&fixture.wav, &safe).unwrap();
+        symlink(&fixture.root, &linked_directory).unwrap();
+        assert!(import_runtime_in(&linked_directory, &fixture.history).is_err());
+        assert!(safe.exists());
+        let original_audio = fs::read(&fixture.wav).unwrap();
+        assert!(import_runtime_in(&fixture.root, &fixture.history).is_err());
+        assert!(fs::symlink_metadata(&symbolic)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(directory.is_dir());
+        assert!(invalid.exists());
+        assert_eq!(fs::read(&hardlink).unwrap(), original_audio);
+        assert_eq!(fs::read(&fixture.wav).unwrap(), original_audio);
+        assert!(!safe.exists());
+        let store = fixture.store();
+        let takes = list_in(&store).unwrap();
+        assert_eq!(takes.len(), 1);
+        assert_eq!(takes[0].id, safe_id);
+        assert!(takes[0].audio_available);
+    }
+
+    #[test]
+    fn interrupted_runtime_import_retains_source_until_durability_can_be_confirmed() {
+        let fixture = Fixture::new();
+        let id = new_id();
+        let safe_id = new_id();
+        let source = fixture.root.join(format!("rec-{id}.wav"));
+        let safe = fixture.root.join(format!("rec-{safe_id}.wav"));
+        fs::copy(&fixture.wav, &source).unwrap();
+        fs::copy(&fixture.wav, &safe).unwrap();
+        let blocked_record = fixture.history.join(format!("{id}.json"));
+        {
+            let _store = fixture.store();
+            fs::create_dir(&blocked_record).unwrap();
+        }
+        assert!(import_runtime_in(&fixture.root, &fixture.history).is_err());
+        assert_eq!(fs::read(&source).unwrap(), fs::read(&fixture.wav).unwrap());
+        assert!(!safe.exists());
+        {
+            let store = fixture.store();
+            assert!(get_in(&store, &id).unwrap().audio_available);
+            assert!(confirm_audio_in(&store, &id, &source).is_err());
+            assert!(get_in(&store, &safe_id).unwrap().audio_available);
+        }
+        fs::remove_dir(&blocked_record).unwrap();
+        import_runtime_in(&fixture.root, &fixture.history).unwrap();
+        assert!(!source.exists());
+        let store = fixture.store();
+        assert!(get_in(&store, &id).unwrap().audio_available);
+        assert_eq!(list_in(&store).unwrap().len(), 2);
     }
 
     #[test]

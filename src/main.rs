@@ -73,6 +73,7 @@ enum CliCommand {
         postproc: Option<PostprocMode>,
     },
     Stop,
+    /// Stop capture or processing without deleting the recording.
     Cancel,
     Status {
         /// Emit the typed, transcript-free status snapshot.
@@ -102,9 +103,9 @@ enum CliCommand {
     },
     /// Re-inject the last saved transcript.
     Last,
-    /// Re-run STT on the retained failed or partial recording.
+    /// Re-run STT on a retained recording.
     Recover {
-        /// Recover this exact recording; omitted selects the newest retained audio.
+        /// Recover this exact take; omitted selects the newest unresolved audio.
         #[arg(long)]
         id: Option<String>,
         /// Use installed local Parakeet without cloud STT or cleanup.
@@ -632,6 +633,9 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
         eprintln!("warning: transcript archive failed: {error}");
     }
     emit_transcribe_telemetry(&config, &outcome);
+    if outcome.local_fallback {
+        eprintln!("cloud transcription unavailable; used local Parakeet");
+    }
     match &outcome.text {
         Ok(text) => {
             if matches!(outcome.postproc, pipeline::PostprocStatus::Failed { .. }) {
@@ -686,8 +690,12 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         source: "transcribe",
         capture_ms: 0,
         stt_ms,
-        stt_model: config.stt.model.clone(),
-        stt_remote: config.stt.endpoint.is_some(),
+        stt_model: if outcome.local_fallback {
+            PARAKEET_V3_INT8.dir_name.to_owned()
+        } else {
+            config.stt.model.clone()
+        },
+        stt_remote: config.stt.endpoint.is_some() && !outcome.local_fallback,
         chars,
         partial: outcome.partial,
         cleanup_state,
@@ -814,8 +822,13 @@ fn capture_diagnosis(config: Option<&Config>, tools: DoctorTools) -> String {
 
 fn stt_diagnosis(config: &Config) -> String {
     if let Some(endpoint) = &config.stt.endpoint {
+        let fallback = match models::installed(&PARAKEET_V3_INT8) {
+            Ok(Some(_)) => "automatic local fallback ready",
+            Ok(None) => "local fallback unavailable — run: cantrip models pull",
+            Err(_) => "local fallback could not be inspected — run: cantrip models status",
+        };
         return format!(
-            "stt: remote configured (model={}; endpoint={}; credential={})",
+            "stt: remote configured (model={}; endpoint={}; credential={}); {fallback}",
             config.stt.model,
             endpoint_origin(endpoint),
             credential_status(config.stt.api_key_id.as_deref())

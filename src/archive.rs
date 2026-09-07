@@ -24,6 +24,7 @@ pub(crate) struct Entry<'a> {
     pub pipeline_elapsed_ms: u64,
     pub stt_model: &'a str,
     pub stt_remote: bool,
+    pub stt_fallback_from_model: Option<&'a str>,
     pub stt_elapsed_ms: u64,
     pub stt_api_cost_usd: Option<f64>,
     pub partial: bool,
@@ -73,11 +74,14 @@ struct PipelineRecord {
 struct SttRecord<'a> {
     model: &'a str,
     backend: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_from_model: Option<&'a str>,
     elapsed_ms: u64,
     partial: bool,
     cancelled: bool,
-    /// API billing only. Local inference is `0`; cloud backends are omitted
-    /// until their compatible response reports an authoritative charge.
+    /// Total API billing across STT attempts. Only explicitly local inference
+    /// is known to cost `0`; a cloud attempt, even before local fallback,
+    /// remains unknown until the provider reports an authoritative charge.
     #[serde(skip_serializing_if = "Option::is_none")]
     api_cost_usd: Option<f64>,
 }
@@ -116,7 +120,7 @@ pub(crate) fn save(entry: Entry<'_>) -> Result<PathBuf> {
     save_to(&paths::transcript_history_dir()?, entry)
 }
 
-fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
+pub(crate) fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
     let store = Store::open(directory)?;
     let generated_id;
     let session_id = match entry.take_id {
@@ -141,6 +145,7 @@ fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
         stt: SttRecord {
             model: entry.stt_model,
             backend: if entry.stt_remote { "cloud" } else { "local" },
+            fallback_from_model: entry.stt_fallback_from_model,
             elapsed_ms: entry.stt_elapsed_ms,
             partial: entry.partial,
             cancelled: entry.cancelled,
@@ -611,6 +616,7 @@ mod tests {
             pipeline_elapsed_ms: 49,
             stt_model: "parakeet-test",
             stt_remote: false,
+            stt_fallback_from_model: None,
             stt_elapsed_ms: 42,
             stt_api_cost_usd: Some(0.0),
             partial: false,

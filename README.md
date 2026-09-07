@@ -18,8 +18,10 @@ that, for text.
   replace the local models (see `docs/CONFIGURATION.md`). API keys live in
   the OS keyring, never in files.
 - **Long dictation without oversized uploads.** Local and cloud STT split long
-  recordings into bounded chunks and deliver one finished transcript. Partial
-  failures preserve available text and the original audio for recovery.
+  recordings into bounded chunks and deliver one finished transcript. Cloud
+  failure, partial text, or empty recognition automatically gets one whole-take
+  retry with installed local Parakeet. No new cloud provider or model download.
+  If neither backend completes, available text and original audio remain saved.
 - **Passive status HUD.** A bottom-anchored, input-transparent track shows measured
   microphone activity and real multi-chunk progress. It never takes focus or
   invents progress. Silence, partial text, deferred delivery, storage failures,
@@ -87,8 +89,8 @@ desktop safety checks require clipboard mode or explicit recovery, as above.
 Run `cantrip doctor` again after changing config or installing a prerequisite.
 If cleanup is enabled, ensure its configured endpoint is running and its
 keyring credential id, when needed, was stored with `cantrip key set`.
-`cantrip cancel` discards an active capture without injecting. During processing,
-cancellation prevents later chunks and delivery, and retains recoverable audio;
+`cantrip cancel` stops capture or processing without injecting or deleting audio.
+Cancellation prevents later chunks, local fallback, cleanup requests, and delivery;
 an already-running provider request may need to return before the worker settles.
 
 ## CLI
@@ -109,9 +111,9 @@ an already-running provider request may need to return before the worker settles
 | `cantrip recordings [--json]` | List canonical recording IDs, durations, and available artifacts; no transcript text |
 | `cantrip copy <id>` | Copy this exact recording's saved transcript; never send keys |
 | `cantrip last` | Re-deliver the latest saved transcript, selected once when accepted |
-| `cantrip recover [--id ID] [--local] [--clipboard]` | Retry this recording; omitted ID selects the newest retained audio |
+| `cantrip recover [--id ID] [--local] [--clipboard]` | Retry this recording; omitted ID selects the newest unresolved take with retained audio |
 | `cantrip dismiss [--event-id ID]` | Acknowledge a notice without deleting recordings |
-| `cantrip forget <id> --confirm` | Delete retained audio and incomplete text; keep complete archived text |
+| `cantrip forget <id> --yes` | Delete retained audio and incomplete text; keep complete archived text |
 | `cantrip reload` | Re-read configuration in the running daemon |
 
 Two hotkeys, one with cleanup and one without: `toggle` and `start` take
@@ -148,9 +150,13 @@ Paste with Ctrl+V in a GUI or Ctrl+Shift+V in a terminal. `--local` uses install
 Parakeet and disables cleanup for that operation; it does not change separately
 opted-in count-only telemetry. A partial result is visibly marked incomplete
 and leaves the audio available. Retrying processes the whole recording again.
+Automatic local fallback keeps your configured cleanup policy; explicit
+`--local` disables cleanup. `cantrip doctor` reports local fallback readiness.
 
-Dismissal only acknowledges feedback. Forget requires confirmation and removes
-that take's audio and incomplete text, retaining any complete archived transcript.
+Dismissal only acknowledges feedback. Successful delivery marks a take resolved
+but keeps its audio. Only confirmed Forget removes that take's audio and incomplete
+text, retaining any complete archived transcript. Retained audio costs about
+1.92 MB per recorded minute (115 MB/hour), with no silent expiry.
 Partial or uncertain delivery is not a successful retry: inspect the destination
 before trying again to avoid duplicates.
 
@@ -199,10 +205,13 @@ documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 - In-flight recordings live in `$XDG_RUNTIME_DIR/cantrip` (tmpfs, per-user
   `0700`). Before transcription, each stopped take is retained under its own ID
   in `$XDG_STATE_HOME/cantrip/transcripts` as owner-only recovery audio.
-  Failed, partial, cancelled, empty meaningful, or undelivered takes remain
-  available independently. Audio is removed after a complete result is durably
-  saved and delivered, or after explicit confirmed Forget.
-  Storage failures are surfaced; runtime-only audio must be retrieved before reboot.
+  Every stopped take, including successful, cancelled, empty, and undelivered
+  takes, remains independently available until explicit confirmed Forget.
+  Graceful shutdown stops and retains live capture; startup imports trusted,
+  finalized runtime leftovers under their original IDs. Runtime originals are
+  consumed only after matching durable audio is confirmed.
+  Storage failures are surfaced. Active or runtime-only audio can be lost on
+  reboot or power failure; no recognition or storage guarantee overrides that.
   Legacy `last-failed.wav` and `last-transcript.txt` migrate independently and
   idempotently, with originals consumed only after durable publication.
 - Every successful STT result is saved locally as an owner-only JSON record in

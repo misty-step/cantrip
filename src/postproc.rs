@@ -1,6 +1,7 @@
 use crate::config::PostprocConfig;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 /// Increment when the fixed cleanup prompt changes semantically.
@@ -151,11 +152,14 @@ struct ChatRound {
 /// Refine a transcript through an OpenAI-compatible chat completion endpoint.
 /// Runs `cfg.passes` rounds in a chain: each later round re-reads the previous
 /// output and fixes residual speech-recognition errors the earlier round left.
+/// Cancellation leaves the caller's raw transcript intact and prevents any
+/// later round from starting; a blocked request may still finish.
 pub fn refine(
     transcript: &str,
     cfg: &PostprocConfig,
     vocabulary: &[String],
     api_key: Option<&str>,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Refinement> {
     let passes = cfg.passes.max(1);
     let started = Instant::now();
@@ -165,12 +169,16 @@ pub fn refine(
         ..RefinementUsage::default()
     };
     for pass in 1..=passes {
+        anyhow::ensure!(
+            !crate::stt::is_cancelled(cancel),
+            "post-processing cancelled"
+        );
         let system = if pass == 1 {
             build_system_prompt(vocabulary, &cfg.instructions)
         } else {
             build_prompt(VERIFY_SYSTEM_PROMPT, vocabulary, "")
         };
-        let round = chat_round(&current, cfg, api_key, &system)?;
+        let round = chat_round(&current, cfg, api_key, &system, cancel)?;
         merge_usage(&mut usage, round.usage);
         current = round.text;
     }
@@ -221,6 +229,7 @@ fn chat_round(
     cfg: &PostprocConfig,
     api_key: Option<&str>,
     system: &str,
+    cancel: Option<&AtomicBool>,
 ) -> Result<ChatRound> {
     let user = build_user_prompt(transcript);
     let request = ChatRequest {
@@ -253,6 +262,10 @@ fn chat_round(
     if let Some(api_key) = api_key {
         request = request.set("Authorization", &format!("Bearer {api_key}"));
     }
+    anyhow::ensure!(
+        !crate::stt::is_cancelled(cancel),
+        "post-processing cancelled"
+    );
 
     let response = match request.send_string(&body) {
         Ok(response) => response,

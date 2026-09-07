@@ -128,12 +128,18 @@ fn refine_round_trip_sends_contract_request_and_strips_model_wrappers() {
     let (endpoint, server) = mock_server(response);
     let mut cfg = postproc_config(endpoint);
     // This test pins the single-round wire contract; the multi-round chain is
-    // covered by `refine_two_passes_chains_output_and_sends_verify_prompt`.
+    // covered by `refine_two_passes_chains_output`.
     cfg.passes = 1;
     let vocabulary = vec!["Cantrip".to_owned(), "PipeWire".to_owned()];
 
-    let refined = postproc::refine("hello cantrip world", &cfg, &vocabulary, Some("sk-test"))
-        .expect("refine should succeed");
+    let refined = postproc::refine(
+        "hello cantrip world",
+        &cfg,
+        &vocabulary,
+        Some("sk-test"),
+        None,
+    )
+    .expect("refine should succeed");
     assert_eq!(refined.text, "Hello, Cantrip world.");
     let usage = refined.usage.expect("provider usage should survive");
     assert_eq!(usage.prompt_tokens, 7);
@@ -188,7 +194,7 @@ fn mock_server_multi(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<
 }
 
 #[test]
-fn refine_two_passes_chains_output_and_sends_verify_prompt() {
+fn refine_two_passes_chains_output() {
     let (endpoint, server) = mock_server_multi(vec![
         ok_json(
             r#"{"choices":[{"message":{"content":"First-pass text. The Exa AP and the CL expose methods."}}]}"#,
@@ -200,7 +206,8 @@ fn refine_two_passes_chains_output_and_sends_verify_prompt() {
     let cfg = postproc_config(endpoint); // passes = 2
     let first = "Initial text. The Exa AP and the CL expose methods.";
 
-    let refined = postproc::refine(first, &cfg, &[], None).expect("two-pass refine should succeed");
+    let refined =
+        postproc::refine(first, &cfg, &[], None, None).expect("two-pass refine should succeed");
     assert_eq!(
         refined.text,
         "First-pass text. The Exa API and the CLI expose methods."
@@ -214,11 +221,6 @@ fn refine_two_passes_chains_output_and_sends_verify_prompt() {
         pass1["messages"][1]["content"],
         postproc::build_user_prompt(first)
     );
-    let system1 = pass1["messages"][0]["content"].as_str().unwrap();
-    assert!(
-        system1.contains("You clean speech-to-text transcripts"),
-        "pass 1 uses the cleanup prompt"
-    );
 
     let pass2: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
     // The source of pass 2 is chained from pass 1's output.
@@ -226,14 +228,51 @@ fn refine_two_passes_chains_output_and_sends_verify_prompt() {
         pass2["messages"][1]["content"],
         postproc::build_user_prompt("First-pass text. The Exa AP and the CL expose methods.")
     );
-    let system2 = pass2["messages"][0]["content"].as_str().unwrap();
-    assert!(
-        system2.contains("final check of a speech-to-text transcript"),
-        "pass 2 must use the verify prompt, got: {system2}"
-    );
-    assert!(
-        !system2.contains("Examples:"),
-        "pass 2 must use only the focused verify prompt"
+}
+
+#[test]
+fn cancelling_a_blocked_cleanup_pass_prevents_later_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server_listener = listener.try_clone().unwrap();
+    let (requested_tx, requested_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = server_listener.accept().unwrap();
+        let _ = read_request(&stream);
+        requested_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream
+            .write_all(
+                ok_json(r#"{"choices":[{"message":{"content":"First cleanup result."}}]}"#)
+                    .as_bytes(),
+            )
+            .unwrap();
+    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&cancel);
+    let client = thread::spawn(move || {
+        postproc::refine(
+            "private dictated words",
+            &postproc_config(endpoint),
+            &[],
+            None,
+            Some(&worker_cancel),
+        )
+    });
+    requested_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    cancel.store(true, Ordering::Release);
+    release_tx.send(()).unwrap();
+    let error = client
+        .join()
+        .unwrap()
+        .expect_err("cancelled cleanup must not finish its chain");
+    assert!(!format!("{error:#}").contains("private dictated words"));
+    server.join().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
     );
 }
 
@@ -243,8 +282,8 @@ fn refine_http_error_reports_status_without_response_body() {
     let (endpoint, server) = mock_server(RESPONSE.to_owned());
     let cfg = postproc_config(endpoint);
 
-    let error =
-        postproc::refine("some dictated words", &cfg, &[], None).expect_err("HTTP 500 must fail");
+    let error = postproc::refine("some dictated words", &cfg, &[], None, None)
+        .expect_err("HTTP 500 must fail");
     let message = format!("{error:#}");
     assert!(message.contains("HTTP 500"), "got: {message}");
     assert!(
@@ -259,7 +298,7 @@ fn refine_transport_error_omits_private_endpoint_details() {
     let cfg = postproc_config(
         "http://[PRIVATE-ENDPOINT-MARKER]/PRIVATE-PATH?secret=PRIVATE-QUERY".to_owned(),
     );
-    let error = postproc::refine("dictated words", &cfg, &[], None)
+    let error = postproc::refine("dictated words", &cfg, &[], None, None)
         .expect_err("malformed endpoint must fail before a request is sent");
     let diagnostic = format!("{error:#}");
     for secret in ["PRIVATE-ENDPOINT-MARKER", "PRIVATE-PATH", "PRIVATE-QUERY"] {
@@ -684,6 +723,77 @@ fn transcribe_remote_failure_without_earlier_text_remains_an_error() {
     );
     assert!(!message.contains("PRIVATE-RESPONSE-MARKER"));
     assert!(!message.contains("sk-private-http-test"));
+}
+
+#[test]
+fn transcribe_cli_keeps_cloud_partial_when_the_local_fallback_model_is_missing() {
+    let fixture = WavFixture::new(native_spec(), 70 * 16_000);
+    let (endpoint, server) = mock_server_multi(vec![
+        ok_json(r#"{"text":"usable cloud prefix"}"#),
+        "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_owned(),
+    ]);
+    let root = fixture.path.with_extension("xdg");
+    let config_dir = root.join("config/cantrip");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let cfg = cantrip::config::Config {
+        stt: cantrip::config::SttConfig {
+            endpoint: Some(endpoint),
+            model: "configured-cloud-model".to_owned(),
+            api_key_id: None,
+        },
+        ..Default::default()
+    };
+    std::fs::write(
+        config_dir.join("config.toml"),
+        toml::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cantrip"))
+        .arg("transcribe")
+        .arg(&fixture.path)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("RUST_LOG", "warn")
+        .output()
+        .expect("running isolated transcribe CLI");
+    assert!(
+        !output.status.success(),
+        "partial text must not claim completion"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        "usable cloud prefix"
+    );
+    assert!(!String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("usable cloud prefix"));
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2, "do not retry failed cloud chunks");
+    let records: Vec<_> = std::fs::read_dir(root.join("state/cantrip/transcripts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    assert_eq!(records.len(), 1);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&records[0]).unwrap()).unwrap();
+    assert_eq!(saved["raw_transcript"], "usable cloud prefix");
+    assert_eq!(saved["stt"]["backend"], "cloud");
+    assert_eq!(saved["stt"]["model"], "configured-cloud-model");
+    assert_eq!(saved["stt"]["partial"], true);
+    assert!(saved["stt"].get("api_cost_usd").is_none());
+    assert!(saved["stt"].get("fallback_from_model").is_none());
+    assert!(fixture.path.is_file());
+    assert!(
+        !root.join("data/cantrip/models").exists(),
+        "fallback never downloads a model"
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
