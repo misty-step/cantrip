@@ -49,12 +49,40 @@ cargo run --release --example eval -- langfuse --out eval/results --dataset cant
 - Reuses the daemon's `[telemetry]` config: `enabled`, OTLP `endpoint`,
   `public_key`, and the `langfuse` OS-keyring secret. It refuses to run when
   telemetry is disabled.
-- Creates a Langfuse dataset, uploads the public/synthetic corpus (clip
-  references and synthetic behavior cases), then posts metadata-only
-  experiment traces and numeric scores for every result already on disk in
-  the selected output directory.
-- `--dataset` is optional; without it the command uses the canonical
-  `cantrip-evals` dataset. Experiment and run names remain unique.
+- Reuses or creates the named Langfuse dataset, uploads the public/synthetic
+  corpus (clip references and synthetic behavior cases), then posts metadata-only
+  experiment traces and numeric scores for results in the selected directory.
+- `--dataset` is optional; the default is the canonical `cantrip-evals` dataset.
+  New item IDs include the remote dataset ID, logical clip/case key, and public
+  content. Changed references or case content create separate items rather than
+  overwriting the old corpus. Matching existing items are reused; exact legacy
+  items with server-generated IDs are adopted in place. This does not delete
+  pre-existing duplicates or rewrite old traces and scores.
+- Completed `run`, post-processing-only, and `behavior` commands write immutable
+  `run.json` metadata containing the command's `started_at_unix_ms`. Publishing
+  uses that recorded start, not the upload clock or file modification time:
+  Langfuse's observation storage key includes the start time. Spans use that
+  run anchor plus the measured latency, not reconstructed per-call execution
+  times. Legacy baselines may instead record `started_at`
+  (`YYYY-MM-DDTHH:MM:SSZ`) or `date` (`YYYY-MM-DD`, UTC). Legacy output without
+  a recorded timestamp must be rerun before publishing; no timestamp is invented.
+- Run identity hashes the parsed JSON content of `run.json`, the selected
+  manifests, and all applicable result files. Dataset, experiment, item, trace,
+  span, and score identities remain stable on repeated publication of the same
+  bundle, including after moving it. Result rows remain distinct, including
+  repeated measurements. Changing the bundle creates a separate experiment.
+  Treat these inputs as immutable; retries must use the same bundle and config.
+- To distinguish intentionally independent runs with otherwise identical
+  bundles, record distinct run IDs in `run.json`, or supply `--run-id <label>`.
+  Reuse that label when retrying; changing it intentionally publishes another
+  experiment. Directory names and publication timestamps are not run identity.
+- Requests retry HTTP 408, 429, 500, 502, 503, and 504, connection/DNS failures,
+  and interrupted response reads, with at most three attempts. Backoff is
+  250 ms then 500 ms; `Retry-After` delta-seconds or GMT HTTP-date hints can
+  extend either delay only up to five seconds. Each attempt retains the
+  60-second request timeout. Other HTTP failures stop immediately, and OTLP
+  partial rejection fails the publish. Errors report the operation and
+  status/failure category, never response bodies or credentials.
 
 Privacy boundary: dataset inputs and expected outputs are the public clips
 and synthetic behavior cases. Experiment spans carry ids, counts, latency,
@@ -377,10 +405,11 @@ Raw model responses may be written only to local result directories for public
 or synthetic corpora. Do not commit private dictation, clipboard text,
 credentials, or machine-local audio. Langfuse is an explicit publish step, not
 the local source of truth. Use one stable dataset named `cantrip-evals`;
-experiment/run names carry the unique date and candidate. Upload public clip
-references and synthetic behavior cases as dataset items, and send only IDs,
-grader scores, latency, cost, and error flags in experiment traces. Audio and
-private operator transcripts never go to Langfuse.
+experiment names carry the immutable bundle identity described under
+[Langfuse publish](#langfuse-publish). Upload public clip references and synthetic
+behavior cases as dataset items, and send only IDs, grader scores, latency, cost,
+and error flags in experiment traces. Audio and private operator transcripts
+never go to Langfuse.
 
 Keep curated public/synthetic inputs, provenance, and selected reproducible
 baselines versioned. Retain growing or complete raw run bundles in approved

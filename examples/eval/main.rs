@@ -12,7 +12,7 @@
 //!   cargo run --release --example eval -- list [--config PATH]
 //!   cargo run --release --example eval -- run [--config PATH] [--stt a,b] [--postproc c,d] [--clips x,y]
 //!   cargo run --release --example eval -- run --ppr-only [--out DIR]
-//!   cargo run --release --example eval -- langfuse [--config PATH] [--out DIR] [--dataset NAME]
+//!   cargo run --release --example eval -- langfuse [--config PATH] [--out DIR] [--dataset NAME] [--run-id ID]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
@@ -1103,7 +1103,40 @@ fn resolve_out_dir(config: &EvalConfig, args: &[String]) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(&config.out_dir))
 }
 
+fn invalidate_run_metadata(out_dir: &Path) -> Result<()> {
+    match fs::remove_file(out_dir.join("run.json")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("invalidating previous evaluation run metadata"),
+    }
+}
+
+fn write_run_metadata(
+    out_dir: &Path,
+    command: &str,
+    started_at: std::time::SystemTime,
+) -> Result<()> {
+    let started_at_unix_ms = u64::try_from(
+        started_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("evaluation clock precedes the Unix epoch")?
+            .as_millis(),
+    )
+    .context("evaluation timestamp exceeds the supported range")?;
+    let metadata = json!({
+        "schema_version": 1,
+        "command": command,
+        "started_at_unix_ms": started_at_unix_ms,
+    });
+    fs::write(
+        out_dir.join("run.json"),
+        serde_json::to_vec_pretty(&metadata)?,
+    )
+    .context("writing completed evaluation run metadata")
+}
+
 fn run(args: &[String]) -> Result<()> {
+    let started_at = std::time::SystemTime::now();
     let config = load_config(args)?;
     validate_config(&config)?;
     let stt_filter: Vec<String> = parse_flag(args, "--stt").unwrap_or_default();
@@ -1139,6 +1172,7 @@ fn run(args: &[String]) -> Result<()> {
         .build();
     let out_dir = resolve_out_dir(&config, args);
     fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    invalidate_run_metadata(&out_dir)?;
 
     // ---------------- Transcription ----------------
     let mut stt_results: Vec<SttResult> = Vec::new();
@@ -1226,7 +1260,8 @@ fn run(args: &[String]) -> Result<()> {
         &stt_results,
         &ppr_filter,
         &out_dir,
-    )
+    )?;
+    write_run_metadata(&out_dir, "run", started_at)
 }
 
 fn normalize_behavior_text(text: &str) -> String {
@@ -1240,6 +1275,7 @@ fn normalize_behavior_text(text: &str) -> String {
 }
 
 fn run_behavior(args: &[String]) -> Result<()> {
+    let started_at = std::time::SystemTime::now();
     let config = load_config(args)?;
     validate_config(&config)?;
     let manifest_path = config
@@ -1283,6 +1319,7 @@ fn run_behavior(args: &[String]) -> Result<()> {
         .build();
     let out_dir = resolve_out_dir(&config, args);
     fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    invalidate_run_metadata(&out_dir)?;
 
     let or_lane = config.postproc.iter().find(|lane| {
         (lane_filter.is_empty() || lane_filter.contains(&lane.id))
@@ -1441,12 +1478,12 @@ fn run_behavior(args: &[String]) -> Result<()> {
         results.len(),
         out_dir.display()
     );
-    Ok(())
+    write_run_metadata(&out_dir, "behavior", started_at)
 }
 
-/// Run the transcription phase only, then delegate to
-/// [`postprocess_and_report`] with the cached transcripts.
+/// Reuse completed transcription results and evaluate the selected cleanup lanes.
 fn run_ppr_only(args: &[String]) -> Result<()> {
+    let started_at = std::time::SystemTime::now();
     let config = load_config(args)?;
     validate_config(&config)?;
     let ppr_filter: Vec<String> = parse_flag(args, "--postproc").unwrap_or_default();
@@ -1467,6 +1504,7 @@ fn run_ppr_only(args: &[String]) -> Result<()> {
     let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(300))
         .build();
+    invalidate_run_metadata(&out_dir)?;
     postprocess_and_report(
         &config,
         &manifest,
@@ -1474,7 +1512,8 @@ fn run_ppr_only(args: &[String]) -> Result<()> {
         &stt_results,
         &ppr_filter,
         &out_dir,
-    )
+    )?;
+    write_run_metadata(&out_dir, "ppr-only", started_at)
 }
 
 /// Post-process every cached transcript through every selected postproc
