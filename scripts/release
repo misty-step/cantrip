@@ -72,6 +72,19 @@ def commit_sha(value):
     return github(f"commits/{urllib.parse.quote(value, safe='')}")["sha"]
 
 
+def release_branch_commit():
+    result = run(
+        "gh", "api",
+        f"repos/{REPOSITORY}/branches/{urllib.parse.quote(BRANCH, safe='')}",
+        check=False,
+    )
+    if result.returncode:
+        if "HTTP 404" in result.stderr:
+            return None
+        raise ReleaseError(f"GitHub lookup failed: {result.stderr.strip()}")
+    return json.loads(result.stdout)["commit"]
+
+
 def sha256(path):
     with Path(path).open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
@@ -215,7 +228,7 @@ def prepare(binary, evidence):
         return
     if tuple(map(int, version.split("."))) < tuple(map(int, version_at().split("."))):
         raise ReleaseError("Landmark would downgrade the committed Cargo version; reconcile version metadata")
-    remote = github(f"commits/{urllib.parse.quote(BRANCH, safe='')}", missing=True)
+    remote = release_branch_commit()
     old_revision = remote["sha"] if remote else ""
     if remote:
         git("fetch", "origin", BRANCH)
