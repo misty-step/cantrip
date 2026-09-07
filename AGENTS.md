@@ -27,18 +27,18 @@ lock. Preserve non-obvious architectural decisions in `docs/adr/`.
 
 ## Commands
 
-The toolchain is pinned to stable in `rust-toolchain.toml` with rustfmt and clippy components.
+The exact toolchain version is pinned in `rust-toolchain.toml` with rustfmt and clippy components.
 
 ```sh
-cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo build --locked
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 cargo run -- transcribe samples/jfk.wav
 ./scripts/check
 ```
 
-`scripts/check` is the CI-equivalent sequence: fmt check, clippy with `-D warnings`, then tests.
+`scripts/check` is the CI-equivalent sequence: fmt check, clippy `-D warnings`, tests, and installer/release safety tests.
 
 ## Contracts
 

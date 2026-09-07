@@ -1,0 +1,437 @@
+#!/usr/bin/env python3
+"""Cantrip's Landmark release PR and verified GitHub publication adapter."""
+
+import argparse
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import tomllib
+import urllib.parse
+import urllib.request
+
+
+ROOT = Path(__file__).resolve().parent.parent
+REPOSITORY = "misty-step/cantrip"
+BRANCH = "landmark/release"
+PLAN = ".landmark/release-plan.json"
+LANDMARK_VERSION = "0.28.7"
+LANDMARK_SHA256 = "d3e7400abcf72428f801aae3d9ed74412d5ced31eecc6be753a48027a6441ed9"
+LANDMARK_URL = (
+    f"https://github.com/misty-step/landmark/releases/download/v{LANDMARK_VERSION}/"
+    "landmark-x86_64-unknown-linux-musl"
+)
+SIGNER = f"{REPOSITORY}/.github/workflows/release.yml"
+VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+REVISION = re.compile(r"[0-9a-f]{40}")
+
+
+class ReleaseError(Exception):
+    pass
+
+
+def run(*args, check=True, input=None):
+    result = subprocess.run(
+        args, cwd=ROOT, input=input, text=True, capture_output=True,
+        env={**os.environ, "LC_ALL": "C.UTF-8", "GIT_NO_REPLACE_OBJECTS": "1"},
+    )
+    if check and result.returncode:
+        raise ReleaseError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()}")
+    return result
+
+
+def git(*args, **kwargs):
+    return run("git", *args, **kwargs)
+
+
+def github(path, *, missing=False):
+    result = run("gh", "api", f"repos/{REPOSITORY}/{path}", check=False)
+    if result.returncode:
+        if missing and "HTTP 404" in result.stderr:
+            return None
+        raise ReleaseError(f"GitHub lookup failed: {result.stderr.strip()}")
+    return json.loads(result.stdout)
+
+
+def release_by_tag(tag):
+    # The tag endpoint omits drafts. List with push credentials so interrupted
+    # uploads can resume without creating a second release or replacing assets.
+    releases = json.loads(run("gh", "api", "--paginate", f"repos/{REPOSITORY}/releases?per_page=100").stdout or "[]")
+    matches = [item for item in releases if item.get("tag_name") == tag]
+    if len(matches) > 1:
+        raise ReleaseError(f"multiple GitHub releases use tag {tag}")
+    return matches[0] if matches else None
+
+
+def commit_sha(value):
+    return github(f"commits/{urllib.parse.quote(value, safe='')}")["sha"]
+
+
+def sha256(path):
+    with Path(path).open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def save_json(path, value):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def version_at(reference=None):
+    text = git("show", f"{reference}:Cargo.toml").stdout if reference else (ROOT / "Cargo.toml").read_text()
+    version = tomllib.loads(text)["package"]["version"]
+    if not VERSION.fullmatch(version):
+        raise ReleaseError("automatic releases require a numeric major.minor.patch Cargo version")
+    return version
+
+
+def head():
+    revision = git("rev-parse", "HEAD").stdout.strip()
+    if not REVISION.fullmatch(revision):
+        raise ReleaseError("release source must be a full commit SHA")
+    return revision
+
+
+@contextmanager
+def landmark():
+    # A private, invocation-owned directory avoids executable cache ownership races.
+    with tempfile.TemporaryDirectory(prefix="cantrip-landmark-") as directory:
+        binary = Path(directory) / "landmark"
+        with urllib.request.urlopen(LANDMARK_URL, timeout=60) as source, binary.open("xb") as target:
+            shutil.copyfileobj(source, target, 1024 * 1024)
+        if sha256(binary) != LANDMARK_SHA256:
+            raise ReleaseError("Landmark download checksum mismatch; nothing was executed")
+        binary.chmod(0o700)
+        yield str(binary)
+
+
+def release_paths(version):
+    return {"notes": f"docs/releases/v{version}.md", "technical": f"docs/releases/v{version}-technical.md"}
+
+
+def set_package_version(path, package, version, *, lock=False):
+    """Edit only the single owned package version; never resolve dependencies."""
+    text = path.read_text()
+    sections = re.split(r"(?m)(?=^\[\[package\]\]\s*$)" if lock else r"(?m)(?=^\[[^\n]+\]\s*$)", text)
+    matches = 0
+    for index, section in enumerate(sections):
+        if not section.startswith("[[package]]" if lock else "[package]"):
+            continue
+        parsed = tomllib.loads(section)["package"]
+        entry = parsed[0] if lock else parsed
+        if entry.get("name") != package:
+            continue
+        updated, count = re.subn(r'(?m)^version = "[^"\n]+"$', f'version = "{version}"', section)
+        if count != 1:
+            raise ReleaseError(f"cannot identify the owned package version in {path.name}")
+        sections[index] = updated
+        matches += 1
+    if matches != 1:
+        raise ReleaseError(f"expected exactly one {package} package in {path.name}")
+    path.write_text("".join(sections))
+
+
+def validate_plan(plan, revision):
+    version = plan.get("version", "")
+    base = plan.get("base_revision", "")
+    if plan.get("schema_version") != 1 or not VERSION.fullmatch(version) or not REVISION.fullmatch(base):
+        raise ReleaseError("invalid release plan identity")
+    if plan.get("tag") != f"v{version}" or version_at(revision) != version:
+        raise ReleaseError("release plan and committed Cargo version disagree")
+    if git("merge-base", "--is-ancestor", base, revision, check=False).returncode:
+        raise ReleaseError("release preparation source is not an ancestor of the release commit")
+    paths = release_paths(version)
+    allowed = {"Cargo.toml", "Cargo.lock", PLAN, *paths.values()}
+    changed = set(git("diff", "--name-only", "--no-renames", base, revision).stdout.splitlines())
+    if unexpected := changed - allowed:
+        raise ReleaseError(f"source changed after release preparation: {', '.join(sorted(unexpected))}; refresh the release PR")
+    old_cargo = tomllib.loads(git("show", f"{base}:Cargo.toml").stdout)
+    new_cargo = tomllib.loads(git("show", f"{revision}:Cargo.toml").stdout)
+    old_cargo["package"]["version"] = version
+    if old_cargo != new_cargo:
+        raise ReleaseError("Cargo dependencies or build settings changed after release preparation")
+    old_lock = tomllib.loads(git("show", f"{base}:Cargo.lock").stdout)
+    new_lock = tomllib.loads(git("show", f"{revision}:Cargo.lock").stdout)
+    owned = [entry for entry in old_lock["package"] if entry["name"] == "cantrip"]
+    if len(owned) != 1:
+        raise ReleaseError("release lockfile has an ambiguous root package")
+    owned[0]["version"] = version
+    if old_lock != new_lock:
+        raise ReleaseError("locked dependencies changed after release preparation")
+    technical = git("show", f"{revision}:{paths['technical']}").stdout
+    if hashlib.sha256(technical.encode()).hexdigest() != plan.get("technical_changelog_sha256"):
+        raise ReleaseError("technical changelog no longer matches Landmark's committed evidence")
+    if not git("show", f"{revision}:{paths['notes']}").stdout.strip():
+        raise ReleaseError("public release notes are empty")
+
+
+def emit(**values):
+    print(json.dumps(values, sort_keys=True))
+    if output := os.environ.get("GITHUB_OUTPUT"):
+        with open(output, "a") as destination:
+            for key, value in values.items():
+                if "\n" in str(value) or "\r" in str(value):
+                    raise ReleaseError("invalid workflow output")
+                destination.write(f"{key}={value}\n")
+
+
+def ensure_release_pr(version, revision):
+    prs = json.loads(run("gh", "pr", "list", "--repo", REPOSITORY, "--head", BRANCH, "--base", "master", "--state", "open", "--json", "number,url").stdout)
+    if len(prs) > 1:
+        raise ReleaseError("multiple release PRs need operator reconciliation")
+    if prs:
+        run("gh", "pr", "edit", str(prs[0]["number"]), "--repo", REPOSITORY, "--title", f"chore(release): prepare {version}")
+        url = prs[0]["url"]
+    else:
+        body = (
+            "<!-- cantrip-landmark-release -->\n"
+            "Landmark prepared the next CPU-only Linux release.\n\n"
+            "Reading order: `.landmark/release-plan.json`, the public notes in "
+            "`docs/releases/`, the separate technical changelog, then Cargo metadata. "
+            "Public Markdown is reviewable/editable; published formats are rendered from the approved Markdown.\n\n"
+            "Merge only after CI passes and the version/notes are approved. Merging starts the baseline build, "
+            "clean-runtime verification, signed provenance, and guarded publication. No release is public yet.\n"
+        )
+        url = run("gh", "pr", "create", "--repo", REPOSITORY, "--base", "master", "--head", BRANCH, "--title", f"chore(release): prepare {version}", "--body", body).stdout.strip()
+    # GITHUB_TOKEN pushes do not trigger push/PR workflows. Dispatch is an explicit exception.
+    checks = json.loads(run("gh", "run", "list", "--repo", REPOSITORY, "--workflow", "ci.yml", "--commit", revision, "--limit", "1", "--json", "databaseId").stdout)
+    if not checks:
+        run("gh", "workflow", "run", "ci.yml", "--repo", REPOSITORY, "--ref", BRANCH)
+    print(f"Release PR: {url}")
+
+
+def prepare(binary, evidence):
+    source = head()
+    version = version_at() if not evidence["previous_tag"] else evidence["version"]
+    if not VERSION.fullmatch(version):
+        raise ReleaseError("Landmark did not select a supported numeric release version")
+    if evidence["previous_tag"] and evidence["version_decision"]["bump"] == "none":
+        emit(mode="none", reason="no-releasable-changes")
+        return
+    if tuple(map(int, version.split("."))) < tuple(map(int, version_at().split("."))):
+        raise ReleaseError("Landmark would downgrade the committed Cargo version; reconcile version metadata")
+    remote = github(f"commits/{urllib.parse.quote(BRANCH, safe='')}", missing=True)
+    old_revision = remote["sha"] if remote else ""
+    if remote:
+        git("fetch", "origin", BRANCH)
+        old_plan = json.loads(git("show", f"{old_revision}:{PLAN}").stdout)
+        validate_plan(old_plan, old_revision)
+        if old_plan["base_revision"] == source and old_plan["version"] == version:
+            ensure_release_pr(version, old_revision)
+            emit(mode="prepared", version=version)
+            return
+        merged = git("merge-base", "--is-ancestor", old_revision, source, check=False).returncode == 0
+        if not merged and (remote.get("author") or {}).get("login") != "github-actions[bot]":
+            raise ReleaseError("release branch contains unmerged human work; refresh it deliberately instead of overwriting it")
+    if git("status", "--porcelain").stdout:
+        raise ReleaseError("release preparation requires a clean disposable checkout")
+    paths = release_paths(version)
+    command = [
+        binary, "run", "--provider", "local", "--repository", REPOSITORY,
+        "--release-tag", f"v{version}",
+        "--technical-changelog-file", paths["technical"],
+        "--output-text-file", ".landmark/run/notes.txt",
+        "--output-html-file", ".landmark/run/notes.html",
+        "--output-json", ".landmark/run/releases.json",
+        "--rss-feed-file", ".landmark/run/feed.xml",
+    ]
+    if (ROOT / paths["notes"]).is_file():
+        command += ["--notes-file", paths["notes"]]
+    else:
+        command += ["--output-file", paths["notes"]]
+    rendered = json.loads(run(*command).stdout)
+    if rendered["version"] != version or rendered["release_tag"] != f"v{version}":
+        raise ReleaseError("Landmark's rendered release identity disagrees with its version plan")
+    if rendered["version_decision"].get("waiver", {}).get("required"):
+        raise ReleaseError("this release requires explicit Landmark policy review; automatic preparation stopped")
+    set_package_version(ROOT / "Cargo.toml", "cantrip", version)
+    set_package_version(ROOT / "Cargo.lock", "cantrip", version, lock=True)
+    plan = {
+        "schema_version": 1, "version": version, "tag": f"v{version}",
+        "base_revision": source, "previous_tag": rendered["previous_tag"],
+        "version_origin": "initial Cargo package version" if not rendered["previous_tag"] else "Landmark",
+        "landmark_version": LANDMARK_VERSION, "landmark_sha256": LANDMARK_SHA256,
+        "version_decision": rendered["version_decision"],
+        "technical_changelog_sha256": sha256(ROOT / paths["technical"]),
+    }
+    save_json(ROOT / PLAN, plan)
+    git("switch", "--detach", source)
+    git("config", "user.name", "github-actions[bot]")
+    git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+    git("add", "--", "Cargo.toml", "Cargo.lock", PLAN, *paths.values())
+    git("-c", "core.hooksPath=/dev/null", "commit", "-m", f"chore(release): prepare {version}")
+    revision = head()
+    validate_plan(plan, revision)
+    git("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "push", f"--force-with-lease=refs/heads/{BRANCH}:{old_revision}", "origin", f"HEAD:refs/heads/{BRANCH}")
+    ensure_release_pr(version, revision)
+    emit(mode="prepared", version=version)
+
+
+def decide():
+    revision = head()
+    if os.environ.get("GITHUB_SHA") != revision:
+        raise ReleaseError("release checkout differs from the authenticated workflow source")
+    if github("git/ref/heads/master")["object"]["sha"] != revision:
+        emit(mode="none", reason="superseded-master-revision")
+        return
+    version = version_at()
+    release = release_by_tag(f"v{version}")
+    if (ROOT / PLAN).is_file() and not (release and not release["draft"]):
+        plan = json.loads((ROOT / PLAN).read_text())
+        validate_plan(plan, revision)
+        emit(mode="publish", version=version, source_revision=revision, previous_tag=plan.get("previous_tag") or "")
+        return
+    with landmark() as binary:
+        run(binary, "doctor", "--format", "json")
+        evidence = json.loads(run(binary, "run", "--provider", "local", "--repository", REPOSITORY, "--dry-run").stdout)
+        prepare(binary, evidence)
+
+
+def checksums(directory):
+    files = sorted(
+        path for path in directory.iterdir()
+        if path.name not in {"SHA256SUMS", "provenance.json"}
+    )
+    if any(not path.is_file() or path.is_symlink() for path in files):
+        raise ReleaseError("release assets must be regular files")
+    (directory / "SHA256SUMS").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in files))
+
+
+def assemble(directory):
+    revision = head()
+    plan = json.loads((ROOT / PLAN).read_text())
+    validate_plan(plan, revision)
+    data = json.loads((directory / "release.json").read_text())
+    if data["source_revision"] != revision or data["version"] != plan["version"]:
+        raise ReleaseError("packaged artifact and release plan disagree")
+    archive = directory / data["archive"]["name"]
+    if sha256(archive) != data["archive"]["sha256"]:
+        raise ReleaseError("packaged archive checksum mismatch")
+    tag = plan["tag"]
+    paths = release_paths(plan["version"])
+    notes = directory / f"{tag}.md"
+    notes.write_text((ROOT / paths["notes"]).read_text().rstrip() + (
+        f"\n\n---\n\n### Verified build identity\n\n"
+        f"- Version: `{tag}`\n- Source: [`{revision}`](https://github.com/{REPOSITORY}/tree/{revision})\n"
+        f"- Target: `{data['target']}`, CPU-only; Rust `{data['rust_toolchain']}`\n"
+        f"- Runtime baseline: Ubuntu 24.04, glibc 2.39 or newer\n"
+        f"- Archive SHA-256: `{data['archive']['sha256']}`\n"
+        "- Installation, maintenance, limitations, and verification instructions are in the archive's `INSTALLATION.md`.\n"
+    ))
+    technical = directory / f"{tag}-technical.md"
+    technical.write_text((ROOT / paths["technical"]).read_text().rstrip() + f"\n\nRelease: `{tag}` · Source: `{revision}`\n")
+    with landmark() as binary:
+        run(binary, "write-artifacts", "--notes-file", str(notes), "--version", plan["version"],
+            "--repository", REPOSITORY, "--release-url", f"https://github.com/{REPOSITORY}/releases/tag/{tag}",
+            "--audience", "end-user", "--output-file", str(notes),
+            "--output-text-file", str(directory / f"{tag}.txt"),
+            "--output-html-file", str(directory / f"{tag}.html"),
+            "--output-json", str(directory / "releases.json"))
+    data["repository"] = REPOSITORY
+    data["release_url"] = f"https://github.com/{REPOSITORY}/releases/tag/{tag}"
+    data["download_base_url"] = f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
+    data["landmark"] = {"version": LANDMARK_VERSION, "sha256": LANDMARK_SHA256}
+    data["public_notes"] = {kind: {"name": f"{tag}.{suffix}", "sha256": sha256(directory / f"{tag}.{suffix}")} for kind, suffix in (("markdown", "md"), ("plaintext", "txt"), ("html", "html"))}
+    data["technical_changelog"] = {"name": technical.name, "sha256": sha256(technical)}
+    data["landmark_feed"] = {"name": "releases.json", "sha256": sha256(directory / "releases.json")}
+    save_json(directory / "release.json", data)
+    checksums(directory)
+    emit(checksums_sha256=sha256(directory / "SHA256SUMS"), archive_sha256=data["archive"]["sha256"])
+
+
+def finalize(directory, verification):
+    data = json.loads((directory / "release.json").read_text())
+    proof = json.loads(verification.read_text())
+    if (proof.get("status"), proof.get("source_revision"), proof.get("archive_sha256")) != ("passed", head(), data["archive"]["sha256"]):
+        raise ReleaseError("clean-runtime proof does not certify this source and archive")
+    if data["source_revision"] != head() or sha256(directory / data["archive"]["name"]) != data["archive"]["sha256"]:
+        raise ReleaseError("publication artifact differs from the verified source or archive")
+    shutil.copyfile(verification, directory / "verification.json")
+    data["verification"] = {"name": "verification.json", "sha256": sha256(directory / "verification.json")}
+    data["provenance"] = {"name": "provenance.json", "signer_workflow": SIGNER, "source_revision": head()}
+    save_json(directory / "release.json", data)
+    checksums(directory)
+
+
+def publish(directory):
+    data = json.loads((directory / "release.json").read_text())
+    revision, tag = data["source_revision"], data["tag"]
+    if revision != head() or tag != f"v{version_at()}":
+        raise ReleaseError("publication identity differs from the checked-out release")
+    if not (directory / "provenance.json").is_file():
+        raise ReleaseError("signed provenance is required before publication")
+    checksums(directory)
+    existing = release_by_tag(tag)
+    if existing:
+        if not existing["draft"]:
+            raise ReleaseError("release is already public; published assets are immutable")
+        if commit_sha(existing["target_commitish"]) != revision:
+            raise ReleaseError("existing draft targets another source revision; nothing was replaced")
+    else:
+        tag_ref = github(f"git/ref/tags/{tag}", missing=True)
+        if tag_ref:
+            raise ReleaseError("tag already exists without this release draft; reconcile its owner before publication")
+        run("gh", "release", "create", tag, "--repo", REPOSITORY, "--target", revision, "--draft", "--title", f"Cantrip {tag}", "--notes-file", str(directory / f"{tag}.md"))
+        existing = release_by_tag(tag)
+        if not existing:
+            raise ReleaseError("GitHub did not create the draft release")
+    uploaded = {asset["name"]: asset for asset in existing["assets"]}
+    expected = {path.name: path for path in directory.iterdir()}
+    if uploaded.keys() - expected.keys():
+        raise ReleaseError("draft contains unexpected assets; review it before retrying")
+    for name, path in sorted(expected.items()):
+        if name in uploaded:
+            if uploaded[name].get("digest") != f"sha256:{sha256(path)}":
+                raise ReleaseError(f"draft asset differs: {name}; existing data was not overwritten")
+        else:
+            run("gh", "release", "upload", tag, str(path), "--repo", REPOSITORY)
+    with tempfile.TemporaryDirectory(prefix="cantrip-release-download-") as temporary:
+        downloaded = Path(temporary)
+        run("gh", "release", "download", tag, "--repo", REPOSITORY, "--dir", str(downloaded))
+        if {path.name for path in downloaded.iterdir()} != expected.keys():
+            raise ReleaseError("downloaded GitHub release asset set differs from the verified set")
+        for name, source in expected.items():
+            if sha256(downloaded / name) != sha256(source):
+                raise ReleaseError(f"downloaded GitHub release asset differs: {name}")
+        for name in (data["archive"]["name"], "release.json"):
+            run("gh", "attestation", "verify", str(downloaded / name), "--repo", REPOSITORY,
+                "--bundle", str(downloaded / "provenance.json"), "--source-digest", revision,
+                "--signer-workflow", SIGNER, "--deny-self-hosted-runners")
+    # This is the only public-release mutation, after every check and download.
+    run("gh", "release", "edit", tag, "--repo", REPOSITORY, "--draft=false", "--latest")
+    published = release_by_tag(tag)
+    if not published or published.get("draft") or not published.get("published_at"):
+        raise ReleaseError("GitHub did not confirm release publication")
+    print(published["html_url"])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("decide", help="prepare a reviewable release PR, or select its merged candidate")
+    for name in ("assemble", "finalize", "publish"):
+        command = commands.add_parser(name)
+        command.add_argument("--directory", type=Path, required=True)
+        if name == "finalize":
+            command.add_argument("--verification", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        if args.command == "decide":
+            decide()
+        elif args.command == "assemble":
+            assemble(args.directory.resolve())
+        elif args.command == "finalize":
+            finalize(args.directory.resolve(), args.verification.resolve())
+        else:
+            publish(args.directory.resolve())
+    except (ReleaseError, OSError, ValueError, KeyError) as error:
+        parser.exit(1, f"release: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

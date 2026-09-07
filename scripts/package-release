@@ -1,0 +1,339 @@
+#!/usr/bin/env python3
+"""Package a prebuilt Cantrip release; requires Python 3.11+, git, and readelf."""
+
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import struct
+import subprocess
+import tarfile
+import tempfile
+import tomllib
+
+
+TARGET = "x86_64-unknown-linux-gnu"
+INTERPRETER = "/lib64/ld-linux-x86-64.so.2"
+PUBLIC_FILES = {
+    "INSTALLATION.md": "docs/INSTALLATION.md",
+    "LICENSE": "LICENSE",
+    "cantrip.service": "contrib/cantrip.service",
+    "install.sh": "contrib/install.sh",
+    "sample.wav": "samples/jfk.wav",
+}
+SEMVER = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+GLIBC_LIBRARIES = {
+    "libc.so.6", "libm.so.6", "libdl.so.2", "libpthread.so.0",
+    "librt.so.1", "libutil.so.1", "libresolv.so.2", "ld-linux-x86-64.so.2",
+}
+# Ubuntu 24.04 ships glibc 2.39 and GCC 14 runtime libraries, including
+# GLIBCXX_3.4.33 / CXXABI_1.3.15. Unknown libraries or ABI namespaces fail closed.
+# ONNX Runtime's prebuilt CPU objects require GLIBC_2.38, so 22.04 cannot link.
+# https://packages.ubuntu.com/noble/libstdc++6
+# https://gcc.gnu.org/onlinedocs/libstdc++/manual/abi.html
+ABI_LIMITS = {
+    **{name: {"GLIBC": "2.39"} for name in GLIBC_LIBRARIES},
+    "libstdc++.so.6": {"GLIBCXX": "3.4.33", "CXXABI": "1.3.15"},
+    "libgcc_s.so.1": {"GCC": "14.0.0"},
+    "libdbus-1.so.3": {},
+}
+EXACT_ABIS = {
+    "libstdc++.so.6": {"CXXABI_TM_1", "CXXABI_FLOAT128"},
+    "libdbus-1.so.3": {"LIBDBUS_1_3"},
+}
+RUNTIME_PACKAGES = {
+    **{name: "libc6" for name in GLIBC_LIBRARIES},
+    "libstdc++.so.6": "libstdc++6",
+    "libgcc_s.so.1": "libgcc-s1",
+    "libdbus-1.so.3": "libdbus-1-3",
+}
+
+
+class ReleaseError(Exception):
+    pass
+
+
+def run(command, *, cwd=None):
+    try:
+        result = subprocess.run(
+            command, cwd=cwd, env={**os.environ, "LC_ALL": "C", "GIT_NO_LAZY_FETCH": "1"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseError(f"cannot run {command[0]}: {error}") from error
+    if result.returncode:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ReleaseError(f"{command[0]} failed ({result.returncode}): {message}")
+    return result
+
+
+def git(root, *args):
+    return run(["git", "--no-replace-objects", "-C", str(root), *args]).stdout
+
+
+def verify_checkout(root, revision):
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
+        raise ReleaseError("--source-revision must be a full lowercase commit SHA")
+    if git(root, "rev-parse", "--show-toplevel").decode().strip() != str(root):
+        raise ReleaseError("the packager must belong to the source checkout root")
+    if git(root, "rev-parse", "HEAD").decode().strip() != revision:
+        raise ReleaseError("--source-revision does not match checkout HEAD")
+    if git(root, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"):
+        raise ReleaseError(
+            "checkout is dirty; commit source changes and remove untracked files "
+            "before packaging (ignored build outputs are permitted)"
+        )
+
+
+def committed_file(root, revision, path):
+    entry = git(root, "ls-tree", "-z", revision, "--", path)
+    if not entry:
+        raise ReleaseError(f"required release source is missing from the commit: {path}")
+    metadata, name = entry.rstrip(b"\0").split(b"\t", 1)
+    mode, kind, object_id = metadata.split()
+    if name.decode() != path or mode not in (b"100644", b"100755") or kind != b"blob":
+        raise ReleaseError(f"release source must be a committed regular file: {path}")
+    # Read committed blobs, never follow worktree links or include ignored files.
+    return git(root, "cat-file", "blob", object_id.decode())
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def snapshot_binary(source, destination):
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as binary:
+        before = os.fstat(binary.fileno())
+        if not stat.S_ISREG(before.st_mode) or not before.st_mode & 0o111:
+            raise ReleaseError("--binary must be a regular executable file, not a link")
+        with destination.open("xb") as snapshot:
+            shutil.copyfileobj(binary, snapshot, 1024 * 1024)
+        after = os.fstat(binary.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        ):
+            raise ReleaseError("binary changed while taking the release snapshot")
+    destination.chmod(0o755)
+
+
+def check_abi(library, requirement):
+    if requirement in EXACT_ABIS.get(library, ()):
+        return
+    match = re.fullmatch(r"([A-Z][A-Z0-9]*)_([0-9]+(?:\.[0-9]+)*)", requirement)
+    maximum = ABI_LIMITS[library].get(match[1]) if match else None
+    if maximum is None:
+        raise ReleaseError(f"unsupported ABI requirement: {library}: {requirement}")
+    if tuple(map(int, match[2].split("."))) > tuple(map(int, maximum.split("."))):
+        raise ReleaseError(
+            f"{library} requires {requirement}, newer than the Ubuntu 24.04 "
+            f"baseline {match[1]}_{maximum}; rebuild on the release baseline"
+        )
+
+
+def inspect_elf(binary):
+    with binary.open("rb") as source:
+        header = source.read(64)
+    if (
+        len(header) != 64 or header[:7] != b"\x7fELF\x02\x01\x01"
+        or header[7] not in (0, 3)
+        or struct.unpack_from("<HHI", header, 16) not in ((2, 62, 1), (3, 62, 1))
+    ):
+        raise ReleaseError("--binary must be a little-endian Linux x86-64 ELF executable")
+    result = run([
+        "readelf", "--wide", "--program-headers", "--dynamic", "--version-info",
+        "--notes", str(binary),
+    ])
+    if result.stderr:
+        raise ReleaseError(f"readelf could not inspect the ELF cleanly: {result.stderr.decode().strip()}")
+    details = result.stdout.decode("utf-8")
+    needed = sorted(set(re.findall(r"\(NEEDED\).*\[([^\]]+)\]", details)))
+    unknown = set(needed) - ABI_LIMITS.keys()
+    if unknown:
+        raise ReleaseError(f"libraries outside the CPU-only release baseline: {', '.join(sorted(unknown))}")
+    if re.search(r"\((?:RPATH|RUNPATH|AUDIT|DEPAUDIT|FILTER|AUXILIARY)\)", details):
+        raise ReleaseError("ELF contains a runtime search path or alternate library loader")
+    interpreters = re.findall(r"\[Requesting program interpreter: ([^\]]+)\]", details)
+    if interpreters not in ([], [INTERPRETER]) or (needed and not interpreters):
+        raise ReleaseError(f"ELF must use the baseline interpreter {INTERPRETER}")
+    for isa in re.findall(r"x86 ISA needed: ([^\n]+)", details):
+        if isa.strip() != "x86-64-baseline":
+            raise ReleaseError(f"ELF requires a non-baseline CPU instruction set: {isa.strip()}")
+
+    requirements = {}
+    counts = {}
+    current = None
+    in_needs = False
+    for line in details.splitlines():
+        if line.startswith("Version ") and "section " in line:
+            in_needs = line.startswith("Version needs section ")
+        if not in_needs:
+            continue
+        entry = re.search(r"File:\s+(\S+)\s+Cnt:\s+([0-9]+)", line)
+        if entry:
+            current = entry[1]
+            if current not in needed or current in requirements:
+                raise ReleaseError(f"unexpected ELF version provider: {current}")
+            requirements[current] = []
+            counts[current] = int(entry[2])
+        requirement = re.search(r"Name:\s+(\S+)\s+Flags:", line)
+        if requirement:
+            if current is None:
+                raise ReleaseError("ELF version requirement has no library provider")
+            check_abi(current, requirement[1])
+            requirements[current].append(requirement[1])
+    if any(len(requirements[name]) != count for name, count in counts.items()):
+        raise ReleaseError("incomplete ELF version requirements reported by readelf")
+    if "(VERNEED)" in details and not requirements:
+        raise ReleaseError("ELF version requirements could not be inspected")
+    return {
+        "distribution": "Ubuntu 24.04",
+        "glibc_min": "2.39",
+        "packages": sorted({RUNTIME_PACKAGES[name] for name in needed}),
+        "elf": {
+            "interpreter": interpreters[0] if interpreters else None,
+            "needed_libraries": needed,
+            "required_symbol_versions": {name: sorted(values) for name, values in sorted(requirements.items())},
+        },
+    }
+
+
+def json_bytes(value):
+    return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def create_archive(destination, root_name, payload, epoch):
+    with destination.open("xb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=epoch) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                root = tarfile.TarInfo(root_name + "/")
+                root.type = tarfile.DIRTYPE
+                root.mode = 0o755
+                root.mtime = epoch
+                archive.addfile(root)
+                for name, source in sorted(payload.items()):
+                    entry = tarfile.TarInfo(f"{root_name}/{name}")
+                    entry.mode = 0o755 if name in ("cantrip", "install.sh") else 0o644
+                    entry.mtime = epoch
+                    entry.size = source.stat().st_size
+                    with source.open("rb") as contents:
+                        archive.addfile(entry, contents)
+
+
+def publish_files(output, files):
+    if output.is_symlink():
+        raise ReleaseError("--output must not be a symbolic link")
+    output.mkdir(parents=True, exist_ok=True)
+    for source in files:
+        if os.path.lexists(output / source.name):
+            raise ReleaseError(f"refusing to overwrite existing output: {output / source.name}")
+    created = []
+    try:
+        for source in files:
+            destination = output / source.name
+            with destination.open("xb") as target:
+                created.append(destination)
+                with source.open("rb") as contents:
+                    shutil.copyfileobj(contents, target, 1024 * 1024)
+                os.fchmod(target.fileno(), 0o644)
+    except BaseException:
+        for destination in created:
+            destination.unlink()
+        raise
+
+
+def package_release(root, binary, output, version, revision):
+    if not SEMVER.fullmatch(version):
+        raise ReleaseError("--version must be a SemVer version without a v prefix")
+    verify_checkout(root, revision)
+    cargo = tomllib.loads(committed_file(root, revision, "Cargo.toml").decode("utf-8"))
+    if cargo.get("package", {}).get("name") != "cantrip" or cargo["package"].get("version") != version:
+        raise ReleaseError("--version does not match the cantrip package version in Cargo.toml")
+    toolchain = tomllib.loads(committed_file(root, revision, "rust-toolchain.toml").decode("utf-8"))
+    rust = toolchain.get("toolchain", {}).get("channel")
+    if not isinstance(rust, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", rust):
+        raise ReleaseError("rust-toolchain.toml must pin an exact Rust release, not a moving channel")
+    epoch = int(git(root, "show", "-s", "--format=%ct", revision).decode().strip())
+    if not 0 <= epoch <= 0xFFFFFFFF:
+        raise ReleaseError("commit timestamp is outside the gzip timestamp range")
+    root_name = f"cantrip-v{version}-{TARGET}"
+    with tempfile.TemporaryDirectory(prefix="cantrip-release-") as directory:
+        staging = Path(directory)
+        payload = {}
+        for name, source in PUBLIC_FILES.items():
+            payload[name] = staging / name
+            payload[name].write_bytes(committed_file(root, revision, source))
+        staged_binary = staging / "cantrip"
+        snapshot_binary(binary, staged_binary)
+        baseline = inspect_elf(staged_binary)
+        binary_hash = sha256(staged_binary)
+        reported_version = run([str(staged_binary), "--version"], cwd=staging).stdout.decode().strip()
+        if reported_version != f"cantrip {version}":
+            raise ReleaseError(f"binary --version reports {reported_version!r}, expected 'cantrip {version}'")
+        if sha256(staged_binary) != binary_hash:
+            raise ReleaseError("binary changed during release inspection")
+        payload["cantrip"] = staged_binary
+        manifest = {
+            "schema_version": 1,
+            "version": version,
+            "tag": f"v{version}",
+            "source_revision": revision,
+            "target": TARGET,
+            "rust_toolchain": rust,
+            "runtime_baseline": baseline,
+            "binary_sha256": binary_hash,
+        }
+        payload["manifest.json"] = staging / "manifest.json"
+        payload["manifest.json"].write_bytes(json_bytes(manifest))
+        checksums = "".join(f"{sha256(path)}  {name}\n" for name, path in sorted(payload.items()))
+        payload["checksums.txt"] = staging / "checksums.txt"
+        payload["checksums.txt"].write_text(checksums, encoding="utf-8")
+        archive = staging / f"{root_name}.tar.gz"
+        create_archive(archive, root_name, payload, epoch)
+        release = staging / "release.json"
+        archive_hash = sha256(archive)
+        release.write_bytes(json_bytes({**manifest, "archive": {"name": archive.name, "sha256": archive_hash}}))
+        sums = staging / "SHA256SUMS"
+        sums.write_text(
+            f"{archive_hash}  {archive.name}\n{sha256(release)}  release.json\n", encoding="utf-8",
+        )
+        # Packaging has no source mutation. Refuse a concurrent checkout change
+        # before exposing any release assets; all payload bytes came from HEAD.
+        verify_checkout(root, revision)
+        publish_files(output, [archive, release, sums])
+    return output / archive.name
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--source-revision", required=True)
+    args = parser.parse_args()
+    try:
+        archive = package_release(
+            Path(__file__).resolve().parent.parent, args.binary.absolute(),
+            args.output.absolute(), args.version, args.source_revision,
+        )
+    except (ReleaseError, OSError, ValueError, tarfile.TarError) as error:
+        parser.exit(1, f"package-release: {error}\n")
+    print(archive)
+
+
+if __name__ == "__main__":
+    main()

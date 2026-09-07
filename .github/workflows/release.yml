@@ -1,0 +1,181 @@
+name: Verified Linux release
+
+on:
+  workflow_call:
+
+# Keep release preparation/publication ordered across successful master builds.
+concurrency:
+  group: cantrip-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      previous_tag: ${{ steps.plan.outputs.previous_tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - id: plan
+        name: Prepare the release PR or select its approved candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release decide
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.mode == 'publish'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      checksums_sha256: ${{ steps.assemble.outputs.checksums_sha256 }}
+    env:
+      RUSTFLAGS: ""
+      CARGO_ENCODED_RUSTFLAGS: ""
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install baseline build dependencies and the exact Rust toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev libssl-dev pkg-config
+          rustup install
+          rustc --version --verbose
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: release-ubuntu24-cpu
+      - name: Build the locked CPU-only target
+        run: cargo build --release --locked --no-default-features --target x86_64-unknown-linux-gnu
+      - name: Package only committed public files and enforce the ELF baseline
+        env:
+          RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          python3 scripts/package-release \
+            --binary target/x86_64-unknown-linux-gnu/release/cantrip \
+            --output dist --version "$RELEASE_VERSION" --source-revision "$GITHUB_SHA"
+      - id: assemble
+        name: Render approved notes and versioned release data
+        run: python3 scripts/release assemble --directory dist
+      - id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cantrip-release-candidate
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      proof_id: ${{ steps.proof.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/candidate
+      - name: Download the previous published rollback target when one exists
+        if: needs.plan.outputs.previous_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
+        run: |
+          gh release download "$PREVIOUS_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$RUNNER_TEMP/previous" \
+            --pattern 'cantrip-*.tar.gz' --pattern release.json --pattern provenance.json
+      - name: Exercise the downloaded artifact without a compiler, checkout, or GPU
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_CHECKSUMS: ${{ needs.build.outputs.checksums_sha256 }}
+          PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
+        run: |
+          previous=()
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            previous=(--previous-directory "$RUNNER_TEMP/previous")
+          fi
+          python3 scripts/verify-release --directory "$RUNNER_TEMP/candidate" \
+            --source-revision "$GITHUB_SHA" --checksums-sha256 "$EXPECTED_CHECKSUMS" \
+            --output "$RUNNER_TEMP/verification.json" "${previous[@]}"
+      - id: proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cantrip-release-verification
+          path: ${{ runner.temp }}/verification.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [build, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.verify.outputs.proof_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/proof
+      - name: Bind the successful runtime proof to this source and artifact
+        run: |
+          python3 scripts/release finalize --directory "$RUNNER_TEMP/candidate" \
+            --verification "$RUNNER_TEMP/proof/verification.json"
+      - id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/candidate/SHA256SUMS
+          create-storage-record: false
+      - name: Stage, download, verify provenance, and publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          cp "$PROVENANCE_BUNDLE" "$RUNNER_TEMP/candidate/provenance.json"
+          python3 scripts/release publish --directory "$RUNNER_TEMP/candidate"

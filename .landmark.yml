@@ -1,0 +1,17 @@
+product:
+  name: Cantrip
+  description: Local-first Linux dictation with private on-device speech recognition and guarded desktop delivery.
+audience: end-user
+voice: Plain English; explain observable changes and limitations without marketing or unsupported promises.
+changelog:
+  source: auto
+artifacts:
+  markdown: docs/releases/{version}.md
+  plaintext: docs/releases/{version}.txt
+  html: docs/releases/{version}.html
+  json: docs/releases/releases.json
+  rss: docs/releases/feed.xml
+release:
+  profile: full
+model:
+  policy: "off"

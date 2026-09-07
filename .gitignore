@@ -21,3 +21,7 @@ __pycache__/
 # its provider packages here too. Neither belongs in this repository.
 .opencode/agents/
 .opencode/node_modules/
+
+# Release build output; release plans and public notes remain tracked.
+/dist/
+/.landmark/run/

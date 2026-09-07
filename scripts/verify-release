@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""Exercise a downloaded release in Ubuntu 22.04 without Rust or a checkout."""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import time
+
+
+BASE_IMAGE = "ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517"
+SIGNER = f"{REPOSITORY}/.github/workflows/release.yml"
+PAYLOAD = {"cantrip", "install.sh", "cantrip.service", "LICENSE", "INSTALLATION.md", "sample.wav", "manifest.json", "checksums.txt"}
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def run(*command, input=None, timeout=60, check=True):
+    result = subprocess.run(command, input=input, text=True, capture_output=True, timeout=timeout)
+    if check and result.returncode:
+        raise RuntimeError(f"{command[0]} failed ({result.returncode}): {result.stderr[-3000:]}")
+    return result
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        while block := source.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_assets(directory, revision, expected_checksums):
+    require(sha256(directory / "SHA256SUMS") == expected_checksums, "downloaded checksum manifest differs from the build job")
+    names = set()
+    for line in (directory / "SHA256SUMS").read_text().splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._+-]+)", line)
+        require(match is not None, "unsafe or malformed release checksum entry")
+        digest, name = match.groups()
+        require(name not in names and name != "SHA256SUMS", "duplicate or self-referential checksum entry")
+        names.add(name)
+        path = directory / name
+        require(path.is_file() and not path.is_symlink(), f"release asset is not a regular file: {name}")
+        require(sha256(path) == digest, f"downloaded release checksum mismatch: {name}")
+    require({path.name for path in directory.iterdir()} == names | {"SHA256SUMS"}, "downloaded release has missing or extra assets")
+    data = json.loads((directory / "release.json").read_text())
+    require(data["schema_version"] == 1 and data["source_revision"] == revision, "downloaded source identity mismatch")
+    require(data["tag"] == f"v{data['version']}" and data["target"] == "x86_64-unknown-linux-gnu", "downloaded release identity mismatch")
+    require(sha256(directory / data["archive"]["name"]) == data["archive"]["sha256"], "archive differs from release metadata")
+    return data
+
+
+def unpack(directory, destination):
+    data = json.loads((directory / "release.json").read_text())
+    root_name = f"cantrip-{data['tag']}-{data['target']}"
+    require(data["archive"]["name"] == f"{root_name}.tar.gz", "noncanonical archive name")
+    with tarfile.open(directory / data["archive"]["name"], "r:gz") as archive:
+        members = archive.getmembers()
+        expected = {root_name} | {f"{root_name}/{name}" for name in PAYLOAD}
+        require(len(members) == len(expected) and {member.name.rstrip('/') for member in members} == expected, "archive payload is not the public allowlist")
+        root = destination / root_name
+        root.mkdir(parents=True)
+        for member in members:
+            if member.name.rstrip("/") == root_name:
+                require(member.isdir(), "archive root is not a directory")
+                continue
+            require(member.isfile(), "archive contains a link or special file")
+            name = member.name.split("/")[1]
+            with archive.extractfile(member) as source, (root / name).open("xb") as target:
+                shutil.copyfileobj(source, target, 1024 * 1024)
+            (root / name).chmod(0o755 if name in ("cantrip", "install.sh") else 0o644)
+    manifest = json.loads((root / "manifest.json").read_text())
+    for field in ("version", "tag", "source_revision", "target", "rust_toolchain", "binary_sha256", "runtime_baseline"):
+        require(manifest[field] == data[field], f"inner and outer release identity disagree: {field}")
+    require(sha256(root / "cantrip") == manifest["binary_sha256"], "binary checksum mismatch")
+    checked = subprocess.run(["sha256sum", "--check", "--strict", "checksums.txt"], cwd=root, text=True, capture_output=True)
+    require(checked.returncode == 0, "extracted payload checksum mismatch")
+    return root, data
+
+
+def inside(mode):
+    require(os.getuid() != 0, "runtime proof must exercise an ordinary user")
+    require(not any(shutil.which(name) for name in ("cargo", "rustc", "gcc", "g++")), "runtime image unexpectedly contains a compiler")
+    require(not list(Path("/dev").glob("nvidia*")), "CPU-only verification must not expose NVIDIA devices")
+    home = Path.home()
+    for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
+        Path(os.environ[variable]).mkdir(parents=True, exist_ok=True, mode=0o700)
+    candidate, data = unpack(Path("/artifacts"), home / "candidate")
+    executable = candidate / "cantrip"
+    require(run(str(executable), "--version").stdout.strip() == f"cantrip {data['version']}", "native binary version mismatch")
+    if mode == "download-model":
+        run(str(executable), "models", "pull", timeout=900)
+        print("Installed the explicitly requested public local model in the isolated runtime.")
+        return
+
+    require(not os.environ.get("WAYLAND_DISPLAY") and not os.environ.get("DISPLAY"), "headless proof inherited a desktop destination")
+    previous = candidate
+    previous_data = data
+    if Path("/previous/release.json").is_file():
+        previous, previous_data = unpack(Path("/previous"), home / "previous")
+    prefix = home / "installation"
+    installed = prefix / "bin/cantrip"
+    run(str(previous / "install.sh"), "install", "--prefix", str(prefix))
+    require(run(str(installed), "--version").stdout.strip() == f"cantrip {previous_data['version']}", "initial installed binary is not runnable")
+    run(str(installed), "--help")
+    run(str(installed), "config", "init")
+    config = Path(os.environ["XDG_CONFIG_HOME"])
+    state = Path(os.environ["XDG_STATE_HOME"])
+    runtime = Path(os.environ["XDG_RUNTIME_DIR"])
+    sentinels = {
+        config / "systemd/user/cantrip.service": b"[Service]\nExecStart=/usr/bin/false\n",
+        config / "systemd/user/cantrip.service.d/90-owner.conf": b"[Service]\nEnvironment=CANTRIP_RELEASE_OWNER=preserve\n",
+        state / "cantrip/transcripts/preserved-history.fixture": b"operator-owned history must survive binary maintenance\n",
+        runtime / "cantrip/preserved-runtime.fixture": b"runtime leftovers are not installer garbage\n",
+    }
+    for path, content in sentinels.items():
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(content)
+        path.chmod(0o600)
+    protected = {path: sha256(path) for path in sentinels}
+    config_file = config / "cantrip/config.toml"
+    require(config_file.is_file(), "native configuration initialization did not produce its configuration")
+    protected[config_file] = sha256(config_file)
+
+    # The bus/keyring are private to this container; no operator credentials enter it.
+    run("gnome-keyring-daemon", "--unlock", "--components=secrets", input=secrets.token_hex(24) + "\n")
+    credential = secrets.token_hex(24)
+    run(str(installed), "key", "set", "release-verification", input=credential + "\n")
+    require(run(str(installed), "key", "status", "release-verification").stdout.strip() == "present", "native keyring store did not report the test credential")
+    require(run("secret-tool", "lookup", "service", "cantrip", "username", "release-verification").stdout.rstrip("\n") == credential, "Secret Service did not retain the native credential")
+
+    def preserved():
+        require(all(path.is_file() and sha256(path) == digest for path, digest in protected.items()), "binary maintenance changed configuration, history, runtime data, or startup ownership")
+        require(run(str(installed), "key", "status", "release-verification").stdout.strip() == "present", "native keyring credential disappeared during maintenance")
+        require(run("secret-tool", "lookup", "service", "cantrip", "username", "release-verification").stdout.rstrip("\n") == credential, "Secret Service credential did not survive maintenance")
+
+    backups = home / "backups"
+    backups.mkdir(mode=0o700)
+    backup = backups / "before-update"
+    original = sha256(installed)
+    installer = str(candidate / "install.sh")
+    run(installer, "update", "--prefix", str(prefix), "--backup", str(backup))
+    require(sha256(installed) == data["binary_sha256"] and sha256(backup) == original, "update did not preserve the old executable before replacement")
+    require(run(str(installed), "--version").stdout.strip() == f"cantrip {data['version']}", "updated executable is not runnable")
+    preserved()
+    run(installer, "rollback", "--prefix", str(prefix), "--backup", str(backup))
+    require(sha256(installed) == original and sha256(backup) == original, "rollback did not restore and retain the selected backup")
+    require(run(str(installed), "--version").stdout.strip() == f"cantrip {previous_data['version']}", "rolled-back executable is not runnable")
+    preserved()
+    if previous_data["version"] != data["version"]:
+        run(installer, "update", "--prefix", str(prefix), "--backup", str(backups / "after-rollback"))
+        preserved()
+
+    # This container has --network=none; --local also disables both cloud lanes.
+    transcription = run(str(installed), "transcribe", "--local", str(candidate / "sample.wav"), timeout=300).stdout
+    words = re.findall(r"[a-z]+", transcription.lower())
+    require("ask not what your country can do for you" in " ".join(words), "real local recognition did not recover the public reference phrase")
+    transcript_characters = len(transcription)
+    del transcription
+
+    daemon_log = home / "daemon.log"
+    with daemon_log.open("w") as output:
+        daemon = subprocess.Popen([str(installed), "daemon"], stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                require(daemon.poll() is None, "native daemon exited before readiness")
+                if run(str(installed), "ping", timeout=5, check=False).returncode == 0:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("native daemon did not become ready")
+            status = json.loads(run(str(installed), "status", "--json").stdout)
+            require(status.get("state") == "idle", "new isolated daemon is not Idle")
+            for operation in ("update", "uninstall"):
+                command = [installer, operation, "--prefix", str(prefix)]
+                if operation == "update":
+                    command += ["--backup", str(backups / "while-running")]
+                require(run(*command, check=False).returncode != 0, f"{operation} did not refuse a live native daemon")
+                require(daemon.poll() is None and run(str(installed), "ping", check=False).returncode == 0, "maintenance stopped the existing daemon")
+                require(sha256(installed) == data["binary_sha256"], "live-maintenance refusal changed the executable")
+                preserved()
+        finally:
+            if daemon.poll() is None:
+                daemon.terminate()
+            try:
+                exit_code = daemon.wait(timeout=90)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait()
+                raise RuntimeError("native daemon failed graceful shutdown; verification aborted")
+        require(exit_code == 0, "native daemon did not shut down cleanly")
+    run(installer, "uninstall", "--prefix", str(prefix))
+    require(not installed.exists() and sha256(backup) == original, "uninstall removed more than the installed executable")
+    preserved()
+    proof = {
+        "schema_version": 1, "status": "passed", "version": data["version"],
+        "source_revision": data["source_revision"], "archive_sha256": data["archive"]["sha256"],
+        "runtime_image": BASE_IMAGE,
+        "previous_release": previous_data["tag"] if previous_data["version"] != data["version"] else None,
+        "rollback_baseline": "previous published artifact" if previous_data["version"] != data["version"] else "first release: reinstall/rollback of the candidate; distinct-byte replacement covered by installer regressions",
+        "local_transcription_characters": transcript_characters,
+        "checks": ["no_compiler_or_source_checkout", "no_gpu", "native_version_and_help", "explicit_model_download", "offline_local_transcription", "install_update_rollback_uninstall", "configuration_history_runtime_and_startup_owner_preservation", "real_secret_service_credential_preservation", "live_native_daemon_maintenance_refusal", "graceful_native_daemon_shutdown"],
+        "not_verified": ["microphone capture", "compositor HUD", "focused desktop delivery", "cross-version history schema migration"],
+    }
+    Path("/evidence/runtime.json").write_text(json.dumps(proof, indent=2, sort_keys=True) + "\n")
+    print("Clean-runtime verification passed: native CPU transcription, maintenance, keyring preservation, and daemon shutdown.")
+
+
+def verify_previous(directory):
+    data = json.loads((directory / "release.json").read_text())
+    for name in ("release.json", data["archive"]["name"]):
+        run("gh", "attestation", "verify", str(directory / name), "--repo", REPOSITORY,
+            "--bundle", str(directory / "provenance.json"), "--source-digest", data["source_revision"],
+            "--signer-workflow", SIGNER, "--deny-self-hosted-runners")
+    require(sha256(directory / data["archive"]["name"]) == data["archive"]["sha256"], "previous release archive is corrupt")
+
+
+def verify(args):
+    directory = args.directory.resolve()
+    data = verify_assets(directory, args.source_revision, args.checksums_sha256)
+    require(not args.output.exists(), "verification output already exists; preserve it and choose a new output path")
+    require(os.getuid() != 0, "run verification as an ordinary Docker-authorized user")
+    if args.previous_directory:
+        verify_previous(args.previous_directory.resolve())
+    script = Path(__file__).resolve()
+    image = f"cantrip-release-verification:{os.getpid()}"
+    with tempfile.TemporaryDirectory(prefix="cantrip-runtime-") as temporary:
+        root = Path(temporary)
+        for name in ("context", "models", "evidence", "download-home", "runtime-home"):
+            (root / name).mkdir(mode=0o700)
+        built = False
+        try:
+            run("docker", "build", "--platform", "linux/amd64", "--file", str(script.parent / "release-runtime.Dockerfile"), "--build-arg", f"TEST_UID={os.getuid()}", "--build-arg", f"TEST_GID={os.getgid()}", "--tag", image, str(root / "context"), timeout=600)
+            built = True
+            for mode, home_name, network in (("download-model", "download-home", "bridge"), ("smoke", "runtime-home", "none")):
+                home = root / home_name
+                (home / "data/cantrip/models").mkdir(parents=True, mode=0o700)
+                command = ["docker", "run", "--rm", "--platform", "linux/amd64", "--runtime=runc", f"--network={network}", "--user", f"{os.getuid()}:{os.getgid()}"]
+                mounts = [(directory, "/artifacts", True), (script, "/verify-release", True), (home, "/home/cantrip", False), (root / "models", "/home/cantrip/data/cantrip/models", mode == "smoke"), (root / "evidence", "/evidence", False)]
+                if args.previous_directory:
+                    mounts.append((args.previous_directory.resolve(), "/previous", True))
+                for source, target, readonly in mounts:
+                    command += ["--mount", f"type=bind,src={source},dst={target}" + (",readonly" if readonly else "")]
+                for key, value in {"HOME": "/home/cantrip", "XDG_CONFIG_HOME": "/home/cantrip/config", "XDG_DATA_HOME": "/home/cantrip/data", "XDG_STATE_HOME": "/home/cantrip/state", "XDG_RUNTIME_DIR": "/home/cantrip/runtime"}.items():
+                    command += ["--env", f"{key}={value}"]
+                command += [image, "dbus-run-session", "--", "python3", "/verify-release", "--inside", mode]
+                result = run(*command, timeout=1200)
+                print(result.stdout.strip())
+            proof = json.loads((root / "evidence/runtime.json").read_text())
+            require(proof["archive_sha256"] == data["archive"]["sha256"], "runtime proof certifies another artifact")
+            proof["workflow_run_id"] = os.environ.get("GITHUB_RUN_ID")
+            proof["workflow_run_attempt"] = os.environ.get("GITHUB_RUN_ATTEMPT")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with args.output.open("x") as output:
+                output.write(json.dumps(proof, indent=2, sort_keys=True) + "\n")
+        finally:
+            if built:
+                run("docker", "image", "rm", image, check=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--inside", choices=("download-model", "smoke"))
+    parser.add_argument("--directory", type=Path)
+    parser.add_argument("--source-revision")
+    parser.add_argument("--checksums-sha256")
+    parser.add_argument("--previous-directory", type=Path)
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+    try:
+        if args.inside:
+            inside(args.inside)
+        else:
+            require(all((args.directory, args.source_revision, args.checksums_sha256, args.output)), "directory, source revision, checksums SHA-256, and output are required")
+            verify(args)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
+        parser.exit(1, f"release verification: {error}\n")
+
+
+if __name__ == "__main__":
+    main()

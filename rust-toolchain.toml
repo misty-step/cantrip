@@ -1,6 +1,6 @@
-# Single source of truth for the Rust toolchain used by CI, local, and forest
-# agents. rustup reads this file on any cargo invocation inside the repo.
+# Exact toolchain for local checks, CI, and published artifacts.
+# rustup reads this file on every cargo invocation inside the repository.
 [toolchain]
-channel = "stable"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

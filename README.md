@@ -57,13 +57,26 @@ trigger ──> capture (pw-record) ──> STT (local, default) ──> postpro
   Sway, Hyprland, wlroots-based).
 
 ```sh
-sudo apt install libdbus-1-dev pkg-config wl-clipboard  # Debian/Ubuntu build + copy prerequisites
+sudo apt install libdbus-1-dev libssl-dev pkg-config wl-clipboard  # source-build prerequisites
 ```
 
 ## Quickstart
 
+### Download and install
+
+Use the [latest verified Linux x86-64 release](https://github.com/misty-step/cantrip/releases/latest)
+for a CPU-only executable that needs no source checkout or Rust installation.
+The runtime baseline is Ubuntu 24.04 / glibc 2.39. Follow the bundled
+[`INSTALLATION.md`](docs/INSTALLATION.md) for checksums, signed provenance,
+runtime packages, first use, and data-preserving update/rollback/uninstall.
+The installer changes only the executable; service and shortcut setup remain
+explicit. Models are a separate, explicitly requested download. The same GitHub
+Release publishes `release.json` and Landmark's `releases.json` for the website.
+
+### Build from source
+
 ```sh
-cargo build --release
+cargo build --release --locked
 
 # 1. Create the annotated default config.
 ./target/release/cantrip config init
@@ -404,29 +417,30 @@ separated historical findings/design proposals: [`docs/EVALUATION.md`](docs/EVAL
 
 ## Development
 
-The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml)
-(channel `stable`). Install it with:
+The exact Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+With rustup installed, enter the checkout and install that toolchain with:
 
 ```sh
-rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+rustup install
 ```
 
 ```sh
-cargo build
+cargo build --locked
 ./scripts/check
 ```
 
 `scripts/check` is the clone-to-green command: it runs `cargo fmt --check`,
-`cargo clippy --all-targets -- -D warnings`, `cargo test`, the offline
-`cargo test --example eval` suite, and Omarchy installer safety tests,
-stopping at the first red gate. The example tests do not contact providers.
+`cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`,
+the offline `cargo test --locked --example eval` suite, and installer/release
+safety tests (Python 3.11+), stopping at the first red gate. The example tests
+do not contact providers.
 
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`
   must be on `PATH`; the pre-commit and pre-push hooks fail closed when either
   scanner is missing instead of skipping the scan.
-- **CI** (`.github/workflows/ci.yml`): fmt, clippy `-D warnings`, tests, and a
-  TruffleHog + Gitleaks secret scan on every push/PR.
+- **CI** (`.github/workflows/ci.yml`): fmt, clippy `-D warnings`, tests, secret
+  scan, and on `master` the Landmark-prepared verified Linux release.
 - Architecture decisions: [`docs/adr/`](docs/adr/). Log tags: `[Daemon]`
   `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 
