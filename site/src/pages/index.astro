@@ -1,0 +1,99 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro';
+import { loadReleases } from '../lib/releases.mjs';
+import { demoTranscript } from '../lib/demo.mjs';
+
+const { latest } = loadReleases();
+if (!latest) throw new Error('A published release is required for the homepage.');
+const transcript = demoTranscript();
+---
+<SiteLayout
+  title="Cantrip — local-first dictation for Linux"
+  description="Speak, stop, keep writing. Local speech recognition on your CPU, a quiet native HUD, and guarded text delivery on Linux Wayland. Cloud features are explicit opt-ins."
+  section="home"
+>
+  <div class="shell home">
+    <section class="hero" aria-labelledby="hero-heading">
+      <div class="hero-copy">
+        <h1 id="hero-heading">Speak.<br /> Keep writing.</h1>
+        <p class="hero-intro">Local-first dictation for Linux.</p>
+        <p class="hero-description">Press your shortcut, say what you mean, and stop. Cantrip turns speech into text without pulling you out of the app you’re writing in.</p>
+        <div class="actions">
+          <a class="button button-primary" href={latest.downloadUrl}>Download for Linux x86-64</a>
+          <a class="button button-secondary" href="/docs/install">Get started</a>
+        </div>
+        <p class="download-note"><a href={`/releases/${latest.tag}`}>{latest.tag} release notes</a><br />CPU-only. No Rust toolchain or GPU required.</p>
+      </div>
+      <figure class="demo">
+        <video
+          controls
+          playsinline
+          preload="none"
+          poster="/demo/dictation-poster.png"
+          width="1280"
+          height="800"
+          aria-label="Cantrip dictating into a real text editor"
+          aria-describedby="demo-caption"
+        >
+          <source src="/demo/dictation.webm" type="video/webm" />
+          <track default kind="captions" src="/demo/dictation.vtt" srclang="en" label="English" />
+          <p>Your browser cannot play this video. <a href="/demo/dictation.webm">Download the demonstration</a> or read the transcript below.</p>
+        </video>
+        <figcaption id="demo-caption">
+          <span>A real writing session, with Cantrip’s native HUD.</span>
+          <a href="/demo/dictation-poster.png">View still image</a>
+        </figcaption>
+        <details class="demo-transcript">
+          <summary>Read the resulting text</summary>
+          <blockquote>{transcript}</blockquote>
+          <p><a href="/demo/dictation.vtt">Read video captions</a></p>
+        </details>
+        <p class="demo-provenance">Public speech through a virtual microphone on Hyprland. Local recognition and explicitly enabled local cleanup. <a href="/demo/evidence.json">Recording details</a>.</p>
+      </figure>
+    </section>
+
+    <section class="principles" aria-labelledby="local-heading">
+      <div class="section-heading">
+        <h2 id="local-heading">Your words.<br /> Your machine.</h2>
+        <p>A small desktop utility, not another place to work.</p>
+      </div>
+      <div class="principle-copy">
+        <section>
+          <h3>Local recognition is the default.</h3>
+          <p>Download the Parakeet model once, deliberately. After that, speech recognition runs on your CPU without sending audio to a provider. No account, GPU, or cloud key is needed for local dictation.</p>
+        </section>
+        <section>
+          <h3>Cleanup is your choice.</h3>
+          <p>Use the raw transcript, or explicitly configure an OpenAI-compatible endpoint to tidy it. That endpoint can be local or cloud-hosted. Cloud recognition and cleanup are separate opt-ins, never a hidden step.</p>
+          <a href="/docs/configuration">Choose your recognition and cleanup settings</a>
+        </section>
+        <section>
+          <h3>Uncertainty doesn’t become a stray paste.</h3>
+          <p>Cantrip checks the desktop and destination before automatic delivery. If they can’t be verified, the text waits for an explicit recovery action. Stopped recordings and transcripts stay in owner-private local history until you deliberately manage them.</p>
+          <a href="/docs/privacy">Understand storage, privacy, and recovery</a>
+        </section>
+      </div>
+    </section>
+
+    <section class="first-use" aria-labelledby="first-use-heading">
+      <div class="section-heading">
+        <h2 id="first-use-heading">One shortcut.<br /> Your own apps.</h2>
+        <p>Make the first take in a safe text field. Then make it a habit.</p>
+      </div>
+      <ol class="use-steps">
+        <li><h3>Set up your desktop.</h3><p>Install the verified release, run <code>cantrip doctor</code>, and explicitly download a local model. Keep one owner for daemon startup.</p><a href="/docs/install">Installation guide</a></li>
+        <li><h3>Bind a recording shortcut.</h3><p>Use a toggle or press-and-release binding. The small native HUD shows microphone activity while you speak, without taking focus.</p><a href="/docs/desktop">Desktop and shortcut setup</a></li>
+        <li><h3>Stop, then keep writing.</h3><p>Cantrip transcribes the take and delivers only when it can verify the destination. Open Actions to review, copy, or recover a saved take.</p><a href="/docs/use">Dictation and recovery guide</a></li>
+      </ol>
+    </section>
+
+    <section class="desktop-boundary" aria-labelledby="desktop-heading">
+      <h2 id="desktop-heading">Check your desktop before installing.</h2>
+      <div>
+        <p>The download is for <strong>Linux x86-64</strong>, with a <strong>{latest.baseline.distribution} / glibc {latest.baseline.glibc_min}+</strong> baseline. Microphone dictation needs PipeWire; the HUD needs Wayland layer-shell support.</p>
+        <p>Automatic keyboard delivery currently requires the documented, verified <strong>Hyprland/logind</strong> desktop. Other desktops can use explicit clipboard delivery. This is not a claim of automatic typing on every Wayland compositor.</p>
+        <a href="/docs/desktop">Read the supported-desktop boundary</a>
+      </div>
+    </section>
+  </div>
+</SiteLayout>

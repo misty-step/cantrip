@@ -1,0 +1,138 @@
+{
+  "archive": {
+    "name": "cantrip-v0.1.1-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "d5e906a25f6a8be70ae48e665606c60b49245bf5323f0170a240a69efef3c825"
+  },
+  "binary_sha256": "564b5b0560bfa69edb2a6bc7b975b70e19826d5558267df23fa70783085d7877",
+  "download_base_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/",
+  "landmark": {
+    "sha256": "d3e7400abcf72428f801aae3d9ed74412d5ced31eecc6be753a48027a6441ed9",
+    "version": "0.28.7"
+  },
+  "landmark_feed": {
+    "name": "releases.json",
+    "sha256": "88a60bf8d612ea757ac40661eb8340519c70bf91ce37f0bf1084b77d67062cf3"
+  },
+  "provenance": {
+    "name": "provenance.json",
+    "signer_workflow": "misty-step/cantrip/.github/workflows/release.yml",
+    "source_revision": "ee69414cd520b11dead3e243928140ca078f22b3"
+  },
+  "public_notes": {
+    "html": {
+      "name": "v0.1.1.html",
+      "sha256": "53458656d44286b2e9f144db03b3300763f952ce164892c60b34d994dd3a437f"
+    },
+    "markdown": {
+      "name": "v0.1.1.md",
+      "sha256": "5478d7918a5fe67c39d599e2cae34fa85248cfa8eb6087eb98a9f2428bc0cf75"
+    },
+    "plaintext": {
+      "name": "v0.1.1.txt",
+      "sha256": "65de49750815e9aab5e0b218c55e955d98060c110ceb9bae50d1e1d820343816"
+    }
+  },
+  "release_url": "https://github.com/misty-step/cantrip/releases/tag/v0.1.1",
+  "repository": "misty-step/cantrip",
+  "runtime_baseline": {
+    "distribution": "Ubuntu 24.04",
+    "elf": {
+      "interpreter": "/lib64/ld-linux-x86-64.so.2",
+      "needed_libraries": [
+        "ld-linux-x86-64.so.2",
+        "libc.so.6",
+        "libdbus-1.so.3",
+        "libgcc_s.so.1",
+        "libm.so.6",
+        "libstdc++.so.6"
+      ],
+      "required_symbol_versions": {
+        "ld-linux-x86-64.so.2": [
+          "GLIBC_2.3"
+        ],
+        "libc.so.6": [
+          "GLIBC_2.10",
+          "GLIBC_2.14",
+          "GLIBC_2.15",
+          "GLIBC_2.16",
+          "GLIBC_2.17",
+          "GLIBC_2.18",
+          "GLIBC_2.2.5",
+          "GLIBC_2.25",
+          "GLIBC_2.27",
+          "GLIBC_2.28",
+          "GLIBC_2.29",
+          "GLIBC_2.3",
+          "GLIBC_2.3.2",
+          "GLIBC_2.3.3",
+          "GLIBC_2.3.4",
+          "GLIBC_2.30",
+          "GLIBC_2.32",
+          "GLIBC_2.33",
+          "GLIBC_2.34",
+          "GLIBC_2.38",
+          "GLIBC_2.39",
+          "GLIBC_2.4",
+          "GLIBC_2.5",
+          "GLIBC_2.6",
+          "GLIBC_2.9"
+        ],
+        "libdbus-1.so.3": [
+          "LIBDBUS_1_3"
+        ],
+        "libgcc_s.so.1": [
+          "GCC_3.0",
+          "GCC_3.3",
+          "GCC_4.2.0"
+        ],
+        "libm.so.6": [
+          "GLIBC_2.2.5",
+          "GLIBC_2.27",
+          "GLIBC_2.29",
+          "GLIBC_2.35"
+        ],
+        "libstdc++.so.6": [
+          "CXXABI_1.3",
+          "CXXABI_1.3.11",
+          "CXXABI_1.3.5",
+          "CXXABI_1.3.7",
+          "GLIBCXX_3.4",
+          "GLIBCXX_3.4.11",
+          "GLIBCXX_3.4.14",
+          "GLIBCXX_3.4.15",
+          "GLIBCXX_3.4.17",
+          "GLIBCXX_3.4.18",
+          "GLIBCXX_3.4.19",
+          "GLIBCXX_3.4.20",
+          "GLIBCXX_3.4.21",
+          "GLIBCXX_3.4.22",
+          "GLIBCXX_3.4.26",
+          "GLIBCXX_3.4.29",
+          "GLIBCXX_3.4.30",
+          "GLIBCXX_3.4.9"
+        ]
+      }
+    },
+    "glibc_min": "2.39",
+    "packages": [
+      "libc6",
+      "libdbus-1-3",
+      "libgcc-s1",
+      "libstdc++6"
+    ]
+  },
+  "rust_toolchain": "1.98.1",
+  "schema_version": 1,
+  "source_revision": "ee69414cd520b11dead3e243928140ca078f22b3",
+  "tag": "v0.1.1",
+  "target": "x86_64-unknown-linux-gnu",
+  "technical_changelog": {
+    "name": "v0.1.1-technical.md",
+    "sha256": "ceed30290bf93d59e1eab1519a8c48186e6673303e99072a7380941794bf282c"
+  },
+  "verification": {
+    "name": "verification.json",
+    "sha256": "6638786733c3802f294e38ed6cd710d17b27840268a7dbcd6b54df32a5292ea1"
+  },
+  "version": "0.1.1"
+}

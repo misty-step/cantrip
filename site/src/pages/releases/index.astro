@@ -1,0 +1,39 @@
+---
+import SiteLayout from '../../layouts/SiteLayout.astro';
+import { loadReleases, releaseDate } from '../../lib/releases.mjs';
+
+const { releases, latest } = loadReleases();
+if (!latest) throw new Error('A published release is required for the releases page.');
+---
+<SiteLayout title="Releases — Cantrip" description="Published Cantrip releases, Linux downloads, release notes, checksums, and source-bound build provenance." section="releases">
+  <div class="shell release-page">
+    <header class="page-heading">
+      <h1>Releases</h1>
+      <p class="lede">The download, the notes, and the source belong together.</p>
+      <p>These are published GitHub releases. Each entry uses its own signed release manifest, Landmark notes, and verified artifact identity—not the version currently in development.</p>
+    </header>
+    <div class="release-download">
+      <div>
+        <h2>Latest stable: {latest.tag}</h2>
+        <p>CPU-only Linux x86-64. {latest.baseline.distribution} / glibc {latest.baseline.glibc_min}+.</p>
+      </div>
+      <div class="actions">
+        <a class="button button-primary" href={latest.downloadUrl}>Download for Linux x86-64</a>
+        <a class="button button-secondary" href="/docs/install">Verify and install</a>
+      </div>
+    </div>
+    <ol class="release-list" aria-label="Published releases">
+      {releases.map((release) => (
+        <li>
+          <div class="release-date"><time datetime={release.publishedAt}>{releaseDate(release.publishedAt)}</time><span>{release.tag}</span></div>
+          <div>
+            <h2><a href={`/releases/${release.tag}`}>{release.title}</a></h2>
+            <p>{release.baseline.distribution} / glibc {release.baseline.glibc_min}+<br />{release.target}</p>
+            <div class="text-links"><a href={`/releases/${release.tag}`}>Release notes and downloads</a><a href={release.releaseUrl}>Published on GitHub</a></div>
+          </div>
+        </li>
+      ))}
+    </ol>
+    <p class="release-caution">Updating replaces the executable, not your configuration, models, credentials, or recording history. <a href="/docs/install#update-and-roll-back">Read the update and rollback procedure</a> before maintenance.</p>
+  </div>
+</SiteLayout>

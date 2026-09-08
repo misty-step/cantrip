@@ -1,0 +1,32 @@
+{
+  "archive_sha256": "d5e906a25f6a8be70ae48e665606c60b49245bf5323f0170a240a69efef3c825",
+  "checks": [
+    "no_compiler_or_source_checkout",
+    "no_gpu",
+    "native_version_and_help",
+    "explicit_model_download",
+    "offline_local_transcription",
+    "install_update_rollback_uninstall",
+    "configuration_history_runtime_keyring_file_and_startup_owner_preservation",
+    "live_native_daemon_maintenance_refusal",
+    "graceful_native_daemon_shutdown"
+  ],
+  "local_transcription_characters": 109,
+  "not_verified": [
+    "microphone capture",
+    "compositor HUD",
+    "focused desktop delivery",
+    "cross-version history schema migration",
+    "secret_service_round_trip_in_headless_runtime"
+  ],
+  "previous_release": "v0.1.0",
+  "rollback_baseline": "previous published artifact",
+  "runtime_image": "ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517",
+  "schema_version": 1,
+  "secret_service": "unavailable_in_headless_runtime",
+  "source_revision": "ee69414cd520b11dead3e243928140ca078f22b3",
+  "status": "passed",
+  "version": "0.1.1",
+  "workflow_run_attempt": "1",
+  "workflow_run_id": "34250435690"
+}

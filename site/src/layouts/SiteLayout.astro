@@ -1,0 +1,63 @@
+---
+import '@fontsource/ibm-plex-mono/latin-400.css';
+import '@fontsource/ibm-plex-mono/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-400.css';
+import '@fontsource/ibm-plex-sans/latin-500.css';
+import '@fontsource/ibm-plex-sans/latin-600.css';
+import '@fontsource/ibm-plex-sans/latin-400-italic.css';
+import '../styles/global.css';
+import { repositoryUrl } from '../lib/docs.mjs';
+
+interface Props {
+  title: string;
+  description: string;
+  section?: 'home' | 'docs' | 'releases';
+  noindex?: boolean;
+}
+
+const { title, description, section, noindex = false } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#13141c" />
+    <meta name="color-scheme" content="dark" />
+    {noindex && <meta name="robots" content="noindex" />}
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Cantrip" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL('/demo/dictation-poster.png', Astro.site)} />
+    <meta property="og:image:alt" content="Cantrip's native dictation HUD in a real Linux writing session" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header shell">
+      <a class="brand" href="/" aria-label="Cantrip home" aria-current={section === 'home' ? 'page' : undefined}>
+        <img src="/favicon.svg" alt="" width="28" height="28" />
+        <span>Cantrip</span>
+      </a>
+      <nav class="primary-nav" aria-label="Primary">
+        <a href="/docs/install" aria-current={section === 'docs' ? 'true' : undefined}>Documentation</a>
+        <a href="/releases" aria-current={section === 'releases' ? 'true' : undefined}>Releases</a>
+        <a href={repositoryUrl}>GitHub</a>
+      </nav>
+    </header>
+    <main id="main" tabindex="-1"><slot /></main>
+    <footer class="site-footer shell">
+      <p>Cantrip is an <a href={`${repositoryUrl}/blob/master/LICENSE`}>MIT-licensed</a> project by <a href="https://mistystep.io">Misty Step</a>.</p>
+      <nav aria-label="Footer">
+        <a href="/docs/privacy">Privacy & recovery</a>
+        <a href={`${repositoryUrl}/issues`}>Report an issue</a>
+      </nav>
+    </footer>
+  </body>
+</html>

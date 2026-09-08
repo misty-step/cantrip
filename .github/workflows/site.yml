@@ -1,0 +1,62 @@
+name: Website
+
+on:
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'docs/**'
+      - 'README.md'
+      - 'scripts/check-site'
+      - '.github/workflows/site.yml'
+  workflow_dispatch:
+  workflow_run:
+    workflows: [CI]
+    branches: [master]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cantrip-website-${{ github.event.pull_request.number || 'production' }}
+  cancel-in-progress: false
+
+jobs:
+  site:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Refresh published release inputs
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npm --prefix site run sync:releases
+      - name: Check and build the same static site used locally
+        run: python3 scripts/check-site
+      - name: Deploy the verified static build
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        working-directory: site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: b069014f6a46558ea9146fb6c4ff8f6c
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_API_TOKEN is required for production deployment.' >&2; exit 1; }
+          npm run deploy
+      - name: Verify public routes
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: |
+          for path in / /docs/install /docs/use /docs/configuration /docs/desktop /docs/privacy /releases; do
+            curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 "https://cantrip.mistystep.io$path" --output /dev/null
+          done

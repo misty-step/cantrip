@@ -1,0 +1,58 @@
+---
+import { getCollection, render } from 'astro:content';
+import type { InferGetStaticPropsType } from 'astro';
+import SiteLayout from '../../layouts/SiteLayout.astro';
+import { loadReleases, releaseDate } from '../../lib/releases.mjs';
+
+export async function getStaticPaths() {
+  const { releases } = loadReleases();
+  const notes = await getCollection('releaseNotes');
+  return releases.map((release) => {
+    const entry = notes.find((candidate) => candidate.id === release.tag);
+    if (!entry) throw new Error(`Missing published Markdown for ${release.tag}`);
+    return { params: { tag: release.tag }, props: { release, entry } };
+  });
+}
+
+type Props = InferGetStaticPropsType<typeof getStaticPaths>;
+const { release, entry } = Astro.props;
+const { Content } = await render(entry);
+---
+<SiteLayout title={`Cantrip ${release.tag} — ${release.title}`} description={`${release.title}. Published release notes, Linux x86-64 download, checksums, and source-bound provenance for Cantrip ${release.tag}.`} section="releases">
+  <div class="shell release-page">
+    <header class="page-heading">
+      <p class="breadcrumb"><a href="/releases">All releases</a></p>
+      <h1>Cantrip {release.tag}</h1>
+      <p class="lede">{release.title}</p>
+      <p>Published <time datetime={release.publishedAt}>{releaseDate(release.publishedAt)}</time>. <a href={release.releaseUrl}>View on GitHub</a>.</p>
+    </header>
+    <section class="release-artifact" aria-labelledby="download-heading">
+      <h2 id="download-heading">Download this release</h2>
+      <p>Linux x86-64, CPU-only. Runtime baseline: {release.baseline.distribution}, glibc {release.baseline.glibc_min} or newer.</p>
+      <div class="actions">
+        <a class="button button-primary" href={release.downloadUrl}>Download {release.tag} for Linux x86-64</a>
+        <a class="button button-secondary" href="/docs/install">Verify and install</a>
+      </div>
+      <dl class="artifact-identity">
+        <div><dt>Source revision</dt><dd><a href={release.sourceUrl}><code>{release.sourceRevision}</code></a></dd></div>
+        <div><dt>Archive SHA-256</dt><dd><code>{release.archive.sha256}</code></dd></div>
+      </dl>
+      <nav class="artifact-links" aria-label="Release verification assets">
+        <a href={release.assets.checksums}>Checksums</a>
+        <a href={release.assets.manifest}>Release manifest</a>
+        <a href={release.assets.provenance}>Signed provenance</a>
+        <a href={release.assets.verification}>Runtime verification</a>
+      </nav>
+    </section>
+    <article class="prose release-notes"><Content /></article>
+    <nav class="release-sources" aria-label="Original published notes">
+      <h2>Original release sources</h2>
+      <p>The notes above are the published Markdown for this tag. The site checks their hash against the same release manifest that identifies the downloadable archive.</p>
+      <div class="text-links">
+        <a href={release.assets.markdown}>Public Markdown</a>
+        <a href={release.assets.technical}>Technical changelog</a>
+        <a href={release.assets.landmark}>Landmark JSON feed</a>
+      </div>
+    </nav>
+  </div>
+</SiteLayout>

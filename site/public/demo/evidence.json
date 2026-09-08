@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "source_revision": "ca201ceaad808cc48f26a3186ef41e70cfeba020",
+  "source_url": "https://github.com/misty-step/cantrip/tree/ca201ceaad808cc48f26a3186ef41e70cfeba020",
+  "build_kind": "Development build; demonstration timings are not a performance benchmark.",
+  "binary_sha256": "3fff24eef864a72a423683a3ac8ba46403b5f76ba8f2f8fb0ac8121b00e25b08",
+  "recorded_at": "2026-09-08T16:11:06Z",
+  "recording_source": "Bundled public John F. Kennedy speech excerpt, samples/jfk.wav, routed through a private PipeWire virtual microphone. No physical microphone or unrelated desktop is included.",
+  "capture_method": "wf-recorder captured the real Cantrip layer-shell HUD and Foot/Neovim editor on a dedicated 1280x800 Hyprland output. Only idle lead-in and trailing time were trimmed; no frames were retimed or stages simulated. The recorder's incorrect full-range metadata was corrected to match the native screenshot before WebM encoding.",
+  "recording_control": "The configured toggle/start/stop command path was automated outside the editor. This recording does not claim a physical hotkey test.",
+  "recognition_model": "parakeet-tdt-0.6b-v3-int8",
+  "cleanup_model": "gemma3:4b",
+  "cleanup_endpoint": "Explicitly enabled local Ollama OpenAI-compatible endpoint",
+  "delivery": "pasted",
+  "editor_receipt_verified": true,
+  "duration_seconds": 20.6,
+  "transcript": "And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.",
+  "timeline": [
+    {
+      "seconds": 0.702,
+      "phase": "recording"
+    },
+    {
+      "seconds": 12.281,
+      "phase": "finalizing-audio"
+    },
+    {
+      "seconds": 12.356,
+      "phase": "transcribing"
+    },
+    {
+      "seconds": 12.666,
+      "phase": "cleaning-up"
+    },
+    {
+      "seconds": 18.05,
+      "phase": "delivering"
+    },
+    {
+      "seconds": 18.111,
+      "phase": "idle"
+    }
+  ]
+}

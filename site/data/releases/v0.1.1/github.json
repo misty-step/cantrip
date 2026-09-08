@@ -1,0 +1,80 @@
+{
+  "id": 384893213,
+  "tag_name": "v0.1.1",
+  "html_url": "https://github.com/misty-step/cantrip/releases/tag/v0.1.1",
+  "draft": false,
+  "prerelease": false,
+  "published_at": "2026-09-08T16:25:46Z",
+  "assets": [
+    {
+      "id": 550862470,
+      "name": "cantrip-v0.1.1-x86_64-unknown-linux-gnu.tar.gz",
+      "size": 17709967,
+      "digest": "sha256:d5e906a25f6a8be70ae48e665606c60b49245bf5323f0170a240a69efef3c825",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/cantrip-v0.1.1-x86_64-unknown-linux-gnu.tar.gz"
+    },
+    {
+      "id": 550862522,
+      "name": "provenance.json",
+      "size": 11648,
+      "digest": "sha256:1c81c45ed01753e5ab0bf5c94a1c7ed6127045a1460fca78d8c95d9eb8242e64",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/provenance.json"
+    },
+    {
+      "id": 550862547,
+      "name": "release.json",
+      "size": 3845,
+      "digest": "sha256:002642b29f81445e2b5fcab0c2b9185861c767e418fa3262bac8c5b6c34bcc5c",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/release.json"
+    },
+    {
+      "id": 550862574,
+      "name": "releases.json",
+      "size": 8655,
+      "digest": "sha256:88a60bf8d612ea757ac40661eb8340519c70bf91ce37f0bf1084b77d67062cf3",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/releases.json"
+    },
+    {
+      "id": 550862445,
+      "name": "SHA256SUMS",
+      "size": 673,
+      "digest": "sha256:402f688177f9311d165d519f4d72ff15a31ffb8e37c2e68322d2f266e907659e",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/SHA256SUMS"
+    },
+    {
+      "id": 550862596,
+      "name": "v0.1.1-technical.md",
+      "size": 175,
+      "digest": "sha256:ceed30290bf93d59e1eab1519a8c48186e6673303e99072a7380941794bf282c",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/v0.1.1-technical.md"
+    },
+    {
+      "id": 550862618,
+      "name": "v0.1.1.html",
+      "size": 1386,
+      "digest": "sha256:53458656d44286b2e9f144db03b3300763f952ce164892c60b34d994dd3a437f",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/v0.1.1.html"
+    },
+    {
+      "id": 550862633,
+      "name": "v0.1.1.md",
+      "size": 1206,
+      "digest": "sha256:5478d7918a5fe67c39d599e2cae34fa85248cfa8eb6087eb98a9f2428bc0cf75",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/v0.1.1.md"
+    },
+    {
+      "id": 550862662,
+      "name": "v0.1.1.txt",
+      "size": 1076,
+      "digest": "sha256:65de49750815e9aab5e0b218c55e955d98060c110ceb9bae50d1e1d820343816",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/v0.1.1.txt"
+    },
+    {
+      "id": 550862674,
+      "name": "verification.json",
+      "size": 1156,
+      "digest": "sha256:6638786733c3802f294e38ed6cd710d17b27840268a7dbcd6b54df32a5292ea1",
+      "browser_download_url": "https://github.com/misty-step/cantrip/releases/download/v0.1.1/verification.json"
+    }
+  ]
+}

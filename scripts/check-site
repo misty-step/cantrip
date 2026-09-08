@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Build the static site and check its published local links, anchors, and assets."""
+
+import argparse
+from html.parser import HTMLParser
+from pathlib import Path
+import subprocess
+import sys
+from urllib.parse import unquote, urljoin, urlsplit
+
+ROOT = Path(__file__).resolve().parent.parent
+SITE = ROOT / "site"
+DIST = SITE / "dist"
+ORIGIN = "https://cantrip.mistystep.io"
+
+
+class Page(HTMLParser):
+    def __init__(self, source):
+        super().__init__(convert_charrefs=True)
+        self.ids = set()
+        self.links = []
+        self.feed(source)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if attrs.get("id"):
+            self.ids.add(attrs["id"])
+        for name in ("href", "src", "poster"):
+            if attrs.get(name):
+                self.links.append(attrs[name])
+
+
+def check_links():
+    pages = {path: Page(path.read_text()) for path in DIST.rglob("*.html")}
+    if not pages:
+        raise RuntimeError("site build produced no HTML pages")
+    failures = []
+    checked = 0
+    for path, page in pages.items():
+        relative = path.relative_to(DIST).as_posix()
+        page_url = ORIGIN + "/" + (relative[:-10] if relative.endswith("index.html") else relative)
+        for reference in page.links:
+            url = urlsplit(urljoin(page_url, reference))
+            if url.scheme not in ("http", "https") or url.netloc != "cantrip.mistystep.io":
+                continue
+            target = DIST / unquote(url.path).lstrip("/")
+            if target.is_dir():
+                target /= "index.html"
+            elif not target.is_file() and not target.suffix:
+                html_file = target.with_suffix(".html")
+                target = html_file if html_file.is_file() else target / "index.html"
+            if not target.is_file():
+                failures.append(f"{relative}: missing {reference}")
+            elif url.fragment and target.suffix == ".html":
+                destination = pages.get(target)
+                if destination is None or unquote(url.fragment) not in destination.ids:
+                    failures.append(f"{relative}: missing anchor {reference}")
+            checked += 1
+    if failures:
+        raise RuntimeError("\n".join(failures))
+    print(f"Static site: {len(pages)} pages, {checked} local links/assets/anchors verified.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--built", action="store_true", help="check an existing build without installing or rebuilding")
+    args = parser.parse_args()
+    if not args.built:
+        for command in (["npm", "ci"], ["npm", "run", "check"], ["npm", "run", "build"]):
+            subprocess.run(command, cwd=SITE, check=True)
+    check_links()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f"site check: {error}", file=sys.stderr)
+        sys.exit(1)
