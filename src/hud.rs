@@ -63,7 +63,13 @@ const STATUS_STALE_AFTER: Duration = Duration::from_secs(2);
 // Time to cover 95% of a measured change; release must outlive a short speech gap.
 const WAVEFORM_EASE: Duration = POLL_INTERVAL;
 const WAVEFORM_RELEASE: Duration = Duration::from_millis(420);
-const SETTLE: Duration = Duration::from_millis(280);
+const LISTENING_ONSET: Duration = Duration::from_millis(280);
+const SETTLE: Duration = Duration::from_millis(400);
+const PROGRESS_REVEAL: Duration = Duration::from_millis(600);
+const PHASE_DWELL: Duration = Duration::from_millis(180);
+// One measured reveal and one cleanup morph, their settled dwells, and
+// compositor-cadence margin. Success settling/holding/fading is additional.
+const MAX_PRESENTATION_LAG: Duration = Duration::from_millis(1600);
 // Full-opacity dwell after the completion grid has finished settling.
 const SUCCESS_HOLD: Duration = Duration::from_millis(1200);
 const RESULT_FADE: Duration = Duration::from_millis(140);
@@ -79,6 +85,7 @@ const CELL_SIZE: f32 = 3.0;
 const CELL_PITCH: f32 = 5.0;
 const TRACK_WIDTH: f32 = CELLS as f32 * CELL_PITCH;
 const GRID_HEIGHT: f32 = (ROWS - 1) as f32 * CELL_PITCH + CELL_SIZE;
+const TRANSCRIPTION_HEIGHT: f32 = 2.0 * CELL_PITCH + CELL_SIZE;
 // Public samples/jfk.wav at 9.0 s: the newest 100 ms of chronological PCM pairs.
 const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-1326, 1927],
@@ -216,6 +223,9 @@ struct ResultView {
     kind: Kind,
     caption: Caption,
     visibility: Visibility,
+    dwell: Duration,
+    presented: bool,
+    waiting_for_settle: bool,
 }
 
 /// Signal absence at the beginning is actionable; silence after real input is
@@ -257,6 +267,80 @@ impl SignalHistory {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum WorkPhase {
+    Finalizing,
+    Transcribing,
+    Cleaning,
+    Delivering,
+}
+
+impl WorkPhase {
+    fn from_stage(stage: Option<&Stage>) -> Option<Self> {
+        match stage? {
+            Stage::FinalizingAudio => Some(Self::Finalizing),
+            Stage::Transcribing { .. } => Some(Self::Transcribing),
+            Stage::CleaningUp => Some(Self::Cleaning),
+            Stage::Delivering => Some(Self::Delivering),
+            _ => None,
+        }
+    }
+
+    fn kind(self) -> Kind {
+        match self {
+            Self::Finalizing | Self::Transcribing => Kind::Working,
+            Self::Cleaning | Self::Delivering => Kind::Finishing,
+        }
+    }
+
+    fn caption(self, progress: Option<(u32, u32)>, recovery: bool) -> Caption {
+        Caption::title(match self {
+            Self::Finalizing => Cow::Borrowed("Finishing recording…"),
+            Self::Cleaning => Cow::Borrowed("Finishing text…"),
+            Self::Delivering => Cow::Borrowed("Delivering text…"),
+            Self::Transcribing => {
+                let verb = if recovery {
+                    "Recovering recording"
+                } else {
+                    "Transcribing"
+                };
+                match progress {
+                    Some((completed, total)) => {
+                        Cow::Owned(format!("{verb} · {completed} of {total} complete"))
+                    }
+                    None => Cow::Owned(format!("{verb}…")),
+                }
+            }
+        })
+    }
+
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+
+    fn next(pending: u8) -> Option<Self> {
+        [
+            Self::Finalizing,
+            Self::Transcribing,
+            Self::Cleaning,
+            Self::Delivering,
+        ]
+        .into_iter()
+        .find(|phase| pending & phase.bit() != 0)
+    }
+}
+
+// Coalesce measurements into one target and remember only which normal phases
+// were observed. No status queue, inferred phases, or worker-side waiting.
+struct WorkPresentation {
+    phase: WorkPhase,
+    latest: WorkPhase,
+    pending: u8,
+    progress: Option<(u32, u32)>,
+    recovery: bool,
+    ready_at: Instant,
+}
+
 struct Model {
     snapshot: Option<StatusSnapshot>,
     operation: Option<String>,
@@ -279,6 +363,7 @@ struct Model {
     reduced_motion: bool,
     desktop_reduced_motion: bool,
     track: TrackMotion,
+    work: Option<WorkPresentation>,
 }
 
 impl Model {
@@ -305,6 +390,7 @@ impl Model {
             reduced_motion: false,
             desktop_reduced_motion: false,
             track: TrackMotion::new(now),
+            work: None,
         }
     }
 
@@ -326,8 +412,11 @@ impl Model {
             .snapshot
             .as_ref()
             .is_none_or(|old| old.state != status.state);
-        let new_operation =
-            active && (epoch_changed || !was_active || self.operation != status.operation_id);
+        let new_operation = active
+            && (epoch_changed
+                || !was_active
+                || self.operation != status.operation_id
+                || status.state == StateKind::Recording && phase_changed);
         let was_disconnected = self.lost_since.take().is_some();
         let lost_active = self.lost_active;
         self.lost_active = false;
@@ -341,6 +430,13 @@ impl Model {
             self.result = None;
             self.interaction = None;
         }
+        if epoch_changed || new_operation {
+            self.work = None;
+            self.track.reset(now);
+            self.kind = None;
+            self.waveform = None;
+            self.progress = None;
+        }
         if new_operation {
             self.operation = status.operation_id.clone();
             self.phase_since = now;
@@ -348,11 +444,6 @@ impl Model {
             self.result = None;
             self.interaction = None;
             self.elapsed_value = None;
-            // A deliberate operation interrupts even an unfinished result fade.
-            self.track.reset(now);
-            self.kind = None;
-            self.waveform = None;
-            self.progress = None;
         } else if phase_changed {
             self.phase_since = now;
         }
@@ -452,6 +543,9 @@ impl Model {
                     action: "Cantrip → Recordings and recovery".to_owned(),
                 },
                 visibility: Visibility::Until(now + NOTICE_HOLD),
+                dwell: NOTICE_HOLD,
+                presented: false,
+                waiting_for_settle: false,
             });
         }
         if status.notice.is_none() {
@@ -468,6 +562,7 @@ impl Model {
                 }
             }
         }
+        self.observe_work(&status, now);
         self.snapshot = Some(status);
         self.refresh(now);
     }
@@ -485,6 +580,19 @@ impl Model {
         if self.lost_since.is_none() {
             self.lost_since = Some(now);
             self.lost_active = self.active();
+            if self.work.take().is_some() {
+                self.lost_active = true;
+                // An outcome received during a cosmetic handoff must never
+                // reappear as a fresh success after connection recovery.
+                self.result = None;
+            }
+            if self
+                .result
+                .as_ref()
+                .is_some_and(|result| result.waiting_for_settle)
+            {
+                self.result = None;
+            }
         }
         self.refresh(now);
     }
@@ -497,11 +605,29 @@ impl Model {
         {
             self.interaction = None;
         }
-        if self
-            .result
-            .as_ref()
-            .is_some_and(|r| r.visibility.alpha(now, self.reduced_motion).is_none())
-        {
+        if let Some(result) = &mut self.result {
+            if result.presented
+                && result.waiting_for_settle
+                && self.kind == Some(Kind::Resolved)
+                && now >= self.track.since + self.track.duration
+                && self.track.presented.iter().all(TrackColumn::fully_lit)
+            {
+                result.waiting_for_settle = false;
+                result.visibility = Visibility::Until(
+                    now + SUCCESS_HOLD
+                        + if self.reduced_motion {
+                            Duration::ZERO
+                        } else {
+                            RESULT_FADE
+                        },
+                );
+            }
+        }
+        if self.result.as_ref().is_some_and(|result| {
+            result.presented
+                && !result.waiting_for_settle
+                && result.visibility.alpha(now, self.reduced_motion).is_none()
+        }) {
             self.result = None;
         }
         if let Some(since) = self.lost_since {
@@ -523,6 +649,9 @@ impl Model {
             if self.lost_active {
                 return;
             }
+        }
+        if self.present_work(now) {
+            return;
         }
         let Some(status) = &self.snapshot else {
             return;
@@ -582,55 +711,37 @@ impl Model {
             StateKind::Processing => {
                 let stage = status.stage.as_ref();
                 let progress = stage.and_then(Stage::measured_progress);
-                let caption = if status.hud.labels
-                    || matches!(stage, Some(Stage::Cancelling | Stage::RemovingRecording))
-                {
-                    Caption::title(match stage {
-                        Some(Stage::FinalizingAudio) => Cow::Borrowed("Finishing recording…"),
-                        Some(Stage::RemovingRecording) => Cow::Borrowed("Removing saved audio…"),
-                        Some(Stage::CleaningUp) => Cow::Borrowed("Finishing text…"),
-                        Some(Stage::Delivering) => Cow::Borrowed("Delivering text…"),
-                        Some(Stage::Cancelling) => {
-                            Cow::Borrowed("Cancelling… Waiting for current work.")
-                        }
-                        Some(Stage::Transcribing { .. }) => {
-                            let verb =
-                                if status.operation_kind == Some(ipc::OperationKind::Recovery) {
-                                    "Recovering recording"
-                                } else {
-                                    "Transcribing"
-                                };
-                            match progress {
-                                Some((completed, total)) => {
-                                    Cow::Owned(format!("{verb} · {completed} of {total} complete"))
-                                }
-                                None => Cow::Owned(format!("{verb}…")),
-                            }
-                        }
-                        _ => Cow::Borrowed("Working…"),
-                    })
-                } else {
-                    Caption::default()
+                let phase = WorkPhase::from_stage(stage);
+                let caption = match stage {
+                    Some(Stage::Cancelling) => {
+                        Caption::title("Cancelling… Waiting for current work.")
+                    }
+                    Some(Stage::RemovingRecording) => Caption::title("Removing saved audio…"),
+                    _ if status.hud.labels => phase.map_or_else(
+                        || Caption::title("Working…"),
+                        |phase| {
+                            phase.caption(
+                                progress,
+                                status.operation_kind == Some(ipc::OperationKind::Recovery),
+                            )
+                        },
+                    ),
+                    _ => Caption::default(),
                 };
-                let kind = if matches!(
-                    stage,
-                    Some(Stage::FinalizingAudio | Stage::CleaningUp | Stage::Delivering)
-                ) {
-                    Kind::Finishing
-                } else {
-                    Kind::Working
-                };
+                let kind = phase.map_or(Kind::Working, WorkPhase::kind);
                 self.set_composition(Some(kind), caption, progress, None, now);
             }
             StateKind::Idle => {
-                if let Some(result) = &self.result {
-                    self.set_composition(
-                        Some(result.kind),
-                        result.caption.clone(),
-                        None,
-                        None,
-                        now,
-                    );
+                if let Some(result) = &mut self.result {
+                    if !result.presented {
+                        result.presented = true;
+                        if matches!(result.visibility, Visibility::Until(_)) {
+                            result.visibility = Visibility::Until(now + result.dwell);
+                        }
+                    }
+                    let kind = result.kind;
+                    let caption = result.caption.clone();
+                    self.set_composition(Some(kind), caption, None, None, now);
                 } else if self.interaction.is_some() {
                     self.set_composition(Some(Kind::Neutral), Caption::default(), None, None, now);
                 } else {
@@ -653,6 +764,126 @@ impl Model {
         }
     }
 
+    fn observe_work(&mut self, status: &StatusSnapshot, now: Instant) {
+        let phase = (status.state == StateKind::Processing)
+            .then(|| WorkPhase::from_stage(status.stage.as_ref()))
+            .flatten();
+        let successful = status.state == StateKind::Idle
+            && self.result.is_some()
+            && status.outcome.as_ref().is_some_and(|outcome| {
+                !outcome.dismissed
+                    && outcome.operation_id == self.operation
+                    && outcome.completeness == Completeness::Complete
+                    && matches!(
+                        outcome.delivery,
+                        Delivery::Typed | Delivery::Pasted | Delivery::Copied
+                    )
+                    && outcome.cleanup != Cleanup::Failed
+            });
+        if self.reduced_motion || phase.is_none() && !successful {
+            self.work = None;
+            return;
+        }
+        if let Some(phase) = phase {
+            let progress = status.stage.as_ref().and_then(Stage::measured_progress);
+            let reset = self.work.as_ref().is_some_and(|work| {
+                phase < work.latest
+                    || phase == WorkPhase::Transcribing
+                        && work.latest == phase
+                        && match (work.progress, progress) {
+                            (Some((old, total)), Some((new, next_total))) => {
+                                total != next_total || new < old
+                            }
+                            (Some(_), None) => true,
+                            _ => false,
+                        }
+            });
+            if reset {
+                // A new/reset pass cannot inherit completed pixels or pending
+                // later phases from the old pass, even within one operation.
+                self.work = None;
+                self.track.reset(now);
+                self.kind = None;
+                self.progress = None;
+            }
+            let work = self.work.get_or_insert_with(|| WorkPresentation {
+                phase,
+                latest: phase,
+                pending: 0,
+                progress,
+                recovery: status.operation_kind == Some(ipc::OperationKind::Recovery),
+                ready_at: now + PHASE_DWELL,
+            });
+            if work.phase == WorkPhase::Finalizing && phase == WorkPhase::Transcribing {
+                // The thin track already represents transcription preparation;
+                // measured work does not pay for a second identical geometry.
+                work.phase = phase;
+            } else if phase > work.phase {
+                work.pending |= phase.bit();
+            }
+            work.latest = phase;
+            if phase == WorkPhase::Transcribing {
+                work.progress = progress;
+            }
+        }
+        if successful {
+            if let Some(work) = &mut self.work {
+                if let Some((_, total)) = work.progress {
+                    // Cleanup may also run on partial text. Only the matching
+                    // complete outcome proves an unreported last chunk finished.
+                    work.progress = Some((total, total));
+                }
+            }
+        }
+    }
+
+    fn present_work(&mut self, now: Instant) -> bool {
+        let Some(work) = &self.work else {
+            return false;
+        };
+        let phase = work.phase;
+        let progress = (phase == WorkPhase::Transcribing)
+            .then_some(work.progress)
+            .flatten();
+        let caption = if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|status| status.hud.labels)
+        {
+            phase.caption(progress, work.recovery)
+        } else {
+            Caption::default()
+        };
+        self.set_composition(Some(phase.kind()), caption, progress, None, now);
+        let work = self.work.as_mut().expect("presenting work");
+        let settled = self.track.since + self.track.duration;
+        let revealed = self
+            .track
+            .fill
+            .as_ref()
+            .map_or(settled, |fill| fill.until());
+        work.ready_at = work.ready_at.max(settled.max(revealed) + PHASE_DWELL);
+        if now >= work.ready_at {
+            if let Some(next) = WorkPhase::next(work.pending) {
+                if next.kind() != work.phase.kind() {
+                    work.ready_at = now + PHASE_DWELL;
+                }
+                work.phase = next;
+                work.pending &= !next.bit();
+                return self.present_work(now);
+            }
+            if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|status| status.state == StateKind::Idle)
+            {
+                self.work = None;
+                return false;
+            }
+        }
+        true
+    }
+
     fn set_composition(
         &mut self,
         kind: Option<Kind>,
@@ -668,14 +899,29 @@ impl Model {
         if self.caption != caption {
             self.caption_revision = self.caption_revision.wrapping_add(1);
         }
-        let transition = changed || progress != self.progress;
-        if transition || waveform != self.waveform {
+        let progress_changed = progress != self.progress;
+        let reset_progress = !changed
+            && progress_changed
+            && match (self.progress, progress) {
+                (Some((old, total)), Some((new, next_total))) => total != next_total || new < old,
+                (Some(_), None) => true,
+                _ => false,
+            };
+        if changed || progress_changed {
+            self.track.advance(
+                progress,
+                now,
+                changed || reset_progress,
+                self.reduced_motion,
+            );
+        }
+        if changed || reset_progress || waveform != self.waveform {
             let heights = match kind {
                 Some(Kind::Recording) => recording_frame(waveform),
                 Some(kind @ (Kind::Working | Kind::Finishing)) => activity_frame(
                     kind,
                     now.saturating_duration_since(self.activity_since),
-                    progress,
+                    self.track.front(now, self.reduced_motion),
                     self.reduced_motion,
                 ),
                 Some(Kind::Resolved) => [TrackColumn::centered(GRID_HEIGHT); CELLS],
@@ -685,8 +931,22 @@ impl Model {
             self.track.target(
                 heights,
                 now,
-                if transition { SETTLE } else { WAVEFORM_EASE },
-                transition,
+                if reset_progress {
+                    Duration::ZERO
+                } else if changed {
+                    if self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|status| status.state == StateKind::Recording)
+                    {
+                        LISTENING_ONSET
+                    } else {
+                        SETTLE
+                    }
+                } else {
+                    WAVEFORM_EASE
+                },
+                changed || reset_progress,
                 self.reduced_motion,
             );
         }
@@ -704,7 +964,7 @@ impl Model {
             Some(kind @ (Kind::Working | Kind::Finishing)) => activity_frame(
                 kind,
                 now.saturating_duration_since(self.activity_since),
-                self.progress,
+                self.track.front(now, self.reduced_motion),
                 self.reduced_motion,
             ),
             _ => self.track.to,
@@ -722,7 +982,13 @@ impl Model {
         }
         self.result
             .as_ref()
-            .and_then(|r| r.visibility.alpha(now, self.reduced_motion))
+            .and_then(|result| {
+                if !result.presented || result.waiting_for_settle {
+                    Some(1.0)
+                } else {
+                    result.visibility.alpha(now, self.reduced_motion)
+                }
+            })
             .unwrap_or(1.0)
     }
 
@@ -920,6 +1186,11 @@ fn present_outcome(
         } else {
             Visibility::Until(now + dwell)
         },
+        dwell,
+        presented: false,
+        waiting_for_settle: kind == Kind::Resolved
+            && delivered
+            && outcome.cleanup != Cleanup::Failed,
     }
 }
 
@@ -945,6 +1216,17 @@ impl TrackColumn {
         self
     }
 
+    fn fully_lit(&self) -> bool {
+        // Match render-key precision: the final floating-point interpolation can
+        // be visually unchanged and therefore never attach another buffer.
+        (self.upper * 16.0).round() >= GRID_HEIGHT * 8.0
+            && (self.lower * 16.0).round() >= GRID_HEIGHT * 8.0
+            && self
+                .opacities
+                .iter()
+                .all(|opacity| (opacity * 255.0).round() == 255.0)
+    }
+
     fn interpolate(self, to: Self, amount: f32) -> Self {
         Self {
             upper: self.upper + (to.upper - self.upper) * amount,
@@ -958,6 +1240,29 @@ impl TrackColumn {
 
 type TrackFrame = [TrackColumn; CELLS];
 
+struct FillMotion {
+    from: f32,
+    to: f32,
+    since: Instant,
+    duration: Duration,
+}
+
+impl FillMotion {
+    fn at(&self, now: Instant) -> f32 {
+        if self.duration.is_zero() {
+            return self.to;
+        }
+        let t = (now.saturating_duration_since(self.since).as_secs_f32()
+            / self.duration.as_secs_f32())
+        .min(1.0);
+        self.from + (self.to - self.from) * t * t * (3.0 - 2.0 * t)
+    }
+
+    fn until(&self) -> Instant {
+        self.since + self.duration
+    }
+}
+
 struct TrackMotion {
     from: TrackFrame,
     to: TrackFrame,
@@ -965,6 +1270,7 @@ struct TrackMotion {
     since: Instant,
     duration: Duration,
     signal_easing: bool,
+    fill: Option<FillMotion>,
 }
 
 impl TrackMotion {
@@ -977,11 +1283,35 @@ impl TrackMotion {
             since: now,
             duration: Duration::ZERO,
             signal_easing: false,
+            fill: None,
         }
     }
 
     fn reset(&mut self, now: Instant) {
         *self = Self::new(now);
+    }
+
+    fn advance(&mut self, progress: Option<(u32, u32)>, now: Instant, reset: bool, reduced: bool) {
+        self.fill = progress.map(|(completed, total)| FillMotion {
+            from: if reset {
+                0.0
+            } else {
+                self.fill.as_ref().map_or(0.0, |fill| fill.at(now))
+            },
+            to: CELLS as f32 * completed as f32 / total as f32,
+            since: now,
+            duration: if reduced {
+                Duration::ZERO
+            } else {
+                PROGRESS_REVEAL
+            },
+        });
+    }
+
+    fn front(&self, now: Instant, reduced: bool) -> Option<f32> {
+        self.fill
+            .as_ref()
+            .map(|fill| if reduced { fill.to } else { fill.at(now) })
     }
 
     fn target(
@@ -992,8 +1322,8 @@ impl TrackMotion {
         state_change: bool,
         reduced: bool,
     ) {
-        // A phase/progress transition begins at the actual attached appearance,
-        // including boundary-cell opacity, even if the prior phase was moving.
+        // A shape transition begins at the actual attached appearance, including
+        // boundary-cell opacity, even if the prior phase was moving.
         self.from = if state_change {
             self.presented
         } else {
@@ -1081,12 +1411,7 @@ fn recording_frame(waveform: Option<AudioWaveform>) -> TrackFrame {
         })
 }
 
-fn activity_frame(
-    kind: Kind,
-    age: Duration,
-    progress: Option<(u32, u32)>,
-    reduced: bool,
-) -> TrackFrame {
+fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) -> TrackFrame {
     const NOISE_NANOS: u128 = 900_000_000;
     const PACKET_NANOS: u128 = 2_400_000_000;
     const PACKET_RADIUS: f32 = 4.0;
@@ -1104,8 +1429,7 @@ fn activity_frame(
         let to = pixel_noise(cell, tick.wrapping_add(1));
         from + (to - from) * blend
     };
-    let filled = progress.map(completed_cells);
-    let packet_center = if kind == Kind::Working && filled.is_none() {
+    let packet_center = if kind == Kind::Working && front.is_none() {
         if reduced {
             (CELLS - 1) as f32 / 2.0
         } else {
@@ -1118,17 +1442,17 @@ fn activity_frame(
     };
     std::array::from_fn(|column| {
         let opacities = if kind == Kind::Finishing {
-            // Every cell stays active; independent value noise gently
-            // pulses without column grouping or a travelling wave.
-            std::array::from_fn(|row| 0.48 + 0.44 * noise(column * ROWS + row))
-        } else if let Some(filled) = filled {
-            // Only a reported chunk count changes this full-height
-            // boundary. Time may shimmer behind it, never ahead of it.
-            if column < filled {
-                std::array::from_fn(|row| 0.64 + 0.32 * noise(column * ROWS + row))
-            } else {
-                [PENDING_OPACITY; ROWS]
-            }
+            // Independent smooth pulses span near-rest to near-full opacity;
+            // all 420 cells remain visible, without a synchronized flash.
+            std::array::from_fn(|row| 0.12 + 0.86 * noise(column * ROWS + row))
+        } else if let Some(front) = front {
+            // Move one fractional spatial boundary, not the opacity of an entire
+            // reported chunk. Shimmer never changes the measured fill extent.
+            let coverage = (front - column as f32).clamp(0.0, 1.0);
+            std::array::from_fn(|row| {
+                PENDING_OPACITY
+                    + coverage * (0.64 + 0.32 * noise(column * ROWS + row) - PENDING_OPACITY)
+            })
         } else {
             let packet =
                 (1.0 - (column as f32 - packet_center).abs() / PACKET_RADIUS).clamp(0.0, 1.0);
@@ -1145,7 +1469,11 @@ fn activity_frame(
         };
         TrackColumn {
             opacities,
-            ..TrackColumn::centered(GRID_HEIGHT)
+            ..TrackColumn::centered(if kind == Kind::Working {
+                TRANSCRIPTION_HEIGHT
+            } else {
+                GRID_HEIGHT
+            })
         }
     })
 }
@@ -1158,14 +1486,6 @@ fn pixel_noise(cell: usize, tick: u32) -> f32 {
     value = value.wrapping_mul(0x846c_a68b);
     value ^= value >> 16;
     (value >> 8) as f32 / 0x00ff_ffff as f32
-}
-
-fn completed_cells(progress: (u32, u32)) -> usize {
-    let (completed, total) = progress;
-    if total <= 1 || completed > total {
-        return 0;
-    }
-    (u64::from(completed) * CELLS as u64 / u64::from(total)) as usize
 }
 
 fn format_elapsed(seconds: u64) -> String {
@@ -2492,6 +2812,16 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
         });
         model.apply(next, now - Duration::from_millis(180));
     }
+    let mut at = if state == ScreenshotState::Interrupted {
+        now - Duration::from_millis(180)
+    } else {
+        result_at
+    };
+    while at < now {
+        model.refresh(at);
+        model.track.presented = model.frame(at);
+        at += FRAME_INTERVAL;
+    }
     model.refresh(now);
     model
 }
@@ -2737,7 +3067,7 @@ mod tests {
     }
 
     #[test]
-    fn phase_changes_preserve_the_last_presented_pixels_and_can_be_interrupted() {
+    fn transcription_morphs_from_presented_listening_into_only_three_rows() {
         let now = Instant::now();
         let mut model = Model::new(now);
         model.apply(recording(0, Some(signal(true))), now);
@@ -2749,41 +3079,18 @@ mod tests {
             total: 5,
         });
         let stop = now + Duration::from_millis(60);
-        model.apply(processing.clone(), stop);
+        model.apply(processing, stop);
         assert_eq!(model.frame(stop), shown);
         let settling = model.frame(stop + SETTLE / 2);
-        let destination = activity_frame(Kind::Working, SETTLE / 2, Some((0, 5)), false);
+        let destination = activity_frame(Kind::Working, SETTLE / 2, Some(0.0), false);
         for ((from, mid), to) in shown.into_iter().zip(settling).zip(destination) {
             assert!(mid.upper >= from.upper.min(to.upper) && mid.upper <= from.upper.max(to.upper));
             assert!(mid.lower >= from.lower.min(to.lower) && mid.lower <= from.lower.max(to.lower));
-            for ((from, mid), to) in from
-                .opacities
-                .into_iter()
-                .zip(mid.opacities)
-                .zip(to.opacities)
-            {
-                assert!(mid >= from.min(to) && mid <= from.max(to));
-            }
         }
-        let finishing = stop + Duration::from_secs(1);
-        let flowing = model.frame(finishing - FRAME_INTERVAL);
-        model.track.presented = flowing;
-        processing.stage = Some(Stage::CleaningUp);
-        model.apply(processing, finishing);
-        assert_eq!(
-            model.frame(finishing),
-            flowing,
-            "changing work rhythms must not pop"
-        );
-        let mut idle = preview_snapshot(StateKind::Idle);
-        idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
-        model.apply(idle, finishing + SETTLE);
-        assert_eq!(model.kind, Some(Kind::Resolved));
-        let mut next = recording(0, Some(signal(true)));
-        next.operation_id = Some("next".to_owned());
-        model.apply(next, finishing + SETTLE + Duration::from_millis(1));
-        assert_eq!(model.kind, Some(Kind::Recording));
-        assert!(model.result.is_none());
+        for column in model.frame(stop + SETTLE).map(raster_rows) {
+            assert!(column[2..5].iter().all(|alpha| *alpha > 0 && *alpha < 128));
+            assert_eq!([column[0], column[1], column[5], column[6]], [0; 4]);
+        }
     }
 
     #[test]
@@ -2844,128 +3151,132 @@ mod tests {
     }
 
     #[test]
-    fn routine_stages_stay_wordless_regardless_of_elapsed_time() {
+    fn measured_front_moves_spatially_without_restarting_or_inventing_stalled_progress() {
         let now = Instant::now();
         let mut model = Model::new(now);
-        model.apply(recording(900, Some(signal(true))), now);
-        assert_eq!(model.caption, Caption::default());
         let mut status = preview_snapshot(StateKind::Processing);
-        for (index, stage) in [
-            Stage::FinalizingAudio,
-            Stage::Transcribing {
-                completed: 0,
-                total: 1,
-            },
-            Stage::Transcribing {
-                completed: 29,
-                total: 30,
-            },
-            Stage::CleaningUp,
-            Stage::Delivering,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let at = now + Duration::from_secs((index as u64 + 1) * 60);
-            status.stage = Some(stage);
-            model.apply(status.clone(), at);
-            model.refresh(at + Duration::from_secs(30));
-            assert_eq!(model.caption, Caption::default());
+        status.stage = Some(Stage::Transcribing {
+            completed: 0,
+            total: 3,
+        });
+        model.apply(status.clone(), now);
+        let reported = now + Duration::from_secs(1);
+        model.track.presented = model.frame(reported);
+        let pending = raster_rows(model.track.presented[0])[3];
+        status.stage = Some(Stage::Transcribing {
+            completed: 1,
+            total: 3,
+        });
+        model.apply(status.clone(), reported);
+        let halfway_at = reported + PROGRESS_REVEAL / 2;
+        let halfway = model.frame(halfway_at);
+        let pixels = halfway.map(raster_rows);
+        assert!(pixels[..10]
+            .iter()
+            .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128)));
+        assert!(pixels[10..].iter().all(|rows| rows[2..5] == [pending; 3]));
+        let fractional = model
+            .frame(reported + PROGRESS_REVEAL * 37 / 100)
+            .map(raster_rows);
+        assert!(fractional[..6].iter().all(|rows| rows[3] > 128));
+        assert!(fractional[6][3] > pending && fractional[6][3] < 128);
+        assert!(fractional[7..].iter().all(|rows| rows[3] == pending));
+        model.apply(status.clone(), halfway_at);
+        assert_eq!(
+            model.frame(halfway_at),
+            halfway,
+            "identical polls must not restart the front"
+        );
+
+        status.stage = Some(Stage::Transcribing {
+            completed: 2,
+            total: 3,
+        });
+        model.apply(status, halfway_at);
+        assert_eq!(
+            model.frame(halfway_at),
+            halfway,
+            "an interrupted reveal must continue in place"
+        );
+        let advancing = model
+            .frame(halfway_at + PROGRESS_REVEAL / 4)
+            .map(raster_rows);
+        assert!(advancing[10..14].iter().all(|rows| rows[3] > 128));
+        assert!(advancing[15..].iter().all(|rows| rows[3] == pending));
+        let settled_at = halfway_at + PROGRESS_REVEAL;
+        let settled = model.frame(settled_at);
+        for frame in [settled, model.frame(settled_at + Duration::from_secs(60))] {
+            let pixels = frame.map(raster_rows);
+            assert!(pixels[..40]
+                .iter()
+                .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128)));
+            assert!(pixels[40..].iter().all(|rows| rows[2..5] == [pending; 3]));
         }
-        let mut idle = preview_snapshot(StateKind::Idle);
-        idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
-        model.apply(idle, now + Duration::from_secs(360));
-        assert_eq!(model.kind, Some(Kind::Resolved));
-        assert_eq!(model.caption, Caption::default());
+        assert_ne!(settled, model.frame(settled_at + Duration::from_secs(1)));
+        model.track.presented = settled;
+        model.disconnected(settled_at);
+        assert!(!model.animate(settled_at));
+        assert_eq!(model.frame(settled_at + POLL_INTERVAL), settled);
     }
 
     #[test]
-    fn flowing_activity_cannot_advance_measured_progress_or_outlive_its_connection() {
-        let now = Instant::now();
-        let mut model = Model::new(now);
-        let mut status = preview_snapshot(StateKind::Processing);
-        status.stage = Some(Stage::Transcribing {
-            completed: 12,
-            total: 30,
-        });
-        model.apply(status.clone(), now);
-        let first = model.frame(now + Duration::from_secs(1));
-        let second = model.frame(now + Duration::from_secs(2));
-        assert_ne!(
-            first, second,
-            "determinate work must still show fluid activity"
-        );
-        for frame in [first, second, model.frame(now + Duration::from_secs(60))] {
-            let pixels = frame.map(raster_rows);
-            assert!(
-                pixels[..24].iter().flatten().all(|alpha| *alpha > 128),
-                "every row behind the reported boundary must be filled"
-            );
-            assert!(
-                pixels[24..]
-                    .iter()
-                    .flatten()
-                    .all(|alpha| *alpha > 0 && *alpha < 128),
-                "elapsed time must leave every pending row visibly dim"
-            );
+    fn reset_and_changed_passes_cannot_inherit_the_previous_front() {
+        for (completed, total, filled) in [(0, 3, 0), (1, 5, 12)] {
+            let now = Instant::now();
+            let mut model = Model::new(now);
+            let mut status = preview_snapshot(StateKind::Processing);
+            status.stage = Some(Stage::Transcribing {
+                completed: 2,
+                total: 3,
+            });
+            model.apply(status.clone(), now);
+            let reset = now + Duration::from_secs(1);
+            model.track.presented = model.frame(reset);
+            status.stage = Some(Stage::Transcribing { completed, total });
+            model.apply(status, reset);
+            assert!(model
+                .frame(reset)
+                .map(raster_rows)
+                .iter()
+                .all(|rows| rows[3] < 128));
+            let pixels = model.frame(reset + PROGRESS_REVEAL).map(raster_rows);
+            assert!(pixels[..filled].iter().all(|rows| rows[3] > 128));
+            assert!(pixels[filled..]
+                .iter()
+                .all(|rows| rows[3] == pixels[CELLS - 1][3] && rows[3] < 128));
         }
-        let before_report = model.frame(now + Duration::from_secs(2));
-        model.apply(status.clone(), now + Duration::from_secs(2));
-        assert_eq!(
-            model.frame(now + Duration::from_secs(2)),
-            before_report,
-            "polling an unchanged chunk count must not restart the ripple"
-        );
-        model.track.presented = second;
-        status.stage = Some(Stage::Transcribing {
-            completed: 15,
-            total: 30,
-        });
-        let reported = now + Duration::from_secs(2);
-        model.apply(status.clone(), reported);
-        assert_eq!(model.frame(reported), second);
-        let halfway = model.frame(reported + SETTLE / 2).map(raster_rows);
-        let settled = model.frame(reported + SETTLE);
-        let settled_pixels = settled.map(raster_rows);
-        for column in 24..30 {
-            for ((before, mid), after) in raster_rows(second[column])
-                .into_iter()
-                .zip(halfway[column])
-                .zip(settled_pixels[column])
-            {
+    }
+
+    #[test]
+    fn unmeasured_transcription_has_a_bounded_packet_and_never_a_completed_trail() {
+        for stage in [
+            None,
+            Some(Stage::Transcribing {
+                completed: 0,
+                total: 1,
+            }),
+            Some(Stage::Transcribing {
+                completed: 4,
+                total: 3,
+            }),
+        ] {
+            let now = Instant::now();
+            let mut model = Model::new(now);
+            let mut status = preview_snapshot(StateKind::Processing);
+            status.stage = stage;
+            model.apply(status, now);
+            let first = model.frame(now + Duration::from_secs(1)).map(raster_rows);
+            let later = model.frame(now + Duration::from_secs(61)).map(raster_rows);
+            for frame in [first, later] {
+                let pending = frame.iter().map(|rows| rows[3]).min().unwrap();
+                let active = frame.iter().filter(|rows| rows[3] > pending).count();
                 assert!(
-                    before < mid && mid < after,
-                    "newly reported cells must settle smoothly"
+                    active <= 8,
+                    "indeterminate activity must leave no completed trail"
                 );
             }
+            assert_ne!(first, later);
         }
-        assert!(
-            halfway[30..].iter().flatten().all(|alpha| *alpha < 128)
-                && settled_pixels[30..]
-                    .iter()
-                    .flatten()
-                    .all(|alpha| *alpha < 128),
-            "interpolation must not illuminate unreported columns"
-        );
-        model.track.presented = settled;
-        let disconnected = reported + SETTLE;
-        model.disconnected(disconnected);
-        assert!(!model.animate(disconnected));
-        assert_eq!(model.frame(disconnected + POLL_INTERVAL), settled);
-        status.stage = Some(Stage::CleaningUp);
-        status.hud.reduced_motion = Some(true);
-        model.apply(status, now + Duration::from_secs(3));
-        assert!(
-            model.progress.is_none(),
-            "cleanup must discard transcription fill"
-        );
-        assert!(!model.animate(now + Duration::from_secs(4)));
-        assert_eq!(
-            model.frame(now + Duration::from_secs(4)),
-            model.frame(now + Duration::from_secs(8))
-        );
-        assert_eq!(completed_cells((30, 30)), CELLS);
-        assert_eq!(completed_cells((31, 30)), 0);
     }
 
     #[test]
@@ -2975,7 +3286,8 @@ mod tests {
         let mut status = preview_snapshot(StateKind::Processing);
         status.stage = Some(Stage::CleaningUp);
         model.apply(status.clone(), now);
-        let first = model.frame(now + SETTLE).map(raster_rows);
+        let first_at = now + Duration::from_millis(900);
+        let first = model.frame(first_at).map(raster_rows);
         let second = model
             .frame(now + SETTLE + Duration::from_secs(1))
             .map(raster_rows);
@@ -2991,6 +3303,18 @@ mod tests {
             "rows must pulse independently rather than sharing a column opacity"
         );
         assert_ne!(first, second, "cleanup should remain visibly active");
+        let opacities: Vec<_> = first.iter().flatten().copied().collect();
+        assert!(*opacities.iter().min().unwrap() < 50);
+        assert!(*opacities.iter().max().unwrap() > 230);
+        let adjacent = model.frame(first_at + FRAME_INTERVAL).map(raster_rows);
+        assert!(
+            first
+                .iter()
+                .flatten()
+                .zip(adjacent.iter().flatten())
+                .all(|(from, to)| from.abs_diff(*to) <= 2),
+            "independent pulses must remain smooth"
+        );
 
         status.hud.reduced_motion = Some(true);
         let reduced_at = now + Duration::from_secs(2);
@@ -3005,6 +3329,264 @@ mod tests {
             "reduced motion must freeze every cell without extinguishing any"
         );
         assert!(!model.animate(reduced_at));
+    }
+
+    fn rapid_handoff(now: Instant) -> (Model, StatusSnapshot, Instant) {
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(true))), now);
+        let stopped = now + Duration::from_secs(1);
+        model.track.presented = model.frame(stopped);
+        let mut status = preview_snapshot(StateKind::Processing);
+        status.hud.labels = true;
+        for (offset, stage) in [
+            (0, Stage::FinalizingAudio),
+            (
+                20,
+                Stage::Transcribing {
+                    completed: 0,
+                    total: 3,
+                },
+            ),
+            (
+                40,
+                Stage::Transcribing {
+                    completed: 1,
+                    total: 3,
+                },
+            ),
+            (
+                60,
+                Stage::Transcribing {
+                    completed: 2,
+                    total: 3,
+                },
+            ),
+            (80, Stage::CleaningUp),
+            (100, Stage::Delivering),
+        ] {
+            let at = stopped + Duration::from_millis(offset);
+            status.stage = Some(stage);
+            model.apply(status.clone(), at);
+            model.track.presented = model.frame(at);
+        }
+        let received = stopped + Duration::from_millis(120);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.hud.labels = true;
+        idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+        model.apply(idle.clone(), received);
+        (model, idle, received)
+    }
+
+    #[test]
+    fn rapid_handoff_finishes_the_measured_front_and_cleanup_before_presenting_success() {
+        let now = Instant::now();
+        let (mut model, idle, received) = rapid_handoff(now);
+        assert_eq!(model.snapshot.as_ref().unwrap().state, StateKind::Idle);
+        assert_eq!(model.kind, Some(Kind::Working));
+        assert!(model.caption.title.starts_with("Transcribing"));
+        let mut completed_track = false;
+        let mut cleaning_at = None;
+        let mut resolved_at = None;
+        let mut settled_at = None;
+        let mut painted = model.track.presented.map(raster_rows);
+        let mut at = received;
+        while at <= received + MAX_PRESENTATION_LAG + SETTLE {
+            model.apply(idle.clone(), at);
+            let frame = model.frame(at);
+            let pixels = frame.map(raster_rows);
+            match model.kind {
+                Some(Kind::Working) => {
+                    completed_track |= pixels
+                        .iter()
+                        .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128));
+                    assert!(model.caption.title.starts_with("Transcribing"));
+                }
+                Some(Kind::Finishing) => {
+                    cleaning_at.get_or_insert(at);
+                    assert!(!model.caption.title.starts_with("Transcribing"));
+                }
+                Some(Kind::Resolved) => {
+                    let started = *resolved_at.get_or_insert(at);
+                    if at >= started + SETTLE && pixels.iter().all(|rows| *rows == [255; ROWS]) {
+                        settled_at = Some(at);
+                    }
+                }
+                other => panic!("unexpected handoff phase: {other:?}"),
+            }
+            if pixels != painted {
+                // Like the real renderer, do not attach equivalent pixel buffers.
+                model.track.presented = frame;
+                painted = pixels;
+            }
+            if settled_at.is_some() {
+                break;
+            }
+            at += FRAME_INTERVAL;
+        }
+        assert!(
+            completed_track,
+            "a known complete outcome must let the final measured front finish"
+        );
+        let cleaning_at = cleaning_at.expect("observed cleanup must survive fast delivery");
+        let resolved_at = resolved_at.expect("the bounded handoff must reach success");
+        assert!(resolved_at - cleaning_at >= SETTLE + PHASE_DWELL);
+        assert!(resolved_at - received <= MAX_PRESENTATION_LAG);
+        let settled_at = settled_at.expect("success must reach a fully illuminated grid");
+        // Hold starts from the attached settled frame, not receipt of the outcome.
+        model.refresh(settled_at);
+        let hold_end = settled_at + SUCCESS_HOLD;
+        let mut at = settled_at;
+        while at < hold_end {
+            model.apply(idle.clone(), at);
+            assert_eq!(model.kind, Some(Kind::Resolved));
+            assert_eq!(model.alpha(at), 1.0);
+            assert!(model
+                .frame(at)
+                .map(raster_rows)
+                .iter()
+                .all(|rows| *rows == [255; ROWS]));
+            at += POLL_INTERVAL;
+        }
+        model.refresh(hold_end + RESULT_FADE / 2);
+        assert!(model.alpha(hold_end + RESULT_FADE / 2) < 1.0);
+        model.apply(idle, hold_end + RESULT_FADE);
+        assert!(
+            model.kind.is_none(),
+            "repeated outcomes must neither rearm nor replay success"
+        );
+    }
+
+    #[test]
+    fn cleanup_on_partial_text_never_completes_unreported_chunks() {
+        for (completeness, delivery) in [
+            (Completeness::Partial, Delivery::Copied),
+            (Completeness::Failed, Delivery::None),
+            (Completeness::Cancelled, Delivery::Cancelled),
+            (Completeness::Complete, Delivery::Deferred),
+            (Completeness::Complete, Delivery::Uncertain),
+        ] {
+            let now = Instant::now();
+            let mut model = Model::new(now);
+            let mut status = preview_snapshot(StateKind::Processing);
+            status.stage = Some(Stage::Transcribing {
+                completed: 1,
+                total: 3,
+            });
+            model.apply(status.clone(), now);
+            let cleaning = now + Duration::from_millis(100);
+            model.track.presented = model.frame(cleaning);
+            status.stage = Some(Stage::CleaningUp);
+            model.apply(status, cleaning);
+            let before_handoff = now + PROGRESS_REVEAL + PHASE_DWELL - FRAME_INTERVAL;
+            model.refresh(before_handoff);
+            assert_eq!(model.kind, Some(Kind::Working));
+            let pixels = model.frame(before_handoff).map(raster_rows);
+            assert!(pixels[20..].iter().all(|rows| rows[3] < 128));
+            let mut idle = preview_snapshot(StateKind::Idle);
+            idle.outcome = Some(preview_outcome(completeness, delivery));
+            model.apply(idle, before_handoff);
+            assert_ne!(model.kind, Some(Kind::Resolved));
+            assert!(model.progress.is_none());
+            assert!(model
+                .frame(before_handoff + MAX_PRESENTATION_LAG)
+                .map(raster_rows)
+                .iter()
+                .all(|rows| [rows[0], rows[1], rows[2], rows[4], rows[5], rows[6]] == [0; 6]));
+        }
+    }
+
+    #[test]
+    fn pending_success_yields_to_control_outcomes_and_epoch_changes() {
+        let now = Instant::now();
+        for interrupt in 0..8 {
+            let (mut model, mut idle, received) = rapid_handoff(now);
+            let mut status = match interrupt {
+                0 => {
+                    let mut next = recording(0, Some(signal(true)));
+                    next.operation_id = Some("next-take".to_owned());
+                    next
+                }
+                1 => {
+                    let mut cancelling = preview_snapshot(StateKind::Processing);
+                    cancelling.stage = Some(Stage::Cancelling);
+                    cancelling
+                }
+                2 => {
+                    idle.outcome.as_mut().unwrap().dismissed = true;
+                    idle
+                }
+                3 => {
+                    idle.epoch = "new-epoch".to_owned();
+                    idle
+                }
+                4 => preview_snapshot(StateKind::Unknown("new-status".to_owned())),
+                _ => {
+                    let delivery =
+                        [Delivery::Failed, Delivery::Deferred, Delivery::Uncertain][interrupt - 5];
+                    let mut outcome = preview_outcome(Completeness::Complete, delivery);
+                    outcome.event_id = 2;
+                    idle.outcome = Some(outcome);
+                    idle
+                }
+            };
+            status.hud.labels = true;
+            let at = received + FRAME_INTERVAL;
+            model.apply(status.clone(), at);
+            match interrupt {
+                0 => assert_eq!(model.kind, Some(Kind::Recording)),
+                1 => assert!(model.caption.title.starts_with("Cancelling")),
+                2 | 3 => assert!(model.kind.is_none()),
+                _ => assert_eq!(model.kind, Some(Kind::Attention)),
+            }
+            model.apply(status, at + MAX_PRESENTATION_LAG + SETTLE);
+            assert_ne!(
+                model.kind,
+                Some(Kind::Resolved),
+                "discarded success must not reappear"
+            );
+        }
+    }
+
+    #[test]
+    fn disconnected_or_stale_status_discards_unpresented_success() {
+        let now = Instant::now();
+        for stale in [false, true] {
+            let (mut model, idle, received) = rapid_handoff(now);
+            let lost = if stale {
+                received + STATUS_STALE_AFTER
+            } else {
+                received
+            };
+            let frozen = model.track.presented;
+            if stale {
+                model.refresh_connection(received, lost);
+            } else {
+                model.disconnected(lost);
+            }
+            assert_eq!(model.frame(lost), frozen);
+            assert!(!model.animate(lost));
+            model.refresh(lost + DISCONNECT_DELAY);
+            assert_eq!(model.kind, Some(Kind::Attention));
+            model.apply(idle, lost + MAX_PRESENTATION_LAG);
+            model.refresh(lost + MAX_PRESENTATION_LAG + SETTLE);
+            assert_ne!(model.kind, Some(Kind::Resolved));
+        }
+    }
+
+    #[test]
+    fn reduced_motion_cuts_directly_through_pending_work_and_success() {
+        let now = Instant::now();
+        let (mut model, mut idle, received) = rapid_handoff(now);
+        idle.hud.reduced_motion = Some(true);
+        model.apply(idle, received);
+        assert_eq!(model.kind, Some(Kind::Resolved));
+        let frame = model.frame(received);
+        assert!(frame
+            .map(raster_rows)
+            .iter()
+            .all(|rows| *rows == [255; ROWS]));
+        assert_eq!(model.frame(received + SUCCESS_HOLD / 2), frame);
+        assert!(!model.animate(received));
     }
 
     #[test]
@@ -3153,6 +3735,8 @@ mod tests {
                     .all(|column| raster_rows(column) == [255; ROWS]),
                 "success must illuminate the entire grid at full accent opacity"
             );
+            model.track.presented = held_frame;
+            model.refresh(settled);
             let hold_end = settled + SUCCESS_HOLD;
             model.apply(idle.clone(), hold_end - FRAME_INTERVAL);
             assert_eq!(model.kind, Some(Kind::Resolved));
@@ -3175,6 +3759,36 @@ mod tests {
                 "unchanged snapshots must neither extend nor replay the result"
             );
         }
+    }
+
+    #[test]
+    fn a_deduplicated_final_success_frame_still_starts_and_expires_its_hold() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Processing);
+        status.stage = Some(Stage::CleaningUp);
+        model.apply(status, now);
+        let delivered = now + Duration::from_secs(1);
+        model.track.presented = model.frame(delivered);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+        model.apply(idle.clone(), delivered);
+        let settled = delivered + SETTLE;
+        let attached = model.frame(settled - Duration::from_millis(4));
+        let final_frame = model.frame(settled);
+        assert_eq!(attached.map(raster_rows), final_frame.map(raster_rows));
+        assert_ne!(attached, final_frame);
+        // The raster is already identical, so neither native nor gallery render
+        // caching needs to attach the mathematically exact interpolation target.
+        model.track.presented = attached;
+        model.refresh(settled);
+        model.apply(idle.clone(), settled + SUCCESS_HOLD - FRAME_INTERVAL);
+        assert_eq!(model.alpha(settled + SUCCESS_HOLD - FRAME_INTERVAL), 1.0);
+        let fading = settled + SUCCESS_HOLD + RESULT_FADE / 2;
+        model.refresh(fading);
+        assert!(model.alpha(fading) > 0.0 && model.alpha(fading) < 1.0);
+        model.apply(idle, settled + SUCCESS_HOLD + RESULT_FADE);
+        assert!(model.kind.is_none());
     }
 
     #[test]

@@ -15,8 +15,8 @@ use eframe::egui;
 
 use super::{
     layout_height, present_outcome, preview_snapshot, screenshot_model, Canvas, Model, RenderKey,
-    ScreenshotState, Visibility, CONTAINER_WIDTH, FRAME_INTERVAL, NOTICE_HOLD, RESULT_FADE, SETTLE,
-    SURFACE_WIDTH,
+    ScreenshotState, Visibility, CONTAINER_WIDTH, FRAME_INTERVAL, MAX_PRESENTATION_LAG,
+    NOTICE_HOLD, RESULT_FADE, SURFACE_WIDTH,
 };
 use crate::{
     ipc::{StateKind, StatusSnapshot},
@@ -33,6 +33,7 @@ type CaptureResult = Rc<RefCell<Option<Result<()>>>>;
 #[derive(Clone, Copy)]
 enum Journey {
     Measured,
+    ThreeChunkHandoff,
     Raw,
     Cancellation,
     Interruption,
@@ -44,8 +45,9 @@ enum Journey {
 }
 
 impl Journey {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Measured,
+        Self::ThreeChunkHandoff,
         Self::Raw,
         Self::Cancellation,
         Self::Interruption,
@@ -59,6 +61,7 @@ impl Journey {
     fn title(self) -> &'static str {
         match self {
             Self::Measured => "Measured dictation",
+            Self::ThreeChunkHandoff => "Three chunks, fast cleanup",
             Self::Raw => "Single chunk, raw text",
             Self::Cancellation => "Cancel during transcription",
             Self::Interruption => "Next take interrupts success",
@@ -73,6 +76,7 @@ impl Journey {
     fn description(self) -> &'static str {
         match self {
             Self::Measured => "Recorded PCM fixture, a speech gap, reported chunk completions, cleanup, delivery, success hold, fade, and idle.",
+            Self::ThreeChunkHandoff => "Three reported chunk completions arrive close together, followed by rapid cleanup and delivery. Review the continuous fill and bounded visual handoffs without delaying actual work.",
             Self::Raw => "One backend chunk stays indeterminate. Its completion goes directly to delivery without cleanup, then success fades to idle.",
             Self::Cancellation => "A cancellation request waits for current work, then a cancelled outcome expires. No backend work runs here.",
             Self::Interruption => "A new operation arrives during the success transition. The next take owns the instrument immediately and completes independently.",
@@ -285,13 +289,15 @@ impl TimelineBuilder {
                 dismissed_at
             }
             Visibility::Until(until) => {
-                let expires = until.duration_since(self.origin);
-                if !self.reduced_motion {
-                    self.mark(at + SETTLE, "Result held");
-                    self.mark(expires - RESULT_FADE, "Result fading");
-                }
-                self.mark(expires, "Idle: result expired");
-                expires
+                // Backend receipt does not start the visual success hold: normal
+                // handoffs may finish first. Leave room for that bounded lag, and
+                // keep checkpoints about input events rather than predicted frames.
+                until.duration_since(self.origin)
+                    + if self.reduced_motion {
+                        Duration::ZERO
+                    } else {
+                        MAX_PRESENTATION_LAG
+                    }
             }
         }
     }
@@ -368,6 +374,41 @@ fn dictation(origin: Instant, reduced_motion: bool, raw: bool) -> Timeline {
         end + milliseconds(960),
         milliseconds(if raw { 3360 } else { 4960 }),
     )
+}
+
+fn three_chunk_handoff(origin: Instant, reduced_motion: bool) -> Timeline {
+    let mut builder = TimelineBuilder::new(origin, reduced_motion);
+    builder.recording(milliseconds(320), milliseconds(1600));
+    builder.state(
+        milliseconds(1600),
+        ScreenshotState::FinalizingAudio,
+        "Finalize audio",
+    );
+    for (completed, at, label) in [
+        (0, 1760, "Reported chunks: 0/3"),
+        (1, 2160, "Reported chunks: 1/3"),
+        (2, 2560, "Reported chunks: 2/3"),
+        (3, 2960, "Reported chunks: 3/3"),
+    ] {
+        builder.chunks(milliseconds(at), completed, 3, label);
+    }
+    builder.state(
+        milliseconds(2976),
+        ScreenshotState::Cleaning,
+        "Cleanup reported",
+    );
+    builder.state(
+        milliseconds(3008),
+        ScreenshotState::Delivering,
+        "Delivery reported",
+    );
+    let mut sent = fixture(ScreenshotState::Sent, origin);
+    sent.outcome
+        .as_mut()
+        .expect("success fixture contains an outcome")
+        .cleanup = crate::ipc::Cleanup::Applied;
+    let end = builder.outcome(milliseconds(3040), sent, "Success reported");
+    builder.finish(end + milliseconds(960), milliseconds(2400))
 }
 
 fn connection(origin: Instant, reduced_motion: bool, restart: bool, focus_lost: bool) -> Timeline {
@@ -639,6 +680,7 @@ fn catalog_timeline(state: ScreenshotState, origin: Instant, reduced_motion: boo
 fn timeline(source: Source, origin: Instant, reduced_motion: bool) -> Timeline {
     match source {
         Source::Journey(Journey::Measured) => dictation(origin, reduced_motion, false),
+        Source::Journey(Journey::ThreeChunkHandoff) => three_chunk_handoff(origin, reduced_motion),
         Source::Journey(Journey::Raw) => dictation(origin, reduced_motion, true),
         Source::Journey(Journey::Cancellation) => cancellation(origin, reduced_motion),
         Source::Journey(Journey::Interruption) => interruption(origin, reduced_motion),

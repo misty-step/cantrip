@@ -216,6 +216,9 @@ It does not start the daemon, capture audio, run speech models, make provider
 requests, or read recording history or credentials.
 Fixture stage durations are illustrative, not an STT latency benchmark; native
 transition, acknowledgement-hold and fade timing come from the production code.
+The “Three chunks, fast cleanup” journey exercises rapid backend handoffs.
+Its event markers describe fixture inputs; the visible phase may deliberately
+trail them while the production renderer finishes its bounded transition.
 
 `hud-gallery` is intentionally hidden from ordinary CLI help. It is a local
 native window, not a public website route or a separate development server.

@@ -46,33 +46,43 @@ compositor frame-callback pacing, responsive input polling and unchanged-frame
 render caching. Temporal smoothing never blends neighboring buckets or adds
 random audio.
 
-Multi-chunk transcription fills the full seven-row pixel grid from left to right,
-using only the reported completed-chunk fraction. Filled cells may shimmer, but
-the bright/dim boundary cannot creep ahead of the measured target. Phase and
-reported-progress changes interpolate from the last presented frame over 280 ms.
+Finalizing and transcription use a centered three-row track, morphing from the
+last presented listening frame over 400 ms instead of revealing a seven-row wall.
+Multi-chunk transcription moves a fractional spatial boundary toward each reported
+completed-chunk fraction over 600 ms. Filled cells may shimmer, but the front
+cannot creep ahead of acknowledged work. New reports continue from the current
+front; identical polls do not restart it and a stalled target stays still.
+Only a matching complete successful outcome can acknowledge an unreported final
+chunk. Cleanup alone cannot: the pipeline also cleans partial transcripts.
 Single-chunk or unknown progress uses a short, repeating left-to-right pixel
 packet, never an accumulating percentage. Existing approximately 30-second STT
 chunk boundaries remain unchanged; do not split speech merely to animate the HUD.
 
-Finishing, finalizing and delivery light every cell with independent, smoothly
-varying brightness. Deterministic per-cell noise gives cleanup its processing
-texture without synchronized flashing, gaps, or a filled-region estimate.
-Each cell remains active; reduced motion holds a static grid.
+Cleanup and delivery expand into all seven rows with independent, smoothly varying
+brightness. Deterministic per-cell noise spans 0.12–0.98 opacity, giving cleanup
+strong contrast without synchronized flashing, gaps, or a filled-region estimate.
+All 420 cells remain active; reduced motion holds a static grid.
 
 A complete typed, pasted or copied result settles into the entire seven-row grid
 at full brightness in the current accent color. There is no icon or new success
 color. A routine typed or pasted acknowledgement gets its full 1200 ms settled
-hold **after** the 280 ms transition, then a 140 ms fade. Reduced motion shows the
+hold **after** the 400 ms transition, then a 140 ms fade. Reduced motion shows the
 settled grid immediately, holds it for 1200 ms and cuts to idle.
 Copied and cleanup-failure feedback retain their explicit captions and four-second
 notice window; partial, uncertain and deferred delivery never receive the resolved
 grid. A helper acknowledgement is not proof that the target application received
 the text.
 
-This is presentation time only: there is no minimum processing-stage dwell and
-no delay to output. New recording interrupts a transition, settled hold or fade
-immediately. Repeated status snapshots cannot renew a result; cached successes
-on attach or daemon restart are still not replayed.
+This is presentation time only: worker stages and output are never delayed.
+Normal forward handoffs finish the current reveal or shape morph, then allow
+180 ms at rest. Coalesce measurements and remember only observed phases, not a
+queue of snapshots. Finalizing/transcription share one geometry hold, as do
+cleanup/delivery. A briefly observed cleanup survives a fast successful outcome;
+the resulting presentation lag is bounded at 1600 ms before success settling.
+New recording, cancellation, removal, adverse outcomes, dismissal, disconnect and
+epoch changes discard pending handoffs immediately. Repeated status snapshots
+cannot renew a result; its full success hold starts only after the settled grid
+has actually been presented. Cached successes on attach or restart are not replayed.
 
 Routine stages remain wordless by default: no delayed reveal, long-recording
 label or caption latch. Explicit `hud.labels = true` enables continuous
@@ -86,10 +96,12 @@ activity rather than implying live work or Ready. Preserve the palette,
 typography, footprint and noninteractive desktop surface.
 
 The 2026-09-08 operator reviews replaced the initial counter-moving transcription
-lobes, grouped cleanup packets and success checkmark. The measured progress front
-now owns transcription's geometry; independent brightness across the full grid
-distinguishes cleanup from the steady full-brightness acknowledgement. The hold
-excludes settling and fading so completion has a visible moment at rest.
+lobes, grouped cleanup packets and success checkmark. A later review replaced
+chunk-wide opacity fades with a moving frontier and reduced transcription's height
+to match ordinary listening more naturally. Independent, higher-contrast brightness
+across the full grid distinguishes cleanup from the steady acknowledgement.
+Bounded presentation lag gives fast backend handoffs breathing room; the success
+hold excludes settling and fading so completion has a visible moment at rest.
 Listening PCM, signed sample scaling, interpolation and attack/release remain
 unchanged.
 
@@ -108,6 +120,10 @@ transcription. Playback, zoom, labels and reduced motion are local controls,
 never saved configuration. The gallery does not contact the daemon, providers or
 keyring, and does not inspect recordings. It remains separate from the public
 website and needs no server, Storybook stack or second application runtime.
+
+The rapid three-chunk journey includes cleanup and delivery reported only 32 ms
+apart. Event markers describe fixture input timing, not predicted visual hold or
+fade boundaries; replay tails include the bounded presentation lag.
 
 ## Alternatives
 

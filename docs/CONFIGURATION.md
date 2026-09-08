@@ -243,11 +243,17 @@ A fixed 1.6× gain before square-root scaling makes quiet speech more visible
 without changing the silence floor. Each side attacks quickly and releases more
 slowly to silence; neighboring columns are never blended.
 
-Transcription and finishing/cleanup use distinct pixel activity patterns. They
-indicate indeterminate work, not a timer or completion estimate. Phase changes
-transition from the last presented frame. Only measured multi-chunk reports
-advance the progress fill. Settled completion feedback acknowledges
-the delivery mechanism, not receipt by the destination application.
+Transcription uses a centered three-row track. Multi-chunk reports move a continuous
+left-to-right fill toward acknowledged work; a stalled report cannot invent more
+progress. Single-chunk or unknown work stays indeterminate. Cleanup expands to all
+seven rows with independent, higher-contrast pixel pulses.
+
+Normal handoffs may visually trail the backend by up to 1.6 seconds to finish their
+transitions. This never delays transcription, cleanup requests, or delivery.
+New recordings, cancellation, errors, dismissal and connection changes interrupt
+pending handoffs immediately. Routine success holds for 1.2 seconds after its grid
+has settled. That feedback acknowledges the delivery mechanism, not receipt by the
+destination application.
 
 `reduced_motion = true` or `false` overrides the desktop preference; omit it to
 follow the desktop. Reduced motion freezes indeterminate activity and presents
