@@ -60,3 +60,6 @@ jobs:
           for path in / /docs/install /docs/use /docs/configuration /docs/desktop /docs/privacy /releases; do
             curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 "https://cantrip.mistystep.io$path" --output /dev/null
           done
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 \
+            "https://cantrip.mistystep.io/" --output "$RUNNER_TEMP/cantrip-home.html"
+          cmp site/dist/index.html "$RUNNER_TEMP/cantrip-home.html"

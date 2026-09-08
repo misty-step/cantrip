@@ -137,3 +137,10 @@ The custom-domain route in `wrangler.jsonc` lets Cloudflare manage DNS and TLS.
 `workers.dev` and preview URLs are disabled. The workflow checks public docs
 and release routes after deploying; `scripts/check-site` catches broken internal
 pages, fragments, and assets before upload.
+
+`public/_headers` preserves the normal revalidation policy and adds
+`no-transform`. This is Cloudflare's
+[documented per-site opt-out from automatic analytics injection](https://developers.cloudflare.com/web-analytics/get-started/#sites-proxied-through-cloudflare),
+not a change to analytics settings for other domains. Production smoke checks
+compare the delivered homepage with the verified build to catch stale output or
+upstream body rewrites.

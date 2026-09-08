@@ -1,0 +1,3 @@
+# Keep the verified static payload intact, including no automatic analytics injection.
+/*
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
