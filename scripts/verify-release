@@ -263,7 +263,7 @@ def verify(args):
                     command += ["--env", f"CANTRIP_KEYRING_PASSWORD={password}"]
                     inner = [
                         "dbus-run-session", "--", "bash", "-euc",
-                        'eval "$(printf "%s\\n" "$CANTRIP_KEYRING_PASSWORD" | gnome-keyring-daemon --start --components=secrets --unlock)" && exec python3 /verify-release --inside smoke',
+                        'eval "$(gnome-keyring-daemon --start --components=secrets)" && printf "%s\\n" "$CANTRIP_KEYRING_PASSWORD" | gnome-keyring-daemon --unlock && exec python3 /verify-release --inside smoke',
                     ]
                 command += [image, *inner]
                 result = run(*command, timeout=1200)
