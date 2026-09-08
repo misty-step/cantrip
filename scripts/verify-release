@@ -19,6 +19,7 @@ BASE_IMAGE = "ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab307
 REPOSITORY = "misty-step/cantrip"
 SIGNER = f"{REPOSITORY}/.github/workflows/release.yml"
 PAYLOAD = {"cantrip", "install.sh", "cantrip.service", "LICENSE", "INSTALLATION.md", "sample.wav", "manifest.json", "checksums.txt"}
+USER_GUIDES = {"USAGE.md", "CONFIGURATION.md", "DESKTOP.md", "PRIVACY.md"}
 
 
 def require(condition, message):
@@ -67,8 +68,12 @@ def unpack(directory, destination):
     require(data["archive"]["name"] == f"{root_name}.tar.gz", "noncanonical archive name")
     with tarfile.open(directory / data["archive"]["name"], "r:gz") as archive:
         members = archive.getmembers()
-        expected = {root_name} | {f"{root_name}/{name}" for name in PAYLOAD}
-        require(len(members) == len(expected) and {member.name.rstrip('/') for member in members} == expected, "archive payload is not the public allowlist")
+        names = {member.name.rstrip("/") for member in members}
+        # Public v0.1.0 predates the bundled manual. Keep that immutable rollback
+        # baseline readable while accepting only the complete new manual.
+        guides = USER_GUIDES if names & {f"{root_name}/{name}" for name in USER_GUIDES} else set()
+        expected = {root_name} | {f"{root_name}/{name}" for name in PAYLOAD | guides}
+        require(len(members) == len(expected) and names == expected, "archive payload is not the public allowlist")
         root = destination / root_name
         root.mkdir(parents=True)
         for member in members:

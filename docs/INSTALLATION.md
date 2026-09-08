@@ -1,93 +1,178 @@
 # Install a Cantrip release
 
-The Linux x86-64 archive contains a CPU-only executable, this guide, `install.sh`,
-the optional `cantrip.service`, `LICENSE`, the public JFK `sample.wav`,
-`manifest.json`, and `checksums.txt`. No Rust installation, GPU, or CUDA runtime
-is needed. Installation itself uses Bash and GNU coreutils, without networking.
+Use the [latest published Linux x86-64 release](https://github.com/misty-step/cantrip/releases/latest)
+for a CPU-only executable. No source checkout, Rust installation, GPU, or CUDA
+runtime is needed. The archive contains the executable, user documentation,
+`install.sh`, the optional `cantrip.service`, `LICENSE`, the public JFK
+`sample.wav`, `manifest.json`, and `checksums.txt`.
+
+Installation is binary-only. It does not download models, enable a service, add
+shortcuts, or change configuration, credentials, or retained recordings.
+After installing, continue to [your first attended dictation](USAGE.md#first-dictation).
+If a retained older bundle lacks a linked companion guide, use the
+[online user documentation](https://cantrip.mistystep.io/docs/install); no
+checkout is required.
 
 ## Runtime prerequisites and support
 
-- Linux x86-64, glibc **2.39 or newer** (release baseline: Ubuntu 24.04).
-- An ordinary user session with readable Linux `/proc`; run the installer as
-  the intended Cantrip user, **not through sudo**.
-- For microphone dictation: PipeWire with `pw-record`, a Wayland compositor,
-  and `wl-copy` from `wl-clipboard` for clipboard/paste delivery.
-- Local transcription needs the Parakeet model, downloaded separately with
-  `cantrip models pull`. Downloads need network access; subsequent local
-  transcription does not. Cloud credentials need an unlocked Secret Service
-  keyring and its user-session D-Bus connection. Cleanup remains opt-in.
-- Automatic keyboard delivery currently requires the documented direct
-  Hyprland desktop (Lua focus/layer APIs verified on 0.56.2), virtual-keyboard
-  support, and a verifiable active logind session. Authenticated UWSM sessions
-  are supported; nested or unverified desktops fail closed. Elsewhere, select
-  `injection = "clipboard"` or explicitly copy from `cantrip actions`.
-  The HUD separately needs Wayland layer-shell support.
+- **Linux x86-64, Ubuntu 24.04 / glibc 2.39 baseline.** The release is
+  dynamically linked, not a static executable. Older glibc systems such as
+  Ubuntu 22.04 are outside this binary's supported baseline.
+- Run as the intended ordinary user with readable Linux `/proc`, **not through
+  sudo**. The installer uses Bash and GNU coreutils without networking.
+- Microphone dictation needs a working PipeWire user session and `pw-record`.
+  Clipboard/paste delivery needs Wayland and `wl-copy` from `wl-clipboard`.
+  On Ubuntu 24.04, the tools are provided by `pipewire-bin` and `wl-clipboard`;
+  installing tools alone does not configure a working microphone/session.
+- Local transcription needs the Parakeet weights, downloaded separately and
+  deliberately with `models pull`. Local inference after that download needs
+  no network. Cleanup is disabled until explicitly configured and enabled.
+- Cloud credentials require an unlocked Secret Service keyring and the same
+  user-session D-Bus connection. No credentials are needed for the default
+  local trial.
+- Automatic keyboard delivery requires the documented direct Hyprland/logind
+  desktop. Other or unverified desktops use explicit clipboard/manual paste.
+  The HUD separately requires Wayland layer-shell support. See the
+  [desktop capability table](DESKTOP.md#supported-desktops).
 
-A successful binary/transcription smoke is not proof of microphone, HUD, or
-paste delivery on a fresh desktop. Follow `cantrip doctor` and make an attended
-trial in a safe destination. Full desktop and startup-owner requirements are
-in the [README](https://github.com/misty-step/cantrip#requirements).
+After verifying the release metadata below, inspect its `runtime_baseline`:
+
+```sh
+jq '.runtime_baseline' release.json
+```
+
+It records the distribution baseline, minimum glibc, actual ELF loader,
+required libraries/symbol versions, and corresponding Ubuntu runtime packages
+for **that artifact**. Use those package requirements rather than assuming
+glibc alone is sufficient. They are not a complete desktop installation recipe:
+graphical-session integration, fonts, microphone tools, and optional keyring
+services depend on your desktop. The release-verifier container also includes
+test tools; its package list is not a minimal product requirement.
+
+A command-line transcription smoke does not prove microphone capture, HUD, or
+paste delivery on your desktop. Read `doctor` findings and complete the
+[attended trial](USAGE.md#first-dictation); its exit code alone is not readiness.
 
 ## Verify and install
 
-Download the archive, `release.json`, and `SHA256SUMS` from the same
-[release](https://github.com/misty-step/cantrip/releases). Substitute the
-published version below, without its leading `v`:
+### Download one published tag
+
+Choose a version from the [published releases](https://github.com/misty-step/cantrip/releases)
+and read that tag's public notes. In a new download directory, replace `VERSION`
+below with its version **without the leading `v`**. Do not use an unreleased
+version from a source checkout.
+
+Download the matching archive, `release.json`, `SHA256SUMS`, and
+`provenance.json` from that same release. With the
+[GitHub CLI](https://cli.github.com/manual/gh_attestation_verify) installed:
 
 ```sh
 version=VERSION
 archive="cantrip-v${version}-x86_64-unknown-linux-gnu.tar.gz"
-sha256sum --check --strict --ignore-missing SHA256SUMS
-# Both the selected archive and release.json must report OK.
-tar -xzf "$archive"
-cd "${archive%.tar.gz}"
-sha256sum --check --strict checksums.txt
-./install.sh install --prefix "$HOME/.local"
+gh release download "v${version}" --repo misty-step/cantrip \
+  --pattern "$archive" --pattern release.json \
+  --pattern SHA256SUMS --pattern provenance.json
+```
+
+Downloading those four files through the release page is also fine. Keep the
+same `version` and `archive` shell variables for the following steps.
+Verification needs `jq`, a recent `gh` with attestation support, and network
+access as required by GitHub's verifier; this is separate from the offline
+binary installer.
+
+### Check corruption and signed provenance
+
+Run from the directory containing those four files. **Stop on any failure; do
+not install an artifact whose identity or attestation does not verify.**
+
+```sh
+(
+  set -eu
+  sha256sum --check --strict --ignore-missing SHA256SUMS
+  # Both the selected archive and release.json must report OK.
+
+  jq -e --arg version "$version" --arg archive "$archive" '
+    .schema_version == 1 and .version == $version and
+    .tag == ("v" + $version) and
+    .target == "x86_64-unknown-linux-gnu" and .archive.name == $archive
+  ' release.json
+  source_revision="$(jq -er '
+    .source_revision | select(test("^[0-9a-f]{40}$|^[0-9a-f]{64}$"))
+  ' release.json)"
+
+  for subject in release.json "$archive"; do
+    gh attestation verify "$subject" \
+      --repo misty-step/cantrip \
+      --bundle provenance.json \
+      --source-digest "$source_revision" \
+      --signer-workflow misty-step/cantrip/.github/workflows/release.yml \
+      --deny-self-hosted-runners
+  done
+
+  jq -r '.archive | "\(.sha256)  \(.name)"' release.json \
+    | sha256sum --check --strict
+  printf 'Verified source revision: %s\n' "$source_revision"
+)
+```
+
+`--ignore-missing` allows other release assets named in `SHA256SUMS` to be
+absent; it is not permission to skip the archive or `release.json`. The
+attestation checks cover both selected files and bind them to the same full
+source revision, repository, and release workflow on a GitHub-hosted runner.
+Compare that verified revision with the commit behind your chosen published
+tag. A signature identifies the build's provenance; it is not a substitute for
+trusting the repository and reviewing its release notes.
+
+Checksums alone detect corruption, not who published a file. Obtain metadata
+and the provenance bundle through the trusted release channel, not an unrelated
+mirror. `release.json` records the archive name and SHA-256 plus its version,
+tag, source revision, target, exact Rust toolchain, runtime baseline, and binary
+SHA-256. The bundled `manifest.json` records the same build identity without
+the archive hash: an archive cannot contain its own hash.
+
+### Install the verified executable
+
+After successful verification and runtime preparation:
+
+```sh
+tar -xzf "$archive" &&
+cd "${archive%.tar.gz}" &&
+sha256sum --check --strict checksums.txt &&
+./install.sh install --prefix "$HOME/.local" &&
 "$HOME/.local/bin/cantrip" --version
 ```
 
-Checksums detect corruption; obtain them through the trusted release channel,
-not from an unrelated mirror. `manifest.json` records the version, tag, full
-source revision, target, exact Rust toolchain, runtime baseline, and binary
-SHA-256. `release.json` adds the archive name and SHA-256. The archive cannot
-contain its own hash. Keep the archive, its provenance files, and release notes
-for later diagnosis or rollback review.
+Stop if the inner checksum check fails. Keep the verified archive, provenance
+files, and release notes for diagnosis or rollback review.
 
 The installer changes only `PREFIX/bin/cantrip`; `--prefix` defaults to
 `$HOME/.local`. It never changes `PATH`, shortcuts, services, config, models,
-recordings, logs, or the OS keyring. Use the explicit executable path or add its
-`bin` directory to your shell's `PATH` yourself. For an existing package-owned
-installation, use the package owner's maintenance procedure instead.
+recordings, logs, or the OS keyring. Use the explicit executable path shown
+above, or deliberately add its `bin` directory to the relevant shell/desktop
+`PATH`. For an existing package-owned installation, use that package owner's
+maintenance procedure instead. Existing installations use `update`, not a
+forced fresh install.
 
-For a first installation only, run `cantrip config init`, inspect
-`cantrip doctor`, and follow its actions, including `cantrip models pull` when
-requested. `cantrip transcribe --local ./sample.wav` exercises local CPU
-transcription without starting the daemon. Start `cantrip daemon` in a dedicated
-terminal for your first attended dictation, then bind one shortcut to the
-absolute executable path plus `toggle`. Existing configurations must not be
-reinitialized during an update.
+Continue to [first dictation](USAGE.md#first-dictation) for first-time config
+creation, the deliberate model download, clear terminal boundaries, and either
+a hotkey-driven editor trial or explicit clipboard/manual paste. Do not
+reinitialize existing configuration during an update.
 
 ## Keep one startup owner
 
-Service installation is **optional and separate**. `install.sh` neither copies
-nor enables the bundled unit. Keep an existing personal/package service or
-compositor autostart; do not install a second owner. Actions uses an installed
-service, even when disabled, and otherwise can start a direct process.
+Service installation is **optional and separate**, after an attended trial.
+Keep a personal/package service or compositor autostart if it already owns
+Cantrip. Actions uses an installed service even when disabled; otherwise it can
+start a direct process. Neither path changes hotkeys.
 
-Use the [README user-service procedure](https://github.com/misty-step/cantrip#user-service-graphical-session)
-for the owner checks, unit review, session environment, enablement, and readiness
-checks. With an archive, the binary is already installed: do **not** repeat the
-repository's fresh-install binary-copy block. Only after its checks show no
-existing service, mask, unit symlink, or personal drop-ins, deliberately copy the
-bundled `./cantrip.service` to
-`${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/cantrip.service`, reload the user
-manager, and review the effective unit before enabling anything.
+The [shared desktop service procedure](DESKTOP.md#user-service-graphical-session)
+starts with the already-installed binary and uses `./cantrip.service` from the
+extracted archive. It covers owner checks, unit review, session environment,
+enablement, readiness, and removal without a source checkout or binary-copy
+step. Another prefix needs an explicit `ExecStart` override. Do not manually
+start `graphical-session.target` or enable lingering to bypass missing desktop
+integration.
 
-The unit runs `%h/.local/bin/cantrip`. Another prefix requires the documented
-explicit `ExecStart` override. Supported service use requires systemd 246+,
-one Wayland session per Unix user, and a session manager that owns and refreshes
-`graphical-session.target` and its environment. Do not manually start that
-target or enable lingering to bypass missing desktop integration.
 
 ## Stop before maintenance
 
@@ -148,8 +233,8 @@ restore its recorded enablement if needed, and check `ping`, `status --json`,
 ## Uninstall and refusals
 
 Stop the existing owner. Deliberately remove its startup enablement and unit,
-if appropriate, using the README's removal procedure; account for shortcuts
-that still refer to the binary. Then:
+if appropriate, using the [desktop removal procedure](DESKTOP.md#stop-update-and-remove);
+account for shortcuts that still refer to the binary. Then:
 
 ```sh
 ./install.sh uninstall --prefix "$HOME/.local"

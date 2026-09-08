@@ -1,237 +1,86 @@
 # Cantrip
 
-Local-first dictation for Linux. Press a key, speak, let go — your words appear
-where your cursor is. A cantrip is a small spell you can always cast; this is
-that, for text.
+Local-first dictation for Linux. Press a shortcut, speak, press it again.
+Cantrip transcribes on your CPU and delivers the finished text when the
+destination can be verified; explicit clipboard delivery is available elsewhere.
+
+[Website](https://cantrip.mistystep.io) ·
+[Download a release](https://github.com/misty-step/cantrip/releases/latest) ·
+[Install](docs/INSTALLATION.md) ·
+[First dictation](docs/USAGE.md#first-dictation)
 
 ## Features
 
-- **Local transcription by default.** Speech never leaves the machine: an
-  int8 ONNX [Parakeet TDT 0.6B v3](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)
-  model via [transcribe-rs](https://github.com/cjpais/transcribe-rs) runs on
-  CPU in ~250 ms for short dictations.
-- **Optional transcript cleanup.** Cleanup is disabled by default. When enabled,
-  the raw transcript can pass through a small language model—such as
-  `qwen3:8b` on local Ollama—to remove spoken disfluencies and add punctuation
-  and capitalization before delivery.
-- **Optional cloud lanes.** Any OpenAI-compatible STT or chat endpoint can
-  replace the local models (see `docs/CONFIGURATION.md`). API keys live in
-  the OS keyring, never in files.
-- **Long dictation without oversized uploads.** Local and cloud STT split long
-  recordings into bounded chunks and deliver one finished transcript. Cloud
-  failure, partial text, or empty recognition automatically gets one whole-take
-  retry with installed local Parakeet. No new cloud provider or model download.
-  If neither backend completes, available text and original audio remain saved.
-- **Passive status HUD.** A bottom-anchored, input-transparent track shows measured
-  microphone activity and real multi-chunk progress. It never takes focus or
-  invents progress. Silence, partial text, deferred delivery, storage failures,
-  and lost connections have distinct notices. Labels and reduced motion are
-  configurable; HUD and native windows follow the desktop palette.
-- **Guarded paste-first delivery.** Finished text is normally copied with
-  `wl-copy`, then pasted with one native Wayland `Ctrl+Shift+V` chord.
-  The destination and uninterrupted session history must remain verifiable.
-  Changed focus, locks, suspend, or ambiguous desktop state defer delivery
-  instead of sending text elsewhere. Strict `type` mode never touches the
-  clipboard; `clipboard` mode only copies. No `wtype`/`ydotool` subprocesses.
-- **Per-recording recovery.** `cantrip actions` opens a deliberate native window
-  for selected-recording copy, local or configured-provider recovery, confirmed
-  deletion, cancellation, and setup. Metadata never exposes transcript text.
-  A new failure or unrelated success cannot replace another pending recording.
-
-```
-trigger ──> capture (pw-record) ──> STT (local, default) ──> postproc (Ollama) ──> inject
-             16 kHz mono s16          parakeet | cloud    qwen3:8b | ...   paste | type | clip
-```
-
-## Requirements
-
-- Linux with PipeWire (`pw-record`) and a Wayland compositor.
-- `wl-clipboard` for paste/copy delivery (usually preinstalled).
-- Native keyboard delivery currently requires a direct Hyprland desktop with
-  the Lua focus/layer APIs (verified on 0.56.2), the virtual-keyboard protocol,
-  and a verifiable active logind session. Authenticated UWSM-managed desktops
-  are supported; nested or unverified desktops fail closed.
-  On other compositors, choose `injection = "clipboard"` or explicitly copy
-  from `cantrip actions`; automatic delivery does not guess.
-- The HUD needs a compositor with the Wayland layer-shell protocol (COSMIC,
-  Sway, Hyprland, wlroots-based).
-
-```sh
-sudo apt install libdbus-1-dev libssl-dev pkg-config wl-clipboard  # source-build prerequisites
-```
+- **Local by default.** CPU-only Parakeet speech recognition through
+  [transcribe-rs](https://github.com/cjpais/transcribe-rs). Download the model
+  deliberately once; it is not bundled in the executable.
+- **Quiet native feedback.** A passive pixel HUD shows microphone activity and
+  processing without taking focus or inventing progress. Native Settings and
+  Actions handle configuration and selected-recording recovery.
+- **Guarded delivery.** Automatic paste/typing requires supported Hyprland/logind
+  focus and session history. Other desktops can use clipboard/manual paste.
+  An uncertain handoff is not automatically retried.
+- **Explicit choices.** Cleanup and cloud providers are optional; cleanup and
+  telemetry are off by default. Stopped audio and plaintext transcript history
+  are retained locally until deliberately removed.
 
 ## Quickstart
 
 ### Download and install
 
-Use the [latest verified Linux x86-64 release](https://github.com/misty-step/cantrip/releases/latest)
-for a CPU-only executable that needs no source checkout or Rust installation.
-The runtime baseline is Ubuntu 24.04 / glibc 2.39. Follow the bundled
-[`INSTALLATION.md`](docs/INSTALLATION.md) for checksums, signed provenance,
-runtime packages, first use, and data-preserving update/rollback/uninstall.
-The installer changes only the executable; service and shortcut setup remain
-explicit. Models are a separate, explicitly requested download. The same GitHub
-Release publishes `release.json` and Landmark's `releases.json` for the website.
+Use the [published Linux x86-64 archive](https://github.com/misty-step/cantrip/releases/latest):
+no checkout, Rust, GPU, or CUDA is needed. The baseline is Ubuntu 24.04 / glibc
+2.39. Follow [installation and provenance verification](docs/INSTALLATION.md),
+then [first attended dictation](docs/USAGE.md#first-dictation). Models, shortcuts,
+and any startup service are separate explicit setup steps; the installer changes
+only the executable.
 
 ### Build from source
 
+Source development is separate from release installation. With rustup and a C
+linker/toolchain installed, use the exact Rust version pinned in
+[`rust-toolchain.toml`](rust-toolchain.toml). On Ubuntu, native **build** packages
+are installed with:
+
 ```sh
+sudo apt install build-essential libdbus-1-dev libssl-dev pkg-config
+```
+
+From the repository root:
+
+```sh
+rustup install
 cargo build --release --locked
-
-# 1. Create the annotated default config.
-./target/release/cantrip config init
-
-# 2. Inspect the effective capture, STT, cleanup, injection, HUD, and daemon
-# paths. Follow each reported action; the local default will request the model.
-./target/release/cantrip doctor
-./target/release/cantrip models pull   # when doctor requests it
-
-# 3. Run the daemon in a dedicated terminal for this first session.
-./target/release/cantrip daemon
-
-# 4. In another terminal, dictate once and inspect the delivery outcome.
-./target/release/cantrip toggle        # start
-./target/release/cantrip toggle        # stop, transcribe, and deliver
+./target/release/cantrip --version
 ```
 
-Bind one custom shortcut to the absolute path of `cantrip toggle`; press it once
-to start and once to stop. Compositors that support separate key-down and
-key-up commands can bind `cantrip start` and `cantrip stop` instead. Unsupported
-desktop safety checks require clipboard mode or explicit recovery, as above.
-
-Run `cantrip doctor` again after changing config or installing a prerequisite.
-If cleanup is enabled, ensure its configured endpoint is running and its
-keyring credential id, when needed, was stored with `cantrip key set`.
-`cantrip cancel` stops capture or processing without injecting or deleting audio.
-Cancellation prevents later chunks, local fallback, cleanup requests, and delivery;
-an already-running provider request may need to return before the worker settles.
-
-## User service (graphical session)
-
-[`contrib/cantrip.service`](contrib/cantrip.service) provides optional systemd
-startup. `cantrip actions` uses an installed service, even when disabled; it
-does not enable it or start a competing daemon. Without a service, Actions can
-start a direct process. Neither path changes hotkeys.
-
-**Supported:** systemd 246 or newer, one Wayland session per Unix user, and a
-session manager that refreshes its environment before starting
-`graphical-session.target` and stops that target on logout. From the attended,
-unlocked graphical session, check:
-
-```sh
-systemctl --user is-active graphical-session.target
-systemctl --user show cantrip.service \
-  --property=LoadState,FragmentPath,DropInPaths,UnitFileState,ActiveState
-```
-
-If the target is inactive or the desktop does not manage its login/logout
-lifecycle, use Actions or the first-session terminal instead. Do not manually
-start the target or enable lingering to bypass missing session integration.
-If a personal/package service or compositor autostart already owns Cantrip,
-keep that owner or deliberately migrate it; do not install a second one.
-
-### Fresh installation
-
-Complete the first-session setup above. Finish or cancel the current take and
-stop its daemon through its existing owner; Ctrl+C stops a foreground daemon.
-`cantrip stop` ends recording, not the daemon. For an Actions-started process,
-identify its executable and PID before sending that specific process SIGTERM
-and waiting for exit; do not use a broad `pkill` or delete its socket.
-
-From the repository root, this block refuses existing binaries, units, masks,
-symlinks, and personal drop-in directories:
+For a first source-built binary at the default location, the following copies
+**only the executable** and refuses an existing file or symlink. Inspect an
+existing installation and its startup owner instead of overwriting it.
 
 ```sh
 (
   set -eu
-  unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-  if [ "$(systemctl --user show cantrip.service --property=LoadState --value)" != not-found ]; then
-    printf '%s\n' 'Existing or unknown service owner; inspect it before replacing it.' >&2
+  binary="$HOME/.local/bin/cantrip"
+  if [ -e "$binary" ] || [ -L "$binary" ]; then
+    printf 'Existing installation at %s; use its maintenance procedure.\n' "$binary" >&2
     exit 1
   fi
-  for path in "$HOME/.local/bin/cantrip" "$unit_dir/cantrip.service" "$unit_dir/cantrip.service.d"; do
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      printf 'Refusing to replace %s\n' "$path" >&2
-      exit 1
-    fi
-  done
-  mkdir -p "$HOME/.local/bin" "$unit_dir"
-  install -m755 ./target/release/cantrip "$HOME/.local/bin/cantrip"
-  install -m644 contrib/cantrip.service "$unit_dir/cantrip.service"
-  systemctl --user daemon-reload
-  systemctl --user cat cantrip.service
+  mkdir -p "$HOME/.local/bin"
+  install -m755 ./target/release/cantrip "$binary"
 )
 ```
 
-Review the effective unit and any inherited drop-ins. It runs
-`%h/.local/bin/cantrip`, not a login-shell `PATH` lookup. To retain another
-executable location, skip the binary copy and use
-`systemctl --user edit cantrip.service` to set:
+Now use the same [first-dictation guide](docs/USAGE.md#first-dictation) as archive
+users. Do not reinitialize existing config, download models implicitly, or start
+a second daemon. The optional [shared service setup](docs/DESKTOP.md#user-service-graphical-session)
+uses `contrib/cantrip.service` for source builders and does not copy the binary.
 
-```ini
-[Service]
-ExecStart=
-ExecStart=/absolute/path/to/cantrip daemon
-```
-
-### Environment and readiness
-
-Services inherit the user manager's environment, not the invoking terminal's.
-The session manager must supply the current `WAYLAND_DISPLAY` and, on Hyprland,
-`HYPRLAND_INSTANCE_SIGNATURE` before startup. Do not hard-code or guess them.
-To repair this login from its graphical terminal, before starting Cantrip:
-
-```sh
-systemctl --user import-environment WAYLAND_DISPLAY
-# On Hyprland:
-systemctl --user import-environment HYPRLAND_INSTANCE_SIGNATURE
-```
-
-A one-time import does not configure future logins; the session manager must
-refresh these values each login and retire them on logout. Import
-`XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE` if supplied by that session.
-`WAYLAND_SOCKET` must be absent. Keep the manager's runtime directory and D-Bus
-address; never import an entire shell environment or put keys in a unit.
-Custom XDG config/data/state paths and tool `PATH` must agree with the existing
-installation so models and recordings do not appear missing. Environment
-changes affect newly started processes, not an already-running daemon.
-
-After reviewing the environment:
-
-```sh
-systemctl --user enable cantrip.service
-systemctl --user start cantrip.service
-"$HOME/.local/bin/cantrip" ping
-"$HOME/.local/bin/cantrip" status --json
-"$HOME/.local/bin/cantrip" doctor
-```
-
-Use the overridden executable path if applicable. An active service is not
-dictation readiness: wait for successful IPC, inspect prerequisites, and make
-an attended trial in a safe destination. Diagnose failures with
-`journalctl --user -u cantrip.service -b --no-pager` and Actions, not a second
-daemon. After repairing repeated startup failures, run
-`systemctl --user reset-failed cantrip.service` before starting again.
-
-### Stop, update, and remove
-
-Finish/cancel a take and wait for Idle before routine maintenance:
-
-```sh
-systemctl --user stop cantrip.service          # stop now
-systemctl --user disable --now cantrip.service # also remove login enablement
-```
-
-The unit follows the [graphical-session lifecycle](https://www.freedesktop.org/software/systemd/man/latest/systemd.special.html#graphical-session.target).
-Explicit stops are not failure-restarted. `KillMode=mixed` lets the daemon stop
-`pw-record` with SIGINT and retain audio before terminating remaining children.
-A stuck shutdown is force-killed after 90 seconds; inspect failures rather than
-assuming runtime-only audio became durable. No unit action deletes retained data.
-
-For an update, build first, record the current enabled/running state, and make
-a private backup of the binary, unit, and drop-ins. Stop the existing owner
-and require a clean inactive result before replacement. For a regular binary
-at the default location, stage beside it and rename atomically:
+For later source-built updates, build first, record the current enabled/running
+state, make a private backup of the installed binary, and
+[stop its existing owner cleanly](docs/DESKTOP.md#stop-update-and-remove). Keep
+that owner stopped during replacement. For a regular binary at the default
+location, stage beside it and rename atomically:
 
 ```sh
 (
@@ -245,184 +94,86 @@ at the default location, stage beside it and rename atomically:
 )
 ```
 
-Use the package owner's procedure for package-managed installations. Leave
-unchanged units and personal drop-ins alone. When deliberately replacing a
-unit, disable its old enablement first, review/merge overrides, install the
-replacement, reload the manager, and restore the intended enablement. Recheck
-environment, IPC, and dictation. Roll back using the backed-up binary and only
-the changed unit settings; never restore whole directories over later edits.
-Binary rollback does not itself prove history-schema compatibility.
+Use the package owner's procedure for package-managed binaries. Leave unchanged
+units, personal drop-ins, configuration, models, keyring credentials, and history
+alone. Restart only the intended owner and repeat the attended dictation. A
+backed-up executable can restore code; it does not reverse history-schema
+changes. For published archives, use the installer's
+[update and rollback operations](docs/INSTALLATION.md#update-and-roll-back)
+instead of this source-build procedure.
 
-To remove only the unit installed by this guide, disable it, remove its
-reviewed file at `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/cantrip.service`,
-and run `systemctl --user daemon-reload`. Inspect whether a lower-priority
-packaged unit becomes visible. Remove only drop-ins you deliberately created;
-keep the binary if bindings still use it. Configuration, models, keyring
-entries, runtime leftovers, and transcript history remain untouched.
+## Requirements
+
+See [binary runtime prerequisites](docs/INSTALLATION.md#runtime-prerequisites-and-support)
+and [desktop capabilities](docs/DESKTOP.md#supported-desktops). A working
+PipeWire session with `pw-record` is needed for capture; clipboard/paste needs
+`wl-copy`. Automatic keys and the passive HUD have separate compositor
+requirements. `doctor` and an idle daemon are not proof of a successful
+microphone-to-editor dictation.
+
+## User service (graphical session)
+
+The optional [user-service procedure](docs/DESKTOP.md#user-service-graphical-session)
+owns service installation, one-owner checks, session environment, and readiness.
+Archive users need no source checkout or source-build binary-copy step.
+
+### Fresh installation
+
+See [fresh service installation](docs/DESKTOP.md#fresh-installation), after an
+attended first dictation. The binary is installed separately.
+
+### Environment and readiness
+
+See [session environment and readiness](docs/DESKTOP.md#environment-and-readiness).
+Do not manually start the graphical-session target or enable lingering as a bypass.
+
+### Stop, update, and remove
+
+See [startup-owner maintenance](docs/DESKTOP.md#stop-update-and-remove) and
+[binary maintenance](docs/INSTALLATION.md#stop-before-maintenance).
 
 ## CLI
 
-| Command | Purpose |
-|---|---|
-| `cantrip daemon [--preload]` | Run the dictation daemon |
-| `cantrip hud [--screenshot PATH]` | Run the layer-shell status HUD (or dump one frame to a PNG and exit). The daemon spawns and watches it; run manually only to override |
-| `cantrip settings [--screenshot PATH]` | Open the configuration window (view, edit, reload; or dump a frame) |
-| `cantrip actions [--doctor] [--screenshot PATH]` | Open the recording recovery and setup window |
-| `cantrip toggle` / `start` / `stop` / `cancel` | Dictation transitions |
-| `cantrip status [--json]` / `ping` | Current state, measured progress, outcome, and capabilities / daemon liveness |
-| `cantrip transcribe [--local] <wav>` | One-shot file transcription; transcript-only stdout, diagnostics on stderr |
-| `cantrip models pull` / `status` | Manage local STT models |
-| `cantrip config show` / `edit` / `init` / `path` | Inspect and edit configuration |
-| `cantrip key set` / `rm` / `status <id>` | Store and manage keyring credential ids |
-| `cantrip doctor` | Environment report |
-| `cantrip recordings [--json]` | List canonical recording IDs, durations, and available artifacts; no transcript text |
-| `cantrip copy <id>` | Copy this exact recording's saved transcript; never send keys |
-| `cantrip last` | Re-deliver the latest saved transcript, selected once when accepted |
-| `cantrip recover [--id ID] [--local] [--clipboard]` | Retry this recording; omitted ID selects the newest unresolved take with retained audio |
-| `cantrip dismiss [--event-id ID]` | Acknowledge a notice without deleting recordings |
-| `cantrip forget <id> --yes` | Delete retained audio and incomplete text; keep complete archived text |
-| `cantrip reload` | Re-read configuration in the running daemon |
-
-Two hotkeys, one with cleanup and one without: `toggle` and `start` take
-`--postproc clean|raw` to force transcript cleanup on or off for that
-dictation, overriding `[postproc].enabled`. Bind one key to
-`cantrip toggle --postproc clean` and the other to
-`cantrip toggle --postproc raw`; each key starts and stops its own dictation
-mode (cleanup runs only when the capture was started with `clean`). Without
-the flag, `[postproc].enabled` decides.
+The [CLI reference](docs/USAGE.md#cli-reference) and
+[everyday recording controls](docs/USAGE.md#everyday-controls) live in the usage
+guide. Examples use explicit installed paths; installation does not alter `PATH`.
 
 ## Recovery
 
-Open `cantrip actions` to select a recording by its capture time and ID. Copy,
-recover, and confirmed Forget always target that selection, even if newer takes
-arrive. Keyboard navigation supports arrows, Page Up/Down, and Home/End.
-Escape closes the window or confirmation without deleting a recording.
-
-For the CLI, list metadata and choose an exact ID:
-
-```sh
-cantrip recordings
-cantrip recover --id RECORDING_ID --clipboard
-cantrip copy RECORDING_ID           # copy already-saved text without re-transcribing
-```
-
-For local recovery without changing your usual configuration:
-
-```sh
-cantrip models pull                 # once, if Parakeet is not installed
-cantrip recover --id RECORDING_ID --local --clipboard
-```
-
-Paste with Ctrl+V in a GUI or Ctrl+Shift+V in a terminal. `--local` uses installed
-Parakeet and disables cleanup for that operation; it does not change separately
-opted-in count-only telemetry. A partial result is visibly marked incomplete
-and leaves the audio available. Retrying processes the whole recording again.
-Automatic local fallback keeps your configured cleanup policy; explicit
-`--local` disables cleanup. `cantrip doctor` reports local fallback readiness.
-
-Dismissal only acknowledges feedback. Successful delivery marks a take resolved
-but keeps its audio. Only confirmed Forget removes that take's audio and incomplete
-text, retaining any complete archived transcript. Retained audio costs about
-1.92 MB per recorded minute (115 MB/hour), with no silent expiry.
-Partial or uncertain delivery is not a successful retry: inspect the destination
-before trying again to avoid duplicates.
-
-For an audio file outside the managed history:
-
-```sh
-(umask 077; cantrip transcribe --local recording.wav > recovered.txt)
-```
-
-The CLI exits unsuccessfully if only a partial transcript was produced, while
-still printing the available text. Keep the original file until satisfied.
+[Use and recover selected recordings](docs/USAGE.md#recovery). Copy never sends
+keys. Confirmed Forget deletes retained audio and incomplete text but
+[keeps complete archived transcript text](docs/PRIVACY.md#what-forget-deletes).
 
 ## Omarchy integration
 
-The repository includes a status badge and menu route. Deploy only while attending
-the unlocked graphical session; review the dry run first:
-
-```sh
-python3 integrations/omarchy/install.py
-python3 integrations/omarchy/install.py --apply
-omarchy menu summon cantrip
-```
-
-Live `--apply` fails closed unless bounded, read-only probes identify the same
-Hyprland/Omarchy session and both explicitly report unlocked, with no requested
-or pending lock. Locked, unavailable, ambiguous, malformed, or timed-out state
-refuses installation before staging or backups. Run from a terminal in that
-graphical session: the installer will not guess a display from SSH/TTY, disable
-locking, unlock automatically, or provide a live bypass. Passing `--config-dir`
-for the live configuration does not skip these checks.
-
-The installer checks again before publishing the staged plugin and each changed
-configuration file. If safety changes during staging/publication, existing
-rollback preserves installed content (and may retain private backups). These
-checks are defense in depth, **not a guarantee against a check-to-lock race**:
-only the shell can coordinate hot reload with locking and fully close that race.
-Do not use unattended live deployment. Dry runs and already-current no-ops remain
-non-mutating without requiring a session probe; a distinct offline `--config-dir`
-fixture can still be installed without a running desktop.
-
-If replacing an existing personal badge, add `--replace-widget OLD_PLUGIN_ID`
-to both installer commands. Left-click keeps raw dictation; right-click opens
-`cantrip actions`. Existing hotkeys are not redefined. Status failures show
-unknown state, not Ready; the badge retains only the last confirmed pending count.
-
-The installer preserves unrelated shell/menu content, stages complete plugin
-updates, and reports private rollback backups. To roll back, disable
-`cantrip.dictation`, restore the previous bar widget, and remove only the managed
-Cantrip menu block. Move the plugin directory outside `omarchy/plugins` rather
-than deleting personal extras. Never restore whole backups over subsequent edits.
+See the optional [Omarchy badge and menu integration](docs/DESKTOP.md#omarchy-integration).
+It is checkout-based, attended, and separate from binary/service/shortcut setup.
 
 ## Configuration
 
-Everything lives in `~/.config/cantrip/config.toml` (or `cantrip config path`);
-`cantrip config show` prints the active file, `config edit` opens it, and
-`cantrip settings` opens a window you can keep open to view and adjust it
-(Save reloads the daemon). The gauntlet-informed recommended setup and every
-knob (STT model, cloud STT, postproc model + instructions, cloud postproc) are
-documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
+See [configuration](docs/CONFIGURATION.md) for local/cloud STT, opt-in cleanup,
+delivery, HUD accessibility, and telemetry. `config show` serializes the
+configuration loaded from disk with defaults, not the original file/comments
+or the running daemon's snapshot. Native Settings saves and reloads the file.
 
 ## Privacy
 
-- Audio and transcripts never leave the machine in the default local lanes.
-- In-flight recordings live in `$XDG_RUNTIME_DIR/cantrip` (tmpfs, per-user
-  `0700`). Before transcription, each stopped take is retained under its own ID
-  in `$XDG_STATE_HOME/cantrip/transcripts` as owner-only recovery audio.
-  Every stopped take, including successful, cancelled, empty, and undelivered
-  takes, remains independently available until explicit confirmed Forget.
-  Graceful shutdown stops and retains live capture; startup imports trusted,
-  finalized runtime leftovers under their original IDs. Runtime originals are
-  consumed only after matching durable audio is confirmed.
-  Storage failures are surfaced. Active or runtime-only audio can be lost on
-  reboot or power failure; no recognition or storage guarantee overrides that.
-  Legacy `last-failed.wav` and `last-transcript.txt` migrate independently and
-  idempotently, with originals consumed only after durable publication.
-- Every successful STT result is saved locally as an owner-only JSON record in
-  `$XDG_STATE_HOME/cantrip/transcripts` (normally
-  `~/.local/state/cantrip/transcripts`). This history contains sensitive text;
-  it is never uploaded or committed automatically.
-- Operational logs contain character counts only—never transcript content.
-  The single stdout exemption is `cantrip transcribe`.
-- Clipboard mode overwrites the clipboard and does not restore the previous
-  contents (restoring is racy on Wayland).
+Read [privacy and retained data](docs/PRIVACY.md) before speaking sensitive
+material. Default local recognition does not upload content, but successful,
+cancelled, and undelivered audio and plaintext history are retained. Cloud
+features, metadata telemetry, clipboard exposure, and exact deletion limits
+are separate choices described there.
 
 ## Evaluation gauntlet
 
-`examples/eval` is a reproducible harness that scores any configured STT and
-post-proc lane over a 5-clip reference set (WER/CER, latency, cost) and ranks
-arrangements. Reproduction procedures, accepted evaluation contracts, and clearly
-separated historical findings/design proposals: [`docs/EVALUATION.md`](docs/EVALUATION.md).
+`examples/eval` is a reproducible harness that scores configured STT and cleanup
+lanes over a five-clip reference set (WER/CER, latency, cost) and ranks
+arrangements. Reproduction procedures, accepted contracts, and clearly separated
+historical findings/design proposals: [evaluation guide](docs/EVALUATION.md).
 
 ## Development
 
-The exact Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
-With rustup installed, enter the checkout and install that toolchain with:
-
-```sh
-rustup install
-```
+After installing the pinned toolchain as above:
 
 ```sh
 cargo build --locked
@@ -437,12 +188,16 @@ do not contact providers.
 
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`
-  must be on `PATH`; the pre-commit and pre-push hooks fail closed when either
-  scanner is missing instead of skipping the scan.
-- **CI** (`.github/workflows/ci.yml`): fmt, clippy `-D warnings`, tests, secret
-  scan, and on `master` the Landmark-prepared verified Linux release.
-- Architecture decisions: [`docs/adr/`](docs/adr/). Log tags: `[Daemon]`
-  `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
+  must be on `PATH`; the hooks fail closed when either scanner is missing.
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): fmt, clippy
+  `-D warnings`, tests, secret scan, and on `master` the Landmark-prepared
+  verified Linux release.
+- **Website and documentation source:** [`site/`](site/). The five user guides
+  below are canonical Markdown, rendered by the site rather than copied into
+  a second web manual. Website release data comes from published release assets,
+  not an unreleased Cargo version or local technical changelog.
+- **Architecture decisions:** [`docs/adr/`](docs/adr/). Operational log tags:
+  `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 
 ## Work and documentation ownership
 
@@ -464,10 +219,10 @@ a higher authority than the request.
 
 ## Prior art & credits
 
-Design informed by [Handy](https://github.com/cjpais/Handy) (and its
-`transcribe-rs` engine, which Cantrip uses directly) and by
-[Vox](https://github.com/misty-step/vox), our macOS predecessor whose pipeline
-architecture and privacy rules carry over.
+Design informed by [Handy](https://github.com/cjpais/Handy) and its
+[`transcribe-rs`](https://github.com/cjpais/transcribe-rs) engine, which Cantrip
+uses directly, and by [Vox](https://github.com/misty-step/vox), our macOS
+predecessor whose pipeline architecture and privacy rules carry over.
 
 ## License
 
@@ -475,8 +230,13 @@ architecture and privacy rules carry over.
 
 ## Docs
 
-- [Configuration](docs/CONFIGURATION.md)
-- [Evaluation gauntlet](docs/EVALUATION.md)
+- [Install](docs/INSTALLATION.md) — verified releases and binary lifecycle.
+- [Use](docs/USAGE.md) — first dictation, controls, outcomes, recovery, and CLI.
+- [Configure](docs/CONFIGURATION.md) — settings and explicit provider choices.
+- [Desktop](docs/DESKTOP.md) — support, shortcuts, startup owners, and diagnostics.
+- [Privacy](docs/PRIVACY.md) — network boundaries, retained audio/text, and deletion.
+- [Published release notes](https://github.com/misty-step/cantrip/releases).
+- [Evaluation gauntlet](docs/EVALUATION.md).
 - [Architecture decisions](docs/adr/) — chronological rationale, not a flat list
   of current implementation requirements. Older decisions retain their original
   evidence and link forward where superseded.
@@ -485,4 +245,3 @@ architecture and privacy rules carry over.
     and the [signed waveform contract](docs/adr/0021-signed-pixel-waveform.md).
   - [Private history and fixture promotion](docs/adr/0013-local-transcript-history.md)
     and [eval-driven post-processing](docs/adr/0012-eval-driven-postprocessing.md).
-- Marketing/docs site scaffold: [`site/`](site/)

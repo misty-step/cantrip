@@ -21,6 +21,10 @@ TARGET = "x86_64-unknown-linux-gnu"
 INTERPRETER = "/lib64/ld-linux-x86-64.so.2"
 PUBLIC_FILES = {
     "INSTALLATION.md": "docs/INSTALLATION.md",
+    "USAGE.md": "docs/USAGE.md",
+    "CONFIGURATION.md": "docs/CONFIGURATION.md",
+    "DESKTOP.md": "docs/DESKTOP.md",
+    "PRIVACY.md": "docs/PRIVACY.md",
     "LICENSE": "LICENSE",
     "cantrip.service": "contrib/cantrip.service",
     "install.sh": "contrib/install.sh",

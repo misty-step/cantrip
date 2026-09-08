@@ -62,6 +62,7 @@ const STATUS_STALE_AFTER: Duration = Duration::from_secs(2);
 const WAVEFORM_EASE: Duration = POLL_INTERVAL;
 const WAVEFORM_RELEASE: Duration = Duration::from_millis(420);
 const SETTLE: Duration = Duration::from_millis(280);
+// Full-opacity dwell after the completion mark has finished settling.
 const SUCCESS_HOLD: Duration = Duration::from_millis(700);
 const RESULT_FADE: Duration = Duration::from_millis(140);
 const NOTICE_HOLD: Duration = Duration::from_secs(4);
@@ -382,7 +383,7 @@ impl Model {
                 // operation happened between polls; active work still wins.
                 let initial = first || epoch_changed;
                 if !active && !outcome.dismissed && (!initial || persistent(outcome)) {
-                    let mut result = present_outcome(outcome, &status, now);
+                    let mut result = present_outcome(outcome, &status, now, self.reduced_motion);
                     if !initial
                         && belongs
                         && outcome.completeness == Completeness::Empty
@@ -412,7 +413,9 @@ impl Model {
                 if let Some(result) = &mut self.result {
                     if result.event_id == Some(outcome.event_id) {
                         result.caption.action =
-                            present_outcome(outcome, &status, now).caption.action;
+                            present_outcome(outcome, &status, now, self.reduced_motion)
+                                .caption
+                                .action;
                     }
                 }
             }
@@ -671,7 +674,7 @@ impl Model {
                     progress,
                     self.reduced_motion,
                 ),
-                Some(Kind::Resolved) => [TrackColumn::centered(2.0); CELLS],
+                Some(Kind::Resolved) => resolved_frame(),
                 Some(Kind::Attention) => [TrackColumn::centered(3.0).with_opacity(0.55); CELLS],
                 _ => [TrackColumn::centered(3.0).with_opacity(0.35); CELLS],
             };
@@ -749,7 +752,12 @@ fn persistent(outcome: &TerminalOutcome) -> bool {
     ))
 }
 
-fn present_outcome(outcome: &TerminalOutcome, status: &StatusSnapshot, now: Instant) -> ResultView {
+fn present_outcome(
+    outcome: &TerminalOutcome,
+    status: &StatusSnapshot,
+    now: Instant,
+    reduced_motion: bool,
+) -> ResultView {
     let attention = persistent(outcome);
     let delivered = matches!(outcome.delivery, Delivery::Typed | Delivery::Pasted);
     let copied = outcome.delivery == Delivery::Copied;
@@ -862,7 +870,11 @@ fn present_outcome(outcome: &TerminalOutcome, status: &StatusSnapshot, now: Inst
             .push_str("Dismiss outcome keeps saved recordings.");
     }
     let dwell = if kind == Kind::Resolved && delivered && outcome.cleanup != Cleanup::Failed {
-        SUCCESS_HOLD + RESULT_FADE
+        if reduced_motion {
+            SUCCESS_HOLD
+        } else {
+            SETTLE + SUCCESS_HOLD + RESULT_FADE
+        }
     } else {
         NOTICE_HOLD
     };
@@ -880,6 +892,8 @@ fn present_outcome(outcome: &TerminalOutcome, status: &StatusSnapshot, now: Inst
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TrackColumn {
+    // Signed distances from the center row: a completion stroke may lie wholly
+    // above or below it without adding a second pixel representation.
     upper: f32,
     lower: f32,
     opacity: f32,
@@ -1046,20 +1060,34 @@ fn activity_frame(
 ) -> TrackFrame {
     let seconds = if reduced { 0.0 } else { age.as_secs_f32() };
     let phase = seconds * std::f32::consts::TAU;
-    let breath = (1.0 - (phase / 2.8).cos()) / 2.0;
+    if kind == Kind::Finishing {
+        // Equal-height packets gather in mirrored pairs, then repeat. Nothing
+        // accumulates or sweeps across a determinate center row.
+        let mut frame = [TrackColumn::centered(13.0).with_opacity(0.0); CELLS];
+        let midpoint = (CELLS / 6 - 1) as f32 / 2.0;
+        for (group, columns) in frame.as_chunks_mut::<6>().0.iter_mut().enumerate() {
+            let distance = (group as f32 - midpoint).abs() / midpoint;
+            let pulse = if reduced {
+                0.5
+            } else {
+                let wave = (1.0 + (phase / 1.8 + distance * std::f32::consts::PI).cos()) / 2.0;
+                wave * wave * wave
+            };
+            columns[1..5].fill(TrackColumn::centered(13.0).with_opacity(0.22 + 0.7 * pulse));
+        }
+        return frame;
+    }
     let filled = progress.map(completed_cells);
     std::array::from_fn(|index| {
         let position = index as f32 / (CELLS - 1) as f32;
-        let energy = if kind == Kind::Finishing {
-            let envelope = (std::f32::consts::PI * (position - 0.5)).cos().powi(2);
-            envelope * (0.25 + 0.75 * breath)
-        } else {
-            // A wide periodic ripple, not a cursor or a guessed completion front.
-            let wave = (1.0 + (std::f32::consts::TAU * (position - 0.5) - phase / 2.2).cos()) / 2.0;
-            wave * wave * wave
-        };
+        // Broad counter-moving lobes have a phrase-like rhythm and quiet edges,
+        // rather than one bright cursor that could imply a completion front.
+        let envelope = (std::f32::consts::PI * position).sin().powi(2);
+        let forward = (1.0 + (std::f32::consts::TAU * position - phase / 2.6).cos()) / 2.0;
+        let returning = (1.0 + (std::f32::consts::TAU * position + phase / 3.9).cos()) / 2.0;
+        let energy = (0.2 + 0.8 * envelope) * (0.65 * forward + 0.35 * returning);
         let mut column =
-            TrackColumn::centered(3.0 + 12.0 * energy).with_opacity(0.25 + 0.65 * energy);
+            TrackColumn::centered(5.0 + 20.0 * energy).with_opacity(0.3 + 0.65 * energy);
         if let Some(filled) = filled {
             // The center row is the only determinate channel. Activity above and
             // below it remains free to flow without advancing the measured fill.
@@ -1067,6 +1095,23 @@ fn activity_frame(
         }
         column
     })
+}
+
+fn resolved_frame() -> TrackFrame {
+    // Two adjacent cells per column make a short downstroke and a longer rising
+    // arm. The rest of the track disappears; a quiet baseline is not success.
+    const ROWS: [f32; 10] = [0.0, 1.0, 2.0, 2.0, 1.0, 0.0, -1.0, -1.0, -2.0, -3.0];
+    let mut frame = [TrackColumn::centered(CELL_SIZE).with_opacity(0.0); CELLS];
+    let first = (CELLS - ROWS.len()) / 2;
+    for (index, row) in ROWS.into_iter().enumerate() {
+        frame[first + index] = TrackColumn {
+            upper: CELL_SIZE / 2.0 - row * CELL_PITCH,
+            lower: (row + 1.0) * CELL_PITCH + CELL_SIZE / 2.0,
+            opacity: 1.0,
+            center_opacity: 1.0,
+        };
+    }
+    frame
 }
 
 fn completed_cells(progress: (u32, u32)) -> usize {
@@ -1407,7 +1452,7 @@ struct RenderKey {
     kind: Option<Kind>,
     caption_revision: u64,
     interaction_event: Option<u64>,
-    heights: [[u16; 2]; CELLS],
+    heights: [[i16; 2]; CELLS],
     opacities: [[u8; 2]; CELLS],
     alpha: u8,
     size: (u32, u32, u32),
@@ -1509,8 +1554,8 @@ impl HudState {
             interaction_event: self.model.interaction.as_ref().and(self.model.notice_event),
             heights: heights.map(|column| {
                 [
-                    (column.upper * 16.0).round() as u16,
-                    (column.lower * 16.0).round() as u16,
+                    (column.upper * 16.0).round() as i16,
+                    (column.lower * 16.0).round() as i16,
                 ]
             }),
             opacities: heights.map(|column| {
@@ -1907,7 +1952,7 @@ impl Canvas<'_> {
     fn pixel_column(&mut self, x: f32, center: f32, width: f32, column: TrackColumn, rgb: [u8; 3]) {
         let top = center - column.upper;
         let bottom = center + column.lower;
-        if bottom - top < CELL_SIZE {
+        if bottom - top < CELL_SIZE && column.upper >= 1.0 && column.lower >= 1.0 {
             let alpha = column.center_opacity;
             // Blend the 2 px quiet sliver into the center cell; rounding a
             // growing rectangle would switch an entire physical row on at once.
@@ -2110,6 +2155,7 @@ pub enum ScreenshotState {
     Delivering,
     Cancelling,
     Sent,
+    SentSettling,
     Copied,
     CopiedInstead,
     CleanupFallback,
@@ -2129,6 +2175,8 @@ pub enum ScreenshotState {
     Busy,
     Recovery,
     ReducedMotion,
+    ReducedMotionCleaning,
+    ReducedMotionSent,
     Settling,
     Interrupted,
     Dismissed,
@@ -2252,7 +2300,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
     processing.stage = Some(match state {
         ScreenshotState::FinalizingAudio => Stage::FinalizingAudio,
         ScreenshotState::RemovingRecording => Stage::RemovingRecording,
-        ScreenshotState::Cleaning => Stage::CleaningUp,
+        ScreenshotState::Cleaning | ScreenshotState::ReducedMotionCleaning => Stage::CleaningUp,
         ScreenshotState::Delivering => Stage::Delivering,
         ScreenshotState::Cancelling => Stage::Cancelling,
         ScreenshotState::ProgressZero => Stage::Transcribing {
@@ -2280,7 +2328,13 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
     } else {
         2
     };
-    processing.hud.reduced_motion = Some(state == ScreenshotState::ReducedMotion);
+    let reduced = matches!(
+        state,
+        ScreenshotState::ReducedMotion
+            | ScreenshotState::ReducedMotionCleaning
+            | ScreenshotState::ReducedMotionSent
+    );
+    processing.hud.reduced_motion = Some(reduced);
     if state == ScreenshotState::Busy {
         processing.notice = Some(ipc::InteractionNotice {
             event_id: 1,
@@ -2313,6 +2367,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
             | ScreenshotState::Busy
             | ScreenshotState::Recovery
             | ScreenshotState::ReducedMotion
+            | ScreenshotState::ReducedMotionCleaning
             | ScreenshotState::Settling
     ) {
         model.refresh(now);
@@ -2372,10 +2427,23 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
         outcome.dismissed = true;
     }
     let mut idle = preview_snapshot(StateKind::Idle);
+    idle.hud.reduced_motion = Some(reduced);
     idle.pending_recordings = usize::from(outcome.artifacts.audio || outcome.artifacts.text);
     idle.outcome = Some(outcome);
     idle.capabilities.local_model = state != ScreenshotState::SetupMissing;
-    model.apply(idle, now - Duration::from_millis(200));
+    let result_at = now
+        - if matches!(
+            state,
+            ScreenshotState::SentSettling | ScreenshotState::Interrupted
+        ) {
+            Duration::from_millis(200)
+        } else {
+            SETTLE + Duration::from_millis(200)
+        };
+    // Terminal stills start from a presented processing frame, not an unseen
+    // transcription target with the old listening pixels still cached.
+    model.track.presented = model.frame(result_at);
+    model.apply(idle, result_at);
     if state == ScreenshotState::Interrupted {
         let mut next = preview_snapshot(StateKind::Recording);
         next.operation_id = Some("next-preview-take".to_owned());
@@ -2777,15 +2845,19 @@ mod tests {
             first, second,
             "determinate work must still show fluid activity"
         );
-        for frame in [first, second] {
-            let center = |index| raster_column(frame[index], 1)[(22 * 8 + 3) * 4 + 3];
-            assert_eq!(center(23), 255);
-            assert_eq!(
-                center(24),
-                41,
-                "activity must not brighten uncompleted center cells"
-            );
-        }
+        let center =
+            |frame: &TrackFrame, index| raster_column(frame[index], 1)[(22 * 8 + 3) * 4 + 3];
+        let completed = center(&first, 23);
+        let pending = center(&first, 24);
+        assert!(
+            completed > pending,
+            "the reported chunk boundary must remain visible"
+        );
+        assert_eq!(
+            (center(&second, 23), center(&second, 24)),
+            (completed, pending),
+            "activity must not change either side of the measured boundary"
+        );
         let before_report = model.frame(now + Duration::from_secs(2));
         model.apply(status.clone(), now + Duration::from_secs(2));
         assert_eq!(
@@ -2891,7 +2963,7 @@ mod tests {
             };
             outcome.error = Some("not a reason to alarm on deliberate cancellation".to_owned());
             status.outcome = Some(outcome.clone());
-            let view = present_outcome(&outcome, &status, now);
+            let view = present_outcome(&outcome, &status, now, false);
             assert_eq!(view.kind, Kind::Neutral);
             assert!(!matches!(view.visibility, Visibility::Persistent));
             assert!(
@@ -2933,8 +3005,48 @@ mod tests {
         assert_eq!(model.kind, Some(Kind::Resolved));
         assert!(!model.caption.title.is_empty());
         model.disconnected(now + Duration::from_millis(200));
-        model.refresh(now + Duration::from_secs(1));
+        model.refresh(now + POLL_INTERVAL + SETTLE + SUCCESS_HOLD + RESULT_FADE);
         assert!(model.kind.is_none());
+    }
+
+    #[test]
+    fn success_holds_after_settling_and_repeated_status_cannot_extend_it() {
+        for reduced in [false, true] {
+            let now = Instant::now();
+            let mut model = Model::new(now);
+            let mut active = recording(0, Some(signal(true)));
+            active.hud.reduced_motion = Some(reduced);
+            model.apply(active, now);
+            let delivered = now + Duration::from_secs(1);
+            model.track.presented = model.frame(delivered);
+            let mut idle = preview_snapshot(StateKind::Idle);
+            idle.hud.reduced_motion = Some(reduced);
+            idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+            model.apply(idle.clone(), delivered);
+            let settled = delivered + if reduced { Duration::ZERO } else { SETTLE };
+            let held_frame = model.frame(settled);
+            let hold_end = settled + SUCCESS_HOLD;
+            model.apply(idle.clone(), hold_end - FRAME_INTERVAL);
+            assert_eq!(model.kind, Some(Kind::Resolved));
+            assert_eq!(model.frame(hold_end - FRAME_INTERVAL), held_frame);
+            assert_eq!(
+                model.alpha(hold_end - FRAME_INTERVAL),
+                1.0,
+                "the transition must not consume the settled hold"
+            );
+            if !reduced {
+                let fading = hold_end + RESULT_FADE / 2;
+                model.refresh(fading);
+                let alpha = model.alpha(fading);
+                assert!(alpha > 0.0 && alpha < 1.0);
+            }
+            let hidden = hold_end + if reduced { Duration::ZERO } else { RESULT_FADE };
+            model.apply(idle, hidden);
+            assert!(
+                model.kind.is_none(),
+                "unchanged snapshots must neither extend nor replay the result"
+            );
+        }
     }
 
     #[test]

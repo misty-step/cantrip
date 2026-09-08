@@ -1,11 +1,19 @@
 # Configuration guide
 
-Cantrip reads one TOML file. `cantrip config path` prints its location
-(default `~/.config/cantrip/config.toml`), `config show` prints it,
-`config init` creates it with defaults, and `config edit` opens it in
-`$EDITOR`. `cantrip settings` opens a window you can keep open to view
-and adjust the common settings; its Save button writes the file back
-(with comments preserved) and reloads the running daemon.
+Cantrip reads one TOML file. Examples use `"$HOME/.local/bin/cantrip"`; substitute
+your installed path if different. In command descriptions, `cantrip` is shorthand
+for that executable, not an assumption that installation changed `PATH`.
+
+`cantrip config path` prints the file's location (normally
+`~/.config/cantrip/config.toml`). `config show` loads the file, applies defaults,
+validates it, and serializes the resulting effective configuration; it does
+**not** print the original file/comments or query the running daemon's current
+snapshot. `config init` creates the annotated defaults only when the file does
+not exist. `config edit` opens the file in `$EDITOR`. Do not reinitialize an
+existing configuration during updates.
+
+`cantrip settings` opens a window for common settings. Save writes the file back
+with comments preserved and reloads the running daemon.
 
 Settings can repair a file that parses as TOML but fails Cantrip validation:
 it loads the actual values, explains the validation error, and enables Save
@@ -18,12 +26,15 @@ jobs keep their STT, cleanup, and delivery snapshot; reload affects subsequent
 operations, not in-flight inference. `audio_source` applies to the next capture.
 `keep_warm` governs model preload at startup and needs a daemon restart.
 
-This example opts into local cleanup. Fresh defaults use
-`[postproc].enabled = false` and an empty cleanup model.
+This example keeps the local-first defaults: Parakeet is selected but its
+weights must be [downloaded deliberately](USAGE.md#2-download-the-local-model-deliberately);
+cleanup remains disabled with no cleanup model selected. Do not replace an
+existing file wholesale with the example. Enable cleanup only after the
+[endpoint, model, and any credential are ready](#postproc--cleanup).
 
 ```toml
-injection = "auto"        # auto | paste | type | clipboard — how corrected text is delivered
-keep_warm = true          # keep the STT model resident between dictations (faster)
+injection = "auto"        # auto | paste | type | clipboard — how finished text is delivered
+keep_warm = true          # preload the local STT model at startup; restart to apply
 # audio_source = "…"      # optional PipeWire node; omit for the default input
 vocabulary = ["PipeWire", "Parakeet"]   # exact-spelling terms fed to postproc + cloud STT
 
@@ -34,9 +45,9 @@ model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
 # api_key_id = "openai"
 
 [postproc]
-enabled = true            # false = pass the raw transcript straight through
-endpoint = "http://localhost:11434/v1"    # OpenAI-compatible endpoint
-model = "qwen3:8b"        # any model your endpoint serves
+enabled = false           # deliver raw recognition; cleanup is an explicit opt-in
+endpoint = "http://localhost:11434/v1"    # does not install or start an endpoint
+model = ""               # choose a model served by your endpoint before enabling
 timeout_ms = 30000
 passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
 min_chars = 40            # skip cleanup under this length; 0 = never skip
@@ -48,25 +59,45 @@ labels = false             # true = continuous accessibility stage labels
 # reduced_motion = true    # true/false override; omit to follow desktop preference
 ```
 
+## Capture and model preload
+
+Omit `audio_source` to use the default PipeWire input. Set it to a specific
+PipeWire node only when you intend to select that microphone; it applies on the
+next capture. A `doctor` report that finds `pw-record` is not proof that the
+selected input records sound. Make an [attended trial](USAGE.md#first-dictation)
+after changing it.
+
+`keep_warm` controls local-model preload when the daemon starts. Changing it
+requires a restart through the [existing startup owner](DESKTOP.md#keep-one-startup-owner),
+not a second daemon. Models remain in the same data directory across
+configuration changes; see [storage locations](PRIVACY.md#storage-locations).
+
 ## `[stt]` — transcription
 
-**Local (default, offline, $0).** `model` is a registry name; install the
-weights with `cantrip models pull`:
+**Local (default).** `model` is a registry name. The model is not bundled with
+the binary; install its weights once with
+`"$HOME/.local/bin/cantrip" models pull`. Installed local inference needs no
+network and has no per-request API charge.
 
-| Model | Notes | Gauntlet WER |
-|---|---|---|
-| `parakeet-tdt-0.6b-v3-int8` | Fastest local; ships by default (only local model in the registry today) | 0.123 |
+| Model | Availability |
+|---|---|
+| `parakeet-tdt-0.6b-v3-int8` | Default selection; download weights separately. The only current local registry model. |
 
 **Cloud.** Set `endpoint` to an OpenAI-compatible API **base** URL (for example
 `https://api.openai.com/v1`). Cantrip posts to `{endpoint}/audio/transcriptions`.
 Also set `model` and `api_key_id`. Store the credential id ahead of time:
 
 ```sh
-cantrip key set openai    # prompts for the key; stored in the OS keyring
+"$HOME/.local/bin/cantrip" key set openai   # prompts for the key; stored in the OS keyring
 ```
 
-From the gauntlet, `gpt-4o-mini-transcribe` is the best accuracy-per-dollar
-cloud model (~WER 0.065 at ~$0.0003/clip).
+An unlocked Secret Service keyring and the same user-session D-Bus connection
+must be available when the daemon uses that id. A configured id is not proof
+that a key exists or the provider accepts it. Cloud recognition sends audio to
+the chosen endpoint; review the [network/content boundary](PRIVACY.md#what-leaves-the-machine)
+before opting in. Evaluated provider comparisons live in the
+[evaluation guide](https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md),
+not in the default configuration.
 
 **Long recordings.** Remote PCM/IEEE-float WAVs are split before upload, keeping
 sample bytes, rate, channels, and format intact. Native Cantrip capture uses
@@ -91,32 +122,48 @@ cannot complete, useful cloud text is preserved. Configured cleanup runs once on
 the selected transcript, not on each attempt. Cancellation prevents starting a
 fallback or subsequent cleanup request; already-running requests may finish.
 There are no automatic downloads or switches to another cloud provider.
-Install the safety-net model with `cantrip models pull`; `cantrip doctor` reports
-readiness. With `keep_warm = true`, cloud-configured daemons preload local Parakeet
-too. External files outside Parakeet's native audio format can still fail locally;
+Install the safety-net model deliberately with `models pull`; `doctor` reports
+whether its installed files are available, not a successful inference. With
+`keep_warm = true`, cloud-configured daemons preload local Parakeet too.
+External files outside Parakeet's native audio format can still fail locally;
 retain or convert the original file.
 
-**Recovery.** `cantrip recover --id ID --clipboard` retries the selected retained
-recording with configured STT while only copying the result. Omit `--id` to select
-the newest unresolved take with retained audio. `cantrip recover --id ID --local --clipboard` uses
-installed default Parakeet and skips cleanup for that job, without rewriting
-this file or changing subsequent dictations. Install the model explicitly with
-`cantrip models pull` if needed. `cantrip transcribe --local <wav>` provides the
-same local recognition/cleanup override for files. Separately opted-in telemetry
-remains count-only and enabled; `--local` is not an all-network-off switch.
-
-`cantrip recordings` lists capture times, recording IDs, durations, and artifact
-availability after daemon restart. `cantrip actions` exposes the same metadata,
-explicit copy/recovery, and confirmed Forget without showing transcript text.
-Operational details remain in `~/.local/state/cantrip/daemon.log`; transcripts
-never appear there. Every stopped take has independent retained audio; unrelated
-successes or later failures cannot erase it. Successful recovery marks it resolved
-without deleting audio. Cancellation retains capture before skipping inference.
-Graceful shutdown retains live capture; startup imports trusted finalized runtime
-leftovers. Dismissal and Copy never delete artifacts. Only confirmed Forget removes
-retained audio and incomplete text; complete archived text remains.
+For selected-recording retries and the per-operation `--local` override, see
+[recovery](USAGE.md#recovery). Explicit local recovery/file transcription skips
+cleanup without rewriting this file, but does not disable independently opted-in
+metadata telemetry. [Retained audio and plaintext history](PRIVACY.md) remain
+local until deliberately removed.
 
 ## `[postproc]` — cleanup
+
+Cleanup is **off by default**. Configure it only after ordinary local dictation
+works:
+
+1. Choose a local or remote OpenAI-compatible chat endpoint and a model it
+   actually serves. Cantrip does not install or launch Ollama or download its
+   models. For local Ollama, start that service and deliberately install the
+   chosen model there before using Cantrip cleanup.
+2. Set `[postproc].endpoint` and `model` in the existing configuration. If the
+   provider requires a credential, store it with `key set ID` and set the
+   matching `api_key_id`; never paste the key into the file.
+3. Only then set `enabled = true`, save/reload, and make a harmless attended
+   trial. Read `cleanup` in the settled outcome. `doctor` describes configuration
+   and available prerequisites; it does not prove that the endpoint is running,
+   the credential works, or the selected model is usable.
+
+For example, an explicitly prepared local Ollama service could use:
+
+```toml
+[postproc]
+enabled = true
+endpoint = "http://localhost:11434/v1"
+model = "qwen3:8b"
+```
+
+Apply these fields to your existing `[postproc]` table; do not add a duplicate
+table or replace unrelated settings. A `--postproc clean` capture also needs
+this usable endpoint/model, even when the saved default is disabled. The
+[per-take controls](USAGE.md#everyday-controls) explain clean/raw shortcuts.
 
 The built-in prompt defines conservative transcript cleanup. Use
 `instructions` only for extra style guidance. It is appended to the fixed
@@ -131,15 +178,13 @@ contract, so keep it short and avoid redefining the task.
 - **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
   many characters (default 40). Short commands skip the cloud round-trip.
   Set `0` to always run cleanup when enabled.
-- **Local.** Default endpoint is Ollama at `localhost:11434`.
-  `qwen3:8b` is the free local recommendation; any `ollama list` model works.
-- **Cloud.** Point the endpoint at any OpenAI-compatible provider and set
-  `api_key_id`. The committed behavior matrix recommends
-  `google/gemini-3.6-flash` with default reasoning: it kept all 21
-  role-sensitive cases as transcript text, averaged 2.9 seconds, and cost
-  about $0.003 per cleanup. The primary operator currently runs
-  `google/gemini-3.7-flash` through OpenRouter with `passes = 1` as an
-  operator override, not the gauntlet winner.
+- **Local.** The default endpoint address is Ollama at `localhost:11434`, but
+  its presence in the file does not mean a service is installed or running.
+  `qwen3:8b` is a local option; use a model your endpoint actually serves.
+- **Cloud.** Point the endpoint at an OpenAI-compatible chat provider and set
+  its `api_key_id`. This sends transcript text to that provider even if STT is
+  local. Choose deliberately using the provider's policies and your own
+  [evaluation](https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md).
 - **`reasoning_effort`.** Optional reasoning effort level (e.g. `low`, `medium`,
   `high`, `none`) for OpenAI-compatible providers that support
   `reasoning.effort` (such as OpenRouter). Omitted from the request when
@@ -148,43 +193,12 @@ contract, so keep it short and avoid redefining the task.
 
 ## Transcript history
 
-Every successful STT result is archived locally, including empty and partial
-results and results from `cantrip transcribe` or `cantrip recover`. The default
-directory is:
-
-```text
-~/.local/state/cantrip/transcripts/
-```
-
-`$XDG_STATE_HOME` replaces `~/.local/state` when set. Each JSON record
-links raw and post-processed text under one immutable take ID. It also records
-the completion timestamp, source, audio duration, total pipeline latency, STT
-model/backend/latency, cleanup model/status/latency/prompt version, and available
-token and billing usage. The selected STT backend/model is recorded, with
-`stt.fallback_from_model` identifying the cloud model when local fallback is used.
-Pure local STT has zero API cost; any configured-cloud attempt leaves STT cost
-unknown, even when local fallback succeeds. Post-processing
-`reported_cost_usd` is stored only when the provider returns the charge; Cantrip
-does not estimate cost from prices that can change later.
-
-The directory is mode `0700`; files are mode `0600` and published atomically.
-An archive write failure is reported but never drops a valid dictation.
-
-This is sensitive plaintext history, retained until you delete it. It is not
-written to operational logs, uploaded, indexed, summarized, or committed by
-Cantrip. Review backup and home-directory sync policies before relying on it.
-Audio remains even after successful delivery: about 1.92 MB/minute (115 MB/hour)
-for native capture. Use confirmed Forget to reclaim selected audio. Disk failures
-are explicit; active/runtime-only recordings do not survive reboot or power loss.
-
-For example, inspect raw and cleaned pairs locally with `jq`:
-
-```sh
-history=${XDG_STATE_HOME:-$HOME/.local/state}/cantrip/transcripts
-jq -s 'map(select(.postproc.status == "applied") |
-  {session_id, raw_transcript, postprocessed_transcript, postproc})' \
-  \"$history\"/*.json
-```
+Cantrip retains stopped microphone audio and sensitive plaintext transcript
+history, including successful takes. The canonical
+[privacy and history guide](PRIVACY.md#transcript-history) explains file locations,
+record fields, local inspection, durability limits, and exact
+[Forget semantics](PRIVACY.md#what-forget-deletes). This is retained data, not an
+ephemeral cache; changing configuration does not erase it.
 
 ## `vocabulary`
 
@@ -229,25 +243,26 @@ A fixed 1.6× gain before square-root scaling makes quiet speech more visible
 without changing the silence floor. Each side attacks quickly and releases more
 slowly to silence; neighboring columns are never blended.
 
-Transcription uses a broad flowing ripple; finishing, finalizing and delivery
-use slower centered breathing. Both indicate indeterminate activity, not a timer
-or completion estimate. Phase changes crossfade from the last presented frame.
-Only measured chunk reports advance the center-row progress fill.
+Transcription and finishing/cleanup use distinct pixel activity patterns. They
+indicate indeterminate work, not a timer or completion estimate. Phase changes
+transition from the last presented frame. Only measured multi-chunk reports
+advance the center-row progress fill. A settled completion mark acknowledges
+the delivery mechanism, not receipt by the destination application.
 
 `reduced_motion = true` or `false` overrides the desktop preference; omit it to
 follow the desktop. Reduced motion freezes indeterminate activity and presents
 measurements directly. Stale or disconnected status stops live animation and
 shows unknown, not Ready. The HUD never takes focus or accepts pointer input.
 HUD, Actions, and Settings use the active Omarchy palette when available.
-See [ADR 0021](adr/0021-signed-pixel-waveform.md) for the rendering contract.
+See [ADR 0021](https://github.com/misty-step/cantrip/blob/master/docs/adr/0021-signed-pixel-waveform.md)
+for the rendering contract.
 
 ## Opt-in telemetry (`[telemetry]`)
 
-Cantrip can export one Langfuse trace per dictation for latency and quality
-analysis. The repo rule has no exception here: traces carry character counts,
-durations, model names, backend names, and error classifications only — never
-transcript text, never audio. Tracing is off by default and adds no network
-traffic until you enable it.
+Telemetry is off by default. Opting in can export one Langfuse trace per
+dictation for operational analysis. It carries metadata, never audio or
+transcript text; see the [privacy boundary](PRIVACY.md#logs-credentials-and-telemetry).
+Enabling it is a separate network choice from local/cloud STT and cleanup.
 
 ```toml
 [telemetry]
@@ -257,14 +272,13 @@ public_key = "pk-lf-..."            # project public key (not a secret)
 api_key_id = "langfuse"             # keyring entry holding the secret key
 ```
 
-Store the secret key with `cantrip key set langfuse` (paste the `sk-lf-...`
-value when prompted). Keys never live in files or git. When enabled, the
-daemon exports from a background thread after each job settles; a full queue
-or an export failure only logs a warning and never affects dictation.
-`cantrip doctor` reports the telemetry state honestly, including whether the
-keyring entry is present.
+Store the secret key with `"$HOME/.local/bin/cantrip" key set langfuse` when
+prompted. The public key is a project identifier; only the secret key belongs
+in the OS keyring, never files or git. Export failures and full queues warn
+without affecting dictation. Read the telemetry findings in `doctor`; a
+configured exporter is not proof of a successful remote export.
 
 The same `[telemetry]` block gates `eval`'s optional Langfuse dataset and
 score publishing (`cargo run --example eval -- langfuse`); that path uses the
 eval harness's own public corpus and never operator dictation. See
-`docs/EVALUATION.md`.
+the [evaluation guide](https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md).

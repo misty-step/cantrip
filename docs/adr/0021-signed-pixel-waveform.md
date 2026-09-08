@@ -46,11 +46,29 @@ compositor frame-callback pacing, responsive input polling and unchanged-frame
 render caching. Temporal smoothing never blends neighboring buckets or adds
 random audio.
 
-Transcription uses a broad flowing ripple. Finishing, finalizing and delivery use
-slower centered breathing. These are explicitly indeterminate activity, not
-completion estimates. Crossfade phase changes from the last presented frame.
-Determinate center-row fill advances only from measured chunk reports, never
-elapsed time.
+Transcription uses two broad, counter-moving lobes with quiet edges, on 2.6 s and
+3.9 s cycles. Finishing, finalizing and delivery instead use equal-height groups
+of pixels, brightening in mirrored pairs toward the center on a repeating 1.8 s
+cycle. The groups never accumulate or grow a filled region. These are explicitly
+indeterminate activity, not completion estimates. Interpolate phase changes from
+the last presented frame over 280 ms. Determinate center-row fill advances only
+from measured chunk reports, never elapsed time; entering finishing removes it.
+
+A complete typed, pasted or copied result resolves into a centered pixel check,
+using the same column cells and interpolation rather than a separate icon layer.
+Signed column bounds let a stroke sit above or below the center row; the rest of
+the track disappears. A routine typed or pasted acknowledgement gets its full
+700 ms settled hold **after** the 280 ms transition, then a 140 ms fade. Reduced
+motion shows the settled mark immediately, holds it for 700 ms and cuts to idle.
+Copied and cleanup-failure feedback retain their explicit captions and four-second
+notice window; partial, uncertain and deferred delivery never receive a success
+mark. A helper acknowledgement is not proof that the target application received
+the text.
+
+This is presentation time only: there is no minimum processing-stage dwell and
+no delay to output. New recording interrupts a transition, settled hold or fade
+immediately. Repeated status snapshots cannot renew a result; cached successes
+on attach or daemon restart are still not replayed.
 
 Routine stages remain wordless by default: no delayed reveal, long-recording
 label or caption latch. Explicit `hud.labels = true` enables continuous
@@ -58,10 +76,18 @@ accessibility text. Keep labels for actionable exceptions, including unavailable
 input, cancellation, failed or partial outcomes, uncertain or deferred delivery,
 and manual-paste feedback.
 
-Reduced motion freezes indeterminate activity and presents measured data directly.
-Stale or disconnected status freezes or replaces activity rather than implying
-live work or Ready. Preserve the palette, typography, footprint and noninteractive
-desktop surface.
+Reduced motion presents a static transcription silhouette and evenly lit finishing
+groups, and presents measured data directly. Stale or disconnected status freezes
+or replaces activity rather than implying live work or Ready. Preserve the palette,
+typography, footprint and noninteractive desktop surface.
+
+The 2026-09-08 presentation refinement replaces the original single transcription
+ripple, centered finishing breath and successful flat-baseline collapse. The breath
+gave cleanup the same waveform vocabulary as transcription, while the old 700 ms
+result window included its 280 ms transition and left little time at rest. Distinct
+ordered groups and a settled check make the post-recording phases legible without
+adding default words, guessed progress or another delivery state. Listening PCM,
+signed sample scaling, interpolation and attack/release remain unchanged.
 
 ## Alternatives
 
