@@ -59,13 +59,26 @@ def github(path, *, missing=False):
 
 
 def release_by_tag(tag):
-    # The tag endpoint omits drafts. List with push credentials so interrupted
-    # uploads can resume without creating a second release or replacing assets.
-    releases = json.loads(run("gh", "api", "--paginate", f"repos/{REPOSITORY}/releases?per_page=100").stdout or "[]")
-    matches = [item for item in releases if item.get("tag_name") == tag]
-    if len(matches) > 1:
-        raise ReleaseError(f"multiple GitHub releases use tag {tag}")
-    return matches[0] if matches else None
+    # `releases/tags/{tag}` omits drafts. `gh release view` returns the draft
+    # the workflow just created so interrupted uploads can resume.
+    result = run(
+        "gh", "release", "view", tag, "--repo", REPOSITORY,
+        "--json", "tagName,isDraft,targetCommitish,assets,url,publishedAt",
+        check=False,
+    )
+    if result.returncode:
+        if "release not found" in result.stderr.lower() or "HTTP 404" in result.stderr:
+            return None
+        raise ReleaseError(f"GitHub lookup failed: {result.stderr.strip()}")
+    data = json.loads(result.stdout)
+    return {
+        "tag_name": data["tagName"],
+        "draft": data["isDraft"],
+        "target_commitish": data.get("targetCommitish") or "",
+        "assets": data.get("assets") or [],
+        "html_url": data.get("url") or "",
+        "published_at": data.get("publishedAt"),
+    }
 
 
 def commit_sha(value):
