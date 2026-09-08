@@ -406,8 +406,11 @@ def publish(directory):
         if not existing["draft"]:
             raise ReleaseError("release is already public; published assets are immutable")
         if commit_sha(existing["target_commitish"]) != revision:
-            raise ReleaseError("existing draft targets another source revision; nothing was replaced")
-    else:
+            # Unpublished drafts from earlier attempts of this version may be
+            # discarded; public releases are never deleted.
+            run("gh", "release", "delete", tag, "--repo", REPOSITORY, "--yes", "--cleanup-tag")
+            existing = None
+    if not existing:
         tag_ref = github(f"git/ref/tags/{tag}", missing=True)
         if tag_ref:
             raise ReleaseError("tag already exists without this release draft; reconcile its owner before publication")
