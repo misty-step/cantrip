@@ -47,6 +47,13 @@ enum CliCommand {
         #[arg(long, value_enum, requires = "screenshot")]
         state: Option<hud::ScreenshotState>,
     },
+    /// Review production HUD states and transitions without running dictation.
+    #[command(hide = true)]
+    HudGallery {
+        /// Capture the actual gallery window to PNG, then exit.
+        #[arg(long, value_name = "PATH")]
+        screenshot: Option<PathBuf>,
+    },
     /// Open the configuration window.
     Settings {
         /// Render one frame to a PNG at PATH, then exit (visual testing).
@@ -265,6 +272,7 @@ fn run(cli: Cli) -> Result<()> {
             daemon::run(config, preload)
         }
         CliCommand::Hud { screenshot, state } => hud::run(screenshot, state),
+        CliCommand::HudGallery { screenshot } => hud::gallery::run(screenshot),
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
         CliCommand::Toggle { postproc } => send_command(Command::Toggle {

@@ -246,7 +246,7 @@ slowly to silence; neighboring columns are never blended.
 Transcription and finishing/cleanup use distinct pixel activity patterns. They
 indicate indeterminate work, not a timer or completion estimate. Phase changes
 transition from the last presented frame. Only measured multi-chunk reports
-advance the center-row progress fill. A settled completion mark acknowledges
+advance the progress fill. Settled completion feedback acknowledges
 the delivery mechanism, not receipt by the destination application.
 
 `reduced_motion = true` or `false` overrides the desktop preference; omit it to

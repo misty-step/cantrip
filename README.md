@@ -199,6 +199,29 @@ do not contact providers.
 - **Architecture decisions:** [`docs/adr/`](docs/adr/). Operational log tags:
   `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 
+### Review the native HUD
+
+Open the local developer gallery without starting dictation:
+
+```sh
+cargo run --locked -- hud-gallery
+cargo run --locked -- hud-gallery --screenshot /tmp/cantrip-hud-gallery.png
+```
+
+The gallery uses fixture status events with the production HUD state machine,
+pixel renderer, font, and palette—not a browser imitation. Browse the full state
+catalog or replay transition journeys; pause, scrub, step frames, and zoom to
+inspect the pixels. Labels and reduced-motion controls affect only the gallery.
+It does not start the daemon, capture audio, run speech models, make provider
+requests, or read recording history or credentials.
+Fixture stage durations are illustrative, not an STT latency benchmark; native
+transition, acknowledgement-hold and fade timing come from the production code.
+
+`hud-gallery` is intentionally hidden from ordinary CLI help. It is a local
+native window, not a public website route or a separate development server.
+The existing `hud --screenshot PATH --state NAME` command still captures the
+actual layer-shell surface for compositor-specific verification.
+
 ## Work and documentation ownership
 
 Work starts from the user's current request, checked against live code and

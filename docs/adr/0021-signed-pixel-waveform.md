@@ -46,23 +46,27 @@ compositor frame-callback pacing, responsive input polling and unchanged-frame
 render caching. Temporal smoothing never blends neighboring buckets or adds
 random audio.
 
-Transcription uses two broad, counter-moving lobes with quiet edges, on 2.6 s and
-3.9 s cycles. Finishing, finalizing and delivery instead use equal-height groups
-of pixels, brightening in mirrored pairs toward the center on a repeating 1.8 s
-cycle. The groups never accumulate or grow a filled region. These are explicitly
-indeterminate activity, not completion estimates. Interpolate phase changes from
-the last presented frame over 280 ms. Determinate center-row fill advances only
-from measured chunk reports, never elapsed time; entering finishing removes it.
+Multi-chunk transcription fills the full seven-row pixel grid from left to right,
+using only the reported completed-chunk fraction. Filled cells may shimmer, but
+the bright/dim boundary cannot creep ahead of the measured target. Phase and
+reported-progress changes interpolate from the last presented frame over 280 ms.
+Single-chunk or unknown progress uses a short, repeating left-to-right pixel
+packet, never an accumulating percentage. Existing approximately 30-second STT
+chunk boundaries remain unchanged; do not split speech merely to animate the HUD.
 
-A complete typed, pasted or copied result settles into a full-width band of three
-pixel rows in the current accent color. The bright, steady band stays within the
-waveform's geometry, without an icon, a new color or a progress animation. A
-routine typed or pasted acknowledgement gets its full 700 ms settled hold
-**after** the 280 ms transition, then a 140 ms fade. Reduced motion shows the
-settled band immediately, holds it for 700 ms and cuts to idle.
+Finishing, finalizing and delivery light every cell with independent, smoothly
+varying brightness. Deterministic per-cell noise gives cleanup its processing
+texture without synchronized flashing, gaps, or a filled-region estimate.
+Each cell remains active; reduced motion holds a static grid.
+
+A complete typed, pasted or copied result settles into the entire seven-row grid
+at full brightness in the current accent color. There is no icon or new success
+color. A routine typed or pasted acknowledgement gets its full 1200 ms settled
+hold **after** the 280 ms transition, then a 140 ms fade. Reduced motion shows the
+settled grid immediately, holds it for 1200 ms and cuts to idle.
 Copied and cleanup-failure feedback retain their explicit captions and four-second
 notice window; partial, uncertain and deferred delivery never receive the resolved
-band. A helper acknowledgement is not proof that the target application received
+grid. A helper acknowledgement is not proof that the target application received
 the text.
 
 This is presentation time only: there is no minimum processing-stage dwell and
@@ -76,20 +80,34 @@ accessibility text. Keep labels for actionable exceptions, including unavailable
 input, cancellation, failed or partial outcomes, uncertain or deferred delivery,
 and manual-paste feedback.
 
-Reduced motion presents a static transcription silhouette and evenly lit finishing
-groups, and presents measured data directly. Stale or disconnected status freezes
-or replaces activity rather than implying live work or Ready. Preserve the palette,
+Reduced motion presents measured waveform and progress data directly and freezes
+indeterminate pixel activity. Stale or disconnected status freezes or replaces
+activity rather than implying live work or Ready. Preserve the palette,
 typography, footprint and noninteractive desktop surface.
 
-The 2026-09-08 presentation refinement replaces the original single transcription
-ripple, centered finishing breath and successful flat-baseline collapse. The breath
-gave cleanup the same waveform vocabulary as transcription, while the old 700 ms
-result window included its 280 ms transition and left little time at rest. Distinct
-ordered groups and a settled accent band make the post-recording phases legible without
-adding default words, guessed progress or another delivery state. Listening PCM,
-signed sample scaling, interpolation and attack/release remain unchanged.
-The operator rejected the initial pixel checkmark; completion now uses the same
-track and palette rather than introducing a separate success symbol.
+The 2026-09-08 operator reviews replaced the initial counter-moving transcription
+lobes, grouped cleanup packets and success checkmark. The measured progress front
+now owns transcription's geometry; independent brightness across the full grid
+distinguishes cleanup from the steady full-brightness acknowledgement. The hold
+excludes settling and fading so completion has a visible moment at rest.
+Listening PCM, signed sample scaling, interpolation and attack/release remain
+unchanged.
+
+### Local state review
+
+`cantrip hud-gallery` is an offline native review window using the already-present
+egui toolkit. Fixture status events drive the same HUD model, temporal
+interpolation, layout, pixel painter and premultiplied frame fade as the passive
+Wayland surface. The gallery displays that native pixel buffer as a texture; it
+does not reimplement the visual states as egui widgets or web animations.
+
+Keep the state catalog tied to the production screenshot scenarios. Replay and
+seeking rebuild the same fixture history through the model, including presented
+frames, so a transition can be inspected without microphone input or real
+transcription. Playback, zoom, labels and reduced motion are local controls,
+never saved configuration. The gallery does not contact the daemon, providers or
+keyring, and does not inspect recordings. It remains separate from the public
+website and needs no server, Storybook stack or second application runtime.
 
 ## Alternatives
 

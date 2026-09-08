@@ -50,6 +50,8 @@ use crate::{
     theme::{self, Palette},
 };
 
+pub mod gallery;
+
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const PREFERENCE_INTERVAL: Duration = Duration::from_secs(2);
@@ -62,8 +64,8 @@ const STATUS_STALE_AFTER: Duration = Duration::from_secs(2);
 const WAVEFORM_EASE: Duration = POLL_INTERVAL;
 const WAVEFORM_RELEASE: Duration = Duration::from_millis(420);
 const SETTLE: Duration = Duration::from_millis(280);
-// Full-opacity dwell after the completion band has finished settling.
-const SUCCESS_HOLD: Duration = Duration::from_millis(700);
+// Full-opacity dwell after the completion grid has finished settling.
+const SUCCESS_HOLD: Duration = Duration::from_millis(1200);
 const RESULT_FADE: Duration = Duration::from_millis(140);
 const NOTICE_HOLD: Duration = Duration::from_secs(4);
 const INTERACTION_HOLD: Duration = Duration::from_secs(2);
@@ -72,9 +74,11 @@ const SURFACE_HEIGHT: u32 = 56;
 const CONTAINER_WIDTH: f32 = 336.0;
 const TRACK_HEIGHT: f32 = 44.0;
 const CELLS: usize = AUDIO_WAVEFORM_BINS;
+const ROWS: usize = 7;
 const CELL_SIZE: f32 = 3.0;
 const CELL_PITCH: f32 = 5.0;
 const TRACK_WIDTH: f32 = CELLS as f32 * CELL_PITCH;
+const GRID_HEIGHT: f32 = (ROWS - 1) as f32 * CELL_PITCH + CELL_SIZE;
 // Public samples/jfk.wav at 9.0 s: the newest 100 ms of chronological PCM pairs.
 const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-1326, 1927],
@@ -674,9 +678,7 @@ impl Model {
                     progress,
                     self.reduced_motion,
                 ),
-                Some(Kind::Resolved) => {
-                    [TrackColumn::centered(2.0 * CELL_PITCH + CELL_SIZE); CELLS]
-                }
+                Some(Kind::Resolved) => [TrackColumn::centered(GRID_HEIGHT); CELLS],
                 Some(Kind::Attention) => [TrackColumn::centered(3.0).with_opacity(0.55); CELLS],
                 _ => [TrackColumn::centered(3.0).with_opacity(0.35); CELLS],
             };
@@ -722,6 +724,35 @@ impl Model {
             .as_ref()
             .and_then(|r| r.visibility.alpha(now, self.reduced_motion))
             .unwrap_or(1.0)
+    }
+
+    fn render_key(
+        &self,
+        frame: &TrackFrame,
+        size: (u32, u32, u32),
+        palette: Palette,
+        alpha: f32,
+    ) -> RenderKey {
+        RenderKey {
+            kind: self.kind,
+            caption_revision: self.caption_revision,
+            interaction_event: self.interaction.as_ref().and(self.notice_event),
+            heights: std::array::from_fn(|index| {
+                let column = &frame[index];
+                [
+                    (column.upper * 16.0).round() as u16,
+                    (column.lower * 16.0).round() as u16,
+                ]
+            }),
+            opacities: std::array::from_fn(|index| {
+                frame[index]
+                    .opacities
+                    .map(|opacity| (opacity * 255.0).round() as u8)
+            }),
+            alpha: (alpha * 255.0).round() as u8,
+            size,
+            palette,
+        }
     }
 
     fn animate(&self, now: Instant) -> bool {
@@ -897,8 +928,7 @@ struct TrackColumn {
     // Nonnegative extents above and below the center row.
     upper: f32,
     lower: f32,
-    opacity: f32,
-    center_opacity: f32,
+    opacities: [f32; ROWS],
 }
 
 impl TrackColumn {
@@ -906,14 +936,12 @@ impl TrackColumn {
         Self {
             upper: height / 2.0,
             lower: height / 2.0,
-            opacity: 1.0,
-            center_opacity: 1.0,
+            opacities: [1.0; ROWS],
         }
     }
 
     const fn with_opacity(mut self, opacity: f32) -> Self {
-        self.opacity = opacity;
-        self.center_opacity = opacity;
+        self.opacities = [opacity; ROWS];
         self
     }
 
@@ -921,9 +949,9 @@ impl TrackColumn {
         Self {
             upper: self.upper + (to.upper - self.upper) * amount,
             lower: self.lower + (to.lower - self.lower) * amount,
-            opacity: self.opacity + (to.opacity - self.opacity) * amount,
-            center_opacity: self.center_opacity
-                + (to.center_opacity - self.center_opacity) * amount,
+            opacities: std::array::from_fn(|row| {
+                self.opacities[row] + (to.opacities[row] - self.opacities[row]) * amount
+            }),
         }
     }
 }
@@ -1005,12 +1033,13 @@ impl TrackMotion {
             return std::array::from_fn(|index| TrackColumn {
                 upper: damp(self.from[index].upper, to[index].upper, 0.01),
                 lower: damp(self.from[index].lower, to[index].lower, 0.01),
-                opacity: damp(self.from[index].opacity, to[index].opacity, 1.0 / 255.0),
-                center_opacity: damp(
-                    self.from[index].center_opacity,
-                    to[index].center_opacity,
-                    1.0 / 255.0,
-                ),
+                opacities: std::array::from_fn(|row| {
+                    damp(
+                        self.from[index].opacities[row],
+                        to[index].opacities[row],
+                        1.0 / 255.0,
+                    )
+                }),
             });
         }
         if elapsed >= self.duration {
@@ -1047,8 +1076,7 @@ fn recording_frame(waveform: Option<AudioWaveform>) -> TrackFrame {
             TrackColumn {
                 upper,
                 lower,
-                opacity,
-                center_opacity: opacity,
+                opacities: [opacity; ROWS],
             }
         })
 }
@@ -1059,43 +1087,77 @@ fn activity_frame(
     progress: Option<(u32, u32)>,
     reduced: bool,
 ) -> TrackFrame {
-    let seconds = if reduced { 0.0 } else { age.as_secs_f32() };
-    let phase = seconds * std::f32::consts::TAU;
-    if kind == Kind::Finishing {
-        // Equal-height packets gather in mirrored pairs, then repeat. Nothing
-        // accumulates or sweeps across a determinate center row.
-        let mut frame = [TrackColumn::centered(13.0).with_opacity(0.0); CELLS];
-        let midpoint = (CELLS / 6 - 1) as f32 / 2.0;
-        for (group, columns) in frame.as_chunks_mut::<6>().0.iter_mut().enumerate() {
-            let distance = (group as f32 - midpoint).abs() / midpoint;
-            let pulse = if reduced {
-                0.5
-            } else {
-                let wave = (1.0 + (phase / 1.8 + distance * std::f32::consts::PI).cos()) / 2.0;
-                wave * wave * wave
-            };
-            columns[1..5].fill(TrackColumn::centered(13.0).with_opacity(0.22 + 0.7 * pulse));
+    const NOISE_NANOS: u128 = 900_000_000;
+    const PACKET_NANOS: u128 = 2_400_000_000;
+    const PACKET_RADIUS: f32 = 4.0;
+    const PENDING_OPACITY: f32 = 0.16;
+
+    let age = if reduced { Duration::ZERO } else { age };
+    let tick = (age.as_nanos() / NOISE_NANOS) as u32;
+    let fraction = (age.as_nanos() % NOISE_NANOS) as f32 / NOISE_NANOS as f32;
+    let blend = fraction * fraction * (3.0 - 2.0 * fraction);
+    let noise = |cell| {
+        if reduced {
+            return 0.5;
         }
-        return frame;
-    }
+        let from = pixel_noise(cell, tick);
+        let to = pixel_noise(cell, tick.wrapping_add(1));
+        from + (to - from) * blend
+    };
     let filled = progress.map(completed_cells);
-    std::array::from_fn(|index| {
-        let position = index as f32 / (CELLS - 1) as f32;
-        // Broad counter-moving lobes have a phrase-like rhythm and quiet edges,
-        // rather than one bright cursor that could imply a completion front.
-        let envelope = (std::f32::consts::PI * position).sin().powi(2);
-        let forward = (1.0 + (std::f32::consts::TAU * position - phase / 2.6).cos()) / 2.0;
-        let returning = (1.0 + (std::f32::consts::TAU * position + phase / 3.9).cos()) / 2.0;
-        let energy = (0.2 + 0.8 * envelope) * (0.65 * forward + 0.35 * returning);
-        let mut column =
-            TrackColumn::centered(5.0 + 20.0 * energy).with_opacity(0.3 + 0.65 * energy);
-        if let Some(filled) = filled {
-            // The center row is the only determinate channel. Activity above and
-            // below it remains free to flow without advancing the measured fill.
-            column.center_opacity = if index < filled { 1.0 } else { 0.16 };
+    let packet_center = if kind == Kind::Working && filled.is_none() {
+        if reduced {
+            (CELLS - 1) as f32 / 2.0
+        } else {
+            (age.as_nanos() % PACKET_NANOS) as f32 / PACKET_NANOS as f32
+                * (CELLS as f32 + 2.0 * PACKET_RADIUS)
+                - PACKET_RADIUS
         }
-        column
+    } else {
+        0.0
+    };
+    std::array::from_fn(|column| {
+        let opacities = if kind == Kind::Finishing {
+            // Every cell stays active; independent value noise gently
+            // pulses without column grouping or a travelling wave.
+            std::array::from_fn(|row| 0.48 + 0.44 * noise(column * ROWS + row))
+        } else if let Some(filled) = filled {
+            // Only a reported chunk count changes this full-height
+            // boundary. Time may shimmer behind it, never ahead of it.
+            if column < filled {
+                std::array::from_fn(|row| 0.64 + 0.32 * noise(column * ROWS + row))
+            } else {
+                [PENDING_OPACITY; ROWS]
+            }
+        } else {
+            let packet =
+                (1.0 - (column as f32 - packet_center).abs() / PACKET_RADIUS).clamp(0.0, 1.0);
+            let packet = packet * packet * (3.0 - 2.0 * packet);
+            if packet > 0.0 {
+                // A bounded packet leaves no completed trail and resets
+                // outside the grid, where both ends are already dim.
+                std::array::from_fn(|row| {
+                    PENDING_OPACITY + packet * (0.48 + 0.2 * noise(column * ROWS + row))
+                })
+            } else {
+                [PENDING_OPACITY; ROWS]
+            }
+        };
+        TrackColumn {
+            opacities,
+            ..TrackColumn::centered(GRID_HEIGHT)
+        }
     })
+}
+
+fn pixel_noise(cell: usize, tick: u32) -> f32 {
+    let mut value = (cell as u32).wrapping_mul(0x9e37_79b9) ^ tick.wrapping_mul(0x85eb_ca6b);
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^= value >> 16;
+    (value >> 8) as f32 / 0x00ff_ffff as f32
 }
 
 fn completed_cells(progress: (u32, u32)) -> usize {
@@ -1437,7 +1499,7 @@ struct RenderKey {
     caption_revision: u64,
     interaction_event: Option<u64>,
     heights: [[u16; 2]; CELLS],
-    opacities: [[u8; 2]; CELLS],
+    opacities: [[u8; ROWS]; CELLS],
     alpha: u8,
     size: (u32, u32, u32),
     palette: Palette,
@@ -1503,20 +1565,7 @@ impl HudState {
         let shown = self.model.kind.is_some();
         let logical_width = self.available_width().max(80);
         let container_width = CONTAINER_WIDTH.min(self.width.min(logical_width) as f32 - 12.0);
-        let text_width = (container_width - 32.0).max(16.0);
-        let interaction = self
-            .model
-            .interaction
-            .as_ref()
-            .map(|(text, _)| text.as_str());
-        let primary_height = caption_height(&self.font, &self.model.caption, None, text_width);
-        let feedback_height = if interaction.is_some() {
-            caption_height(&self.font, &self.model.caption, interaction, text_width)
-                .saturating_sub(primary_height)
-        } else {
-            0
-        };
-        let target_height = SURFACE_HEIGHT + primary_height + feedback_height;
+        let target_height = layout_height(&self.model, &self.font, container_width);
         let desired = (logical_width, target_height);
         if self.requested_size != desired {
             self.requested_size = desired;
@@ -1532,26 +1581,12 @@ impl HudState {
         } else {
             self.model.alpha(now)
         };
-        let key = RenderKey {
-            kind: self.model.kind,
-            caption_revision: self.model.caption_revision,
-            interaction_event: self.model.interaction.as_ref().and(self.model.notice_event),
-            heights: heights.map(|column| {
-                [
-                    (column.upper * 16.0).round() as u16,
-                    (column.lower * 16.0).round() as u16,
-                ]
-            }),
-            opacities: heights.map(|column| {
-                [
-                    (column.opacity * 255.0).round() as u8,
-                    (column.center_opacity * 255.0).round() as u8,
-                ]
-            }),
-            alpha: (alpha * 255.0).round() as u8,
-            size: (self.width, self.height, self.buffer_scale),
-            palette: self.palette,
-        };
+        let key = self.model.render_key(
+            &heights,
+            (self.width, self.height, self.buffer_scale),
+            self.palette,
+            alpha,
+        );
         if self.last_render.as_ref() == Some(&key)
             && shown == self.visible
             && self.screenshot.is_none()
@@ -1576,121 +1611,21 @@ impl HudState {
                 wl_shm::Format::Argb8888,
             )
             .context("creating HUD frame")?;
-        bytes.fill(0);
-        if let Some(kind) = self.model.kind {
-            let mut canvas = Canvas {
-                bytes: &mut *bytes,
-                width,
-                height,
-                scale: self.buffer_scale as f32,
-                alpha: 1.0,
-            };
-            let left = (self.width as f32 - container_width) / 2.0;
-            let top = 6.0;
-            let body_height = self.height as f32 - 12.0;
-            canvas.rect(
-                left,
-                top,
-                container_width,
-                body_height,
-                self.palette.border,
-                1.0,
-            );
-            canvas.rect(
-                left + 1.0,
-                top + 1.0,
-                container_width - 2.0,
-                body_height - 2.0,
-                self.palette.surface,
-                1.0,
-            );
-            if kind == Kind::Attention {
-                canvas.rect(left, top, 2.0, body_height, self.palette.attention, 1.0);
-            }
-            let rgb = match kind {
-                Kind::Recording | Kind::Working | Kind::Finishing | Kind::Resolved => {
-                    self.palette.accent
-                }
-                Kind::Attention => self.palette.attention,
-                Kind::Neutral => self.palette.foreground,
-            };
-            let track_width = TRACK_WIDTH.min(container_width - 32.0);
-            let slot_width = track_width / CELLS as f32;
-            let cell_width = slot_width * CELL_SIZE / CELL_PITCH;
-            let track_left = (self.width as f32 - track_width) / 2.0;
-            for (index, column) in heights.iter().copied().enumerate() {
-                canvas.pixel_column(
-                    track_left + index as f32 * slot_width + (slot_width - cell_width) / 2.0,
-                    top + TRACK_HEIGHT / 2.0,
-                    cell_width,
-                    column,
-                    rgb,
-                );
-            }
-            let mut y = top + TRACK_HEIGHT;
-            y += canvas.text(
-                &self.font,
-                &self.model.caption.title,
-                left + 16.0,
-                y,
-                text_width,
-                12.0,
-                3,
-                self.palette.foreground,
-            );
-            if !self.model.caption.detail.is_empty() {
-                y += 3.0;
-                y += canvas.text(
-                    &self.font,
-                    &self.model.caption.detail,
-                    left + 16.0,
-                    y,
-                    text_width,
-                    11.0,
-                    3,
-                    self.palette.foreground,
-                );
-            }
-            if !self.model.caption.action.is_empty() {
-                y += 7.0;
-                y += canvas.text(
-                    &self.font,
-                    &self.model.caption.action,
-                    left + 16.0,
-                    y,
-                    text_width,
-                    10.0,
-                    4,
-                    if kind == Kind::Attention {
-                        self.palette.attention
-                    } else {
-                        self.palette.foreground
-                    },
-                );
-            }
-            if let Some(interaction) = interaction {
-                y += 7.0;
-                canvas.rect(left + 16.0, y, text_width, 1.0, self.palette.border, 1.0);
-                y += 6.0;
-                canvas.text(
-                    &self.font,
-                    interaction,
-                    left + 16.0,
-                    y,
-                    text_width,
-                    11.0,
-                    2,
-                    self.palette.foreground,
-                );
-            }
-        }
-        // Fade the composed premultiplied frame once, not each overlapping
-        // primitive; the resting surface is always fully opaque.
-        if alpha < 1.0 {
-            for byte in bytes.iter_mut() {
-                *byte = (f32::from(*byte) * alpha).round() as u8;
-            }
-        }
+        let mut canvas = Canvas {
+            bytes: &mut *bytes,
+            width,
+            height,
+            scale: self.buffer_scale as f32,
+            alpha: 1.0,
+        };
+        canvas.paint_hud(
+            &self.model,
+            &self.font,
+            self.palette,
+            &heights,
+            container_width,
+        );
+        canvas.fade(alpha);
         let _ = layer.set_buffer_scale(self.buffer_scale);
         layer
             .wl_surface()
@@ -1889,6 +1824,121 @@ struct Canvas<'a> {
 }
 
 impl Canvas<'_> {
+    fn paint_hud(
+        &mut self,
+        model: &Model,
+        font: &FontRef<'_>,
+        palette: Palette,
+        frame: &TrackFrame,
+        container_width: f32,
+    ) {
+        self.bytes.fill(0);
+        let Some(kind) = model.kind else {
+            return;
+        };
+        let logical_width = self.width as f32 / self.scale;
+        let left = (logical_width - container_width) / 2.0;
+        let top = 6.0;
+        let body_height = self.height as f32 / self.scale - 12.0;
+        self.rect(left, top, container_width, body_height, palette.border, 1.0);
+        self.rect(
+            left + 1.0,
+            top + 1.0,
+            container_width - 2.0,
+            body_height - 2.0,
+            palette.surface,
+            1.0,
+        );
+        if kind == Kind::Attention {
+            self.rect(left, top, 2.0, body_height, palette.attention, 1.0);
+        }
+        let rgb = match kind {
+            Kind::Recording | Kind::Working | Kind::Finishing | Kind::Resolved => palette.accent,
+            Kind::Attention => palette.attention,
+            Kind::Neutral => palette.foreground,
+        };
+        let track_width = TRACK_WIDTH.min(container_width - 32.0);
+        let slot_width = track_width / CELLS as f32;
+        let cell_width = slot_width * CELL_SIZE / CELL_PITCH;
+        let track_left = (logical_width - track_width) / 2.0;
+        for (index, column) in frame.iter().copied().enumerate() {
+            self.pixel_column(
+                track_left + index as f32 * slot_width + (slot_width - cell_width) / 2.0,
+                top + TRACK_HEIGHT / 2.0,
+                cell_width,
+                column,
+                rgb,
+            );
+        }
+        let text_width = (container_width - 32.0).max(16.0);
+        let mut y = top + TRACK_HEIGHT;
+        y += self.text(
+            font,
+            &model.caption.title,
+            left + 16.0,
+            y,
+            text_width,
+            12.0,
+            3,
+            palette.foreground,
+        );
+        if !model.caption.detail.is_empty() {
+            y += 3.0;
+            y += self.text(
+                font,
+                &model.caption.detail,
+                left + 16.0,
+                y,
+                text_width,
+                11.0,
+                3,
+                palette.foreground,
+            );
+        }
+        if !model.caption.action.is_empty() {
+            y += 7.0;
+            y += self.text(
+                font,
+                &model.caption.action,
+                left + 16.0,
+                y,
+                text_width,
+                10.0,
+                4,
+                if kind == Kind::Attention {
+                    palette.attention
+                } else {
+                    palette.foreground
+                },
+            );
+        }
+        if let Some((interaction, _)) = &model.interaction {
+            y += 7.0;
+            self.rect(left + 16.0, y, text_width, 1.0, palette.border, 1.0);
+            y += 6.0;
+            self.text(
+                font,
+                interaction,
+                left + 16.0,
+                y,
+                text_width,
+                11.0,
+                2,
+                palette.foreground,
+            );
+        }
+    }
+
+    fn fade(&mut self, alpha: f32) {
+        // Fade the composed premultiplied frame once, not each overlapping
+        // primitive; the resting surface is always fully opaque.
+        if alpha < 1.0 {
+            for byte in self.bytes.iter_mut() {
+                *byte = (f32::from(*byte) * alpha).round() as u8;
+            }
+        }
+    }
+
     fn pixel(&mut self, x: u32, y: u32, rgb: [u8; 3], coverage: f32) {
         if x >= self.width || y >= self.height {
             return;
@@ -1939,7 +1989,7 @@ impl Canvas<'_> {
         let top = center - column.upper;
         let bottom = center + column.lower;
         if bottom - top < CELL_SIZE {
-            let alpha = column.center_opacity;
+            let alpha = column.opacities[ROWS / 2];
             // Blend the 2 px quiet sliver into the center cell; rounding a
             // growing rectangle would switch an entire physical row on at once.
             let row_top = center - CELL_SIZE / 2.0;
@@ -1967,17 +2017,13 @@ impl Canvas<'_> {
             );
             return;
         }
-        for row in -3..=3 {
-            let row_top = center + row as f32 * CELL_PITCH - CELL_SIZE / 2.0;
+        for (row, alpha) in column.opacities.into_iter().enumerate() {
+            let offset = row as i32 - (ROWS / 2) as i32;
+            let row_top = center + offset as f32 * CELL_PITCH - CELL_SIZE / 2.0;
             let coverage = ((row_top + CELL_SIZE).min(bottom) - row_top.max(top))
                 .clamp(0.0, CELL_SIZE)
                 / CELL_SIZE;
             // The fixed pixel fades as an edge crosses it; its geometry never snaps on/off.
-            let alpha = if row == 0 {
-                column.center_opacity
-            } else {
-                column.opacity
-            };
             self.aligned_rect(x, row_top, width, CELL_SIZE, rgb, alpha * coverage);
         }
     }
@@ -2057,6 +2103,12 @@ fn wrap_line(text: &str, max_chars: usize) -> (&str, &str) {
         }
     }
     (text, "")
+}
+
+fn layout_height(model: &Model, font: &FontRef<'_>, container_width: f32) -> u32 {
+    let text_width = (container_width - 32.0).max(16.0);
+    let interaction = model.interaction.as_ref().map(|(text, _)| text.as_str());
+    SURFACE_HEIGHT + caption_height(font, &model.caption, interaction, text_width)
 }
 
 fn caption_height(
@@ -2497,6 +2549,14 @@ mod tests {
         bytes
     }
 
+    fn raster_rows(column: TrackColumn) -> [u8; ROWS] {
+        let bytes = raster_column(column, 1);
+        std::array::from_fn(|row| {
+            let y = 22 + (row as i32 - (ROWS / 2) as i32) * CELL_PITCH as i32;
+            bytes[(y as usize * 8 + 3) * 4 + 3]
+        })
+    }
+
     #[test]
     fn signed_columns_preserve_polarity_without_touching_neighbors() {
         let mut waveform = [[0; 2]; AUDIO_WAVEFORM_BINS];
@@ -2696,10 +2756,14 @@ mod tests {
         for ((from, mid), to) in shown.into_iter().zip(settling).zip(destination) {
             assert!(mid.upper >= from.upper.min(to.upper) && mid.upper <= from.upper.max(to.upper));
             assert!(mid.lower >= from.lower.min(to.lower) && mid.lower <= from.lower.max(to.lower));
-            assert!(
-                mid.opacity >= from.opacity.min(to.opacity)
-                    && mid.opacity <= from.opacity.max(to.opacity)
-            );
+            for ((from, mid), to) in from
+                .opacities
+                .into_iter()
+                .zip(mid.opacities)
+                .zip(to.opacities)
+            {
+                assert!(mid >= from.min(to) && mid <= from.max(to));
+            }
         }
         let finishing = stop + Duration::from_secs(1);
         let flowing = model.frame(finishing - FRAME_INTERVAL);
@@ -2831,19 +2895,20 @@ mod tests {
             first, second,
             "determinate work must still show fluid activity"
         );
-        let center =
-            |frame: &TrackFrame, index| raster_column(frame[index], 1)[(22 * 8 + 3) * 4 + 3];
-        let completed = center(&first, 23);
-        let pending = center(&first, 24);
-        assert!(
-            completed > pending,
-            "the reported chunk boundary must remain visible"
-        );
-        assert_eq!(
-            (center(&second, 23), center(&second, 24)),
-            (completed, pending),
-            "activity must not change either side of the measured boundary"
-        );
+        for frame in [first, second, model.frame(now + Duration::from_secs(60))] {
+            let pixels = frame.map(raster_rows);
+            assert!(
+                pixels[..24].iter().flatten().all(|alpha| *alpha > 128),
+                "every row behind the reported boundary must be filled"
+            );
+            assert!(
+                pixels[24..]
+                    .iter()
+                    .flatten()
+                    .all(|alpha| *alpha > 0 && *alpha < 128),
+                "elapsed time must leave every pending row visibly dim"
+            );
+        }
         let before_report = model.frame(now + Duration::from_secs(2));
         model.apply(status.clone(), now + Duration::from_secs(2));
         assert_eq!(
@@ -2852,9 +2917,41 @@ mod tests {
             "polling an unchanged chunk count must not restart the ripple"
         );
         model.track.presented = second;
-        model.disconnected(now + Duration::from_secs(2));
-        assert!(!model.animate(now + Duration::from_secs(2)));
-        assert_eq!(model.frame(now + Duration::from_millis(2100)), second);
+        status.stage = Some(Stage::Transcribing {
+            completed: 15,
+            total: 30,
+        });
+        let reported = now + Duration::from_secs(2);
+        model.apply(status.clone(), reported);
+        assert_eq!(model.frame(reported), second);
+        let halfway = model.frame(reported + SETTLE / 2).map(raster_rows);
+        let settled = model.frame(reported + SETTLE);
+        let settled_pixels = settled.map(raster_rows);
+        for column in 24..30 {
+            for ((before, mid), after) in raster_rows(second[column])
+                .into_iter()
+                .zip(halfway[column])
+                .zip(settled_pixels[column])
+            {
+                assert!(
+                    before < mid && mid < after,
+                    "newly reported cells must settle smoothly"
+                );
+            }
+        }
+        assert!(
+            halfway[30..].iter().flatten().all(|alpha| *alpha < 128)
+                && settled_pixels[30..]
+                    .iter()
+                    .flatten()
+                    .all(|alpha| *alpha < 128),
+            "interpolation must not illuminate unreported columns"
+        );
+        model.track.presented = settled;
+        let disconnected = reported + SETTLE;
+        model.disconnected(disconnected);
+        assert!(!model.animate(disconnected));
+        assert_eq!(model.frame(disconnected + POLL_INTERVAL), settled);
         status.stage = Some(Stage::CleaningUp);
         status.hud.reduced_motion = Some(true);
         model.apply(status, now + Duration::from_secs(3));
@@ -2869,6 +2966,45 @@ mod tests {
         );
         assert_eq!(completed_cells((30, 30)), CELLS);
         assert_eq!(completed_cells((31, 30)), 0);
+    }
+
+    #[test]
+    fn cleanup_pulses_individual_cells_but_reduced_motion_stays_fully_active_and_static() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Processing);
+        status.stage = Some(Stage::CleaningUp);
+        model.apply(status.clone(), now);
+        let first = model.frame(now + SETTLE).map(raster_rows);
+        let second = model
+            .frame(now + SETTLE + Duration::from_secs(1))
+            .map(raster_rows);
+        assert!(first
+            .iter()
+            .flatten()
+            .chain(second.iter().flatten())
+            .all(|alpha| *alpha > 0));
+        assert!(
+            first
+                .iter()
+                .all(|column| column.windows(2).any(|rows| rows[0] != rows[1])),
+            "rows must pulse independently rather than sharing a column opacity"
+        );
+        assert_ne!(first, second, "cleanup should remain visibly active");
+
+        status.hud.reduced_motion = Some(true);
+        let reduced_at = now + Duration::from_secs(2);
+        model.apply(status, reduced_at);
+        let steady = model.frame(reduced_at).map(raster_rows);
+        assert!(steady.iter().flatten().all(|alpha| *alpha > 0));
+        assert_eq!(
+            steady,
+            model
+                .frame(reduced_at + Duration::from_secs(60))
+                .map(raster_rows),
+            "reduced motion must freeze every cell without extinguishing any"
+        );
+        assert!(!model.animate(reduced_at));
     }
 
     #[test]
@@ -3011,6 +3147,12 @@ mod tests {
             model.apply(idle.clone(), delivered);
             let settled = delivered + if reduced { Duration::ZERO } else { SETTLE };
             let held_frame = model.frame(settled);
+            assert!(
+                held_frame
+                    .into_iter()
+                    .all(|column| raster_rows(column) == [255; ROWS]),
+                "success must illuminate the entire grid at full accent opacity"
+            );
             let hold_end = settled + SUCCESS_HOLD;
             model.apply(idle.clone(), hold_end - FRAME_INTERVAL);
             assert_eq!(model.kind, Some(Kind::Resolved));

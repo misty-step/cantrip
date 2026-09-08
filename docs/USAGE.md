@@ -124,7 +124,7 @@ not merely an available virtual-keyboard backend.
    transcription and delivery. Do not switch to a terminal to issue `stop` or
    poll status: the delivery destination is selected when recording stops.
 4. Wait for processing to settle, then inspect the actual text in the editor.
-   The HUD's completion mark reports the delivery mechanism's acknowledgement,
+   The HUD's completion feedback reports the delivery mechanism's acknowledgement,
    not proof that the editor accepted the sentence.
 5. Only after delivery has settled, return to Terminal B to inspect the outcome:
 
