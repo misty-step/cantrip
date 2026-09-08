@@ -54,15 +54,15 @@ indeterminate activity, not completion estimates. Interpolate phase changes from
 the last presented frame over 280 ms. Determinate center-row fill advances only
 from measured chunk reports, never elapsed time; entering finishing removes it.
 
-A complete typed, pasted or copied result resolves into a centered pixel check,
-using the same column cells and interpolation rather than a separate icon layer.
-Signed column bounds let a stroke sit above or below the center row; the rest of
-the track disappears. A routine typed or pasted acknowledgement gets its full
-700 ms settled hold **after** the 280 ms transition, then a 140 ms fade. Reduced
-motion shows the settled mark immediately, holds it for 700 ms and cuts to idle.
+A complete typed, pasted or copied result settles into a full-width band of three
+pixel rows in the current accent color. The bright, steady band stays within the
+waveform's geometry, without an icon, a new color or a progress animation. A
+routine typed or pasted acknowledgement gets its full 700 ms settled hold
+**after** the 280 ms transition, then a 140 ms fade. Reduced motion shows the
+settled band immediately, holds it for 700 ms and cuts to idle.
 Copied and cleanup-failure feedback retain their explicit captions and four-second
-notice window; partial, uncertain and deferred delivery never receive a success
-mark. A helper acknowledgement is not proof that the target application received
+notice window; partial, uncertain and deferred delivery never receive the resolved
+band. A helper acknowledgement is not proof that the target application received
 the text.
 
 This is presentation time only: there is no minimum processing-stage dwell and
@@ -85,9 +85,11 @@ The 2026-09-08 presentation refinement replaces the original single transcriptio
 ripple, centered finishing breath and successful flat-baseline collapse. The breath
 gave cleanup the same waveform vocabulary as transcription, while the old 700 ms
 result window included its 280 ms transition and left little time at rest. Distinct
-ordered groups and a settled check make the post-recording phases legible without
+ordered groups and a settled accent band make the post-recording phases legible without
 adding default words, guessed progress or another delivery state. Listening PCM,
 signed sample scaling, interpolation and attack/release remain unchanged.
+The operator rejected the initial pixel checkmark; completion now uses the same
+track and palette rather than introducing a separate success symbol.
 
 ## Alternatives
 

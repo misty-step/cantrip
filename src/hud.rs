@@ -62,7 +62,7 @@ const STATUS_STALE_AFTER: Duration = Duration::from_secs(2);
 const WAVEFORM_EASE: Duration = POLL_INTERVAL;
 const WAVEFORM_RELEASE: Duration = Duration::from_millis(420);
 const SETTLE: Duration = Duration::from_millis(280);
-// Full-opacity dwell after the completion mark has finished settling.
+// Full-opacity dwell after the completion band has finished settling.
 const SUCCESS_HOLD: Duration = Duration::from_millis(700);
 const RESULT_FADE: Duration = Duration::from_millis(140);
 const NOTICE_HOLD: Duration = Duration::from_secs(4);
@@ -674,7 +674,9 @@ impl Model {
                     progress,
                     self.reduced_motion,
                 ),
-                Some(Kind::Resolved) => resolved_frame(),
+                Some(Kind::Resolved) => {
+                    [TrackColumn::centered(2.0 * CELL_PITCH + CELL_SIZE); CELLS]
+                }
                 Some(Kind::Attention) => [TrackColumn::centered(3.0).with_opacity(0.55); CELLS],
                 _ => [TrackColumn::centered(3.0).with_opacity(0.35); CELLS],
             };
@@ -892,8 +894,7 @@ fn present_outcome(
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TrackColumn {
-    // Signed distances from the center row: a completion stroke may lie wholly
-    // above or below it without adding a second pixel representation.
+    // Nonnegative extents above and below the center row.
     upper: f32,
     lower: f32,
     opacity: f32,
@@ -1095,23 +1096,6 @@ fn activity_frame(
         }
         column
     })
-}
-
-fn resolved_frame() -> TrackFrame {
-    // Two adjacent cells per column make a short downstroke and a longer rising
-    // arm. The rest of the track disappears; a quiet baseline is not success.
-    const ROWS: [f32; 10] = [0.0, 1.0, 2.0, 2.0, 1.0, 0.0, -1.0, -1.0, -2.0, -3.0];
-    let mut frame = [TrackColumn::centered(CELL_SIZE).with_opacity(0.0); CELLS];
-    let first = (CELLS - ROWS.len()) / 2;
-    for (index, row) in ROWS.into_iter().enumerate() {
-        frame[first + index] = TrackColumn {
-            upper: CELL_SIZE / 2.0 - row * CELL_PITCH,
-            lower: (row + 1.0) * CELL_PITCH + CELL_SIZE / 2.0,
-            opacity: 1.0,
-            center_opacity: 1.0,
-        };
-    }
-    frame
 }
 
 fn completed_cells(progress: (u32, u32)) -> usize {
@@ -1452,7 +1436,7 @@ struct RenderKey {
     kind: Option<Kind>,
     caption_revision: u64,
     interaction_event: Option<u64>,
-    heights: [[i16; 2]; CELLS],
+    heights: [[u16; 2]; CELLS],
     opacities: [[u8; 2]; CELLS],
     alpha: u8,
     size: (u32, u32, u32),
@@ -1554,8 +1538,8 @@ impl HudState {
             interaction_event: self.model.interaction.as_ref().and(self.model.notice_event),
             heights: heights.map(|column| {
                 [
-                    (column.upper * 16.0).round() as i16,
-                    (column.lower * 16.0).round() as i16,
+                    (column.upper * 16.0).round() as u16,
+                    (column.lower * 16.0).round() as u16,
                 ]
             }),
             opacities: heights.map(|column| {
@@ -1624,9 +1608,11 @@ impl HudState {
                 canvas.rect(left, top, 2.0, body_height, self.palette.attention, 1.0);
             }
             let rgb = match kind {
-                Kind::Recording | Kind::Working | Kind::Finishing => self.palette.accent,
+                Kind::Recording | Kind::Working | Kind::Finishing | Kind::Resolved => {
+                    self.palette.accent
+                }
                 Kind::Attention => self.palette.attention,
-                Kind::Resolved | Kind::Neutral => self.palette.foreground,
+                Kind::Neutral => self.palette.foreground,
             };
             let track_width = TRACK_WIDTH.min(container_width - 32.0);
             let slot_width = track_width / CELLS as f32;
@@ -1952,7 +1938,7 @@ impl Canvas<'_> {
     fn pixel_column(&mut self, x: f32, center: f32, width: f32, column: TrackColumn, rgb: [u8; 3]) {
         let top = center - column.upper;
         let bottom = center + column.lower;
-        if bottom - top < CELL_SIZE && column.upper >= 1.0 && column.lower >= 1.0 {
+        if bottom - top < CELL_SIZE {
             let alpha = column.center_opacity;
             // Blend the 2 px quiet sliver into the center cell; rounding a
             // growing rectangle would switch an entire physical row on at once.
