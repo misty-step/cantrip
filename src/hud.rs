@@ -610,7 +610,13 @@ impl Model {
                 && result.waiting_for_settle
                 && self.kind == Some(Kind::Resolved)
                 && now >= self.track.since + self.track.duration
-                && self.track.presented.iter().all(TrackColumn::fully_lit)
+                && self
+                    .track
+                    .presented
+                    .columns
+                    .iter()
+                    .all(TrackColumn::fully_lit)
+                && (self.track.presented.expansion * 1024.0).round() == 1024.0
             {
                 result.waiting_for_settle = false;
                 result.visibility = Visibility::Until(
@@ -924,9 +930,18 @@ impl Model {
                     self.track.front(now, self.reduced_motion),
                     self.reduced_motion,
                 ),
-                Some(Kind::Resolved) => [TrackColumn::centered(GRID_HEIGHT); CELLS],
-                Some(Kind::Attention) => [TrackColumn::centered(3.0).with_opacity(0.55); CELLS],
-                _ => [TrackColumn::centered(3.0).with_opacity(0.35); CELLS],
+                Some(Kind::Resolved) => TrackFrame {
+                    columns: [TrackColumn::centered(GRID_HEIGHT); CELLS],
+                    expansion: 1.0,
+                },
+                Some(Kind::Attention) => TrackFrame {
+                    columns: [TrackColumn::centered(3.0).with_opacity(0.55); CELLS],
+                    expansion: 0.0,
+                },
+                _ => TrackFrame {
+                    columns: [TrackColumn::centered(3.0).with_opacity(0.35); CELLS],
+                    expansion: 0.0,
+                },
             };
             self.track.target(
                 heights,
@@ -1004,17 +1019,18 @@ impl Model {
             caption_revision: self.caption_revision,
             interaction_event: self.interaction.as_ref().and(self.notice_event),
             heights: std::array::from_fn(|index| {
-                let column = &frame[index];
+                let column = &frame.columns[index];
                 [
                     (column.upper * 16.0).round() as u16,
                     (column.lower * 16.0).round() as u16,
                 ]
             }),
             opacities: std::array::from_fn(|index| {
-                frame[index]
+                frame.columns[index]
                     .opacities
                     .map(|opacity| (opacity * 255.0).round() as u8)
             }),
+            expansion: (frame.expansion * 1024.0).round() as u16,
             alpha: (alpha * 255.0).round() as u8,
             size,
             palette,
@@ -1238,7 +1254,12 @@ impl TrackColumn {
     }
 }
 
-type TrackFrame = [TrackColumn; CELLS];
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TrackFrame {
+    columns: [TrackColumn; CELLS],
+    // Expand with the existing shape morph, retaining the last attached width.
+    expansion: f32,
+}
 
 struct FillMotion {
     from: f32,
@@ -1275,7 +1296,10 @@ struct TrackMotion {
 
 impl TrackMotion {
     fn new(now: Instant) -> Self {
-        let quiet = [TrackColumn::centered(2.0).with_opacity(0.3); CELLS];
+        let quiet = TrackFrame {
+            columns: [TrackColumn::centered(2.0).with_opacity(0.3); CELLS],
+            expansion: 0.0,
+        };
         Self {
             from: quiet,
             to: quiet,
@@ -1360,24 +1384,40 @@ impl TrackMotion {
                     to + residual
                 }
             };
-            return std::array::from_fn(|index| TrackColumn {
-                upper: damp(self.from[index].upper, to[index].upper, 0.01),
-                lower: damp(self.from[index].lower, to[index].lower, 0.01),
-                opacities: std::array::from_fn(|row| {
-                    damp(
-                        self.from[index].opacities[row],
-                        to[index].opacities[row],
-                        1.0 / 255.0,
-                    )
+            return TrackFrame {
+                columns: std::array::from_fn(|index| TrackColumn {
+                    upper: damp(
+                        self.from.columns[index].upper,
+                        to.columns[index].upper,
+                        0.01,
+                    ),
+                    lower: damp(
+                        self.from.columns[index].lower,
+                        to.columns[index].lower,
+                        0.01,
+                    ),
+                    opacities: std::array::from_fn(|row| {
+                        damp(
+                            self.from.columns[index].opacities[row],
+                            to.columns[index].opacities[row],
+                            1.0 / 255.0,
+                        )
+                    }),
                 }),
-            });
+                expansion: damp(self.from.expansion, to.expansion, 1.0 / 1024.0),
+            };
         }
         if elapsed >= self.duration {
             return to;
         }
         let t = elapsed.as_secs_f32() / self.duration.as_secs_f32();
         let eased = t * t * (3.0 - 2.0 * t);
-        std::array::from_fn(|index| self.from[index].interpolate(to[index], eased))
+        TrackFrame {
+            columns: std::array::from_fn(|index| {
+                self.from.columns[index].interpolate(to.columns[index], eased)
+            }),
+            expansion: self.from.expansion + (to.expansion - self.from.expansion) * eased,
+        }
     }
 
     fn moving(&self, now: Instant) -> bool {
@@ -1397,7 +1437,7 @@ fn recording_frame(waveform: Option<AudioWaveform>) -> TrackFrame {
         1.0 + 15.5 * amplitude
     }
 
-    waveform
+    let columns = waveform
         .unwrap_or([[0; 2]; AUDIO_WAVEFORM_BINS])
         .map(|[minimum, maximum]| {
             let upper = extent(maximum.max(0) as u16);
@@ -1408,7 +1448,11 @@ fn recording_frame(waveform: Option<AudioWaveform>) -> TrackFrame {
                 lower,
                 opacities: [opacity; ROWS],
             }
-        })
+        });
+    TrackFrame {
+        columns,
+        expansion: 0.0,
+    }
 }
 
 fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) -> TrackFrame {
@@ -1440,7 +1484,7 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
     } else {
         0.0
     };
-    std::array::from_fn(|column| {
+    let columns = std::array::from_fn(|column| {
         let opacities = if kind == Kind::Finishing {
             // Independent smooth pulses span near-rest to near-full opacity;
             // all 420 cells remain visible, without a synchronized flash.
@@ -1475,7 +1519,11 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
                 GRID_HEIGHT
             })
         }
-    })
+    });
+    TrackFrame {
+        columns,
+        expansion: if kind == Kind::Finishing { 1.0 } else { 0.0 },
+    }
 }
 
 fn pixel_noise(cell: usize, tick: u32) -> f32 {
@@ -1820,6 +1868,7 @@ struct RenderKey {
     interaction_event: Option<u64>,
     heights: [[u16; 2]; CELLS],
     opacities: [[u8; ROWS]; CELLS],
+    expansion: u16,
     alpha: u8,
     size: (u32, u32, u32),
     palette: Palette,
@@ -2177,11 +2226,14 @@ impl Canvas<'_> {
             Kind::Attention => palette.attention,
             Kind::Neutral => palette.foreground,
         };
-        let track_width = TRACK_WIDTH.min(container_width - 32.0);
+        let resting_width = TRACK_WIDTH.min(container_width - 32.0).max(0.0);
+        // Match the full-height grid's visual gutter, not the caption inset.
+        let expanded_width = (container_width - 12.0).max(0.0);
+        let track_width = resting_width + (expanded_width - resting_width) * frame.expansion;
         let slot_width = track_width / CELLS as f32;
-        let cell_width = slot_width * CELL_SIZE / CELL_PITCH;
+        let cell_width = (slot_width * CELL_SIZE / CELL_PITCH).min(CELL_SIZE);
         let track_left = (logical_width - track_width) / 2.0;
-        for (index, column) in frame.iter().copied().enumerate() {
+        for (index, column) in frame.columns.iter().copied().enumerate() {
             self.pixel_column(
                 track_left + index as f32 * slot_width + (slot_width - cell_width) / 2.0,
                 top + TRACK_HEIGHT / 2.0,
@@ -2855,13 +2907,16 @@ mod tests {
         let mut model = Model::new(now);
         model.apply(recording(0, Some(signal(false))), now);
         let quiet = [TrackColumn::centered(2.0).with_opacity(0.3); CELLS];
-        assert_eq!(model.track.frame(now), quiet);
-        assert_eq!(model.track.frame(now + SETTLE / 2), quiet);
+        assert_eq!(model.track.frame(now).columns, quiet);
+        assert_eq!(model.track.frame(now + SETTLE / 2).columns, quiet);
         model.apply(
             recording(1, Some(signal(false))),
             now + Duration::from_secs(1),
         );
-        assert_eq!(model.track.frame(now + Duration::from_secs(1)), quiet);
+        assert_eq!(
+            model.track.frame(now + Duration::from_secs(1)).columns,
+            quiet
+        );
     }
 
     fn raster_column(column: TrackColumn, scale: u32) -> Vec<u8> {
@@ -2887,12 +2942,153 @@ mod tests {
         })
     }
 
+    fn raster_hud(model: &Model, now: Instant, width: u32, scale: f32) -> (Vec<u8>, u32) {
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
+        let height = (layout_height(model, &font, container_width) as f32 * scale).round() as u32;
+        let width = (width as f32 * scale).round() as u32;
+        let mut bytes = vec![0; (width * height * 4) as usize];
+        Canvas {
+            bytes: &mut bytes,
+            width,
+            height,
+            scale,
+            alpha: 1.0,
+        }
+        .paint_hud(
+            model,
+            &font,
+            Palette {
+                surface: [0; 3],
+                border: [0, 255, 0],
+                accent: [255; 3],
+                foreground: [0, 0, 255],
+                ..Palette::default()
+            },
+            &model.frame(now),
+            container_width,
+        );
+        (bytes, width)
+    }
+
+    fn grid_bounds(bytes: &[u8], width: u32, scale: f32) -> [u32; 4] {
+        let mut bounds = [width, u32::MAX, 0, 0];
+        for (index, pixel) in bytes.as_chunks::<4>().0.iter().enumerate() {
+            let x = index as u32 % width;
+            let y = index as u32 / width;
+            if y as f32 >= (6.0 + TRACK_HEIGHT) * scale {
+                break;
+            }
+            if pixel[0] > 0 && pixel[0] == pixel[1] && pixel[1] == pixel[2] {
+                bounds[0] = bounds[0].min(x);
+                bounds[1] = bounds[1].min(y);
+                bounds[2] = bounds[2].max(x + 1);
+                bounds[3] = bounds[3].max(y + 1);
+            }
+        }
+        bounds
+    }
+
+    #[test]
+    fn cleaning_and_success_fill_the_visualization_without_covering_border_or_caption() {
+        let now = Instant::now();
+        for state in [
+            ScreenshotState::Cleaning,
+            ScreenshotState::Sent,
+            ScreenshotState::ReducedMotionCleaning,
+            ScreenshotState::ReducedMotionSent,
+        ] {
+            let mut model = screenshot_model(state, now);
+            let unlabelled = model.caption.clone();
+            for width in [80, 240, SURFACE_WIDTH] {
+                for scale in [1.0, 1.25, 2.0] {
+                    model.caption = unlabelled.clone();
+                    let (plain, physical_width) = raster_hud(&model, now, width, scale);
+                    let bounds = grid_bounds(&plain, physical_width, scale);
+                    let container = CONTAINER_WIDTH.min(width as f32 - 12.0);
+                    let left = ((width as f32 - container) / 2.0 + 6.0) * scale;
+                    let right = width as f32 * scale - left;
+                    assert!(
+                        bounds[0] as f32 >= left - 0.5 && bounds[0] as f32 <= left + 2.0 * scale,
+                        "{state:?} at {width}px/{scale}x has an unfilled left gutter: {bounds:?}"
+                    );
+                    assert!(
+                        bounds[2] as f32 <= right + 0.5 && bounds[2] as f32 >= right - 2.0 * scale,
+                        "{state:?} at {width}px/{scale}x has an unfilled right gutter: {bounds:?}"
+                    );
+                    assert_eq!(bounds[1], (11.5 * scale).round() as u32);
+                    assert_eq!(bounds[3], (44.5 * scale).round() as u32);
+                    model.caption = Caption::title("Finishing text…");
+                    let (labelled, _) = raster_hud(&model, now, width, scale);
+                    let track_end = (45.5 * scale).floor() as usize * physical_width as usize * 4;
+                    assert_eq!(
+                        &plain[..track_end],
+                        &labelled[..track_end],
+                        "captions must remain below the visualization"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_height_recording_expands_continuously_into_cleaning_or_success() {
+        let now = Instant::now();
+        for cleaning in [false, true] {
+            let mut model = Model::new(now);
+            let mut full_signal = signal(true);
+            full_signal.waveform = [[i16::MIN, i16::MAX]; AUDIO_WAVEFORM_BINS];
+            model.apply(recording(0, Some(full_signal)), now);
+            let stopped = now + Duration::from_secs(1);
+            model.track.presented = model.frame(stopped);
+            let (before, width) = raster_hud(&model, stopped, SURFACE_WIDTH, 1.0);
+            let initial_bounds = grid_bounds(&before, width, 1.0);
+            let mut next = preview_snapshot(if cleaning {
+                StateKind::Processing
+            } else {
+                StateKind::Idle
+            });
+            if cleaning {
+                next.stage = Some(Stage::CleaningUp);
+            } else {
+                next.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+            }
+            model.apply(next, stopped);
+            assert_eq!(
+                raster_hud(&model, stopped, SURFACE_WIDTH, 1.0).0,
+                before,
+                "the morph must begin at the attached width, even for a full-height waveform"
+            );
+            let (middle, _) = raster_hud(&model, stopped + SETTLE / 2, SURFACE_WIDTH, 1.0);
+            let middle_bounds = grid_bounds(&middle, width, 1.0);
+            let settled = stopped + SETTLE;
+            model.track.presented = model.frame(settled);
+            let (after, _) = raster_hud(&model, settled, SURFACE_WIDTH, 1.0);
+            let final_bounds = grid_bounds(&after, width, 1.0);
+            assert!(final_bounds[0] < middle_bounds[0] && middle_bounds[0] < initial_bounds[0]);
+            assert!(final_bounds[2] > middle_bounds[2] && middle_bounds[2] > initial_bounds[2]);
+            assert_eq!(
+                [final_bounds[1], final_bounds[3]],
+                [initial_bounds[1], initial_bounds[3]]
+            );
+            if cleaning {
+                let delivered = settled + PHASE_DWELL;
+                let mut idle = preview_snapshot(StateKind::Idle);
+                idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+                model.apply(idle, delivered);
+                assert_eq!(model.kind, Some(Kind::Resolved));
+                let (success, _) = raster_hud(&model, delivered + SETTLE / 2, SURFACE_WIDTH, 1.0);
+                assert_eq!(grid_bounds(&success, width, 1.0), final_bounds);
+            }
+        }
+    }
+
     #[test]
     fn signed_columns_preserve_polarity_without_touching_neighbors() {
         let mut waveform = [[0; 2]; AUDIO_WAVEFORM_BINS];
         waveform[13] = [512, 8192];
         waveform[14] = [-8192, -512];
-        let heights = recording_frame(Some(waveform));
+        let heights = recording_frame(Some(waveform)).columns;
         assert!(heights[13].upper > 8.75 && heights[13].upper < 16.5);
         assert_eq!(heights[13].lower, 1.0);
         assert_eq!(heights[14].upper, 1.0);
@@ -2903,7 +3099,7 @@ mod tests {
             }
         }
         waveform[14] = [i16::MIN, i16::MAX];
-        let louder_neighbor = recording_frame(Some(waveform));
+        let louder_neighbor = recording_frame(Some(waveform)).columns;
         assert_eq!(louder_neighbor[13], heights[13]);
         assert_eq!(louder_neighbor[15], heights[15]);
     }
@@ -2911,16 +3107,16 @@ mod tests {
     #[test]
     fn raw_signal_floor_and_clipping_do_not_normalize_quiet_audio() {
         let quiet = [TrackColumn::centered(2.0).with_opacity(0.3); CELLS];
-        assert_eq!(recording_frame(None), quiet);
+        assert_eq!(recording_frame(None).columns, quiet);
         assert_eq!(
-            recording_frame(Some([[-32, 32]; AUDIO_WAVEFORM_BINS])),
+            recording_frame(Some([[-32, 32]; AUDIO_WAVEFORM_BINS])).columns,
             quiet
         );
-        let above_floor = recording_frame(Some([[-33, 33]; AUDIO_WAVEFORM_BINS]))[0];
+        let above_floor = recording_frame(Some([[-33, 33]; AUDIO_WAVEFORM_BINS])).columns[0];
         assert!(above_floor.upper > 1.0 && above_floor.upper < 2.0);
         assert_eq!(above_floor.upper, above_floor.lower);
         assert_eq!(
-            recording_frame(Some([[i16::MIN, i16::MAX]; AUDIO_WAVEFORM_BINS])),
+            recording_frame(Some([[i16::MIN, i16::MAX]; AUDIO_WAVEFORM_BINS])).columns,
             [TrackColumn::centered(33.0); CELLS]
         );
     }
@@ -3083,11 +3279,16 @@ mod tests {
         assert_eq!(model.frame(stop), shown);
         let settling = model.frame(stop + SETTLE / 2);
         let destination = activity_frame(Kind::Working, SETTLE / 2, Some(0.0), false);
-        for ((from, mid), to) in shown.into_iter().zip(settling).zip(destination) {
+        for ((from, mid), to) in shown
+            .columns
+            .into_iter()
+            .zip(settling.columns)
+            .zip(destination.columns)
+        {
             assert!(mid.upper >= from.upper.min(to.upper) && mid.upper <= from.upper.max(to.upper));
             assert!(mid.lower >= from.lower.min(to.lower) && mid.lower <= from.lower.max(to.lower));
         }
-        for column in model.frame(stop + SETTLE).map(raster_rows) {
+        for column in model.frame(stop + SETTLE).columns.map(raster_rows) {
             assert!(column[2..5].iter().all(|alpha| *alpha > 0 && *alpha < 128));
             assert_eq!([column[0], column[1], column[5], column[6]], [0; 4]);
         }
@@ -3103,18 +3304,18 @@ mod tests {
         track.target(quiet, now, WAVEFORM_EASE, false, false);
         assert_eq!(track.frame(now), full);
         let gap = now + POLL_INTERVAL;
-        let released = track.frame(gap);
+        let released = track.frame(gap).columns;
         assert!(
             released[0].upper > 8.0,
             "a 100 ms pause must retain a visible tail"
         );
-        assert!(released[0].upper < full[0].upper);
+        assert!(released[0].upper < full.columns[0].upper);
         let mut previous = released[0].upper;
         for step in 1..=10 {
             let at = gap + POLL_INTERVAL * step;
             // Repeated quiet observations cannot restart a slow ease-in.
             track.target(quiet, at, WAVEFORM_EASE, false, false);
-            let current = track.frame(at)[0].upper;
+            let current = track.frame(at).columns[0].upper;
             assert!(current <= previous);
             previous = current;
         }
@@ -3125,7 +3326,7 @@ mod tests {
         assert_eq!(track.frame(now), quiet);
         let attack = track.frame(gap);
         assert!(
-            attack[0].upper > 15.0,
+            attack.columns[0].upper > 15.0,
             "new speech must respond within one measurement"
         );
         track.target(quiet, gap, WAVEFORM_EASE, false, false);
@@ -3162,7 +3363,7 @@ mod tests {
         model.apply(status.clone(), now);
         let reported = now + Duration::from_secs(1);
         model.track.presented = model.frame(reported);
-        let pending = raster_rows(model.track.presented[0])[3];
+        let pending = raster_rows(model.track.presented.columns[0])[3];
         status.stage = Some(Stage::Transcribing {
             completed: 1,
             total: 3,
@@ -3170,13 +3371,14 @@ mod tests {
         model.apply(status.clone(), reported);
         let halfway_at = reported + PROGRESS_REVEAL / 2;
         let halfway = model.frame(halfway_at);
-        let pixels = halfway.map(raster_rows);
+        let pixels = halfway.columns.map(raster_rows);
         assert!(pixels[..10]
             .iter()
             .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128)));
         assert!(pixels[10..].iter().all(|rows| rows[2..5] == [pending; 3]));
         let fractional = model
             .frame(reported + PROGRESS_REVEAL * 37 / 100)
+            .columns
             .map(raster_rows);
         assert!(fractional[..6].iter().all(|rows| rows[3] > 128));
         assert!(fractional[6][3] > pending && fractional[6][3] < 128);
@@ -3200,13 +3402,14 @@ mod tests {
         );
         let advancing = model
             .frame(halfway_at + PROGRESS_REVEAL / 4)
+            .columns
             .map(raster_rows);
         assert!(advancing[10..14].iter().all(|rows| rows[3] > 128));
         assert!(advancing[15..].iter().all(|rows| rows[3] == pending));
         let settled_at = halfway_at + PROGRESS_REVEAL;
         let settled = model.frame(settled_at);
         for frame in [settled, model.frame(settled_at + Duration::from_secs(60))] {
-            let pixels = frame.map(raster_rows);
+            let pixels = frame.columns.map(raster_rows);
             assert!(pixels[..40]
                 .iter()
                 .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128)));
@@ -3236,10 +3439,14 @@ mod tests {
             model.apply(status, reset);
             assert!(model
                 .frame(reset)
+                .columns
                 .map(raster_rows)
                 .iter()
                 .all(|rows| rows[3] < 128));
-            let pixels = model.frame(reset + PROGRESS_REVEAL).map(raster_rows);
+            let pixels = model
+                .frame(reset + PROGRESS_REVEAL)
+                .columns
+                .map(raster_rows);
             assert!(pixels[..filled].iter().all(|rows| rows[3] > 128));
             assert!(pixels[filled..]
                 .iter()
@@ -3265,8 +3472,14 @@ mod tests {
             let mut status = preview_snapshot(StateKind::Processing);
             status.stage = stage;
             model.apply(status, now);
-            let first = model.frame(now + Duration::from_secs(1)).map(raster_rows);
-            let later = model.frame(now + Duration::from_secs(61)).map(raster_rows);
+            let first = model
+                .frame(now + Duration::from_secs(1))
+                .columns
+                .map(raster_rows);
+            let later = model
+                .frame(now + Duration::from_secs(61))
+                .columns
+                .map(raster_rows);
             for frame in [first, later] {
                 let pending = frame.iter().map(|rows| rows[3]).min().unwrap();
                 let active = frame.iter().filter(|rows| rows[3] > pending).count();
@@ -3287,9 +3500,10 @@ mod tests {
         status.stage = Some(Stage::CleaningUp);
         model.apply(status.clone(), now);
         let first_at = now + Duration::from_millis(900);
-        let first = model.frame(first_at).map(raster_rows);
+        let first = model.frame(first_at).columns.map(raster_rows);
         let second = model
             .frame(now + SETTLE + Duration::from_secs(1))
+            .columns
             .map(raster_rows);
         assert!(first
             .iter()
@@ -3306,7 +3520,10 @@ mod tests {
         let opacities: Vec<_> = first.iter().flatten().copied().collect();
         assert!(*opacities.iter().min().unwrap() < 50);
         assert!(*opacities.iter().max().unwrap() > 230);
-        let adjacent = model.frame(first_at + FRAME_INTERVAL).map(raster_rows);
+        let adjacent = model
+            .frame(first_at + FRAME_INTERVAL)
+            .columns
+            .map(raster_rows);
         assert!(
             first
                 .iter()
@@ -3319,12 +3536,13 @@ mod tests {
         status.hud.reduced_motion = Some(true);
         let reduced_at = now + Duration::from_secs(2);
         model.apply(status, reduced_at);
-        let steady = model.frame(reduced_at).map(raster_rows);
+        let steady = model.frame(reduced_at).columns.map(raster_rows);
         assert!(steady.iter().flatten().all(|alpha| *alpha > 0));
         assert_eq!(
             steady,
             model
                 .frame(reduced_at + Duration::from_secs(60))
+                .columns
                 .map(raster_rows),
             "reduced motion must freeze every cell without extinguishing any"
         );
@@ -3388,12 +3606,12 @@ mod tests {
         let mut cleaning_at = None;
         let mut resolved_at = None;
         let mut settled_at = None;
-        let mut painted = model.track.presented.map(raster_rows);
+        let mut painted = model.track.presented.columns.map(raster_rows);
         let mut at = received;
         while at <= received + MAX_PRESENTATION_LAG + SETTLE {
             model.apply(idle.clone(), at);
             let frame = model.frame(at);
-            let pixels = frame.map(raster_rows);
+            let pixels = frame.columns.map(raster_rows);
             match model.kind {
                 Some(Kind::Working) => {
                     completed_track |= pixels
@@ -3442,6 +3660,7 @@ mod tests {
             assert_eq!(model.alpha(at), 1.0);
             assert!(model
                 .frame(at)
+                .columns
                 .map(raster_rows)
                 .iter()
                 .all(|rows| *rows == [255; ROWS]));
@@ -3480,7 +3699,7 @@ mod tests {
             let before_handoff = now + PROGRESS_REVEAL + PHASE_DWELL - FRAME_INTERVAL;
             model.refresh(before_handoff);
             assert_eq!(model.kind, Some(Kind::Working));
-            let pixels = model.frame(before_handoff).map(raster_rows);
+            let pixels = model.frame(before_handoff).columns.map(raster_rows);
             assert!(pixels[20..].iter().all(|rows| rows[3] < 128));
             let mut idle = preview_snapshot(StateKind::Idle);
             idle.outcome = Some(preview_outcome(completeness, delivery));
@@ -3489,6 +3708,7 @@ mod tests {
             assert!(model.progress.is_none());
             assert!(model
                 .frame(before_handoff + MAX_PRESENTATION_LAG)
+                .columns
                 .map(raster_rows)
                 .iter()
                 .all(|rows| [rows[0], rows[1], rows[2], rows[4], rows[5], rows[6]] == [0; 6]));
@@ -3582,6 +3802,7 @@ mod tests {
         assert_eq!(model.kind, Some(Kind::Resolved));
         let frame = model.frame(received);
         assert!(frame
+            .columns
             .map(raster_rows)
             .iter()
             .all(|rows| *rows == [255; ROWS]));
@@ -3731,6 +3952,7 @@ mod tests {
             let held_frame = model.frame(settled);
             assert!(
                 held_frame
+                    .columns
                     .into_iter()
                     .all(|column| raster_rows(column) == [255; ROWS]),
                 "success must illuminate the entire grid at full accent opacity"
@@ -3776,7 +3998,10 @@ mod tests {
         let settled = delivered + SETTLE;
         let attached = model.frame(settled - Duration::from_millis(4));
         let final_frame = model.frame(settled);
-        assert_eq!(attached.map(raster_rows), final_frame.map(raster_rows));
+        assert_eq!(
+            attached.columns.map(raster_rows),
+            final_frame.columns.map(raster_rows)
+        );
         assert_ne!(attached, final_frame);
         // The raster is already identical, so neither native nor gallery render
         // caching needs to attach the mathematically exact interpolation target.
