@@ -25,15 +25,34 @@ cargo run --release --example eval -- behavior
 - `--config PATH` selects a lane definition JSON file.
 - `--stt a,b`, `--postproc c,d`, `--clips a,b`, and `--cases a,b` narrow a run.
 - `behavior --repeat N` repeats each selected case.
+- `behavior --postproc-manifest PATH` overrides the text-case manifest.
 - `--out DIR` prevents a partial run from replacing canonical results.
-- Cloud lanes that use a `__mint.*` marker are broker-only. Set
-  `CANTRIP_PROXY` so the broker can rewrite `https://` provider URLs to
-  `<prefix>/<host>/<path>` and substitute key markers. The current harness
-  still attempts an unauthenticated direct request when the proxy is absent;
-  those calls fail with HTTP 401. Do not treat that as a successful run.
-  Stop when that broker prerequisite is missing rather than interpreting an
-  authentication error as a model result. The broker endpoint is deliberately
-  not committed; obtain it from the repo owner.
+- Cloud lanes that use `__mint.*` markers route through `CANTRIP_PROXY` when
+  set: the broker rewrites HTTPS provider URLs to `<prefix>/<host>/<path>`
+  and substitutes the markers. When `CANTRIP_PROXY` is unset, OpenRouter
+  lanes use direct Bearer authentication, first reading the OS keyring
+  (`cantrip key`), then falling back to `OPENROUTER_API_KEY`. Missing or
+  malformed credentials fail without printing keys or headers. Other
+  marker-based cloud lanes still require the broker. Its endpoint is
+  deliberately not committed; obtain it from the repo owner.
+
+The vocabulary-system comparison uses `eval/config-vocab-systems.json`.
+Each lane's `vocabulary_mode` is `global` (the default), `candidate-filtered`,
+`none`, or `deterministic-aliases`. Filtered mode builds the production prompt
+for each source from matching token sequences, one-edit spelling candidates,
+and the baseline's spoken aliases; it does not rewrite the source. Common-word
+collisions remain candidates, so this is not semantic disambiguation. No-vocab
+mode keeps the cleanup prompt but omits vocabulary. Deterministic aliases
+perform only the documented token replacements, without an LLM or formatting.
+Custom full-prompt `instructions` cannot be combined with a non-global mode.
+
+Cloud cleanup requests match production: configured effort sends only
+`reasoning: {"effort": "..."}`; unset effort omits `reasoning`. No evaluator-only
+reasoning flags or generation cap are added. Completed behavior records include
+`elapsed_us` (including retries) and explicit request errors; `pricing.json`
+records the observed USD-per-token prices. The comparison's detailed board
+reports strict exact-accepted scores, nearest-rank percentiles, variability,
+and separately identified vocabulary corruptions without relaxing the oracle.
 
 ## Langfuse publish
 

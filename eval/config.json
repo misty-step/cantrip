@@ -122,16 +122,6 @@
       "ollama_base": "http://127.0.0.1:11434"
     },
     {
-      "id": "gemini-2.5-flash-lite",
-      "endpoint": "https://openrouter.ai/api/v1",
-      "model": "google/gemini-2.5-flash-lite",
-      "marker": "__mint.openrouter.default__",
-      "scheme": "Bearer",
-      "pricing": {
-        "unit": "openrouter"
-      }
-    },
-    {
       "id": "gemini-3.5-flash-lite",
       "endpoint": "https://openrouter.ai/api/v1",
       "model": "google/gemini-3.5-flash-lite",
