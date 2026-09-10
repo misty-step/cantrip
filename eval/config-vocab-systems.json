@@ -1,0 +1,139 @@
+{
+  "manifest": "samples/eval/manifest.json",
+  "postproc_manifest": "samples/eval/vocab-behavior.json",
+  "out_dir": "eval/results/vocab-systems",
+  "instructions": "",
+  "vocabulary": [
+    "Omarchy",
+    "Herdr",
+    "Ghostty",
+    "Hyprland",
+    "PipeWire",
+    "Wayland",
+    "Dvorak",
+    "Tailscale",
+    "OMP",
+    "Serenity",
+    "Glamdring",
+    "Mirrodin",
+    "Cantrip",
+    "Parakeet",
+    "OpenRouter",
+    "Flash Lite",
+    "MAI Transcribe 2",
+    "Langfuse",
+    "Misty Step",
+    "Iron Forest",
+    "Powder",
+    "Estate",
+    "Exocortex",
+    "Scry",
+    "Sploot",
+    "Sanctum",
+    "Crucible",
+    "Landmark",
+    "Daybook",
+    "QMD",
+    "Portless",
+    "R90",
+    "Habitat",
+    "Tangle",
+    "Trellis",
+    "Olympus",
+    "Tach",
+    "Adminifi",
+    "Sprite",
+    "Brandt",
+    "HTMX",
+    "Vite",
+    "npx",
+    "pnpm",
+    "DeepSeek",
+    "Torvalds",
+    "Ollama",
+    "Codex",
+    "MCP",
+    "FSRS"
+  ],
+  "stt": [],
+  "postproc": [
+    {
+      "id": "gemini-3.5-flash-lite-global",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.5-flash-lite",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      },
+      "vocabulary_mode": "global"
+    },
+    {
+      "id": "gemini-3.5-flash-lite-candidate-filtered",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.5-flash-lite",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      },
+      "vocabulary_mode": "candidate-filtered"
+    },
+    {
+      "id": "gemini-3.5-flash-lite-none",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "google/gemini-3.5-flash-lite",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      },
+      "vocabulary_mode": "none"
+    },
+    {
+      "id": "mercury-2.5-global",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "inception/mercury-2.5",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      },
+      "vocabulary_mode": "global",
+      "reasoning_effort": "none"
+    },
+    {
+      "id": "mercury-2.5-candidate-filtered",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "inception/mercury-2.5",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      },
+      "vocabulary_mode": "candidate-filtered",
+      "reasoning_effort": "none"
+    },
+    {
+      "id": "mercury-2.5-none",
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "inception/mercury-2.5",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "openrouter"
+      },
+      "vocabulary_mode": "none",
+      "reasoning_effort": "none"
+    },
+    {
+      "id": "deterministic-aliases",
+      "endpoint": "deterministic://aliases",
+      "model": "deterministic-aliases-v1",
+      "pricing": {
+        "unit": "zero"
+      },
+      "vocabulary_mode": "deterministic-aliases"
+    }
+  ]
+}

@@ -140,6 +140,16 @@ struct SttLane {
     pricing: Option<PriceSpec>,
 }
 
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum VocabularyMode {
+    #[default]
+    Global,
+    CandidateFiltered,
+    None,
+    DeterministicAliases,
+}
+
 #[derive(Debug, Deserialize)]
 struct PostprocLane {
     id: String,
@@ -155,6 +165,8 @@ struct PostprocLane {
     instructions: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default)]
+    vocabulary_mode: VocabularyMode,
     /// Set for local Ollama lanes: the base URL (without /v1) used to evict
     /// the model after the lane so the next large model fits in VRAM.
     #[serde(default)]
@@ -225,6 +237,11 @@ struct BehaviorResult {
     category: String,
     iteration: usize,
     latency_ms: u128,
+    /// Entire attempt, including retry backoff; preserves sub-millisecond baselines.
+    #[serde(default)]
+    elapsed_us: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
     cost_usd: f64,
     input_tokens: u64,
     output_tokens: u64,
@@ -733,6 +750,189 @@ struct ChatUsage {
     #[serde(default)]
     completion_tokens: u64,
 }
+// Whole-token aliases are deliberately context-free: "brass tack" is corrupted.
+const VOCABULARY_ALIASES: &[(&[&str], &str)] = &[
+    (&["tac"], "Tach"),
+    (&["tack"], "Tach"),
+    (&["skry"], "Scry"),
+    (&["cue", "em", "dee"], "QMD"),
+    (&["f", "s", "r", "s"], "FSRS"),
+    (&["pipe", "wire"], "PipeWire"),
+];
+
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+    for (index, ch) in text.char_indices() {
+        if ch.is_alphanumeric() || ch == '_' {
+            start.get_or_insert(index);
+        } else if let Some(start) = start.take() {
+            spans.push((start, index));
+        }
+    }
+    if let Some(start) = start {
+        spans.push((start, text.len()));
+    }
+    spans
+}
+
+fn alias_matches(text: &str, spans: &[(usize, usize)], words: &[&str]) -> bool {
+    spans.len() >= words.len()
+        && spans
+            .iter()
+            .zip(words)
+            .all(|(&(start, end), word)| text[start..end].eq_ignore_ascii_case(word))
+        && spans[..words.len()]
+            .windows(2)
+            .all(|pair| text[pair[0].1..pair[1].0].chars().all(char::is_whitespace))
+}
+
+fn deterministic_aliases(text: &str) -> String {
+    let spans = word_spans(text);
+    let mut output = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut index = 0;
+    while index < spans.len() {
+        if let Some(&(words, replacement)) = VOCABULARY_ALIASES
+            .iter()
+            .find(|(words, _)| alias_matches(text, &spans[index..], words))
+        {
+            output.push_str(&text[copied..spans[index].0]);
+            output.push_str(replacement);
+            copied = spans[index + words.len() - 1].1;
+            index += words.len();
+        } else {
+            index += 1;
+        }
+    }
+    output.push_str(&text[copied..]);
+    output
+}
+
+fn within_one_edit(left: &str, right: &str) -> bool {
+    if !left.is_ascii() || !right.is_ascii() || left.len().abs_diff(right.len()) > 1 {
+        return false;
+    }
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    let (mut i, mut j, mut edits) = (0, 0, 0);
+    while i < left.len() && j < right.len() {
+        if left[i] == right[j] {
+            i += 1;
+            j += 1;
+            continue;
+        }
+        edits += 1;
+        if edits > 1 {
+            return false;
+        }
+        if left.len() >= right.len() {
+            i += 1;
+        }
+        if right.len() >= left.len() {
+            j += 1;
+        }
+    }
+    edits + usize::from(i < left.len() || j < right.len()) <= 1
+}
+
+fn compact_word(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// A lexical candidate gate, not a semantic disambiguator. Matching common
+/// words and homophones remain candidates so the model must preserve context.
+fn candidate_vocabulary(vocabulary: &[String], text: &str) -> Vec<String> {
+    let spans = word_spans(text);
+    let tokens: Vec<String> = spans
+        .iter()
+        .map(|&(start, end)| compact_word(&text[start..end]))
+        .collect();
+    let mut candidates = Vec::new();
+    for index in 0..spans.len() {
+        let mut joined = String::new();
+        for end in index..(index + 5).min(spans.len()) {
+            if end > index
+                && !text[spans[end - 1].1..spans[end].0]
+                    .chars()
+                    .all(char::is_whitespace)
+            {
+                break;
+            }
+            joined.push_str(&tokens[end]);
+            candidates.push(joined.clone());
+        }
+        for &(words, replacement) in VOCABULARY_ALIASES {
+            if alias_matches(text, &spans[index..], words) {
+                candidates.push(compact_word(replacement));
+            }
+        }
+    }
+    vocabulary
+        .iter()
+        .filter(|term| {
+            let term = compact_word(term);
+            candidates.iter().any(|candidate| {
+                *candidate == term
+                    || (term.len() >= 4
+                        && candidate.len() >= 3
+                        && within_one_edit(&term, candidate))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn filtered_instructions(config: &EvalConfig, lane: &PostprocLane, text: &str) -> Option<String> {
+    (lane.vocabulary_mode == VocabularyMode::CandidateFiltered).then(|| {
+        postproc::build_system_prompt(
+            &candidate_vocabulary(&config.vocabulary, text),
+            &config.instructions,
+        )
+    })
+}
+
+fn direct_openrouter_auth(request: ureq::Request) -> Result<ureq::Request> {
+    let key = cantrip::keys::get("openrouter")
+        .ok()
+        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+        .ok_or_else(|| {
+            anyhow!("OpenRouter authentication requires `cantrip key` or OPENROUTER_API_KEY")
+        })?;
+    // Reject before ureq can include the value in a header-validation error.
+    anyhow::ensure!(
+        !key.is_empty() && key.bytes().all(|byte| byte.is_ascii_graphic()),
+        "OpenRouter API key contains invalid characters"
+    );
+    Ok(request.set("Authorization", &format!("Bearer {key}")))
+}
+
+/// Keep retry classification, but discard URLs, headers, and response bodies.
+#[derive(Debug)]
+enum CloudRequestError {
+    Http(u16),
+    Transport(ureq::ErrorKind),
+}
+
+impl std::fmt::Display for CloudRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(status) => write!(formatter, "HTTP {status}"),
+            Self::Transport(kind) => write!(formatter, "transport {kind:?}"),
+        }
+    }
+}
+
+impl std::error::Error for CloudRequestError {}
+
+fn cloud_request_error(error: ureq::Error) -> CloudRequestError {
+    match error {
+        ureq::Error::Status(status, _) => CloudRequestError::Http(status),
+        ureq::Error::Transport(error) => CloudRequestError::Transport(error.kind()),
+    }
+}
 
 fn postproc_call(
     agent: &ureq::Agent,
@@ -740,6 +940,18 @@ fn postproc_call(
     transcript: &str,
     instructions: &str,
 ) -> Result<(String, ChatUsage, u128)> {
+    if lane.vocabulary_mode == VocabularyMode::DeterministicAliases {
+        let start = Instant::now();
+        let output = deterministic_aliases(transcript);
+        return Ok((
+            output,
+            ChatUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+            },
+            start.elapsed().as_millis(),
+        ));
+    }
     let user = postproc::build_user_prompt(transcript);
     if let Some(base) = &lane.ollama_base {
         return ollama_postproc(agent, base, lane, &user, transcript, instructions);
@@ -750,17 +962,13 @@ fn postproc_call(
     ));
     let mut body = json!({
         "model": lane.model,
-        // Cap generation: dictation cleanup is small; this also bounds models
-        // that decompose into an unbounded reasoning loop (their exorbitant
-        // outputs are then flagged as degenerate rather than hanging the run).
-        "max_tokens": 2048,
         "messages": [
             {"role": "system", "content": instructions},
             {"role": "user", "content": user},
         ],
     });
     if let Some(effort) = &lane.reasoning_effort {
-        body["reasoning"] = json!({ "effort": effort, "exclude": true });
+        body["reasoning"] = json!({ "effort": effort });
     }
     let start = Instant::now();
     let mut request = agent.post(&url);
@@ -771,18 +979,17 @@ fn postproc_call(
                 request = request.set(&name, &value);
             }
         }
+    } else if url.starts_with("https://openrouter.ai/") {
+        request = direct_openrouter_auth(request)?;
     }
     let payload = serde_json::to_vec(&body).context("serializing chat request")?;
     let response = request
         .set("Content-Type", "application/json")
         .send_bytes(&payload)
-        .with_context(|| format!("POST {url} for lane '{}'", lane.id))?;
-    let parsed: ChatResponse = response
-        .into_string()
-        .with_context(|| format!("reading response for lane '{}'", lane.id))
-        .and_then(|raw| {
-            serde_json::from_str(&raw).map_err(|e| anyhow!("bad chat response: {e}"))
-        })?;
+        .map_err(cloud_request_error)
+        .with_context(|| format!("chat request for lane '{}'", lane.id))?;
+    let parsed: ChatResponse = serde_json::from_reader(response.into_reader())
+        .map_err(|_| anyhow!("unexpected chat response shape for lane '{}'", lane.id))?;
     let latency = start.elapsed().as_millis();
     let raw = parsed
         .choices
@@ -865,30 +1072,37 @@ fn openrouter_pricing(agent: &ureq::Agent, marker: &str) -> Result<BTreeMap<Stri
     // Mint markers are only meaningful through the proxy.
     if proxy_prefix().is_some() {
         request = request.set("Authorization", &format!("Bearer {marker}"));
+    } else {
+        request = direct_openrouter_auth(request)?;
     }
-    let response = request.call().with_context(|| format!("GET {url}"))?;
-    let parsed: serde_json::Value = serde_json::from_str(
-        &response
-            .into_string()
-            .context("reading OpenRouter model list")?,
-    )
-    .context("parsing OpenRouter model list")?;
+    let response = request
+        .call()
+        .map_err(cloud_request_error)
+        .context("fetching OpenRouter model prices")?;
+    let parsed: serde_json::Value = serde_json::from_reader(response.into_reader())
+        .map_err(|_| anyhow!("unexpected OpenRouter model list shape"))?;
     let mut out = BTreeMap::new();
     if let Some(data) = parsed.get("data").and_then(|d| d.as_array()) {
         for item in data {
             let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let prompt = item
+            let Some(prompt) = item
                 .get("pricing")
                 .and_then(|p| p.get("prompt"))
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0);
-            let completion = item
+                .filter(|price| price.is_finite() && *price >= 0.0)
+            else {
+                continue;
+            };
+            let Some(completion) = item
                 .get("pricing")
                 .and_then(|p| p.get("completion"))
                 .and_then(|v| v.as_str())
                 .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0);
+                .filter(|price| price.is_finite() && *price >= 0.0)
+            else {
+                continue;
+            };
             if !id.is_empty() {
                 out.insert(id.to_string(), (prompt, completion));
             }
@@ -903,9 +1117,21 @@ fn openrouter_pricing(agent: &ureq::Agent, marker: &str) -> Result<BTreeMap<Stri
 /// bad header, too many redirects) and 4xx are not retried.
 fn is_transient(error: &anyhow::Error) -> bool {
     for cause in error.chain() {
+        if let Some(error) = cause.downcast_ref::<CloudRequestError>() {
+            return match error {
+                CloudRequestError::Http(code) => *code >= 500 || *code == 429,
+                CloudRequestError::Transport(kind) => matches!(
+                    kind,
+                    ureq::ErrorKind::Dns
+                        | ureq::ErrorKind::ConnectionFailed
+                        | ureq::ErrorKind::Io
+                        | ureq::ErrorKind::ProxyConnect
+                ),
+            };
+        }
         if let Some(ureq_err) = cause.downcast_ref::<ureq::Error>() {
             return match ureq_err {
-                ureq::Error::Status(code, _) => *code >= 500,
+                ureq::Error::Status(code, _) => *code >= 500 || *code == 429,
                 ureq::Error::Transport(err) => matches!(
                     err.kind(),
                     ureq::ErrorKind::Dns
@@ -1080,6 +1306,11 @@ fn validate_config(config: &EvalConfig) -> Result<()> {
         }
     }
     for lane in &config.postproc {
+        anyhow::ensure!(
+            lane.instructions.is_none() || lane.vocabulary_mode == VocabularyMode::Global,
+            "postproc '{}': custom instructions cannot override a vocabulary experiment",
+            lane.id
+        );
         let Some(p) = &lane.pricing else { continue };
         match p.unit.as_str() {
             "zero" | "openrouter" => {}
@@ -1278,9 +1509,12 @@ fn run_behavior(args: &[String]) -> Result<()> {
     let started_at = std::time::SystemTime::now();
     let config = load_config(args)?;
     validate_config(&config)?;
-    let manifest_path = config
-        .postproc_manifest
-        .as_deref()
+    let manifest_override = parse_flag(args, "--postproc-manifest");
+    let manifest_path = manifest_override
+        .as_ref()
+        .and_then(|values| values.first())
+        .map(String::as_str)
+        .or(config.postproc_manifest.as_deref())
         .ok_or_else(|| anyhow!("config has no postproc_manifest"))?;
     let manifest: BehaviorManifest = serde_json::from_str(
         &fs::read_to_string(manifest_path)
@@ -1335,23 +1569,50 @@ fn run_behavior(args: &[String]) -> Result<()> {
         }
         None => BTreeMap::new(),
     };
-    let default_instructions =
-        postproc::build_system_prompt(&config.vocabulary, &config.instructions);
+    let mut selected_prices = BTreeMap::new();
+    for lane in &config.postproc {
+        if (lane_filter.is_empty() || lane_filter.contains(&lane.id))
+            && lane.pricing.as_ref().map(|price| price.unit.as_str()) == Some("openrouter")
+        {
+            let prices = or_pricing.get(&lane.model).ok_or_else(|| {
+                anyhow!(
+                    "OpenRouter price unavailable for lane '{}'; cost is unknown",
+                    lane.id
+                )
+            })?;
+            selected_prices.insert(&lane.model, prices);
+        }
+    }
+    fs::write(
+        out_dir.join("pricing.json"),
+        serde_json::to_vec_pretty(&selected_prices)?,
+    )
+    .context("saving observed model prices in USD per token")?;
     let mut results = Vec::new();
     for lane in &config.postproc {
         if !lane_filter.is_empty() && !lane_filter.contains(&lane.id) {
             continue;
         }
         eprintln!("[eval] behavior lane '{}' start", lane.id);
+        let vocabulary = if lane.vocabulary_mode == VocabularyMode::Global {
+            config.vocabulary.as_slice()
+        } else {
+            &[]
+        };
+        let default_instructions = postproc::build_system_prompt(vocabulary, &config.instructions);
         let instructions = lane
             .instructions
             .as_deref()
             .unwrap_or(&default_instructions);
         for iteration in 1..=repeats {
             for case in &cases {
+                let filtered = filtered_instructions(&config, lane, &case.input);
+                let instructions = filtered.as_deref().unwrap_or(instructions);
+                let started = Instant::now();
                 let call = retry_cloud(&format!("behavior {}", lane.id), || {
                     postproc_call(&agent, lane, &case.input, instructions)
                 });
+                let elapsed_us = started.elapsed().as_micros();
                 let (text, usage, latency) = match call {
                     Ok(value) => value,
                     Err(error) => {
@@ -1365,6 +1626,8 @@ fn run_behavior(args: &[String]) -> Result<()> {
                             category: case.category.clone(),
                             iteration,
                             latency_ms: 0,
+                            elapsed_us,
+                            error: Some(format!("{error:#}")),
                             cost_usd: 0.0,
                             input_tokens: 0,
                             output_tokens: 0,
@@ -1396,6 +1659,8 @@ fn run_behavior(args: &[String]) -> Result<()> {
                     category: case.category.clone(),
                     iteration,
                     latency_ms: latency,
+                    elapsed_us,
+                    error: None,
                     cost_usd: cost,
                     input_tokens: usage.prompt_tokens,
                     output_tokens: usage.completion_tokens,
@@ -1542,14 +1807,18 @@ fn postprocess_and_report(
         }
         None => BTreeMap::new(),
     };
-    let default_instructions =
-        postproc::build_system_prompt(&config.vocabulary, &config.instructions);
     let mut ppr_results: Vec<PprResult> = Vec::new();
     for lane in &config.postproc {
         if !ppr_filter.is_empty() && !ppr_filter.contains(&lane.id.to_string()) {
             continue;
         }
         eprintln!("[eval] postproc lane '{}' start", lane.id);
+        let vocabulary = if lane.vocabulary_mode == VocabularyMode::Global {
+            config.vocabulary.as_slice()
+        } else {
+            &[]
+        };
+        let default_instructions = postproc::build_system_prompt(vocabulary, &config.instructions);
         if lane.pricing.as_ref().map(|p| p.unit.as_str()) == Some("openrouter")
             && !or_pricing.contains_key(&lane.model)
         {
@@ -1559,9 +1828,11 @@ fn postprocess_and_report(
             );
         }
         for stt in stt_results {
+            let filtered = filtered_instructions(config, lane, &stt.text);
             let instructions = lane
                 .instructions
                 .as_deref()
+                .or(filtered.as_deref())
                 .unwrap_or(&default_instructions);
             let call = retry_cloud(&format!("ppr {}", lane.id), || {
                 postproc_call(agent, lane, &stt.text, instructions)
@@ -2025,6 +2296,7 @@ mod tests {
             }),
             instructions: None,
             reasoning_effort: None,
+            vocabulary_mode: VocabularyMode::Global,
             ollama_base: None,
         };
         let usage = ChatUsage {
@@ -2042,6 +2314,62 @@ mod tests {
             normalize_behavior_text(" One.  \r\n\r\nTwo.\n"),
             "One.\n\nTwo."
         );
+    }
+
+    #[test]
+    fn candidate_gate_matches_spelling_without_unrelated_promotions() {
+        let vocabulary = [
+            "Tach",
+            "Tailscale",
+            "Scry",
+            "Ghostty",
+            "QMD",
+            "FSRS",
+            "PipeWire",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            candidate_vocabulary(&vocabulary, "pipe our usage into TAC"),
+            ["Tach"]
+        );
+        assert_eq!(
+            candidate_vocabulary(&vocabulary, "update skry in a ghosty window"),
+            ["Scry", "Ghostty"]
+        );
+        assert_eq!(
+            candidate_vocabulary(&vocabulary, "run cue em dee with f s r s over pipe wire"),
+            ["QMD", "FSRS", "PipeWire"]
+        );
+        assert!(candidate_vocabulary(&vocabulary, "the morning sky is clear").is_empty());
+        assert!(candidate_vocabulary(&vocabulary, "put the package on the scale").is_empty());
+        assert_eq!(candidate_vocabulary(&vocabulary, "a brass tack"), ["Tach"]);
+    }
+
+    #[test]
+    fn aliases_are_boundary_aware_but_not_context_aware() {
+        assert_eq!(
+            deterministic_aliases("TAC tack skry cue em dee f s r s pipe wire"),
+            "Tach Tach Scry QMD FSRS PipeWire"
+        );
+        assert_eq!(
+            deterministic_aliases("a brass tack, tacks, stack, cue em. dee"),
+            "a brass Tach, tacks, stack, cue em. dee"
+        );
+    }
+
+    #[test]
+    fn cloud_errors_hide_header_values_and_retain_retryability() {
+        let secret = "synthetic-private-header\n";
+        let error = ureq::post("http://127.0.0.1:1")
+            .set("Authorization", secret)
+            .call()
+            .unwrap_err();
+        let sanitized = anyhow::Error::new(cloud_request_error(error));
+        assert!(!format!("{sanitized:#}").contains("synthetic-private-header"));
+        assert!(!format!("{sanitized:?}").contains("synthetic-private-header"));
+        assert!(!is_transient(&sanitized));
+        assert!(is_transient(&CloudRequestError::Http(503).into()));
+        assert!(!is_transient(&CloudRequestError::Http(401).into()));
     }
 
     #[test]
