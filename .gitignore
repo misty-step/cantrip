@@ -25,3 +25,7 @@ __pycache__/
 # Release build output; release plans and public notes remain tracked.
 /dist/
 /.landmark/run/
+
+# Iron Forest installed binary and generated evidence
+.iron-forest/bin/
+.iron-forest/runtime/

@@ -1,3 +1,0 @@
-Act only on the current operator request or an explicit delegation from it. Without that request, report no work; do not select an old queue item.
-
-Run one Builder pass from `agent.md`: select one explicitly requested Subject, implement its spec in the assigned worktree, run the configured checks, and publish one review request for the exact revision. If no Subject is eligible, return a clean no-work summary without a Projection.

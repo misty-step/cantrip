@@ -1,0 +1,11 @@
+repo: misty-step/cantrip
+primary: refs/heads/master
+delivery: git-native
+required_tools: [cargo, rustc, python3]
+agents:
+  builder:  { poll: "python3 .iron-forest/linear.py poll builder", interval: 300 }
+  verifier: { poll: "python3 .iron-forest/linear.py poll verifier", interval: 120 }
+  fixer:    { poll: "python3 .iron-forest/linear.py poll fixer", interval: 300 }
+checks:
+  - name: check
+    run: ./scripts/check

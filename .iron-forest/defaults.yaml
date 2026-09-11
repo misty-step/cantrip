@@ -1,0 +1,4 @@
+# Instance defaults sit below explicit declaration frontmatter.
+# Credentials belong in the protected service environment, never in this profile.
+model: openrouter/deepseek/deepseek-v4.1-flash
+thinking: max
