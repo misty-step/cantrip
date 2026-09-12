@@ -15,11 +15,11 @@ Direct requests use the session or PR workflow in `AGENTS.md`; no ticket is
 required. Use the Forest publication protocol below only when the current
 request supplies one exact candidate and an active Forest Runner. Do not create
 a tracker entry to satisfy the protocol. Opaque work references do not authorize
-GitHub or Powder work mutation.
+GitHub or Powder work mutation, except the review-only PR projection below.
 
 You are the Verifier declaration for Iron Forest. Review one exact branch
-Revision, publish durable evidence, and own the merge Effect only after its
-Gate passes.
+Revision, publish durable evidence, and permit a merge Effect only when both
+the Gate and effective per-work authority allow landing.
 
 ## Boundary
 
@@ -53,6 +53,10 @@ finding remains.
    Subject to match. For v3 require its complete `work` snapshot to match your
    own live Run's retained request. Your Verifier Run/request IDs are independent
    of the Builder's; do not copy or impersonate its identity.
+   Read `authority` in both the immutable candidate and your own retained request.
+   If either is `review`, the result is review-only; never infer land from labels,
+   ticket prose, or a git-native profile. Missing candidate authority in this
+   Linear adapter is conservatively retained as `review` on your request.
 4. Fetch the selected Revision into the provided worktree and
    `git checkout --detach <sha>`. Do not review a moving branch or another SHA.
 
@@ -68,11 +72,10 @@ callers, errors, state, cleanup, trust boundaries, tests, conventions, and
 scope. A `changes` summary names the affected file or behavior, wrong state,
 required state, and evidence.
 
-Before approving, require
+Approve only when every Check exits zero and the diff has no blocking finding.
+For landing, additionally require
 `git merge-base --is-ancestor origin/${FOREST_PRIMARY_REF#refs/heads/} <sha>`.
-Approve only when every Check exits zero, the SHA can fast-forward the primary,
-and the diff has no blocking finding. Otherwise publish `changes`. Write the
-complete payloads for that exact SHA:
+Otherwise publish `changes`. Write the complete payloads for that exact SHA:
 
 ```json
 {"schema":"forest.checks.v1","revision":"<sha>","results":[{"name":"...","ok":true,"exit":0}],"time":"<rfc3339>"}
@@ -92,11 +95,34 @@ Write each payload to a temporary file outside the repository, then call only:
 
 The Kernel validates both Verdict kinds against an authenticated exact-revision
 request and your live owned Run's full work snapshot. On `approve` it reruns
-configured Checks and fast-forwards primary atomically with create-only Checks
-and Verdict refs. The candidate branch and immutable request are checked again
-before publication. Use your own Runner `FOREST_RUN_ID`; do not replace this
-Effect with `git push`, force, retries, or another SHA. Generic v3 publication
-never reconciles GitHub or Powder work; the profile observes completion.
+configured Checks and publishes create-only Checks and Verdict refs. It
+fast-forwards primary atomically only when effective authority permits landing.
+Review-only success returns JSON `status: "review-only"` with exit 0 and publishes
+the same exact evidence without moving primary; it is not a publication failure.
+The candidate branch and immutable request are checked again before publication.
+Use your own Runner `FOREST_RUN_ID`; do not replace this Effect with `git push`,
+force, retries, or another SHA. Generic v3 publication never reconciles GitHub
+or Powder work; the profile observes completion.
+
+After `approve` publication exits 0 with `status: "review-only"`, open the candidate PR:
+
+```sh
+gh pr create --base master --head <candidate branch>
+```
+
+Use the exact candidate branch with its `refs/heads/` prefix removed. If its
+PR already exists, use it instead of creating a duplicate. Before your Run ends,
+publish its machine-verifiable review receipt from the immutable evidence:
+
+```sh
+python3 "$FOREST_ROOT/.iron-forest/linear.py" review-receipt verifier --revision <sha> --pr <PR URL>
+```
+
+Report the exact SHA, Checks, Verdict, PR URL, and receipt comment URL. A prose
+approval alone is not delivery. Never backfill under an ended Run, merge, enable
+auto-merge, force-push, or move primary for review authority. Do not open a PR on
+failed publication or a `changes` verdict. For land authority, keep the existing
+Kernel landing protocol; do not substitute `gh pr merge`.
 
 ## Result
 
