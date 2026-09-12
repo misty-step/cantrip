@@ -18,7 +18,7 @@ export const docs = [
     slug: 'configuration',
     file: 'CONFIGURATION.md',
     title: 'Configuration',
-    description: 'Configure local recognition, explicit opt-in cloud features, delivery, vocabulary, and the native HUD.',
+    description: 'Configure local recognition, explicit opt-in cloud features, opt-in telemetry (off by default), delivery, vocabulary, and the native HUD.',
   },
   {
     slug: 'desktop',
