@@ -229,6 +229,28 @@ class ReleaseInstallationContracts(unittest.TestCase):
         self.assertFalse(backup.exists())
         self.assert_operator_state_preserved()
 
+    def test_user_owned_sticky_world_writable_ancestor_is_accepted(self):
+        sticky = self.root / "private-tmp"
+        sticky.mkdir()
+        os.chmod(sticky, 0o1777)
+        prefix = sticky / "selected prefix"
+        bundle = self.bundle("new")
+        self.succeeds(self.invoke(bundle, "install", prefix=prefix))
+        self.assertEqual(self.version(prefix / "bin" / "cantrip"), "new")
+        self.assert_operator_state_preserved()
+
+    def test_user_owned_world_writable_ancestor_without_sticky_is_refused(self):
+        writable = self.root / "shared"
+        writable.mkdir()
+        os.chmod(writable, 0o0777)
+        prefix = writable / "selected prefix"
+        bundle = self.bundle("new")
+        result = self.invoke(bundle, "install", prefix=prefix)
+        self.refuses(result)
+        self.assertIn("Directory is group/world-writable:", result.stderr)
+        self.assertFalse((prefix / "bin" / "cantrip").exists())
+        self.assert_operator_state_preserved()
+
     def test_corrupt_bundle_fails_before_backup_or_replacement(self):
         self.installed()
         updated = self.bundle("updated")

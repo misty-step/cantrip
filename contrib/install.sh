@@ -81,8 +81,9 @@ absolute_path() {
   REPLY=${current:-/}
 }
 
-# Root-owned sticky directories such as /tmp are safe ancestors, but never
-# writable destinations. Other users must not be able to redirect our writes.
+# Sticky world-writable directories owned by root or the current user are safe
+# ancestors (host /tmp, or systemd user PrivateTmp), but never destinations.
+# Sticky bit blocks others from replacing our entries; only root or we own the directory.
 check_directories() {
   local path=$1 allow_missing=$2 part current= owner mode bits
   local -a parts
@@ -100,7 +101,7 @@ check_directories() {
     [[ "$owner" == "$UID" || "$owner" == 0 ]] || fail "Directory belongs to another user: $current"
     bits=$((8#$mode))
     if (( bits & 0022 )); then
-      [[ "$owner" == 0 ]] && (( bits & 01000 )) || fail "Directory is group/world-writable: $current"
+      [[ "$owner" == 0 || "$owner" == "$UID" ]] && (( bits & 01000 )) || fail "Directory is group/world-writable: $current"
     fi
   done
 }
