@@ -183,7 +183,7 @@ impl Config {
             let stripped = endpoint.trim_end_matches('/');
             if stripped.ends_with("/audio/transcriptions") {
                 bail!(
-                    "stt.endpoint must be the API base URL (e.g. https://api.openai.com/v1),                      not the full /audio/transcriptions path"
+                    "stt.endpoint must be the API base URL (e.g. https://api.openai.com/v1), not the full /audio/transcriptions path"
                 );
             }
             if self.stt.model.trim().is_empty() {
@@ -360,9 +360,15 @@ mod tests {
             ..Default::default()
         };
         let err = config.validate().expect_err("full path must fail");
+        let message = err.to_string();
+        assert!(message.contains("API base"), "unexpected error: {message}");
         assert!(
-            err.to_string().contains("API base"),
-            "unexpected error: {err:#}"
+            message.contains("/audio/transcriptions"),
+            "error should name the offending path: {message}"
+        );
+        assert!(
+            !message.contains("  "),
+            "error should not contain a padded run of spaces: {message}"
         );
     }
 
