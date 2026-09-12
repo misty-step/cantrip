@@ -580,10 +580,15 @@ def review_receipt(root: Path, revision: str, pr: str) -> int:
             previous = json.loads(comment["body"][len(marker):].strip())
             if previous.get("revision") == revision:
                 raise AdapterError("candidate already has a receipt; reconcile rather than duplicate")
+    summary = verdict["summary"] + "\n\nPublished evidence (same live Verifier Run):\n"
+    summary += f"Verdict: {verdict['verdict']} at {verdict['time']}.\n"
+    summary += f"Checks at {checks['time']}: " + ", ".join(
+        f"{row['name']} exit={row['exit']} ok={str(row['ok']).lower()}" for row in checks["results"]
+    ) + "\n"
+    summary += "\n".join(f"{kind}: {source['ref']} @ {source['commit']}" for kind, source in refs.items())
+    # forest.review.v1 is a strict six-field contract; evidence belongs in summary.
     receipt = {"schema": "forest.review.v1", "run_id": run_id, "work_id": work["id"],
-               "revision": revision, "decision": verdict["verdict"], "summary": verdict["summary"],
-               "checks": checks, "verdict": verdict,
-               "provenance": {"kind": "in-run-published-evidence", "evidence": refs}}
+               "revision": revision, "decision": verdict["verdict"], "summary": summary}
     # GitHub supplies source timestamps. Never invent or backdate a Run lifetime.
     current = live_run()
     if any(current.get(key) != run.get(key) for key in ("run_id", "request_id", "work", "authority")):
