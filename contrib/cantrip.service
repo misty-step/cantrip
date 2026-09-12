@@ -1,6 +1,6 @@
 [Unit]
 Description=Cantrip dictation daemon
-Documentation=https://github.com/misty-step/cantrip#user-service-graphical-session
+Documentation=https://github.com/misty-step/cantrip/blob/master/docs/DESKTOP.md#user-service-graphical-session
 # The desktop owns this target; starting Cantrip must not create a session.
 Requisite=graphical-session.target
 After=graphical-session.target
