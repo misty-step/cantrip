@@ -23,7 +23,7 @@ pub fn models_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("models"))
 }
 
-/// `$XDG_RUNTIME_DIR/cantrip/` (falls back to `/tmp/cantrip-$UID`).
+/// `$XDG_RUNTIME_DIR/cantrip/` (falls back to `/tmp/cantrip-$UID/cantrip/`).
 /// Holds the control socket and in-flight recordings. Runtime dirs are
 /// tmpfs and per-user (0700), so recordings never touch disk.
 pub fn runtime_dir() -> Result<PathBuf> {
