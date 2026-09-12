@@ -68,7 +68,7 @@ it outside this Subject and do not create a speculative ticket.
 ## Request payload
 
 ```json
-{"schema":"forest.review-request.v3","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","run_id":"<actual FOREST_RUN_ID>","request_id":"<actual request id>","work":{"system":"<opaque system>","id":"<immutable id>","key":"<display key>","url":"<work URL>"}}
+{"schema":"forest.review-request.v3","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","run_id":"<actual FOREST_RUN_ID>","request_id":"<actual request id>","authority":"<retained authority>","work":{"system":"<opaque system>","id":"<immutable id>","key":"<display key>","url":"<work URL>"}}
 ```
 
 Use the actual live Builder Run identity and the request retained at
@@ -76,6 +76,9 @@ Use the actual live Builder Run identity and the request retained at
 Copy its exact `id` into `request_id` and its complete `work` snapshot, including
 optional `key` and `url`. Omit `request_id` if the Run has no request, and omit
 `work` if the request has none. Do not add `tracker` or manufacture missing fields.
+Copy its exact `authority` (`land` or `review`) into the payload; omit only if
+absent from the retained request. Never infer authority from ticket prose or
+profile delivery settings. `review` authorizes candidate evidence, not landing.
 The Kernel checks against the owning primary checkout's live Run and retained
 request, including identical retries and a final check after candidate Checks.
 The Builder writes the initial payload; a Fixer uses its own Run/request identity.

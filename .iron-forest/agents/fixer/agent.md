@@ -85,9 +85,12 @@ Read `$FOREST_ROOT/.iron-forest/runtime/runs/$FOREST_RUN_ID.request.json`.
 Omit absent `request_id` and `work`; never add `tracker`. The Kernel requires
 the actual live Fixer, exact retained request/work, and an authenticated
 `changes` verdict; old request/verdict evidence remains immutable.
+Copy `authority` exactly from your retained request; omit only if absent.
+Never elevate the rejected candidate's `review` authority to `land` or absent.
+If the retained request would elevate it, stop and report an unsupported handoff.
 
 ```json
-{"schema":"forest.review-request.v3","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","run_id":"<actual Fixer FOREST_RUN_ID>","request_id":"<actual Fixer request id>","work":{"system":"<unchanged system>","id":"<unchanged immutable id>","key":"<unchanged display key>","url":"<unchanged work URL>"}}
+{"schema":"forest.review-request.v3","subject":"<id>","branch":"forest/<id>/<slug>","revision":"<sha>","time":"<rfc3339>","run_id":"<actual Fixer FOREST_RUN_ID>","request_id":"<actual Fixer request id>","authority":"<retained authority>","work":{"system":"<unchanged system>","id":"<unchanged immutable id>","key":"<unchanged display key>","url":"<unchanged work URL>"}}
 ```
 
 ## Result
