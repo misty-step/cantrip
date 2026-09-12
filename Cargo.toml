@@ -5,7 +5,7 @@ edition = "2021"
 description = "Local-first dictation for Linux: hold a key, speak, get text."
 license = "MIT"
 repository = "https://github.com/misty-step/cantrip"
-homepage = "https://github.com/misty-step/cantrip"
+homepage = "https://cantrip.mistystep.io"
 readme = "README.md"
 
 [dependencies]
