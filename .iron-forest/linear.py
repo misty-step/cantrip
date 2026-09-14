@@ -3,7 +3,7 @@
 
 Kernel never inspects tickets. Eligibility is this command's exit code
 (0 = work, 1 = none). Live Linear reads use a credential discovered from
-~/.secrets by property name; this file never prints or persists values.
+pass entries under workstation/ by property name; values are never printed or persisted.
 
 Agent: Land grants land; Agent: Review and legacy Agent: Ready grant review.
 Conflicting labels choose review. Operator Action always excludes an issue.
@@ -28,7 +28,6 @@ AUTHORITY_LABELS = frozenset({LAND_LABEL, REVIEW_LABEL, READY_LABEL})
 OPERATOR_LABEL = "Operator Action"
 LINEAR_GRAPHQL = "https://api.linear.app/graphql"
 LINEAR_SYSTEM = "https://linear.app/misty-step"
-SECRETS_PATH = Path.home() / ".secrets"
 CREDENTIAL_NAMES = (
     "LINEAR_API_KEY",
     "LINEAR_API_TOKEN",
@@ -97,36 +96,40 @@ def project_name(repo: str) -> str:
     return project
 
 
-def parse_secrets(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        values[key] = value
-    return values
-
-
 def discover_linear_credential() -> tuple[str, str]:
     env_name = next((name for name in CREDENTIAL_NAMES if os.environ.get(name)), "")
     if env_name:
         return env_name, os.environ[env_name]
-    secrets = parse_secrets(SECRETS_PATH)
+    environment = os.environ.copy()
+    environment["PASSWORD_STORE_GPG_OPTS"] = "--batch --pinentry-mode error"
     for name in CREDENTIAL_NAMES:
-        value = secrets.get(name, "").strip()
+        try:
+            result = subprocess.run(
+                ["pass", "show", "--", f"workstation/{name}"],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise AdapterError(f"timed out decrypting workstation/{name}") from None
+        except OSError:
+            raise AdapterError("cannot run pass; install it and configure the local password store") from None
+        if result.returncode:
+            continue
+        try:
+            value = result.stdout.decode("utf-8")
+        except UnicodeError:
+            raise AdapterError(f"workstation/{name} is not UTF-8") from None
         if value:
+            if any(ord(char) < 32 or ord(char) == 127 for char in value):
+                raise AdapterError(f"workstation/{name} contains invalid credential control characters")
             return name, value
     tried = ", ".join(CREDENTIAL_NAMES)
     raise AdapterError(
-        f"no Linear API credential in environment or {SECRETS_PATH} "
-        f"(tried {tried}); refusing to invent one"
+        "no usable Linear API credential in environment or pass workstation/ "
+        f"(tried {tried}); check entries and the GPG key"
     )
 
 
