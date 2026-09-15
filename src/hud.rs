@@ -1399,11 +1399,16 @@ impl TrackMotion {
 }
 
 fn recording_frame(waveform: Option<AudioWaveform>) -> TrackFrame {
+    // Listening sensitivity. Normal speech should light most of the field
+    // without pinning ordinary peaks at full height; the silence floor and the
+    // square-root response are unchanged.
+    const WAVEFORM_GAIN: f32 = 3.2;
+
     fn extent(magnitude: u16) -> f32 {
         let amplitude = if magnitude <= 32 {
             0.0
         } else {
-            (1.6 * f32::from(magnitude) / 32767.0)
+            (WAVEFORM_GAIN * f32::from(magnitude) / 32767.0)
                 .clamp(0.0, 1.0)
                 .sqrt()
         };

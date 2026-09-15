@@ -27,7 +27,11 @@ adding, removing or resizing cells.
   the rest floor; a row the extent only partly covers fades between the floor
   and the column's active opacity by its fractional coverage. The column's
   active opacity remains `0.3 + 0.7 × amplitude`, and amplitude at or below the
-  existing input floor stays entirely at rest.
+  existing input floor stays entirely at rest. The 2026-09-15 operator review
+  raised the fixed pre-sqrt gain from 1.6× to 3.2×: with a persistent field the
+  same PCM reads dimmer than the old sparse track did, and normal speech should
+  light most of the field. The silence floor, square-root response and
+  attack/release are unchanged.
 - **Transcribing.** The full field height participates: the measured fractional
   front fills whole columns, and the bounded indeterminate packet lights whole
   columns as it moves. Every column beyond the front stays at rest. Pending

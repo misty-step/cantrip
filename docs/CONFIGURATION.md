@@ -239,9 +239,9 @@ manual-paste feedback. There is no timed reveal, long-recording label or latched
 caption. `labels = true` keeps stage text visible as an accessibility override.
 
 Listening shows 60 independent signed PCM pixel columns, sampled every 100 ms.
-A fixed 1.6× gain before square-root scaling makes quiet speech more visible
-without changing the silence floor. Each side attacks quickly and releases more
-slowly to silence; neighboring columns are never blended.
+A fixed 3.2× gain before square-root scaling makes normal speech light most of
+the field without changing the silence floor. Each side attacks quickly and
+releases more slowly to silence; neighboring columns are never blended.
 
 The HUD paints one persistent 60×7 pixel field in every visible state; cells are
 always shown at a faint rest level and work raises them above it. Listening raises
