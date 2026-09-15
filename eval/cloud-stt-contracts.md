@@ -110,3 +110,52 @@ state is for this machine through the Mint broker at delivery time.
 - Sources: `https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe`,
   `https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/new-mai-models-in-microsoft-foundry-across-text-image-voice-and-speech/4524632`,
   `https://azure.microsoft.com/en-us/pricing/details/speech/`.
+
+## OpenRouter — Meta Muse Voice Transcribe 1.0 (eval-only)
+
+as_of: 2026-09-11. Eval adapter only; not wired into production daemon STT.
+
+- Contract (Muse model page, JSON): `POST https://openrouter.ai/api/v1/audio/transcriptions`,
+  `Authorization: Bearer`, `Content-Type: application/json`,
+  body `{ "model": "meta/muse-voice-transcribe-1.0", "input_audio": { "data": "<raw base64, not data URI>", "format": "wav" } }`.
+  Response `{ "text", "usage": { seconds, tokens, cost } }`. This host's 2026-09-11
+  JSON smoke returned `usage` keys `cost` and `seconds` (no tokens).
+- OpenRouter STT API also documents OpenAI-style multipart `file` + `model`
+  (25 MB cap) at the same path. Muse's model page documents JSON only.
+- Live probe 2026-09-11, `samples/jfk.wav`, direct OpenRouter (keyring
+  `openrouter`; `CANTRIP_PROXY` unset): JSON HTTP 2xx; multipart HTTP 2xx.
+  Production Cantrip (`POST {base}/audio/transcriptions` file+model) is
+  therefore a drop-in at HTTP-class 2xx on this host. The eval lane still
+  uses JSON because that is Muse's advertised contract.
+- Auth: mint marker `__mint.openrouter.default__` only when `CANTRIP_PROXY`
+  is set; otherwise `cantrip key` id `openrouter`, else `OPENROUTER_API_KEY`.
+  Markers are never sent as credentials on the direct path.
+- Pricing: Meta list price **$0.18/hour = $0.003/min**. OpenRouter
+  `/models?output_modalities=transcription` lists `pricing.prompt: "0.18"`.
+  Eval `per_min` rate is 0.003; recorded `cost_usd` prefers response
+  `usage.cost` when it is finite and `>= 0`, else falls back to per_min.
+  pricing_source: Meta Model API pricing page; OpenRouter model/STT docs.
+- Sources: `https://dev.meta.ai/docs/pricing-rate-limits.md`,
+  `https://openrouter.ai/meta/muse-voice-transcribe-1.0`,
+  `https://openrouter.ai/docs/api/api-reference/stt/create-transcription`.
+
+## OpenRouter catalog equivalents (eval-only)
+
+as_of: 2026-09-11. Same JSON `kind: openrouter` adapter as Muse (keyring
+`openrouter`; `CANTRIP_PROXY` unset). Not wired into production daemon STT.
+Results: `/tmp/cantrip-eval-stt-muse-cloud` (does not replace
+`eval/results/stt-muse`).
+
+- `openai/whisper-1`: JSON HTTP 401 on first clip. Not scored. OpenAI
+  whisper-1 **$0.006/min**; OpenRouter `pricing.prompt` 0.006.
+- `openai/gpt-4o-mini-transcribe`: JSON HTTP 401 on first clip. Not scored.
+  Historical ~$0.003/min; token-billed. Recorded cost would prefer
+  `usage.cost`.
+- `deepgram/nova-3`: JSON HTTP 2xx, 5/5 clips. Deepgram PAYG monolingual
+  **$0.0048/min**; OpenRouter `pricing.prompt` **0.0043**. Recorded `cost_usd`
+  is summed `usage.cost` (0.003486 / 48.65 s ≈ $0.0043/min).
+- ElevenLabs Scribe v2 is not on OpenRouter. Mint probe: DNS NXDOMAIN for the
+  broker host (HTTP 000 / curl 6). Not scored.
+
+Other OpenRouter STT models (MAI-Transcribe 2, Voxtral, Qwen3 ASR, Nemotron,
+grok-stt) were not run.

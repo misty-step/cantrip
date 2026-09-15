@@ -111,7 +111,7 @@ struct PriceSpec {
 #[derive(Debug, Deserialize)]
 struct SttLane {
     id: String,
-    kind: String, // transcribe_rs | whisper_cpp | openai | deepgram | elevenlabs
+    kind: String, // transcribe_rs | whisper_cpp | openai | deepgram | elevenlabs | openrouter
     #[serde(default)]
     family: Option<String>, // parakeet | canary | moonshine
     #[serde(default)]
@@ -707,6 +707,116 @@ fn elevenlabs_transcribe(agent: &ureq::Agent, lane: &SttLane, wav: &Path) -> Res
     Ok(text)
 }
 
+const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn encode_base64(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(BASE64[(n >> 18) as usize & 63] as char);
+        out.push(BASE64[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Muse/OpenRouter advertised JSON body: raw base64, not a data URI.
+fn openrouter_transcription_body(model: &str, wav: &[u8]) -> serde_json::Value {
+    json!({
+        "model": model,
+        "input_audio": {
+            "data": encode_base64(wav),
+            "format": "wav",
+        },
+    })
+}
+
+fn finite_nonneg_cost(value: Option<&serde_json::Value>) -> Option<f64> {
+    let number = match value? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }?;
+    (number.is_finite() && number >= 0.0).then_some(number)
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterTranscription {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
+}
+
+/// OpenRouter JSON transcription (`input_audio`). Returns (text, usage.cost).
+fn openrouter_transcribe(
+    agent: &ureq::Agent,
+    lane: &SttLane,
+    wav: &Path,
+) -> Result<(String, Option<f64>)> {
+    let endpoint = lane
+        .endpoint
+        .as_deref()
+        .with_context(|| format!("lane '{}' needs endpoint", lane.id))?;
+    let path = lane
+        .path
+        .as_deref()
+        .with_context(|| format!("lane '{}' needs path", lane.id))?;
+    let model = lane
+        .model
+        .as_deref()
+        .with_context(|| format!("lane '{}' needs model", lane.id))?;
+    let url = proxied(&format!("{}{}", endpoint.trim_end_matches('/'), path));
+    let wav_bytes = fs::read(wav).with_context(|| format!("reading {}", wav.display()))?;
+    let payload = serde_json::to_vec(&openrouter_transcription_body(model, &wav_bytes))
+        .context("serializing OpenRouter transcription request")?;
+    let mut request = agent.post(&url).set("Content-Type", "application/json");
+    if proxy_prefix().is_some() {
+        if let Some(marker) = &lane.marker {
+            for (name, value) in auth_headers(lane.scheme.as_deref().unwrap_or("Bearer"), marker)
+            {
+                request = request.set(&name, &value);
+            }
+        }
+    } else {
+        request = direct_openrouter_auth(request)?;
+    }
+    let response = request
+        .send_bytes(&payload)
+        .map_err(cloud_request_error)
+        .with_context(|| format!("transcription request for lane '{}'", lane.id))?;
+    let parsed: OpenRouterTranscription = serde_json::from_reader(response.into_reader())
+        .map_err(|_| anyhow!("unexpected transcription response shape for lane '{}'", lane.id))?;
+    let text = parsed.text.trim().to_owned();
+    if text.is_empty() {
+        bail!("OpenRouter returned no transcript for lane '{}'", lane.id);
+    }
+    let cost = finite_nonneg_cost(parsed.usage.as_ref().and_then(|usage| usage.get("cost")));
+    Ok((text, cost))
+}
+
+fn mint_marker_requires_proxy(lane: &SttLane) -> bool {
+    lane.kind != "openrouter"
+        && lane
+            .marker
+            .as_deref()
+            .is_some_and(|marker| marker.starts_with("__mint."))
+}
+
 fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -932,6 +1042,26 @@ fn cloud_request_error(error: ureq::Error) -> CloudRequestError {
         ureq::Error::Status(status, _) => CloudRequestError::Http(status),
         ureq::Error::Transport(error) => CloudRequestError::Transport(error.kind()),
     }
+}
+
+fn cloud_http_status(error: &anyhow::Error) -> Option<u16> {
+    for cause in error.chain() {
+        if let Some(CloudRequestError::Http(status)) = cause.downcast_ref::<CloudRequestError>() {
+            return Some(*status);
+        }
+        if let Some(ureq::Error::Status(status, _)) = cause.downcast_ref::<ureq::Error>() {
+            return Some(*status);
+        }
+    }
+    None
+}
+
+fn http_class_label(status: u16) -> String {
+    format!("{}xx", status / 100)
+}
+
+fn is_paid_stt_kind(kind: &str) -> bool {
+    matches!(kind, "openrouter" | "openai" | "deepgram" | "elevenlabs")
 }
 
 fn postproc_call(
@@ -1177,6 +1307,19 @@ fn stt_cost_usd(lane: &SttLane, audio_secs: f64, input_tokens: u64, output_token
     }
 }
 
+fn recorded_stt_cost_usd(
+    lane: &SttLane,
+    audio_secs: f64,
+    input_tokens: u64,
+    output_tokens: u64,
+    usage_cost: Option<f64>,
+) -> f64 {
+    match usage_cost {
+        Some(cost) if cost.is_finite() && cost >= 0.0 => cost,
+        _ => stt_cost_usd(lane, audio_secs, input_tokens, output_tokens),
+    }
+}
+
 fn ppr_cost_usd(
     lane: &PostprocLane,
     usage: &ChatUsage,
@@ -1278,7 +1421,10 @@ fn lane_available(lane: &SttLane) -> bool {
                     .and_then(expand_home)
                     .is_some_and(|path| path.exists())
         }
-        _ => lane.endpoint.is_some() && lane.path.is_some() && lane.model.is_some(),
+        "openai" | "deepgram" | "elevenlabs" | "openrouter" => {
+            lane.endpoint.is_some() && lane.path.is_some() && lane.model.is_some()
+        }
+        _ => false,
     }
 }
 
@@ -1407,12 +1553,34 @@ fn run(args: &[String]) -> Result<()> {
 
     // ---------------- Transcription ----------------
     let mut stt_results: Vec<SttResult> = Vec::new();
+    let mut stt_skips: Vec<serde_json::Value> = Vec::new();
+    let mut skip_paid_stt = false;
     for lane in &config.stt {
         if !stt_filter.is_empty() && !stt_filter.contains(&lane.id.to_string()) {
             continue;
         }
         if !lane_available(lane) {
             eprintln!("[eval] skip stt lane '{}' (assets missing)", lane.id);
+            continue;
+        }
+        if mint_marker_requires_proxy(lane) && proxy_prefix().is_none() {
+            eprintln!(
+                "[eval] skip stt lane '{}' (mint marker requires CANTRIP_PROXY)",
+                lane.id
+            );
+            continue;
+        }
+        if skip_paid_stt && is_paid_stt_kind(&lane.kind) {
+            eprintln!(
+                "[eval] skip stt lane '{}' (stopped remaining paid lanes after HTTP 402/403)",
+                lane.id
+            );
+            stt_skips.push(json!({
+                "lane": lane.id,
+                "http_status": serde_json::Value::Null,
+                "http_class": "4xx",
+                "reason": "stopped remaining paid lanes after HTTP 402/403",
+            }));
             continue;
         }
         eprintln!("[eval] stt lane '{}' start", lane.id);
@@ -1426,26 +1594,62 @@ fn run(args: &[String]) -> Result<()> {
         for (index, (clip_id, wav_path, samples, secs)) in clip_data.iter().enumerate() {
             let cold = index == 0;
             let t0 = Instant::now();
-            let result: Result<(String, u64, u64)> = match lane.kind.as_str() {
+            let result: Result<(String, u64, u64, Option<f64>)> = match lane.kind.as_str() {
                 "transcribe_rs" => model
                     .as_mut()
-                    .ok_or_else(|| anyhow!("model not loaded for lane '{}'", lane.id))?
-                    .transcribe(samples)
-                    .map(|t| (t, 0, 0)),
-                "whisper_cpp" => whisper_cpp(lane, Path::new(wav_path)).map(|t| (t, 0, 0)),
+                    .ok_or_else(|| anyhow!("model not loaded for lane '{}'", lane.id))
+                    .and_then(|model| model.transcribe(samples).map(|t| (t, 0, 0, None))),
+                "whisper_cpp" => whisper_cpp(lane, Path::new(wav_path)).map(|t| (t, 0, 0, None)),
                 "openai" => retry_cloud(&format!("stt {}", lane.id), || {
                     openai_transcribe(&agent, lane, Path::new(wav_path))
+                })
+                .map(|(text, input_tokens, output_tokens)| {
+                    (text, input_tokens, output_tokens, None)
                 }),
                 "deepgram" => retry_cloud(&format!("stt {}", lane.id), || {
-                    deepgram_transcribe(&agent, lane, Path::new(wav_path)).map(|t| (t, 0, 0))
+                    deepgram_transcribe(&agent, lane, Path::new(wav_path)).map(|t| (t, 0, 0, None))
                 }),
                 "elevenlabs" => retry_cloud(&format!("stt {}", lane.id), || {
-                    elevenlabs_transcribe(&agent, lane, Path::new(wav_path)).map(|t| (t, 0, 0))
+                    elevenlabs_transcribe(&agent, lane, Path::new(wav_path)).map(|t| (t, 0, 0, None))
+                }),
+                "openrouter" => retry_cloud(&format!("stt {}", lane.id), || {
+                    openrouter_transcribe(&agent, lane, Path::new(wav_path))
+                        .map(|(text, cost)| (text, 0, 0, cost))
                 }),
                 other => bail!("unknown stt kind {other:?}"),
             };
-            let (text, input_tokens, output_tokens) =
-                result.with_context(|| format!("lane '{}' clip '{}'", lane.id, clip_id))?;
+            let (text, input_tokens, output_tokens, usage_cost) = match result {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("[eval] FAIL stt {} clip {}: {error:#}", lane.id, clip_id);
+                    let http_status = cloud_http_status(&error);
+                    let http_class = http_status.map(http_class_label);
+                    if let Some(status) = http_status {
+                        eprintln!(
+                            "[eval] skip stt lane '{}' HTTP {} ({})",
+                            lane.id,
+                            status,
+                            http_class.as_deref().unwrap_or("unknown")
+                        );
+                        if status == 402 || status == 403 {
+                            skip_paid_stt = true;
+                            eprintln!(
+                                "[eval] stop remaining paid stt lanes after HTTP {status}"
+                            );
+                        }
+                    } else if is_paid_stt_kind(&lane.kind) {
+                        eprintln!("[eval] skip stt lane '{}' (cloud error)", lane.id);
+                    }
+                    stt_skips.push(json!({
+                        "lane": lane.id,
+                        "clip": clip_id,
+                        "http_status": http_status,
+                        "http_class": http_class,
+                        "reason": format!("{error:#}"),
+                    }));
+                    break;
+                }
+            };
             let latency = t0.elapsed().as_millis();
             if lane.pricing.as_ref().map(|p| p.unit.as_str()) == Some("per_token")
                 && input_tokens == 0
@@ -1456,15 +1660,19 @@ fn run(args: &[String]) -> Result<()> {
                     lane.id
                 );
             }
-            let cost = stt_cost_usd(lane, *secs, input_tokens, output_tokens);
+            let cost = recorded_stt_cost_usd(lane, *secs, input_tokens, output_tokens, usage_cost);
             eprintln!(
-                "[eval] stt {} clip {} chars={} ms={} cost_usd={:.6} cold={}",
+                "[eval] stt {} clip {} chars={} ms={} cost_usd={:.6} cold={} usage_cost={}",
                 lane.id,
                 clip_id,
                 text.chars().count(),
                 latency,
                 cost,
-                cold
+                cold,
+                match usage_cost {
+                    Some(value) => format!("{value:.6}"),
+                    None => "missing".to_owned(),
+                }
             );
             stt_results.push(SttResult {
                 lane: lane.id.clone(),
@@ -1483,6 +1691,11 @@ fn run(args: &[String]) -> Result<()> {
     let transcripts_path = out_dir.join("transcripts.json");
     fs::write(&transcripts_path, serde_json::to_vec_pretty(&stt_results)?)
         .with_context(|| format!("writing {}", transcripts_path.display()))?;
+    fs::write(
+        out_dir.join("stt-skips.json"),
+        serde_json::to_vec_pretty(&stt_skips)?,
+    )
+    .context("writing stt-skips.json")?;
 
     postprocess_and_report(
         &config,
@@ -2236,6 +2449,50 @@ mod tests {
         assert!(
             (stt_cost_usd(&lane, 0.0, 110, 28) - (110.0 * 1.25 + 28.0 * 5.0) / 1e6).abs() < 1e-12
         );
+    }
+
+    #[test]
+    fn openrouter_json_body_is_raw_base64_wav() {
+        let wav = b"RIFF....";
+        let body = openrouter_transcription_body("meta/muse-voice-transcribe-1.0", wav);
+        assert_eq!(body["model"], "meta/muse-voice-transcribe-1.0");
+        assert_eq!(body["input_audio"]["format"], "wav");
+        let data = body["input_audio"]["data"].as_str().expect("base64 data");
+        assert!(!data.starts_with("data:"));
+        assert_eq!(data, encode_base64(wav));
+    }
+
+    #[test]
+    fn stt_cost_prefers_finite_nonneg_usage_cost() {
+        let lane = stt_lane(PriceSpec {
+            unit: "per_min".into(),
+            rate: 0.003,
+            input: 0.0,
+            output: 0.0,
+        });
+        assert!(
+            (recorded_stt_cost_usd(&lane, 60.0, 0, 0, Some(0.000552)) - 0.000552).abs() < 1e-12
+        );
+        assert!((recorded_stt_cost_usd(&lane, 60.0, 0, 0, None) - 0.003).abs() < 1e-12);
+        assert!((recorded_stt_cost_usd(&lane, 60.0, 0, 0, Some(f64::NAN)) - 0.003).abs() < 1e-12);
+        assert!((recorded_stt_cost_usd(&lane, 60.0, 0, 0, Some(-0.1)) - 0.003).abs() < 1e-12);
+        assert_eq!(recorded_stt_cost_usd(&lane, 60.0, 0, 0, Some(0.0)), 0.0);
+    }
+
+    #[test]
+    fn mint_markers_require_proxy_except_openrouter() {
+        let mut openai = stt_lane(PriceSpec {
+            unit: "per_min".into(),
+            rate: 0.006,
+            input: 0.0,
+            output: 0.0,
+        });
+        openai.kind = "openai".into();
+        openai.marker = Some("__mint.openai.default__".into());
+        assert!(mint_marker_requires_proxy(&openai));
+        openai.kind = "openrouter".into();
+        openai.marker = Some("__mint.openrouter.default__".into());
+        assert!(!mint_marker_requires_proxy(&openai));
     }
 
     #[test]

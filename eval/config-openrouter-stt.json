@@ -1,0 +1,300 @@
+{
+  "manifest": "samples/eval/manifest.json",
+  "postproc_manifest": "samples/eval/postproc-behavior.json",
+  "out_dir": "eval/results/openrouter-stt-contenders",
+  "instructions": "",
+  "vocabulary": [
+    "API",
+    "Cantrip",
+    "HUD",
+    "Parakeet",
+    "PipeWire",
+    "WAV"
+  ],
+  "stt": [
+    {
+      "id": "parakeet-v3-int8",
+      "kind": "transcribe_rs",
+      "family": "parakeet",
+      "dir": "~/.local/share/cantrip/models/parakeet-tdt-0.6b-v3-int8",
+      "quant": "int8",
+      "pricing": {
+        "unit": "zero"
+      }
+    },
+    {
+      "id": "openrouter-microsoft-mai-transcribe-2",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "microsoft/mai-transcribe-2",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-meta-muse-voice-transcribe-1.0",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "meta/muse-voice-transcribe-1.0",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-nvidia-nemotron-3.5-asr-streaming-multilingual-0.6b",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-mistralai-voxtral-small-24b-2507-stt",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "mistralai/voxtral-small-24b-2507-stt",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-mistralai-voxtral-mini-3b-2507",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "mistralai/voxtral-mini-3b-2507",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-qwen-qwen3-asr-1.7b",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "qwen/qwen3-asr-1.7b",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-qwen-qwen3-asr-0.6b",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "qwen/qwen3-asr-0.6b",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-openai-gpt-transcribe",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "openai/gpt-transcribe",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-fish-audio-transcribe-1",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "fish-audio/transcribe-1",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-x-ai-grok-stt-1.0",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "x-ai/grok-stt-1.0",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-deepgram-nova-3",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "deepgram/nova-3",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-microsoft-mai-transcribe-1.5",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "microsoft/mai-transcribe-1.5",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-nvidia-parakeet-tdt-0.6b-v3",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "nvidia/parakeet-tdt-0.6b-v3",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-mistralai-voxtral-mini-transcribe",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "mistralai/voxtral-mini-transcribe",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-qwen-qwen3-asr-flash-2026-02-10",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "qwen/qwen3-asr-flash-2026-02-10",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-google-chirp-3",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "google/chirp-3",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-openai-gpt-4o-mini-transcribe",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "openai/gpt-4o-mini-transcribe",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-openai-whisper-large-v3",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "openai/whisper-large-v3",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-openai-whisper-large-v3-turbo",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "openai/whisper-large-v3-turbo",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-openai-whisper-1",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "openai/whisper-1",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    },
+    {
+      "id": "openrouter-openai-gpt-4o-transcribe",
+      "kind": "openrouter",
+      "endpoint": "https://openrouter.ai",
+      "path": "/api/v1/audio/transcriptions",
+      "model": "openai/gpt-4o-transcribe",
+      "marker": "__mint.openrouter.default__",
+      "scheme": "Bearer",
+      "pricing": {
+        "unit": "per_min",
+        "rate": 0.001
+      }
+    }
+  ],
+  "postproc": []
+}
