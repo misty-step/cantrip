@@ -268,6 +268,7 @@ predecessor whose pipeline architecture and privacy rules carry over.
   evidence and link forward where superseded.
   - [Per-take recovery and verified delivery](docs/adr/0019-per-take-recovery-and-verified-delivery.md),
     refined by [local completion and explicit audio deletion](docs/adr/0020-local-completion-and-explicit-audio-deletion.md)
-    and the [signed waveform contract](docs/adr/0021-signed-pixel-waveform.md).
+    and the [signed waveform contract](docs/adr/0021-signed-pixel-waveform.md),
+    painted as a [persistent pixel field](docs/adr/0023-persistent-pixel-field.md).
   - [Private history and fixture promotion](docs/adr/0013-local-transcript-history.md)
     and [eval-driven post-processing](docs/adr/0012-eval-driven-postprocessing.md).

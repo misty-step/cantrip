@@ -1,6 +1,9 @@
 # ADR 0021: Signed pixel waveform from independent PCM measurements
 
-Date: 2026-09-07. Status: accepted.
+Date: 2026-09-07. Status: accepted. Refined by
+[ADR 0023](0023-persistent-pixel-field.md), which replaces the per-state track
+geometry with one persistent pixel field while keeping this waveform mapping
+and its honest-progress, cleanup, success, timing and reduced-motion contracts.
 
 ## Problem
 
