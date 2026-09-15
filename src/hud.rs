@@ -67,7 +67,7 @@ const LISTENING_ONSET: Duration = Duration::from_millis(280);
 const SETTLE: Duration = Duration::from_millis(400);
 const PROGRESS_REVEAL: Duration = Duration::from_millis(600);
 const PHASE_DWELL: Duration = Duration::from_millis(180);
-// One measured reveal and one cleanup morph, their settled dwells, and
+// One measured reveal and one cleanup transition, their settled dwells, and
 // compositor-cadence margin. Success settling/holding/fading is additional.
 const MAX_PRESENTATION_LAG: Duration = Duration::from_millis(1600);
 // Full-opacity dwell after the completion grid has finished settling.
@@ -83,9 +83,10 @@ const CELLS: usize = AUDIO_WAVEFORM_BINS;
 const ROWS: usize = 7;
 const CELL_SIZE: f32 = 3.0;
 const CELL_PITCH: f32 = 5.0;
-const TRACK_WIDTH: f32 = CELLS as f32 * CELL_PITCH;
 const GRID_HEIGHT: f32 = (ROWS - 1) as f32 * CELL_PITCH + CELL_SIZE;
-const TRANSCRIPTION_HEIGHT: f32 = 2.0 * CELL_PITCH + CELL_SIZE;
+// Every cell of the field is always painted. Active work raises cells above
+// this floor; nothing ever changes the field's geometry to hide cells.
+const FIELD_REST: f32 = 0.10;
 // Public samples/jfk.wav at 9.0 s: the newest 100 ms of chronological PCM pairs.
 const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-1326, 1927],
@@ -616,7 +617,6 @@ impl Model {
                     .columns
                     .iter()
                     .all(TrackColumn::fully_lit)
-                && (self.track.presented.expansion * 1024.0).round() == 1024.0
             {
                 result.waiting_for_settle = false;
                 result.visibility = Visibility::Until(
@@ -821,8 +821,8 @@ impl Model {
                 ready_at: now + PHASE_DWELL,
             });
             if work.phase == WorkPhase::Finalizing && phase == WorkPhase::Transcribing {
-                // The thin track already represents transcription preparation;
-                // measured work does not pay for a second identical geometry.
+                // The centered working band already represents transcription
+                // preparation; measured work does not pay for a second hold.
                 work.phase = phase;
             } else if phase > work.phase {
                 work.pending |= phase.bit();
@@ -922,7 +922,7 @@ impl Model {
             );
         }
         if changed || reset_progress || waveform != self.waveform {
-            let heights = match kind {
+            let target = match kind {
                 Some(Kind::Recording) => recording_frame(waveform),
                 Some(kind @ (Kind::Working | Kind::Finishing)) => activity_frame(
                     kind,
@@ -931,20 +931,17 @@ impl Model {
                     self.reduced_motion,
                 ),
                 Some(Kind::Resolved) => TrackFrame {
-                    columns: [TrackColumn::centered(GRID_HEIGHT); CELLS],
-                    expansion: 1.0,
+                    columns: [TrackColumn::filled(); CELLS],
                 },
                 Some(Kind::Attention) => TrackFrame {
-                    columns: [TrackColumn::centered(3.0).with_opacity(0.55); CELLS],
-                    expansion: 0.0,
+                    columns: [TrackColumn::rest().with_center(0.55); CELLS],
                 },
                 _ => TrackFrame {
-                    columns: [TrackColumn::centered(3.0).with_opacity(0.35); CELLS],
-                    expansion: 0.0,
+                    columns: [TrackColumn::rest().with_center(0.35); CELLS],
                 },
             };
             self.track.target(
-                heights,
+                target,
                 now,
                 if reset_progress {
                     Duration::ZERO
@@ -1018,19 +1015,11 @@ impl Model {
             kind: self.kind,
             caption_revision: self.caption_revision,
             interaction_event: self.interaction.as_ref().and(self.notice_event),
-            heights: std::array::from_fn(|index| {
-                let column = &frame.columns[index];
-                [
-                    (column.upper * 16.0).round() as u16,
-                    (column.lower * 16.0).round() as u16,
-                ]
-            }),
             opacities: std::array::from_fn(|index| {
                 frame.columns[index]
                     .opacities
                     .map(|opacity| (opacity * 255.0).round() as u8)
             }),
-            expansion: (frame.expansion * 1024.0).round() as u16,
             alpha: (alpha * 255.0).round() as u8,
             size,
             palette,
@@ -1212,41 +1201,40 @@ fn present_outcome(
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TrackColumn {
-    // Nonnegative extents above and below the center row.
-    upper: f32,
-    lower: f32,
+    // Active light per row above the persistent resting field. Every value is
+    // at least FIELD_REST so the full container is always visible.
     opacities: [f32; ROWS],
 }
 
 impl TrackColumn {
-    const fn centered(height: f32) -> Self {
+    const fn rest() -> Self {
         Self {
-            upper: height / 2.0,
-            lower: height / 2.0,
+            opacities: [FIELD_REST; ROWS],
+        }
+    }
+
+    const fn filled() -> Self {
+        Self {
             opacities: [1.0; ROWS],
         }
     }
 
-    const fn with_opacity(mut self, opacity: f32) -> Self {
-        self.opacities = [opacity; ROWS];
+    fn with_center(mut self, opacity: f32) -> Self {
+        let center = ROWS / 2;
+        self.opacities[center] = self.opacities[center].max(opacity);
         self
     }
 
     fn fully_lit(&self) -> bool {
         // Match render-key precision: the final floating-point interpolation can
         // be visually unchanged and therefore never attach another buffer.
-        (self.upper * 16.0).round() >= GRID_HEIGHT * 8.0
-            && (self.lower * 16.0).round() >= GRID_HEIGHT * 8.0
-            && self
-                .opacities
-                .iter()
-                .all(|opacity| (opacity * 255.0).round() == 255.0)
+        self.opacities
+            .iter()
+            .all(|opacity| (opacity * 255.0).round() == 255.0)
     }
 
     fn interpolate(self, to: Self, amount: f32) -> Self {
         Self {
-            upper: self.upper + (to.upper - self.upper) * amount,
-            lower: self.lower + (to.lower - self.lower) * amount,
             opacities: std::array::from_fn(|row| {
                 self.opacities[row] + (to.opacities[row] - self.opacities[row]) * amount
             }),
@@ -1257,8 +1245,6 @@ impl TrackColumn {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TrackFrame {
     columns: [TrackColumn; CELLS],
-    // Expand with the existing shape morph, retaining the last attached width.
-    expansion: f32,
 }
 
 struct FillMotion {
@@ -1297,8 +1283,7 @@ struct TrackMotion {
 impl TrackMotion {
     fn new(now: Instant) -> Self {
         let quiet = TrackFrame {
-            columns: [TrackColumn::centered(2.0).with_opacity(0.3); CELLS],
-            expansion: 0.0,
+            columns: [TrackColumn::rest(); CELLS],
         };
         Self {
             from: quiet,
@@ -1346,8 +1331,8 @@ impl TrackMotion {
         state_change: bool,
         reduced: bool,
     ) {
-        // A shape transition begins at the actual attached appearance, including
-        // boundary-cell opacity, even if the prior phase was moving.
+        // A state transition begins at the actual attached cell light, even if
+        // the prior phase was still moving.
         self.from = if state_change {
             self.presented
         } else {
@@ -1386,16 +1371,6 @@ impl TrackMotion {
             };
             return TrackFrame {
                 columns: std::array::from_fn(|index| TrackColumn {
-                    upper: damp(
-                        self.from.columns[index].upper,
-                        to.columns[index].upper,
-                        0.01,
-                    ),
-                    lower: damp(
-                        self.from.columns[index].lower,
-                        to.columns[index].lower,
-                        0.01,
-                    ),
                     opacities: std::array::from_fn(|row| {
                         damp(
                             self.from.columns[index].opacities[row],
@@ -1404,7 +1379,6 @@ impl TrackMotion {
                         )
                     }),
                 }),
-                expansion: damp(self.from.expansion, to.expansion, 1.0 / 1024.0),
             };
         }
         if elapsed >= self.duration {
@@ -1416,7 +1390,6 @@ impl TrackMotion {
             columns: std::array::from_fn(|index| {
                 self.from.columns[index].interpolate(to.columns[index], eased)
             }),
-            expansion: self.from.expansion + (to.expansion - self.from.expansion) * eased,
         }
     }
 
@@ -1434,7 +1407,7 @@ fn recording_frame(waveform: Option<AudioWaveform>) -> TrackFrame {
                 .clamp(0.0, 1.0)
                 .sqrt()
         };
-        1.0 + 15.5 * amplitude
+        1.0 + (GRID_HEIGHT / 2.0 - 1.0) * amplitude
     }
 
     let columns = waveform
@@ -1442,24 +1415,31 @@ fn recording_frame(waveform: Option<AudioWaveform>) -> TrackFrame {
         .map(|[minimum, maximum]| {
             let upper = extent(maximum.max(0) as u16);
             let lower = extent(minimum.min(0).unsigned_abs());
-            let opacity = 0.3 + 0.7 * (upper.max(lower) - 1.0) / 15.5;
-            TrackColumn {
-                upper,
-                lower,
-                opacities: [opacity; ROWS],
-            }
+            let amplitude = (upper.max(lower) - 1.0) / (GRID_HEIGHT / 2.0 - 1.0);
+            let active = if amplitude <= 0.0 {
+                FIELD_REST
+            } else {
+                0.3 + 0.7 * amplitude
+            };
+            // The sparse field is always present. The signed extent only raises
+            // the fixed cells it reaches, fading an edge cell by its coverage.
+            let opacities = std::array::from_fn(|row| {
+                let offset = (row as f32 - (ROWS / 2) as f32) * CELL_PITCH;
+                let top = offset + CELL_SIZE / 2.0;
+                let bottom = offset - CELL_SIZE / 2.0;
+                let covered =
+                    ((top.min(upper) - bottom.max(-lower)).max(0.0) / CELL_SIZE).clamp(0.0, 1.0);
+                FIELD_REST + (active - FIELD_REST) * covered
+            });
+            TrackColumn { opacities }
         });
-    TrackFrame {
-        columns,
-        expansion: 0.0,
-    }
+    TrackFrame { columns }
 }
 
 fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) -> TrackFrame {
     const NOISE_NANOS: u128 = 900_000_000;
     const PACKET_NANOS: u128 = 2_400_000_000;
     const PACKET_RADIUS: f32 = 4.0;
-    const PENDING_OPACITY: f32 = 0.16;
 
     let age = if reduced { Duration::ZERO } else { age };
     let tick = (age.as_nanos() / NOISE_NANOS) as u32;
@@ -1484,6 +1464,9 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
     } else {
         0.0
     };
+    // Transcription raises only the centered three-row band above the field;
+    // cleanup raises every row. The field itself never changes shape.
+    let band = |row: usize| (row as i32 - (ROWS / 2) as i32).abs() <= 1;
     let columns = std::array::from_fn(|column| {
         let opacities = if kind == Kind::Finishing {
             // Independent smooth pulses span near-rest to near-full opacity;
@@ -1494,36 +1477,29 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
             // reported chunk. Shimmer never changes the measured fill extent.
             let coverage = (front - column as f32).clamp(0.0, 1.0);
             std::array::from_fn(|row| {
-                PENDING_OPACITY
-                    + coverage * (0.64 + 0.32 * noise(column * ROWS + row) - PENDING_OPACITY)
+                if !band(row) {
+                    return FIELD_REST;
+                }
+                let active = 0.64 + 0.32 * noise(column * ROWS + row);
+                FIELD_REST + (active - FIELD_REST) * coverage
             })
         } else {
             let packet =
                 (1.0 - (column as f32 - packet_center).abs() / PACKET_RADIUS).clamp(0.0, 1.0);
             let packet = packet * packet * (3.0 - 2.0 * packet);
-            if packet > 0.0 {
+            std::array::from_fn(|row| {
+                if !band(row) {
+                    return FIELD_REST;
+                }
                 // A bounded packet leaves no completed trail and resets
                 // outside the grid, where both ends are already dim.
-                std::array::from_fn(|row| {
-                    PENDING_OPACITY + packet * (0.48 + 0.2 * noise(column * ROWS + row))
-                })
-            } else {
-                [PENDING_OPACITY; ROWS]
-            }
-        };
-        TrackColumn {
-            opacities,
-            ..TrackColumn::centered(if kind == Kind::Working {
-                TRANSCRIPTION_HEIGHT
-            } else {
-                GRID_HEIGHT
+                let active = 0.48 + 0.2 * noise(column * ROWS + row);
+                FIELD_REST + (active - FIELD_REST) * packet
             })
-        }
+        };
+        TrackColumn { opacities }
     });
-    TrackFrame {
-        columns,
-        expansion: if kind == Kind::Finishing { 1.0 } else { 0.0 },
-    }
+    TrackFrame { columns }
 }
 
 fn pixel_noise(cell: usize, tick: u32) -> f32 {
@@ -1866,9 +1842,7 @@ struct RenderKey {
     kind: Option<Kind>,
     caption_revision: u64,
     interaction_event: Option<u64>,
-    heights: [[u16; 2]; CELLS],
     opacities: [[u8; ROWS]; CELLS],
-    expansion: u16,
     alpha: u8,
     size: (u32, u32, u32),
     palette: Palette,
@@ -2226,13 +2200,12 @@ impl Canvas<'_> {
             Kind::Attention => palette.attention,
             Kind::Neutral => palette.foreground,
         };
-        let resting_width = TRACK_WIDTH.min(container_width - 32.0).max(0.0);
-        // Match the full-height grid's visual gutter, not the caption inset.
-        let expanded_width = (container_width - 12.0).max(0.0);
-        let track_width = resting_width + (expanded_width - resting_width) * frame.expansion;
-        let slot_width = track_width / CELLS as f32;
+        // The field always fills the container at full width; state changes only
+        // raise cell light above FIELD_REST, never the field's geometry.
+        let field_width = (container_width - 12.0).max(0.0);
+        let slot_width = field_width / CELLS as f32;
         let cell_width = (slot_width * CELL_SIZE / CELL_PITCH).min(CELL_SIZE);
-        let track_left = (logical_width - track_width) / 2.0;
+        let track_left = (logical_width - field_width) / 2.0;
         for (index, column) in frame.columns.iter().copied().enumerate() {
             self.pixel_column(
                 track_left + index as f32 * slot_width + (slot_width - cell_width) / 2.0,
@@ -2358,45 +2331,14 @@ impl Canvas<'_> {
     }
 
     fn pixel_column(&mut self, x: f32, center: f32, width: f32, column: TrackColumn, rgb: [u8; 3]) {
-        let top = center - column.upper;
-        let bottom = center + column.lower;
-        if bottom - top < CELL_SIZE {
-            let alpha = column.opacities[ROWS / 2];
-            // Blend the 2 px quiet sliver into the center cell; rounding a
-            // growing rectangle would switch an entire physical row on at once.
-            let row_top = center - CELL_SIZE / 2.0;
-            let coverage = ((row_top + CELL_SIZE).min(bottom) - row_top.max(top))
-                .clamp(0.0, CELL_SIZE)
-                / CELL_SIZE;
-            let emergence = ((bottom - top - 2.0) / (CELL_SIZE - 2.0)).clamp(0.0, 1.0);
-            let cell_alpha = alpha * coverage * emergence;
-            self.aligned_rect(x, row_top, width, center - 1.0 - row_top, rgb, cell_alpha);
-            self.aligned_rect(
-                x,
-                center - 1.0,
-                width,
-                2.0,
-                rgb,
-                cell_alpha + alpha * (1.0 - emergence),
-            );
-            self.aligned_rect(
-                x,
-                center + 1.0,
-                width,
-                row_top + CELL_SIZE - center - 1.0,
-                rgb,
-                cell_alpha,
-            );
-            return;
-        }
+        // Every row is a fixed 3×3 logical cell; the field never changes geometry.
         for (row, alpha) in column.opacities.into_iter().enumerate() {
+            if alpha <= 0.0 {
+                continue;
+            }
             let offset = row as i32 - (ROWS / 2) as i32;
             let row_top = center + offset as f32 * CELL_PITCH - CELL_SIZE / 2.0;
-            let coverage = ((row_top + CELL_SIZE).min(bottom) - row_top.max(top))
-                .clamp(0.0, CELL_SIZE)
-                / CELL_SIZE;
-            // The fixed pixel fades as an edge crosses it; its geometry never snaps on/off.
-            self.aligned_rect(x, row_top, width, CELL_SIZE, rgb, alpha * coverage);
+            self.aligned_rect(x, row_top, width, CELL_SIZE, rgb, alpha);
         }
     }
 
@@ -2906,7 +2848,7 @@ mod tests {
         let now = Instant::now();
         let mut model = Model::new(now);
         model.apply(recording(0, Some(signal(false))), now);
-        let quiet = [TrackColumn::centered(2.0).with_opacity(0.3); CELLS];
+        let quiet = [TrackColumn::rest(); CELLS];
         assert_eq!(model.track.frame(now).columns, quiet);
         assert_eq!(model.track.frame(now + SETTLE / 2).columns, quiet);
         model.apply(
@@ -3032,54 +2974,41 @@ mod tests {
     }
 
     #[test]
-    fn full_height_recording_expands_continuously_into_cleaning_or_success() {
-        let now = Instant::now();
-        for cleaning in [false, true] {
-            let mut model = Model::new(now);
-            let mut full_signal = signal(true);
-            full_signal.waveform = [[i16::MIN, i16::MAX]; AUDIO_WAVEFORM_BINS];
-            model.apply(recording(0, Some(full_signal)), now);
-            let stopped = now + Duration::from_secs(1);
-            model.track.presented = model.frame(stopped);
-            let (before, width) = raster_hud(&model, stopped, SURFACE_WIDTH, 1.0);
-            let initial_bounds = grid_bounds(&before, width, 1.0);
-            let mut next = preview_snapshot(if cleaning {
-                StateKind::Processing
-            } else {
-                StateKind::Idle
-            });
-            if cleaning {
-                next.stage = Some(Stage::CleaningUp);
-            } else {
-                next.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
+    fn persistent_field_is_present_in_every_composition() {
+        // Quiet recording keeps every cell of the field visible and no cell active.
+        let quiet = recording_frame(None);
+        assert!(quiet
+            .columns
+            .iter()
+            .all(|column| column.opacities == [FIELD_REST; ROWS]));
+        // Full-scale audio lights every cell rather than changing the field's shape.
+        let loud = recording_frame(Some([[i16::MIN, i16::MAX]; AUDIO_WAVEFORM_BINS]));
+        assert!(loud.columns.iter().all(TrackColumn::fully_lit));
+        // Transcription raises only the centered three-row band above the field.
+        let working = activity_frame(Kind::Working, Duration::ZERO, Some(CELLS as f32), false);
+        for column in working.columns {
+            for (row, opacity) in column.opacities.into_iter().enumerate() {
+                let in_band = (row as i32 - (ROWS / 2) as i32).abs() <= 1;
+                if in_band {
+                    assert!(opacity > FIELD_REST, "band row {row} stays active");
+                } else {
+                    assert_eq!(opacity, FIELD_REST, "row {row} rests in the field");
+                }
             }
-            model.apply(next, stopped);
-            assert_eq!(
-                raster_hud(&model, stopped, SURFACE_WIDTH, 1.0).0,
-                before,
-                "the morph must begin at the attached width, even for a full-height waveform"
-            );
-            let (middle, _) = raster_hud(&model, stopped + SETTLE / 2, SURFACE_WIDTH, 1.0);
-            let middle_bounds = grid_bounds(&middle, width, 1.0);
-            let settled = stopped + SETTLE;
-            model.track.presented = model.frame(settled);
-            let (after, _) = raster_hud(&model, settled, SURFACE_WIDTH, 1.0);
-            let final_bounds = grid_bounds(&after, width, 1.0);
-            assert!(final_bounds[0] < middle_bounds[0] && middle_bounds[0] < initial_bounds[0]);
-            assert!(final_bounds[2] > middle_bounds[2] && middle_bounds[2] > initial_bounds[2]);
-            assert_eq!(
-                [final_bounds[1], final_bounds[3]],
-                [initial_bounds[1], initial_bounds[3]]
-            );
-            if cleaning {
-                let delivered = settled + PHASE_DWELL;
-                let mut idle = preview_snapshot(StateKind::Idle);
-                idle.outcome = Some(preview_outcome(Completeness::Complete, Delivery::Pasted));
-                model.apply(idle, delivered);
-                assert_eq!(model.kind, Some(Kind::Resolved));
-                let (success, _) = raster_hud(&model, delivered + SETTLE / 2, SURFACE_WIDTH, 1.0);
-                assert_eq!(grid_bounds(&success, width, 1.0), final_bounds);
-            }
+        }
+        // Cleanup, success and the resting/attention compositions never clip the field.
+        let finishing = activity_frame(Kind::Finishing, Duration::ZERO, None, false);
+        assert!(finishing
+            .columns
+            .iter()
+            .all(|column| column.opacities.iter().all(|alpha| *alpha > FIELD_REST)));
+        assert!(TrackColumn::filled().fully_lit());
+        for column in [
+            TrackColumn::rest(),
+            TrackColumn::rest().with_center(0.55),
+            TrackColumn::rest().with_center(0.35),
+        ] {
+            assert!(column.opacities.iter().all(|alpha| *alpha >= FIELD_REST));
         }
     }
 
@@ -3088,109 +3017,91 @@ mod tests {
         let mut waveform = [[0; 2]; AUDIO_WAVEFORM_BINS];
         waveform[13] = [512, 8192];
         waveform[14] = [-8192, -512];
-        let heights = recording_frame(Some(waveform)).columns;
-        assert!(heights[13].upper > 8.75 && heights[13].upper < 16.5);
-        assert_eq!(heights[13].lower, 1.0);
-        assert_eq!(heights[14].upper, 1.0);
-        assert_eq!(heights[14].lower, heights[13].upper);
-        for (index, column) in heights.iter().enumerate() {
-            if index != 13 && index != 14 {
-                assert_eq!(*column, TrackColumn::centered(2.0).with_opacity(0.3));
-            }
+        let columns = recording_frame(Some(waveform)).columns;
+        // A positive peak raises rows above center; its negative side stays at rest.
+        assert!(columns[13].opacities[4] > FIELD_REST);
+        assert!(columns[13].opacities[5] > FIELD_REST);
+        assert_eq!(columns[13].opacities[2], FIELD_REST);
+        // A negative peak mirrors that polarity below center.
+        assert!(columns[14].opacities[2] > FIELD_REST);
+        assert!(columns[14].opacities[1] > FIELD_REST);
+        assert_eq!(columns[14].opacities[5], FIELD_REST);
+        for index in [0, 11, 12, 15, 16, 59] {
+            assert_eq!(columns[index], TrackColumn::rest(), "column {index}");
         }
-        waveform[14] = [i16::MIN, i16::MAX];
-        let louder_neighbor = recording_frame(Some(waveform)).columns;
-        assert_eq!(louder_neighbor[13], heights[13]);
-        assert_eq!(louder_neighbor[15], heights[15]);
     }
 
     #[test]
     fn raw_signal_floor_and_clipping_do_not_normalize_quiet_audio() {
-        let quiet = [TrackColumn::centered(2.0).with_opacity(0.3); CELLS];
+        let quiet = [TrackColumn::rest(); CELLS];
         assert_eq!(recording_frame(None).columns, quiet);
         assert_eq!(
             recording_frame(Some([[-32, 32]; AUDIO_WAVEFORM_BINS])).columns,
             quiet
         );
+        // A sample just above the floor raises the center cell above rest but
+        // does not normalize the column to full brightness.
         let above_floor = recording_frame(Some([[-33, 33]; AUDIO_WAVEFORM_BINS])).columns[0];
-        assert!(above_floor.upper > 1.0 && above_floor.upper < 2.0);
-        assert_eq!(above_floor.upper, above_floor.lower);
+        assert!(above_floor.opacities[ROWS / 2] > FIELD_REST);
+        assert!(above_floor.opacities[ROWS / 2] < 0.5);
         assert_eq!(
             recording_frame(Some([[i16::MIN, i16::MAX]; AUDIO_WAVEFORM_BINS])).columns,
-            [TrackColumn::centered(33.0); CELLS]
+            [TrackColumn::filled(); CELLS]
         );
     }
 
     #[test]
-    fn moving_edges_fade_whole_fixed_pixels_at_each_buffer_scale() {
+    fn field_rows_keep_their_fixed_cells_at_every_buffer_scale() {
         for scale in [1, 2] {
-            let s = scale as f32;
-            let width = (8 * scale) as usize;
-            let left = (2.25 * s).round() as usize;
-            let right = (5.25 * s).round() as usize;
-            let top = (15.5 * s).round() as usize;
-            let bottom = (18.5 * s).round() as usize;
-            for (upper, edge_alpha) in [(4.25, 64), (5.0, 128), (5.75, 191)] {
-                let bytes = raster_column(
-                    TrackColumn {
-                        upper,
-                        ..TrackColumn::centered(10.0)
-                    },
-                    scale,
-                );
-                let alpha = |x, y| bytes[(y * width + x) * 4 + 3];
-                for y in top..bottom {
-                    for x in left..right {
-                        assert_eq!(alpha(x, y), edge_alpha);
-                    }
-                    assert_eq!(alpha(left - 1, y), 0);
-                    assert_eq!(alpha(right, y), 0);
-                }
-                assert_eq!(alpha(left, (19.5 * s).round() as usize), 0);
-                assert_eq!(alpha(left, (22.0 * s) as usize), 255);
-                assert_eq!(alpha(left, (27.0 * s) as usize), 128);
-                assert_eq!(alpha(left, (32.0 * s) as usize), 0);
-            }
-        }
-    }
-
-    #[test]
-    fn quiet_and_full_scale_keep_their_pixel_geometry() {
-        for scale in [1, 2] {
-            let s = scale as f32;
             let width = (8 * scale) as usize;
             let x = (3 * scale) as usize;
-            let quiet = raster_column(TrackColumn::centered(2.0), scale);
-            let full = raster_column(TrackColumn::centered(33.0), scale);
+            let rest = raster_column(TrackColumn::rest(), scale);
+            let full = raster_column(TrackColumn::filled(), scale);
             for y in 0..(44 * scale) as usize {
                 let alpha = (y * width + x) * 4 + 3;
-                let in_baseline = ((21 * scale) as usize..(23 * scale) as usize).contains(&y);
-                assert_eq!(quiet[alpha], if in_baseline { 255 } else { 0 });
                 let in_cell = [5.5, 10.5, 15.5, 20.5, 25.5, 30.5, 35.5]
                     .into_iter()
                     .any(|top| {
-                        ((top * s).round() as usize..((top + 3.0) * s).round() as usize)
+                        ((top * scale as f32).round() as usize
+                            ..((top + 3.0) * scale as f32).round() as usize)
                             .contains(&y)
                     });
-                assert_eq!(full[alpha], if in_cell { 255 } else { 0 });
+                assert_eq!(
+                    rest[alpha],
+                    if in_cell {
+                        (FIELD_REST * 255.0).round() as u8
+                    } else {
+                        0
+                    },
+                    "resting scale {scale} row at {y}"
+                );
+                assert_eq!(
+                    full[alpha],
+                    if in_cell { 255 } else { 0 },
+                    "full scale {scale} row at {y}"
+                );
             }
         }
     }
 
     #[test]
-    fn quiet_onset_fades_into_the_center_cell_without_a_row_jump() {
+    fn quiet_onset_raises_the_center_row_smoothly_from_the_field() {
         for scale in [1, 2] {
             let width = (8 * scale) as usize;
             let x = (3 * scale) as usize;
-            let y = (23 * scale) as usize;
-            let edge_alpha = |height| {
-                raster_column(TrackColumn::centered(height), scale)[(y * width + x) * 4 + 3]
+            let y = (22 * scale) as usize;
+            let center_alpha = |amplitude: u16| {
+                let amplitude = amplitude as i16;
+                let waveform = [[0, 0]; AUDIO_WAVEFORM_BINS].map(|_| [-amplitude, amplitude]);
+                let column = recording_frame(Some(waveform)).columns[0];
+                raster_column(column, scale)[(y * width + x) * 4 + 3]
             };
-            let steps = [2.0, 2.25, 2.5, 2.75, 3.0].map(edge_alpha);
-            assert_eq!(steps[0], 0);
-            assert_eq!(steps[4], 255);
-            assert!(steps.windows(2).all(|pair| pair[0] < pair[1]));
-            assert!(255 - edge_alpha(2.99) <= 4);
+            let steps = [0_u16, 64, 128, 256, 512].map(center_alpha);
+            assert!(steps.windows(2).all(|pair| pair[0] <= pair[1]));
+            assert!(
+                steps[1] > steps[0],
+                "speech must rise above the resting field"
+            );
         }
     }
 
@@ -3263,7 +3174,7 @@ mod tests {
     }
 
     #[test]
-    fn transcription_morphs_from_presented_listening_into_only_three_rows() {
+    fn transcription_keeps_the_full_field_and_lights_only_the_middle_band() {
         let now = Instant::now();
         let mut model = Model::new(now);
         model.apply(recording(0, Some(signal(true))), now);
@@ -3271,26 +3182,29 @@ mod tests {
         model.track.presented = shown;
         let mut processing = preview_snapshot(StateKind::Processing);
         processing.stage = Some(Stage::Transcribing {
-            completed: 0,
+            completed: 1,
             total: 5,
         });
         let stop = now + Duration::from_millis(60);
         model.apply(processing, stop);
-        assert_eq!(model.frame(stop), shown);
-        let settling = model.frame(stop + SETTLE / 2);
-        let destination = activity_frame(Kind::Working, SETTLE / 2, Some(0.0), false);
-        for ((from, mid), to) in shown
-            .columns
-            .into_iter()
-            .zip(settling.columns)
-            .zip(destination.columns)
-        {
-            assert!(mid.upper >= from.upper.min(to.upper) && mid.upper <= from.upper.max(to.upper));
-            assert!(mid.lower >= from.lower.min(to.lower) && mid.lower <= from.lower.max(to.lower));
-        }
-        for column in model.frame(stop + SETTLE).columns.map(raster_rows) {
-            assert!(column[2..5].iter().all(|alpha| *alpha > 0 && *alpha < 128));
-            assert_eq!([column[0], column[1], column[5], column[6]], [0; 4]);
+        assert_eq!(
+            model.frame(stop),
+            shown,
+            "the field begins at the attached cells"
+        );
+        // Measured progress raises only the centered band; every other cell
+        // remains in the resting field rather than disappearing.
+        let settled = model.frame(stop + SETTLE + PROGRESS_REVEAL);
+        for (index, column) in settled.columns.into_iter().enumerate() {
+            let filled = index < CELLS / 5;
+            for (row, opacity) in column.opacities.into_iter().enumerate() {
+                let in_band = (row as i32 - (ROWS / 2) as i32).abs() <= 1;
+                if filled && in_band {
+                    assert!(opacity > FIELD_REST, "lit cell {index}/{row}");
+                } else {
+                    assert_eq!(opacity, FIELD_REST, "resting cell {index}/{row}");
+                }
+            }
         }
     }
 
@@ -3306,16 +3220,16 @@ mod tests {
         let gap = now + POLL_INTERVAL;
         let released = track.frame(gap).columns;
         assert!(
-            released[0].upper > 8.0,
+            released[0].opacities[3] > 0.5,
             "a 100 ms pause must retain a visible tail"
         );
-        assert!(released[0].upper < full.columns[0].upper);
-        let mut previous = released[0].upper;
+        assert!(released[0].opacities[3] < full.columns[0].opacities[3]);
+        let mut previous = released[0].opacities[3];
         for step in 1..=10 {
             let at = gap + POLL_INTERVAL * step;
             // Repeated quiet observations cannot restart a slow ease-in.
             track.target(quiet, at, WAVEFORM_EASE, false, false);
-            let current = track.frame(at).columns[0].upper;
+            let current = track.frame(at).columns[0].opacities[3];
             assert!(current <= previous);
             previous = current;
         }
@@ -3326,7 +3240,7 @@ mod tests {
         assert_eq!(track.frame(now), quiet);
         let attack = track.frame(gap);
         assert!(
-            attack.columns[0].upper > 15.0,
+            attack.columns[0].opacities[3] > 0.9,
             "new speech must respond within one measurement"
         );
         track.target(quiet, gap, WAVEFORM_EASE, false, false);
@@ -3711,7 +3625,11 @@ mod tests {
                 .columns
                 .map(raster_rows)
                 .iter()
-                .all(|rows| [rows[0], rows[1], rows[2], rows[4], rows[5], rows[6]] == [0; 6]));
+                .all(
+                    |rows| [rows[0], rows[1], rows[2], rows[4], rows[5], rows[6]]
+                        .iter()
+                        .all(|alpha| *alpha == (FIELD_REST * 255.0).round() as u8)
+                ));
         }
     }
 
