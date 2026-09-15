@@ -26,6 +26,9 @@ __pycache__/
 /dist/
 /.landmark/run/
 
+# Local wrangler account cache; never source.
+/.wrangler/
+
 # Iron Forest installed binary and generated evidence
 .iron-forest/bin/
 .iron-forest/runtime/
