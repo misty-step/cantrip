@@ -28,10 +28,12 @@ adding, removing or resizing cells.
   and the column's active opacity by its fractional coverage. The column's
   active opacity remains `0.3 + 0.7 × amplitude`, and amplitude at or below the
   existing input floor stays entirely at rest.
-- **Transcribing.** Only the centered three-row band is raised: the measured
-  fractional front, or the bounded indeterminate packet, brightens those fixed
-  cells. Every other cell of the field stays at rest. Pending cells are the
-  resting field, not a second geometry.
+- **Transcribing.** The full field height participates: the measured fractional
+  front fills whole columns, and the bounded indeterminate packet lights whole
+  columns as it moves. Every column beyond the front stays at rest. Pending
+  cells are the resting field, not a second geometry. The 2026-09-15 operator
+  review chose full height over the earlier three-row band: with a persistent
+  field, full-height columns match listening instead of shrinking the work.
 - **Cleanup and delivery.** Every row is raised with the existing independent
   per-cell brightness noise; all 420 cells remain active.
 - **Success.** Every row is raised to full accent brightness.
@@ -73,8 +75,8 @@ Listening, transcription, cleanup and success are now distinguishable by
 *brightness distribution only*, so the faint rest floor must stay subtle enough
 not to compete with active cells; `FIELD_REST` is the single tuning point.
 Geometry-related tests are replaced by field-occupancy tests: every visible
-composition must keep all seven rows at or above the floor, and only the
-expected band may rise above it.
+composition must keep all seven rows at or above the floor, and measured
+transcription may raise only the columns its front has reached.
 
 This supersedes the track geometry described by
 [ADR 0021](0021-signed-pixel-waveform.md) — the signed PCM mapping, honest

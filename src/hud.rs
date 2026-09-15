@@ -1464,9 +1464,8 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
     } else {
         0.0
     };
-    // Transcription raises only the centered three-row band above the field;
-    // cleanup raises every row. The field itself never changes shape.
-    let band = |row: usize| (row as i32 - (ROWS / 2) as i32).abs() <= 1;
+    // Both working patterns span the full field height: the measured front
+    // fills whole columns up to acknowledged work, cleanup pulses every cell.
     let columns = std::array::from_fn(|column| {
         let opacities = if kind == Kind::Finishing {
             // Independent smooth pulses span near-rest to near-full opacity;
@@ -1477,9 +1476,6 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
             // reported chunk. Shimmer never changes the measured fill extent.
             let coverage = (front - column as f32).clamp(0.0, 1.0);
             std::array::from_fn(|row| {
-                if !band(row) {
-                    return FIELD_REST;
-                }
                 let active = 0.64 + 0.32 * noise(column * ROWS + row);
                 FIELD_REST + (active - FIELD_REST) * coverage
             })
@@ -1487,12 +1483,9 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
             let packet =
                 (1.0 - (column as f32 - packet_center).abs() / PACKET_RADIUS).clamp(0.0, 1.0);
             let packet = packet * packet * (3.0 - 2.0 * packet);
+            // A bounded packet leaves no completed trail and resets
+            // outside the grid, where both ends are already dim.
             std::array::from_fn(|row| {
-                if !band(row) {
-                    return FIELD_REST;
-                }
-                // A bounded packet leaves no completed trail and resets
-                // outside the grid, where both ends are already dim.
                 let active = 0.48 + 0.2 * noise(column * ROWS + row);
                 FIELD_REST + (active - FIELD_REST) * packet
             })
@@ -2984,18 +2977,12 @@ mod tests {
         // Full-scale audio lights every cell rather than changing the field's shape.
         let loud = recording_frame(Some([[i16::MIN, i16::MAX]; AUDIO_WAVEFORM_BINS]));
         assert!(loud.columns.iter().all(TrackColumn::fully_lit));
-        // Transcription raises only the centered three-row band above the field.
+        // Measured transcription fills whole columns up to the front.
         let working = activity_frame(Kind::Working, Duration::ZERO, Some(CELLS as f32), false);
-        for column in working.columns {
-            for (row, opacity) in column.opacities.into_iter().enumerate() {
-                let in_band = (row as i32 - (ROWS / 2) as i32).abs() <= 1;
-                if in_band {
-                    assert!(opacity > FIELD_REST, "band row {row} stays active");
-                } else {
-                    assert_eq!(opacity, FIELD_REST, "row {row} rests in the field");
-                }
-            }
-        }
+        assert!(working
+            .columns
+            .iter()
+            .all(|column| column.opacities.iter().all(|opacity| *opacity > FIELD_REST)));
         // Cleanup, success and the resting/attention compositions never clip the field.
         let finishing = activity_frame(Kind::Finishing, Duration::ZERO, None, false);
         assert!(finishing
@@ -3174,7 +3161,7 @@ mod tests {
     }
 
     #[test]
-    fn transcription_keeps_the_full_field_and_lights_only_the_middle_band() {
+    fn transcription_fills_full_height_columns_up_to_the_measured_front() {
         let now = Instant::now();
         let mut model = Model::new(now);
         model.apply(recording(0, Some(signal(true))), now);
@@ -3192,14 +3179,13 @@ mod tests {
             shown,
             "the field begins at the attached cells"
         );
-        // Measured progress raises only the centered band; every other cell
-        // remains in the resting field rather than disappearing.
+        // Measured progress raises every row of the columns it covers; the
+        // columns beyond the front remain in the resting field.
         let settled = model.frame(stop + SETTLE + PROGRESS_REVEAL);
         for (index, column) in settled.columns.into_iter().enumerate() {
             let filled = index < CELLS / 5;
             for (row, opacity) in column.opacities.into_iter().enumerate() {
-                let in_band = (row as i32 - (ROWS / 2) as i32).abs() <= 1;
-                if filled && in_band {
+                if filled {
                     assert!(opacity > FIELD_REST, "lit cell {index}/{row}");
                 } else {
                     assert_eq!(opacity, FIELD_REST, "resting cell {index}/{row}");
@@ -3288,8 +3274,8 @@ mod tests {
         let pixels = halfway.columns.map(raster_rows);
         assert!(pixels[..10]
             .iter()
-            .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128)));
-        assert!(pixels[10..].iter().all(|rows| rows[2..5] == [pending; 3]));
+            .all(|rows| rows.iter().all(|alpha| *alpha > 128)));
+        assert!(pixels[10..].iter().all(|rows| *rows == [pending; ROWS]));
         let fractional = model
             .frame(reported + PROGRESS_REVEAL * 37 / 100)
             .columns
@@ -3318,16 +3304,18 @@ mod tests {
             .frame(halfway_at + PROGRESS_REVEAL / 4)
             .columns
             .map(raster_rows);
-        assert!(advancing[10..14].iter().all(|rows| rows[3] > 128));
-        assert!(advancing[15..].iter().all(|rows| rows[3] == pending));
+        assert!(advancing[10..14]
+            .iter()
+            .all(|rows| rows.iter().all(|alpha| *alpha > 128)));
+        assert!(advancing[15..].iter().all(|rows| *rows == [pending; ROWS]));
         let settled_at = halfway_at + PROGRESS_REVEAL;
         let settled = model.frame(settled_at);
         for frame in [settled, model.frame(settled_at + Duration::from_secs(60))] {
             let pixels = frame.columns.map(raster_rows);
             assert!(pixels[..40]
                 .iter()
-                .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128)));
-            assert!(pixels[40..].iter().all(|rows| rows[2..5] == [pending; 3]));
+                .all(|rows| rows.iter().all(|alpha| *alpha > 128)));
+            assert!(pixels[40..].iter().all(|rows| *rows == [pending; ROWS]));
         }
         assert_ne!(settled, model.frame(settled_at + Duration::from_secs(1)));
         model.track.presented = settled;
@@ -3530,7 +3518,7 @@ mod tests {
                 Some(Kind::Working) => {
                     completed_track |= pixels
                         .iter()
-                        .all(|rows| rows[2..5].iter().all(|alpha| *alpha > 128));
+                        .all(|rows| rows.iter().all(|alpha| *alpha > 128));
                     assert!(model.caption.title.starts_with("Transcribing"));
                 }
                 Some(Kind::Finishing) => {

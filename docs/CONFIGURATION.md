@@ -245,11 +245,11 @@ slowly to silence; neighboring columns are never blended.
 
 The HUD paints one persistent 60×7 pixel field in every visible state; cells are
 always shown at a faint rest level and work raises them above it. Listening raises
-the cells its signed peaks reach. Transcription raises only the centered three-row
-band: multi-chunk reports move a continuous left-to-right fill toward acknowledged
-work, and a stalled report cannot invent more progress. Single-chunk or unknown
-work stays indeterminate. Cleanup raises all seven rows with independent,
-higher-contrast pixel pulses; success raises the whole field.
+the cells its signed peaks reach. Transcription raises full-height columns up to a
+continuous left-to-right fill toward acknowledged work; a stalled report cannot
+invent more progress, and single-chunk or unknown work stays indeterminate.
+Cleanup pulses every cell independently at higher contrast; success raises the
+whole field.
 
 Normal handoffs may visually trail the backend by up to 1.6 seconds to finish their
 transitions. This never delays transcription, cleanup requests, or delivery.
