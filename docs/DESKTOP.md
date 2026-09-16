@@ -252,7 +252,9 @@ A stuck shutdown is force-killed after 90 seconds; inspect failures rather than
 assuming runtime-only audio became durable. No unit action deletes retained data.
 
 For a binary update or rollback, record the current enabled/running state and
-follow [release maintenance](INSTALLATION.md#update-and-roll-back). Keep the
+follow [release maintenance](INSTALLATION.md#update-and-roll-back). Source
+builders use [`scripts/install-from-source`](../scripts/install-from-source)
+(it always rebuilds this tree, then replaces the binary). Keep the
 existing owner stopped throughout replacement. Leave unchanged units and
 personal drop-ins alone. If deliberately replacing a unit, disable its old
 enablement first, preserve and review overrides, install the reviewed replacement,

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Build THIS tree, then atomically install PREFIX/bin/cantrip.
+#
+# The binary that lands is the one cargo just produced from the current
+# sources and lockfile. A previously compiled target/ artifact is never an
+# input, so a git change between "build" and "copy" cannot ship.
+#
+# Verified release archives use contrib/install.sh, not this script.
+set -euo pipefail
+umask 077
+
+fail() {
+  printf 'cantrip install-from-source: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: ./scripts/install-from-source [--prefix PATH]
+
+From the repository root: cargo build --release --locked, then atomically
+install PREFIX/bin/cantrip (default PREFIX=$HOME/.local).
+
+Refuses a symlink destination, a non-file destination, and a live daemon
+holding the destination or the runtime socket. Does not start, stop, or
+enable a service. Stop the existing owner first.
+
+Dirty trees are installed (the point is this tree, not a clean index).
+USAGE
+}
+
+prefix=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --prefix)
+      [[ $# -ge 2 && -n "${2:-}" ]] || fail '--prefix requires a path.'
+      prefix=$2
+      shift 2
+      ;;
+    *)
+      fail "Unexpected argument '$1'; use --help."
+      ;;
+  esac
+done
+
+[[ -f Cargo.toml && -f rust-toolchain.toml ]] || fail 'Run from the Cantrip repository root (Cargo.toml and rust-toolchain.toml).'
+command -v cargo >/dev/null || fail 'cargo is not on PATH.'
+
+if [[ -z "$prefix" ]]; then
+  [[ -n "${HOME:-}" ]] || fail 'HOME is unset; supply --prefix PATH.'
+  prefix=$HOME/.local
+fi
+
+# Resolve without following links. Reject '..' and any symlink component so a
+# destination cannot silently land in a checkout.
+absolute_path() {
+  local value=$1 part current=
+  local -a parts
+  [[ -n "$value" && "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail 'Paths must be nonempty and contain no newlines.'
+  [[ "$value" == /* ]] || value="$(pwd -P)/$value"
+  IFS=/ read -r -a parts <<< "$value"
+  for part in "${parts[@]}"; do
+    [[ -n "$part" && "$part" != . ]] || continue
+    [[ "$part" != .. ]] || fail "Use a path without '..': $value"
+    current+=/$part
+    [[ ! -L "$current" ]] || fail "Refusing symlink path: $current"
+  done
+  REPLY=${current:-/}
+}
+
+absolute_path "$prefix"
+prefix=$REPLY
+bin_dir=$prefix/bin
+dest=$bin_dir/cantrip
+
+assert_destination() {
+  if [[ -L "$dest" ]]; then
+    fail "Refusing symlink destination: $dest. Inspect the owner and install a regular file."
+  fi
+  if [[ -e "$dest" && ! -f "$dest" ]]; then
+    fail "Destination exists and is not a regular file: $dest"
+  fi
+}
+
+assert_stopped() {
+  local number refs protocol flags type state inode socket_path process executable
+  local runtime_base runtime_socket
+  runtime_base=${XDG_RUNTIME_DIR:-/tmp/cantrip-$UID}
+  runtime_socket=${runtime_base%/}/cantrip/cantrip.sock
+  [[ -r /proc/net/unix && -r /proc/self/cmdline ]] || fail 'Cannot inspect Linux /proc; daemon shutdown cannot be verified.'
+  while read -r number refs protocol flags type state inode socket_path; do
+    if [[ "$socket_path" == "$runtime_socket" || ( -n "$socket_path" && -e "$socket_path" && -e "$runtime_socket" && "$socket_path" -ef "$runtime_socket" ) ]]; then
+      fail "A live Cantrip socket exists at $socket_path. Finish/cancel the take, stop the existing owner, and wait for exit. 'cantrip stop' only ends recording."
+    fi
+  done < /proc/net/unix
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    for process in /proc/[0-9]*; do
+      [[ -O "$process" ]] || continue
+      executable=$(readlink -- "$process/exe" 2>/dev/null) || continue
+      if [[ "$process/exe" -ef "$dest" || "$executable" == "$dest" || "$executable" == "$dest (deleted)" ]]; then
+        fail "Installed executable is still running (PID ${process##*/}: $executable). Stop it through its existing owner and wait for exit."
+      fi
+    done
+  fi
+}
+
+revision_line() {
+  local top rev
+  if ! command -v git >/dev/null; then
+    printf 'no git\n'
+    return
+  fi
+  if ! top=$(git rev-parse --show-toplevel 2>/dev/null); then
+    printf 'not a git work tree\n'
+    return
+  fi
+  if [[ "$top" != "$(pwd -P)" ]]; then
+    printf 'cwd is not the git root\n'
+    return
+  fi
+  rev=$(git rev-parse --short HEAD)
+  if [[ -n "$(git status --porcelain)" ]]; then
+    printf '%s (dirty)\n' "$rev"
+  else
+    printf '%s\n' "$rev"
+  fi
+}
+
+assert_destination
+assert_stopped
+
+printf 'cantrip install-from-source: building %s\n' "$(revision_line)" >&2
+cargo build --release --locked
+
+built=$(pwd -P)/target/release/cantrip
+[[ ! -L "$built" && -f "$built" && -x "$built" ]] || fail "Build did not produce a regular executable at $built"
+
+assert_destination
+assert_stopped
+
+mkdir -p -- "$bin_dir" || fail "Cannot create $bin_dir"
+staged=$(mktemp -- "$bin_dir/.cantrip.XXXXXX")
+trap 'rm -f -- "$staged"' EXIT
+install -m755 -- "$built" "$staged" || fail 'Cannot stage the new executable; the installed binary has not been replaced.'
+mv -T -- "$staged" "$dest" || fail "Atomic replacement failed at $dest; the previous file is unchanged."
+trap - EXIT
+
+printf 'revision: %s\n' "$(revision_line)"
+printf 'installed: %s\n' "$dest"
+"$dest" --version
