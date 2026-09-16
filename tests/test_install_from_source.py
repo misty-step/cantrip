@@ -102,6 +102,18 @@ class InstallFromSourceContracts(unittest.TestCase):
             "second",
         )
 
+    def test_symlink_bin_directory_is_refused(self):
+        victim = self.root / "checkout-bin"
+        victim.mkdir()
+        self.dest.parent.parent.mkdir(parents=True)
+        self.dest.parent.symlink_to(victim, target_is_directory=True)
+        result = self.invoke()
+        self.refuses(result)
+        self.assertIn("Refusing symlink path", result.stderr)
+        self.assertTrue(self.dest.parent.is_symlink())
+        self.assertFalse((self.repo / "cargo.args").exists())
+        self.assertEqual(list(victim.iterdir()), [])
+
     def test_symlink_destination_is_refused_and_left_in_place(self):
         victim = self.root / "checkout-binary"
         victim.write_bytes(b"keep me\n")

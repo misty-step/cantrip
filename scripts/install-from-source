@@ -78,6 +78,9 @@ bin_dir=$prefix/bin
 dest=$bin_dir/cantrip
 
 assert_destination() {
+  if [[ -L "$bin_dir" ]]; then
+    fail "Refusing symlink path: $bin_dir"
+  fi
   if [[ -L "$dest" ]]; then
     fail "Refusing symlink destination: $dest. Inspect the owner and install a regular file."
   fi
@@ -143,6 +146,7 @@ assert_destination
 assert_stopped
 
 mkdir -p -- "$bin_dir" || fail "Cannot create $bin_dir"
+assert_destination
 staged=$(mktemp -- "$bin_dir/.cantrip.XXXXXX")
 trap 'rm -f -- "$staged"' EXIT
 install -m755 -- "$built" "$staged" || fail 'Cannot stage the new executable; the installed binary has not been replaced.'
