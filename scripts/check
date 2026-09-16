@@ -28,3 +28,6 @@ python3 -m unittest discover -s integrations/omarchy -p 'test_*.py'
 
 echo "── check: release artifact and installer"
 python3 -m unittest discover -s tests -p 'test_release_*.py'
+
+echo "── check: source installer"
+python3 -m unittest discover -s tests -p 'test_install_from_source.py'

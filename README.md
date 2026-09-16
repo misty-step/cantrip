@@ -46,7 +46,7 @@ are installed with:
 sudo apt install build-essential libdbus-1-dev libssl-dev pkg-config
 ```
 
-From the repository root:
+From the repository root, compile without installing:
 
 ```sh
 rustup install
@@ -54,45 +54,21 @@ cargo build --release --locked
 ./target/release/cantrip --version
 ```
 
-For a first source-built binary at the default location, the following copies
-**only the executable** and refuses an existing file or symlink. Inspect an
-existing installation and its startup owner instead of overwriting it.
+To install a source-built binary, one command builds **this tree** and atomically
+replaces `$HOME/.local/bin/cantrip`. It never copies a previously compiled
+`target/` artifact, so a git change cannot sneak in between build and install.
+It refuses a symlink destination and a live daemon. First install and later
+updates are the same command. See [ADR 0025](docs/adr/0025-source-install-builds-this-tree.md).
 
 ```sh
-(
-  set -eu
-  binary="$HOME/.local/bin/cantrip"
-  if [ -e "$binary" ] || [ -L "$binary" ]; then
-    printf 'Existing installation at %s; use its maintenance procedure.\n' "$binary" >&2
-    exit 1
-  fi
-  mkdir -p "$HOME/.local/bin"
-  install -m755 ./target/release/cantrip "$binary"
-)
+# Stop the existing owner first: docs/DESKTOP.md#stop-update-and-remove
+./scripts/install-from-source
 ```
 
 Now use the same [first-dictation guide](docs/USAGE.md#first-dictation) as archive
 users. Do not reinitialize existing config, download models implicitly, or start
 a second daemon. The optional [shared service setup](docs/DESKTOP.md#user-service-graphical-session)
 uses `contrib/cantrip.service` for source builders and does not copy the binary.
-
-For later source-built updates, build first, record the current enabled/running
-state, make a private backup of the installed binary, and
-[stop its existing owner cleanly](docs/DESKTOP.md#stop-update-and-remove). Keep
-that owner stopped during replacement. For a regular binary at the default
-location, stage beside it and rename atomically:
-
-```sh
-(
-  set -eu
-  binary="$HOME/.local/bin/cantrip"
-  [ -f "$binary" ] && [ ! -L "$binary" ]
-  staged="$(mktemp "$HOME/.local/bin/.cantrip.XXXXXX")"
-  trap 'rm -f -- "$staged"' EXIT
-  install -m755 ./target/release/cantrip "$staged"
-  mv -T -- "$staged" "$binary"
-)
-```
 
 Use the package owner's procedure for package-managed binaries. Leave unchanged
 units, personal drop-ins, configuration, models, keyring credentials, and history
