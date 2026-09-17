@@ -34,10 +34,12 @@ adding, removing or resizing cells.
   attack/release are unchanged.
 - **Transcribing.** The full field height participates: the measured fractional
   front fills whole columns, and the bounded indeterminate packet lights whole
-  columns as it moves. Every column beyond the front stays at rest. Pending
-  cells are the resting field, not a second geometry. The 2026-09-15 operator
-  review chose full height over the earlier three-row band: with a persistent
-  field, full-height columns match listening instead of shrinking the work.
+  columns as it moves. Columns beyond the front keep a decaying cleanup-style
+  flicker that is strongest at the fill edge and fades to the rest floor; it is
+  activity texture, not acknowledged progress. Reduced motion omits the flicker.
+  The 2026-09-15 operator review chose full height over the earlier three-row
+  band: with a persistent field, full-height columns match listening instead of
+  shrinking the work. The 2026-09-17 operator review added the frontier flicker.
 - **Cleanup and delivery.** Every row is raised with the existing independent
   per-cell brightness noise; all 420 cells remain active.
 - **Success.** Every row is raised to full accent brightness.
@@ -80,7 +82,8 @@ Listening, transcription, cleanup and success are now distinguishable by
 not to compete with active cells; `FIELD_REST` is the single tuning point.
 Geometry-related tests are replaced by field-occupancy tests: every visible
 composition must keep all seven rows at or above the floor, and measured
-transcription may raise only the columns its front has reached.
+transcription's filled meter may raise only the columns its front has reached;
+a decaying flicker may light a short band beyond that front.
 
 This supersedes the track geometry described by
 [ADR 0021](0021-signed-pixel-waveform.md) — the signed PCM mapping, honest

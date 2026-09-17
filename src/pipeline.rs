@@ -82,11 +82,11 @@ pub enum Stage {
 }
 
 impl Stage {
-    /// Return validated measured chunk progress. Single-chunk transcription is
-    /// intentionally indeterminate on the HUD.
+    /// Return validated measured chunk progress. `0/1` is an empty meter;
+    /// `1/1` fills it. Invalid totals stay indeterminate.
     pub fn measured_progress(&self) -> Option<(u32, u32)> {
         match self {
-            Self::Transcribing { completed, total } if *total > 1 && *completed <= *total => {
+            Self::Transcribing { completed, total } if *total >= 1 && *completed <= *total => {
                 Some((*completed, *total))
             }
             _ => None,
@@ -1034,7 +1034,15 @@ mod tests {
                 total: 1
             }
             .measured_progress(),
-            None
+            Some((0, 1))
+        );
+        assert_eq!(
+            Stage::Transcribing {
+                completed: 1,
+                total: 1
+            }
+            .measured_progress(),
+            Some((1, 1))
         );
         assert_eq!(
             Stage::Transcribing {

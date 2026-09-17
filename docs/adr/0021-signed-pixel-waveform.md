@@ -53,12 +53,15 @@ Finalizing and transcription use a centered three-row track, morphing from the
 last presented listening frame over 400 ms instead of revealing a seven-row wall.
 Multi-chunk transcription moves a fractional spatial boundary toward each reported
 completed-chunk fraction over 600 ms. Filled cells may shimmer, but the front
-cannot creep ahead of acknowledged work. New reports continue from the current
-front; identical polls do not restart it and a stalled target stays still.
+cannot creep ahead of acknowledged work. A short decaying cleanup-style flicker
+may appear beyond the fill as indeterminate activity; it does not move the
+measured front. New reports continue from the current front; identical polls
+do not restart it and a stalled target stays still.
 Only a matching complete successful outcome can acknowledge an unreported final
 chunk. Cleanup alone cannot: the pipeline also cleans partial transcripts.
-Single-chunk or unknown progress uses a short, repeating left-to-right pixel
-packet, never an accumulating percentage. Existing approximately 30-second STT
+Single-chunk `0/1` holds the empty meter and frontier; `1/1` fills the meter.
+Unknown or invalid totals still use the left-to-right packet, never an invented
+percentage. Existing approximately 30-second STT
 chunk boundaries remain unchanged; do not split speech merely to animate the HUD.
 
 Cleanup and delivery expand into all seven rows with independent, smoothly varying

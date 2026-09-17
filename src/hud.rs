@@ -87,6 +87,8 @@ const GRID_HEIGHT: f32 = (ROWS - 1) as f32 * CELL_PITCH + CELL_SIZE;
 // Every cell of the field is always painted. Active work raises cells above
 // this floor; nothing ever changes the field's geometry to hide cells.
 const FIELD_REST: f32 = 0.10;
+// Cleanup-style flicker beyond measured fill; 0 at this many columns past the front.
+const FRONTIER_RADIUS: f32 = 8.0;
 // Public samples/jfk.wav at 9.0 s: the newest 100 ms of chronological PCM pairs.
 const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-1326, 1927],
@@ -1471,18 +1473,33 @@ fn activity_frame(kind: Kind, age: Duration, front: Option<f32>, reduced: bool) 
     };
     // Both working patterns span the full field height: the measured front
     // fills whole columns up to acknowledged work, cleanup pulses every cell.
+    let finishing = |cell| 0.12 + 0.86 * noise(cell);
     let columns = std::array::from_fn(|column| {
         let opacities = if kind == Kind::Finishing {
             // Independent smooth pulses span near-rest to near-full opacity;
             // all 420 cells remain visible, without a synchronized flash.
-            std::array::from_fn(|row| 0.12 + 0.86 * noise(column * ROWS + row))
+            std::array::from_fn(|row| finishing(column * ROWS + row))
         } else if let Some(front) = front {
             // Move one fractional spatial boundary, not the opacity of an entire
-            // reported chunk. Shimmer never changes the measured fill extent.
+            // reported chunk. The filled meter never creeps past acknowledged
+            // work; a decaying cleanup-style flicker may light a short band
+            // beyond it.
             let coverage = (front - column as f32).clamp(0.0, 1.0);
+            let frontier = if reduced {
+                0.0
+            } else {
+                let beyond = (column as f32 - front).max(0.0);
+                let t = (beyond / FRONTIER_RADIUS).min(1.0);
+                (1.0 - t) * (1.0 - t) * (1.0 - coverage)
+            };
             std::array::from_fn(|row| {
-                let active = 0.64 + 0.32 * noise(column * ROWS + row);
-                FIELD_REST + (active - FIELD_REST) * coverage
+                let cell = column * ROWS + row;
+                let filled = FIELD_REST + (0.64 + 0.32 * noise(cell) - FIELD_REST) * coverage;
+                if frontier <= 0.0 {
+                    filled
+                } else {
+                    (filled + (finishing(cell) - FIELD_REST) * frontier).min(1.0)
+                }
             })
         } else {
             let packet =
@@ -2882,6 +2899,20 @@ mod tests {
         })
     }
 
+    fn meter_column(rows: &[u8; ROWS]) -> bool {
+        let min = *rows.iter().min().unwrap();
+        let max = *rows.iter().max().unwrap();
+        min > 160 && max - min < 90
+    }
+
+    fn rest_column(rows: &[u8; ROWS]) -> bool {
+        *rows == [(FIELD_REST * 255.0).round() as u8; ROWS]
+    }
+
+    fn first_rest_column(front: f32) -> usize {
+        ((front + FRONTIER_RADIUS).ceil() as usize).min(CELLS)
+    }
+
     fn raster_hud(model: &Model, now: Instant, width: u32, scale: f32) -> (Vec<u8>, u32) {
         let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
         let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
@@ -3184,19 +3215,88 @@ mod tests {
             shown,
             "the field begins at the attached cells"
         );
-        // Measured progress raises every row of the columns it covers; the
-        // columns beyond the front remain in the resting field.
+        // Measured progress raises every row of the columns it covers. A
+        // decaying cleanup-style flicker may light a short band beyond the
+        // front; far columns stay at rest.
         let settled = model.frame(stop + SETTLE + PROGRESS_REVEAL);
+        let front = (CELLS / 5) as f32;
         for (index, column) in settled.columns.into_iter().enumerate() {
-            let filled = index < CELLS / 5;
-            for (row, opacity) in column.opacities.into_iter().enumerate() {
-                if filled {
-                    assert!(opacity > FIELD_REST, "lit cell {index}/{row}");
-                } else {
+            if index < CELLS / 5 {
+                for (row, opacity) in column.opacities.into_iter().enumerate() {
+                    assert!(opacity > 0.60, "meter cell {index}/{row}");
+                }
+            } else if (index as f32) >= front + FRONTIER_RADIUS {
+                for (row, opacity) in column.opacities.into_iter().enumerate() {
                     assert_eq!(opacity, FIELD_REST, "resting cell {index}/{row}");
                 }
+            } else {
+                assert!(
+                    column
+                        .opacities
+                        .iter()
+                        .all(|opacity| *opacity >= FIELD_REST),
+                    "frontier cell {index} must stay on the field"
+                );
             }
         }
+    }
+
+    #[test]
+    fn transcribing_frontier_flickers_like_cleanup_beyond_the_measured_fill() {
+        let front = 12.0;
+        let age = Duration::from_millis(450);
+        let working = activity_frame(Kind::Working, age, Some(front), false);
+        let cleaning = activity_frame(Kind::Finishing, age, None, false);
+        let pixels = working.columns.map(raster_rows);
+        let edge = front as usize;
+
+        for (column, rows) in pixels.iter().enumerate().take(edge) {
+            assert!(
+                meter_column(rows),
+                "acknowledged work must stay a solid meter at {column}"
+            );
+        }
+        assert_eq!(
+            working.columns[edge], cleaning.columns[edge],
+            "the first unfilled column is full-strength cleanup flicker"
+        );
+        for (column, rows) in pixels
+            .iter()
+            .enumerate()
+            .take(first_rest_column(front))
+            .skip(edge + 1)
+        {
+            let beyond = column as f32 - front;
+            let t = (beyond / FRONTIER_RADIUS).min(1.0);
+            let halo = (1.0 - t) * (1.0 - t);
+            for row in 0..ROWS {
+                let expected =
+                    FIELD_REST + (cleaning.columns[column].opacities[row] - FIELD_REST) * halo;
+                let got = working.columns[column].opacities[row];
+                assert!(
+                    (got - expected).abs() < 1e-6,
+                    "column {column} row {row}: {got} vs {expected}"
+                );
+            }
+            assert!(
+                !meter_column(rows),
+                "frontier {column} must not read as completed fill"
+            );
+        }
+        assert!(pixels[first_rest_column(front)..].iter().all(rest_column));
+
+        let nearer: u32 = pixels[edge].iter().map(|alpha| u32::from(*alpha)).sum();
+        let farther: u32 = pixels[edge + 4].iter().map(|alpha| u32::from(*alpha)).sum();
+        assert!(
+            nearer > farther,
+            "flicker must weaken with distance from the fill"
+        );
+
+        let reduced = activity_frame(Kind::Working, age, Some(front), true)
+            .columns
+            .map(raster_rows);
+        assert!(reduced[..edge].iter().all(meter_column));
+        assert!(reduced[edge..].iter().all(rest_column));
     }
 
     #[test]
@@ -3268,7 +3368,6 @@ mod tests {
         model.apply(status.clone(), now);
         let reported = now + Duration::from_secs(1);
         model.track.presented = model.frame(reported);
-        let pending = raster_rows(model.track.presented.columns[0])[3];
         status.stage = Some(Stage::Transcribing {
             completed: 1,
             total: 3,
@@ -3277,17 +3376,21 @@ mod tests {
         let halfway_at = reported + PROGRESS_REVEAL / 2;
         let halfway = model.frame(halfway_at);
         let pixels = halfway.columns.map(raster_rows);
-        assert!(pixels[..10]
-            .iter()
-            .all(|rows| rows.iter().all(|alpha| *alpha > 128)));
-        assert!(pixels[10..].iter().all(|rows| *rows == [pending; ROWS]));
+        assert!(pixels[..10].iter().all(meter_column));
+        assert!(!meter_column(&pixels[10]));
+        assert!(pixels[first_rest_column(10.0)..].iter().all(rest_column));
+        let t = 0.37_f32;
+        let fractional_front = 20.0 * t * t * (3.0 - 2.0 * t);
         let fractional = model
             .frame(reported + PROGRESS_REVEAL * 37 / 100)
             .columns
             .map(raster_rows);
-        assert!(fractional[..6].iter().all(|rows| rows[3] > 128));
-        assert!(fractional[6][3] > pending && fractional[6][3] < 128);
-        assert!(fractional[7..].iter().all(|rows| rows[3] == pending));
+        let filled = fractional_front.floor() as usize;
+        assert!(fractional[..filled].iter().all(meter_column));
+        assert!(!meter_column(&fractional[filled]));
+        assert!(fractional[first_rest_column(fractional_front)..]
+            .iter()
+            .all(rest_column));
         model.apply(status.clone(), halfway_at);
         assert_eq!(
             model.frame(halfway_at),
@@ -3305,22 +3408,24 @@ mod tests {
             halfway,
             "an interrupted reveal must continue in place"
         );
+        let t = 0.25_f32;
+        let advancing_front = 10.0 + 30.0 * t * t * (3.0 - 2.0 * t);
         let advancing = model
             .frame(halfway_at + PROGRESS_REVEAL / 4)
             .columns
             .map(raster_rows);
-        assert!(advancing[10..14]
+        let filled = advancing_front.floor() as usize;
+        assert!(advancing[..filled].iter().all(meter_column));
+        assert!(advancing[first_rest_column(advancing_front)..]
             .iter()
-            .all(|rows| rows.iter().all(|alpha| *alpha > 128)));
-        assert!(advancing[15..].iter().all(|rows| *rows == [pending; ROWS]));
+            .all(rest_column));
         let settled_at = halfway_at + PROGRESS_REVEAL;
         let settled = model.frame(settled_at);
         for frame in [settled, model.frame(settled_at + Duration::from_secs(60))] {
             let pixels = frame.columns.map(raster_rows);
-            assert!(pixels[..40]
-                .iter()
-                .all(|rows| rows.iter().all(|alpha| *alpha > 128)));
-            assert!(pixels[40..].iter().all(|rows| *rows == [pending; ROWS]));
+            assert!(pixels[..40].iter().all(meter_column));
+            assert!(!meter_column(&pixels[40]));
+            assert!(pixels[first_rest_column(40.0)..].iter().all(rest_column));
         }
         assert_ne!(settled, model.frame(settled_at + Duration::from_secs(1)));
         model.track.presented = settled;
@@ -3344,31 +3449,31 @@ mod tests {
             model.track.presented = model.frame(reset);
             status.stage = Some(Stage::Transcribing { completed, total });
             model.apply(status, reset);
-            assert!(model
-                .frame(reset)
-                .columns
-                .map(raster_rows)
-                .iter()
-                .all(|rows| rows[3] < 128));
+            assert!(
+                model
+                    .frame(reset)
+                    .columns
+                    .map(raster_rows)
+                    .iter()
+                    .all(|rows| !meter_column(rows)),
+                "a reset pass must not keep the previous filled meter"
+            );
             let pixels = model
                 .frame(reset + PROGRESS_REVEAL)
                 .columns
                 .map(raster_rows);
-            assert!(pixels[..filled].iter().all(|rows| rows[3] > 128));
-            assert!(pixels[filled..]
-                .iter()
-                .all(|rows| rows[3] == pixels[CELLS - 1][3] && rows[3] < 128));
+            assert!(pixels[..filled].iter().all(meter_column));
+            let front = CELLS as f32 * completed as f32 / total as f32;
+            assert!(pixels[first_rest_column(front)..].iter().all(rest_column));
+            if filled < CELLS {
+                assert!(!meter_column(&pixels[filled]));
+            }
         }
     }
-
     #[test]
     fn unmeasured_transcription_has_a_bounded_packet_and_never_a_completed_trail() {
         for stage in [
             None,
-            Some(Stage::Transcribing {
-                completed: 0,
-                total: 1,
-            }),
             Some(Stage::Transcribing {
                 completed: 4,
                 total: 3,
@@ -3397,6 +3502,38 @@ mod tests {
             }
             assert_ne!(first, later);
         }
+    }
+
+    #[test]
+    fn single_chunk_waits_at_the_frontier_then_fills_the_meter() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Processing);
+        status.stage = Some(Stage::Transcribing {
+            completed: 0,
+            total: 1,
+        });
+        model.apply(status.clone(), now);
+        let waiting = model.frame(now + SETTLE).columns.map(raster_rows);
+        assert!(waiting.iter().all(|rows| !meter_column(rows)));
+        assert!(!rest_column(&waiting[0]));
+        assert!(waiting[first_rest_column(0.0)..].iter().all(rest_column));
+
+        let reported = now + Duration::from_secs(1);
+        model.track.presented = model.frame(reported);
+        status.stage = Some(Stage::Transcribing {
+            completed: 1,
+            total: 1,
+        });
+        model.apply(status, reported);
+        let filled = model
+            .frame(reported + PROGRESS_REVEAL)
+            .columns
+            .map(raster_rows);
+        assert!(
+            filled.iter().all(meter_column),
+            "a completed single chunk must fill the meter"
+        );
     }
 
     #[test]
@@ -3607,7 +3744,8 @@ mod tests {
             model.refresh(before_handoff);
             assert_eq!(model.kind, Some(Kind::Working));
             let pixels = model.frame(before_handoff).columns.map(raster_rows);
-            assert!(pixels[20..].iter().all(|rows| rows[3] < 128));
+            assert!(pixels[..20].iter().all(meter_column));
+            assert!(pixels[20..].iter().all(|rows| !meter_column(rows)));
             let mut idle = preview_snapshot(StateKind::Idle);
             idle.outcome = Some(preview_outcome(completeness, delivery));
             model.apply(idle, before_handoff);
