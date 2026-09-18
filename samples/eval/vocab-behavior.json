@@ -145,6 +145,14 @@
         "I said Gemini 3.8 Flash, and it transcribed Gemini 3.5 Flash.",
         "I said Gemini 3.8 Flash and it transcribed Gemini 3.5 Flash."
       ]
+    },
+    {
+      "id": "no-excuse-not-note-use",
+      "category": "cleanup",
+      "input": "note: use. Automated testing should just be comprehensive.",
+      "accepted": [
+        "No excuse. Automated testing should just be comprehensive."
+      ]
     }
   ]
 }
