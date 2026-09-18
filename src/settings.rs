@@ -48,6 +48,9 @@ struct Editable {
     pp_passes: u8,
     pp_min_chars: usize,
     pp_instructions: String,
+    pp_decision_model: Option<String>,
+    pp_decision_endpoint: Option<String>,
+    pp_decision_key: Option<String>,
     /// Not editable in the window; carried through saves so enabling
     /// telemetry in the config file survives a settings write.
     telemetry: TelemetryConfig,
@@ -73,6 +76,9 @@ impl Editable {
             pp_passes: cfg.postproc.passes,
             pp_min_chars: cfg.postproc.min_chars,
             pp_instructions: cfg.postproc.instructions.clone(),
+            pp_decision_model: cfg.postproc.decision_model.clone(),
+            pp_decision_endpoint: cfg.postproc.decision_endpoint.clone(),
+            pp_decision_key: cfg.postproc.decision_api_key_id.clone(),
             telemetry: cfg.telemetry.clone(),
             hud: cfg.hud,
         }
@@ -105,6 +111,9 @@ impl Editable {
                 passes: self.pp_passes,
                 min_chars: self.pp_min_chars,
                 instructions: self.pp_instructions.clone(),
+                decision_model: self.pp_decision_model.clone(),
+                decision_endpoint: self.pp_decision_endpoint.clone(),
+                decision_api_key_id: self.pp_decision_key.clone(),
             },
             telemetry: self.telemetry.clone(),
             hud: self.hud,
@@ -1136,6 +1145,9 @@ mod tests {
                 passes: 1,
                 min_chars: 40,
                 instructions: "Remove filler words.".to_owned(),
+                decision_model: None,
+                decision_endpoint: None,
+                decision_api_key_id: None,
             },
             telemetry: TelemetryConfig::default(),
             hud: HudConfig {
@@ -1164,6 +1176,9 @@ mod tests {
             pp_passes: 1,
             pp_min_chars: 40,
             pp_instructions: String::new(),
+            pp_decision_model: None,
+            pp_decision_endpoint: None,
+            pp_decision_key: None,
             telemetry: TelemetryConfig::default(),
             hud: HudConfig::default(),
         };

@@ -117,6 +117,9 @@ fn postproc_config(endpoint: String) -> PostprocConfig {
         passes: 2,
         min_chars: 0,
         instructions: "Keep numerals as digits.".to_owned(),
+        decision_model: None,
+        decision_endpoint: None,
+        decision_api_key_id: None,
     }
 }
 
@@ -274,6 +277,89 @@ fn cancelling_a_blocked_cleanup_pass_prevents_later_requests() {
         listener.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+fn refine_decision_triage_skips_when_clean() {
+    let response = ok_json(
+        r#"{"model":"typesafe/jev-1.13","answers":{"needs_cleanup":{"type":"noul","noul":0.05}}}"#,
+    );
+    let (decision_endpoint, decision_server) = mock_server(response);
+    let mut cfg = postproc_config("http://127.0.0.1:1".to_owned());
+    cfg.passes = 1;
+    cfg.decision_model = Some("typesafe/jev-1.13".to_owned());
+    cfg.decision_endpoint = Some(decision_endpoint);
+
+    let res = postproc::refine("This text is already clean.", &cfg, &[], None, None)
+        .expect("refine should succeed via decision triage");
+    assert_eq!(res.text, "This text is already clean.");
+    assert!(res.usage.is_none());
+    decision_server.join().expect("decision server joins");
+}
+
+#[test]
+fn refine_decision_watchdog_rejects_answered_question() {
+    let (endpoint, server) = mock_server_multi(vec![
+        ok_json(
+            r#"{"model":"typesafe/jev-1.13","answers":{"needs_cleanup":{"type":"noul","noul":0.85}}}"#,
+        ),
+        ok_json(r#"{"choices":[{"message":{"content":"The meeting is at 2 PM tomorrow."}}]}"#),
+        ok_json(
+            r#"{"model":"typesafe/jev-1.13","answers":{"answered_question":{"type":"noul","noul":0.95},"content_fidelity":{"type":"score","score":0.2}}}"#,
+        ),
+    ]);
+
+    let mut cfg = postproc_config(endpoint.clone());
+    cfg.passes = 1;
+    cfg.decision_model = Some("typesafe/jev-1.13".to_owned());
+    cfg.decision_endpoint = Some(endpoint);
+
+    let res = postproc::refine("what time is the meeting tomorrow", &cfg, &[], None, None)
+        .expect("refine should succeed with fallback");
+    assert_eq!(res.text, "what time is the meeting tomorrow");
+    server.join().expect("server joins");
+}
+
+#[test]
+fn refine_decision_fails_open_on_error() {
+    let error_resp =
+        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_owned();
+    let (endpoint, server) = mock_server_multi(vec![
+        error_resp.clone(),
+        ok_json(r#"{"choices":[{"message":{"content":"Cleaned text."}}]}"#),
+        error_resp,
+    ]);
+
+    let mut cfg = postproc_config(endpoint.clone());
+    cfg.passes = 1;
+    cfg.decision_model = Some("typesafe/jev-1.13".to_owned());
+    cfg.decision_endpoint = Some(endpoint);
+
+    let res = postproc::refine("raw uncleaned text", &cfg, &[], None, None)
+        .expect("refine should succeed even if decision endpoint fails");
+    assert_eq!(res.text, "Cleaned text.");
+    server.join().expect("server joins");
+}
+
+#[test]
+fn refine_decision_missing_keys_fails_open() {
+    let empty_decision = ok_json(r#"{"model":"typesafe/jev-1.13","answers":{}}"#);
+    let (endpoint, server) = mock_server_multi(vec![
+        empty_decision.clone(),
+        ok_json(r#"{"choices":[{"message":{"content":"Cleaned text."}}]}"#),
+        empty_decision,
+    ]);
+
+    let mut cfg = postproc_config(endpoint.clone());
+    cfg.passes = 1;
+    cfg.decision_model = Some("typesafe/jev-1.13".to_owned());
+    cfg.decision_endpoint = Some(endpoint);
+
+    let res = postproc::refine("raw uncleaned text", &cfg, &[], None, None)
+        .expect("refine should succeed even if decision answers are missing");
+    assert_eq!(res.text, "Cleaned text.");
+    server.join().expect("server joins");
 }
 
 #[test]

@@ -189,6 +189,22 @@ contract, so keep it short and avoid redefining the task.
   `high`, `none`) for OpenAI-compatible providers that support
   `reasoning.effort` (such as OpenRouter). Omitted from the request when
   unset; local endpoints ignore unknown fields.
+- **`decision_model`.** Optional TypeSafe System One decision model (e.g.
+  `typesafe/jev-1.13` or `jev-latest`) for pre-cleanup triage and post-cleanup
+  watchdog verification. Disabled when unset. When enabled, clean takes
+  bypass generative cleanup to reduce latency and token spend; post-cleanup
+  watchdog verification rejects "answer-to-question" hallucinations and falls
+  back to the raw transcript ([ADR 0026](adr/0026-typesafe-system-one-decisions.md)).
+  Enabling a decision model sends transcript text to the decision endpoint even
+  when generative cleanup is bypassed; review the
+  [network/content boundary](PRIVACY.md#what-leaves-the-machine) before opting in.
+- **`decision_endpoint`.** Optional URL override for the decision model.
+  Defaults to OpenRouter's decisions endpoint (`https://openrouter.ai/api/alpha/decisions`)
+  for `typesafe/*` models, or TypeSafe native (`https://api.typesafe.ai/v1/systemone`)
+  otherwise.
+- **`decision_api_key_id`.** Keyring credential ID for decision calls. When unset,
+  defaults to `openrouter` in the OS keyring for OpenRouter models or `typesafe`
+  otherwise, falling back to the runtime cleanup credential.
 - A postproc failure never drops a dictation: the raw transcript is used.
 
 ## Transcript history

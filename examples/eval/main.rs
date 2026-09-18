@@ -32,9 +32,9 @@ use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineParams, MoonshineV
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
+mod judge;
 mod langfuse;
 mod wer;
-
 const BOUNDARY: &str = "cantrip-eval-boundary-3fa91c";
 
 /// Optional proxy prefix for provider endpoints, read from the `CANTRIP_PROXY`
@@ -74,7 +74,10 @@ fn main() -> Result<()> {
         "run" => run(rest),
         "behavior" => run_behavior(rest),
         "langfuse" => langfuse::publish(rest),
-        other => bail!("unknown subcommand '{other}' (expected list | run | behavior | langfuse)"),
+        "judge-probe" => run_judge_probe(rest),
+        other => bail!(
+            "unknown subcommand '{other}' (expected list | run | behavior | langfuse | judge-probe)"
+        ),
     }
 }
 
@@ -246,9 +249,10 @@ struct BehaviorResult {
     input_tokens: u64,
     output_tokens: u64,
     passed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    judge: Option<judge::JudgeVerdict>,
     text: String,
 }
-
 // ---------------------------------------------------------------------------
 // Local STT (transcribe-rs)
 // ---------------------------------------------------------------------------
@@ -1533,7 +1537,13 @@ fn run_behavior(args: &[String]) -> Result<()> {
         .transpose()?
         .unwrap_or(1);
     anyhow::ensure!(repeats > 0, "--repeat must be greater than zero");
-
+    let use_judge = args.iter().any(|a| a == "--judge");
+    let judge = if use_judge {
+        eprintln!("[eval] initializing model judge (TypeSafe Jev)...");
+        Some(judge::ModelJudge::try_default()?)
+    } else {
+        None
+    };
     let cases: Vec<&BehaviorCase> = manifest
         .cases
         .iter()
@@ -1632,6 +1642,7 @@ fn run_behavior(args: &[String]) -> Result<()> {
                             input_tokens: 0,
                             output_tokens: 0,
                             passed: false,
+                            judge: None,
                             text: String::new(),
                         });
                         continue;
@@ -1643,6 +1654,23 @@ fn run_behavior(args: &[String]) -> Result<()> {
                     .iter()
                     .any(|accepted| normalize_behavior_text(accepted) == normalized);
                 let cost = ppr_cost_usd(lane, &usage, Some(&or_pricing));
+                let judge_verdict = if let Some(judge) = &judge {
+                    match judge.grade(&case.input, &text, None) {
+                        Ok(v) => {
+                            eprintln!(
+                                "[eval] judge case={} role={:.2} content={:.1} disfluency={:.2} decision={}",
+                                case.id, v.role_fidelity, v.content_fidelity_score, v.disfluency_removed, v.decision
+                            );
+                            Some(v)
+                        }
+                        Err(e) => {
+                            eprintln!("[eval] judge warn case={}: {e:#}", case.id);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 eprintln!(
                     "[eval] behavior {} case={} iteration={} pass={} chars={} ms={} cost_usd={:.6}",
                     lane.id,
@@ -1665,6 +1693,7 @@ fn run_behavior(args: &[String]) -> Result<()> {
                     input_tokens: usage.prompt_tokens,
                     output_tokens: usage.completion_tokens,
                     passed,
+                    judge: judge_verdict,
                     text,
                 });
             }
@@ -1735,6 +1764,42 @@ fn run_behavior(args: &[String]) -> Result<()> {
             mean_ms,
         ));
     }
+    if use_judge {
+        board.push_str("\n## Model Judge (ADR 0012 / ADR 0026)\n\n| lane | judge pass | judge uncertain | judge fail | mean role | mean content | mean disfluency |\n|---|---:|---:|---:|---:|---:|---:|\n");
+        for lane in &config.postproc {
+            let lane_results: Vec<&BehaviorResult> = results
+                .iter()
+                .filter(|result| result.lane == lane.id)
+                .collect();
+            if lane_results.is_empty() {
+                continue;
+            }
+            let judged: Vec<&judge::JudgeVerdict> = lane_results
+                .iter()
+                .filter_map(|r| r.judge.as_ref())
+                .collect();
+            if judged.is_empty() {
+                continue;
+            }
+            let passes = judged.iter().filter(|j| j.decision == "pass").count();
+            let uncertains = judged.iter().filter(|j| j.decision == "uncertain").count();
+            let fails = judged.iter().filter(|j| j.decision == "fail").count();
+            let total = judged.len() as f64;
+            let mean_role = judged.iter().map(|j| j.role_fidelity).sum::<f64>() / total;
+            let mean_content = judged.iter().map(|j| j.content_fidelity_score).sum::<f64>() / total;
+            let mean_disfluency = judged.iter().map(|j| j.disfluency_removed).sum::<f64>() / total;
+            board.push_str(&format!(
+                "| {} | {passes}/{} | {uncertains}/{} | {fails}/{} | {:.2} | {:.2} | {:.2} |\n",
+                lane.id,
+                judged.len(),
+                judged.len(),
+                judged.len(),
+                mean_role,
+                mean_content,
+                mean_disfluency,
+            ));
+        }
+    }
     let board_path = out_dir.join("behavior.md");
     fs::write(&board_path, &board).with_context(|| format!("writing {}", board_path.display()))?;
     println!("{board}");
@@ -1744,6 +1809,29 @@ fn run_behavior(args: &[String]) -> Result<()> {
         out_dir.display()
     );
     write_run_metadata(&out_dir, "behavior", started_at)
+}
+
+fn run_judge_probe(args: &[String]) -> Result<()> {
+    let source = args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("what time is the meeting tomorrow");
+    let candidate = args
+        .get(1)
+        .map(String::as_str)
+        .unwrap_or("What time is the meeting tomorrow?");
+    println!("[judge-probe] source:    \"{source}\"");
+    println!("[judge-probe] candidate: \"{candidate}\"");
+    let judge = judge::ModelJudge::try_default()?;
+    let t0 = Instant::now();
+    let verdict = judge.grade(source, candidate, None)?;
+    let elapsed = t0.elapsed();
+    println!("[judge-probe] latency:   {:.2?}", elapsed);
+    println!(
+        "[judge-probe] verdict:\n{}",
+        serde_json::to_string_pretty(&verdict)?
+    );
+    Ok(())
 }
 
 /// Reuse completed transcription results and evaluate the selected cleanup lanes.

@@ -163,6 +163,63 @@ pub fn refine(
 ) -> Result<Refinement> {
     let passes = cfg.passes.max(1);
     let started = Instant::now();
+
+    // Pre-cleanup triage gatekeeper (ADR 0026):
+    // If an opt-in decision model is configured, evaluate whether generative cleanup
+    // is required. If the raw transcript is already clean (needs_cleanup < 0.20),
+    // bypass generative passes to save latency and token cost.
+    if let Some(client) = get_decision_client(cfg, api_key) {
+        if !crate::stt::is_cancelled(cancel) {
+            let mut questions = std::collections::BTreeMap::new();
+            questions.insert(
+                "needs_cleanup".to_string(),
+                crate::typesafe::Question::noul_with_criteria(
+                    "Does this speech-to-text transcript contain speech disfluencies, filler words (um, uh), false starts, or clear recognition errors that require rewriting by an LLM?",
+                    "Contains disfluencies, errors, or stutters needing rewrite",
+                    "Already clean, fluent prose or concise command; no rewriting needed",
+                ),
+            );
+            match client.evaluate(
+                &serde_json::Value::String(transcript.to_string()),
+                &questions,
+                cancel,
+            ) {
+                Ok(resp) => {
+                    match resp
+                        .answers
+                        .get("needs_cleanup")
+                        .and_then(crate::typesafe::Answer::as_noul_prob)
+                    {
+                        Some(prob) if prob < 0.20 => {
+                            tracing::info!(
+                                "[Postproc] decision triage skipped generative cleanup: text clean (p={:.2}) ms={}",
+                                prob,
+                                started.elapsed().as_millis()
+                            );
+                            return Ok(Refinement {
+                                text: transcript.to_string(),
+                                usage: None,
+                            });
+                        }
+                        Some(_) => {
+                            // Needs cleanup or uncertain: proceed to generative passes
+                        }
+                        None => {
+                            tracing::debug!(
+                                "[Postproc] decision triage response missing 'needs_cleanup'; proceeding with generative cleanup"
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        "[Postproc] decision triage unavailable ({err:#}); proceeding with generative cleanup"
+                    );
+                }
+            }
+        }
+    }
+
     let mut current = transcript.to_owned();
     let mut usage = RefinementUsage {
         reported_cost_usd: Some(0.0),
@@ -181,6 +238,75 @@ pub fn refine(
         let round = chat_round(&current, cfg, api_key, &system, cancel)?;
         merge_usage(&mut usage, round.usage);
         current = round.text;
+    }
+
+    // Post-cleanup watchdog (ADR 0026 / ADR 0012):
+    // Check whether the candidate output answered a question, executed an instruction,
+    // or distorted core content instead of transcribing. If tripped, reject and fall back.
+    if let Some(client) = get_decision_client(cfg, api_key) {
+        if !crate::stt::is_cancelled(cancel) {
+            let state = serde_json::json!({
+                "source": transcript,
+                "candidate": current,
+            });
+            let mut questions = std::collections::BTreeMap::new();
+            questions.insert(
+                "answered_question".to_string(),
+                crate::typesafe::Question::noul_with_criteria(
+                    "Did the candidate output answer the question, execute the command, converse, or add conversational preamble instead of acting as a faithful speech-to-text transcript of the source words?",
+                    "Answered the question, executed the command, or conversed",
+                    "Faithfully transcribed or cleaned the speaker's words without answering",
+                ),
+            );
+            questions.insert(
+                "content_fidelity".to_string(),
+                crate::typesafe::Question::score(
+                    "How faithfully does the candidate output preserve all facts, numbers, dates, proper nouns, and negations from the source?",
+                    [
+                        "Severe distortion, omitted core facts, flipped negation, or hallucinated content",
+                        "Minor wording variation or harmless synonym while preserving meaning",
+                        "Faithful preservation of all facts, numbers, and negations",
+                    ],
+                ),
+            );
+            match client.evaluate(&state, &questions, cancel) {
+                Ok(resp) => {
+                    let ans_prob = resp
+                        .answers
+                        .get("answered_question")
+                        .and_then(crate::typesafe::Answer::as_noul_prob);
+                    let fidelity = resp
+                        .answers
+                        .get("content_fidelity")
+                        .and_then(crate::typesafe::Answer::as_score);
+
+                    match (ans_prob, fidelity) {
+                        (Some(ans_prob), Some(fidelity)) => {
+                            if ans_prob > 0.60 || fidelity < 0.5 {
+                                tracing::warn!(
+                                    "[Postproc] decision watchdog rejected cleanup: answer-to-question detected (ans_p={:.2}, fidelity={:.1}) ms={}; falling back to raw transcript",
+                                    ans_prob,
+                                    fidelity,
+                                    started.elapsed().as_millis()
+                                );
+                                return Ok(Refinement {
+                                    text: transcript.to_string(),
+                                    usage: (usage.responses_with_usage > 0).then_some(usage),
+                                });
+                            }
+                        }
+                        _ => {
+                            tracing::debug!(
+                                "[Postproc] decision watchdog response missing expected answers, failing open"
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::debug!("[Postproc] decision watchdog failed-open: {err:#}");
+                }
+            }
+        }
     }
 
     tracing::info!(
@@ -299,6 +425,36 @@ fn chat_round(
         text: normalize_response(content, transcript)?,
         usage: response.usage,
     })
+}
+
+fn get_decision_client(
+    cfg: &PostprocConfig,
+    fallback_key: Option<&str>,
+) -> Option<crate::typesafe::DecisionClient> {
+    let model = cfg.decision_model.as_ref()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    let key = cfg
+        .decision_api_key_id
+        .as_deref()
+        .and_then(|id| crate::keys::get(id).ok())
+        .or_else(|| {
+            if model.starts_with("typesafe/") || model.contains("openrouter") {
+                crate::keys::get("openrouter").ok()
+            } else {
+                crate::keys::get("typesafe").ok()
+            }
+        })
+        .or_else(|| fallback_key.map(str::to_owned));
+
+    let timeout = Duration::from_millis(cfg.timeout_ms.clamp(1_000, 5_000));
+    Some(crate::typesafe::DecisionClient::new(
+        cfg.decision_endpoint.as_deref(),
+        Some(model),
+        key,
+        timeout,
+    ))
 }
 
 pub fn build_system_prompt(vocabulary: &[String], instructions: &str) -> String {

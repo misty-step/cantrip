@@ -53,6 +53,16 @@ pub struct PostprocConfig {
     /// `0` disables the skip. Default 40 covers short commands without a cloud round-trip.
     pub min_chars: usize,
     pub instructions: String,
+    /// Optional TypeSafe System One decision model (e.g. "typesafe/jev-1.13" or "jev-latest")
+    /// for fast pre-cleanup triage and post-cleanup watchdog validation.
+    /// Disabled when None or empty.
+    pub decision_model: Option<String>,
+    /// Optional endpoint override for the decision model. Defaults to
+    /// OpenRouter decisions endpoint for "typesafe/*" models or TypeSafe native otherwise.
+    pub decision_endpoint: Option<String>,
+    /// Optional keyring ID for decision authentication. Defaults to "openrouter"
+    /// for OpenRouter models or "typesafe" otherwise, falling back to api_key_id.
+    pub decision_api_key_id: Option<String>,
 }
 
 impl Default for Config {
@@ -117,6 +127,9 @@ impl Default for PostprocConfig {
             passes: 1,
             min_chars: 40,
             instructions: String::new(),
+            decision_model: None,
+            decision_endpoint: None,
+            decision_api_key_id: None,
         }
     }
 }
@@ -161,6 +174,20 @@ impl Config {
                 "postproc.timeout_ms must be between 1000 and 120000, got {}",
                 self.postproc.timeout_ms
             );
+        }
+        if let Some(model) = &self.postproc.decision_model {
+            if model.trim().is_empty() {
+                bail!("postproc.decision_model must not be empty when set");
+            }
+            if let Some(endpoint) = &self.postproc.decision_endpoint {
+                let endpoint = endpoint.trim();
+                if endpoint.is_empty() {
+                    bail!("postproc.decision_endpoint must not be empty when set");
+                }
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    bail!("postproc.decision_endpoint must be an http(s) URL");
+                }
+            }
         }
         if self.telemetry.enabled {
             if !self.telemetry.endpoint.starts_with("http://")
@@ -316,6 +343,36 @@ mod tests {
         assert!(error
             .to_string()
             .contains("postproc.timeout_ms must be between 1000 and 120000"));
+    }
+
+    #[test]
+    fn validation_accepts_valid_decision_model() {
+        let config = Config {
+            postproc: PostprocConfig {
+                decision_model: Some("typesafe/jev-1.13".to_string()),
+                decision_endpoint: Some("https://openrouter.ai/api/alpha/decisions".to_string()),
+                ..PostprocConfig::default()
+            },
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_empty_decision_model() {
+        let config = Config {
+            postproc: PostprocConfig {
+                decision_model: Some("   ".to_string()),
+                ..PostprocConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("empty decision_model must fail");
+        assert!(error
+            .to_string()
+            .contains("postproc.decision_model must not be empty"));
     }
 
     #[test]

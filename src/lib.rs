@@ -27,3 +27,4 @@ pub mod settings;
 pub mod stt;
 pub mod telemetry;
 pub mod theme;
+pub mod typesafe;
