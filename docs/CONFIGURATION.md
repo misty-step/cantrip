@@ -207,6 +207,35 @@ contract, so keep it short and avoid redefining the task.
   otherwise, falling back to the runtime cleanup credential.
 - A postproc failure never drops a dictation: the raw transcript is used.
 
+## `[handoff.NAME]` — named local commands (US-011)
+
+Define a target with a lowercase name matching `[a-z0-9_-]{1,32}`:
+
+```toml
+[handoff.pepper]
+command = ["/home/you/.local/bin/pepper-receive", "--stdin"]
+timeout_seconds = 15
+```
+
+The first argv element must be an absolute executable path; Cantrip does not
+invoke a shell. `timeout_seconds` defaults to 15 and is clamped to 1–120.
+After editing, run `cantrip reload`, then use `cantrip toggle --handoff pepper`
+to begin and toggle again (or `cantrip stop`) to finish. Alternatively use
+`cantrip start --handoff pepper`; both start commands can also specify
+`--postproc clean` or `--postproc raw`. The destination is selected at start:
+changing config or omitting `--handoff` on the stop toggle does not change it.
+
+The complete final transcript goes to the target's stdin; `CANTRIP_TAKE_ID`
+identifies the retained take. No transcript is sent to the clipboard or focused
+window. Partial/empty takes are not handed off. A failed or timed-out command
+does not retry or fall back to desktop delivery; `cantrip status` shows
+`delivery: handed-off` on exit zero, or `delivery: failed` with
+`error: handoff-failed` / `handoff-timeout`. Copy a saved take explicitly via
+`cantrip copy ID` when needed. `cantrip doctor` checks whether each configured
+command exists and is executable; it does not prove the target processes a take.
+Treat the executable as trusted code with access to the transcript. See
+[ADR 0027](adr/0027-named-handoff-targets.md).
+
 ## Transcript history
 
 Cantrip retains stopped microphone audio and sensitive plaintext transcript

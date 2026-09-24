@@ -73,11 +73,17 @@ enum CliCommand {
         /// Post-processing for this dictation: clean | raw (default: [postproc].enabled).
         #[arg(long, value_enum)]
         postproc: Option<PostprocMode>,
+        /// Deliver this take to a named local command instead of the desktop.
+        #[arg(long, value_name = "NAME")]
+        handoff: Option<String>,
     },
     Start {
         /// Post-processing for this dictation: clean | raw (default: [postproc].enabled).
         #[arg(long, value_enum)]
         postproc: Option<PostprocMode>,
+        /// Deliver this take to a named local command instead of the desktop.
+        #[arg(long, value_name = "NAME")]
+        handoff: Option<String>,
     },
     Stop,
     /// Stop capture or processing without deleting the recording.
@@ -275,11 +281,13 @@ fn run(cli: Cli) -> Result<()> {
         CliCommand::HudGallery { screenshot } => hud::gallery::run(screenshot),
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
-        CliCommand::Toggle { postproc } => send_command(Command::Toggle {
+        CliCommand::Toggle { postproc, handoff } => send_command(Command::Toggle {
             postproc: postproc.map(|mode| mode == PostprocMode::Clean),
+            handoff,
         }),
-        CliCommand::Start { postproc } => send_command(Command::Start {
+        CliCommand::Start { postproc, handoff } => send_command(Command::Start {
             postproc: postproc.map(|mode| mode == PostprocMode::Clean),
+            handoff,
         }),
         CliCommand::Stop => send_command(Command::Stop),
         CliCommand::Cancel => send_command(Command::Cancel),
@@ -792,6 +800,9 @@ fn doctor() -> Result<()> {
         println!("{}", cleanup_diagnosis(config));
         println!("{}", telemetry_diagnosis(config));
         println!("{}", injection_diagnosis(config.injection, tools));
+        for (name, target) in &config.handoff {
+            println!("{}", handoff_diagnosis(name, target));
+        }
     } else {
         println!("stt: blocked — fix config first");
         println!("cleanup: blocked — fix config first");
@@ -813,6 +824,20 @@ fn doctor() -> Result<()> {
         Err(_) => println!("daemon: not running or unreachable — open cantrip actions for setup"),
     }
     Ok(())
+}
+
+fn handoff_diagnosis(name: &str, target: &cantrip::config::HandoffTarget) -> String {
+    let executable = &target.command[0];
+    let ready = fs::metadata(executable)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
+    format!(
+        "handoff.{name}: {} (command={executable})",
+        if ready {
+            "ready"
+        } else {
+            "blocked — executable missing or not executable"
+        }
+    )
 }
 
 fn capture_diagnosis(config: Option<&Config>, tools: DoctorTools) -> String {
@@ -1006,5 +1031,23 @@ mod tests {
         assert!(!line.contains("secret"));
         assert!(!line.contains("hidden"));
         assert!(!line.contains("private-key-name"));
+    }
+    #[test]
+    fn doctor_checks_handoff_executable_permissions() {
+        let root = PathBuf::from(env::var_os("HOME").unwrap())
+            .join(".cache/tmp")
+            .join(format!("cantrip-doctor-{}", recovery::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("receiver");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        let target = cantrip::config::HandoffTarget {
+            command: vec![executable.display().to_string()],
+            timeout_seconds: 15,
+        };
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(handoff_diagnosis("pepper", &target).contains("handoff.pepper: ready"));
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(handoff_diagnosis("pepper", &target).contains("blocked"));
+        fs::remove_dir_all(root).unwrap();
     }
 }

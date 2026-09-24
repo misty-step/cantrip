@@ -784,7 +784,7 @@ impl Model {
                     && outcome.completeness == Completeness::Complete
                     && matches!(
                         outcome.delivery,
-                        Delivery::Typed | Delivery::Pasted | Delivery::Copied
+                        Delivery::Typed | Delivery::Pasted | Delivery::Copied | Delivery::HandedOff
                     )
                     && outcome.cleanup != Cleanup::Failed
             });
@@ -1065,7 +1065,10 @@ fn present_outcome(
     reduced_motion: bool,
 ) -> ResultView {
     let attention = persistent(outcome);
-    let delivered = matches!(outcome.delivery, Delivery::Typed | Delivery::Pasted);
+    let delivered = matches!(
+        outcome.delivery,
+        Delivery::Typed | Delivery::Pasted | Delivery::HandedOff
+    );
     let copied = outcome.delivery == Delivery::Copied;
     let mut caption = Caption::default();
     let mut kind = if attention {
@@ -1107,6 +1110,10 @@ fn present_outcome(
             Delivery::Failed => caption.title = "Delivery failed.".to_owned(),
             Delivery::Cancelled => caption.title = "Cancelled".to_owned(),
             Delivery::Copied => {
+                kind = Kind::Resolved;
+                caption.title = outcome.message.clone();
+            }
+            Delivery::HandedOff => {
                 kind = Kind::Resolved;
                 caption.title = outcome.message.clone();
             }

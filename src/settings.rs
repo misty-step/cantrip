@@ -55,6 +55,8 @@ struct Editable {
     /// telemetry in the config file survives a settings write.
     telemetry: TelemetryConfig,
     hud: HudConfig,
+    /// Local handoff commands are file-only settings; preserve them across GUI saves.
+    handoff: std::collections::BTreeMap<String, crate::config::HandoffTarget>,
 }
 
 impl Editable {
@@ -81,6 +83,7 @@ impl Editable {
             pp_decision_key: cfg.postproc.decision_api_key_id.clone(),
             telemetry: cfg.telemetry.clone(),
             hud: cfg.hud,
+            handoff: cfg.handoff.clone(),
         }
     }
 
@@ -117,6 +120,8 @@ impl Editable {
             },
             telemetry: self.telemetry.clone(),
             hud: self.hud,
+            handoff: self.handoff.clone(),
+            selected_handoff: None,
         }
     }
 }
@@ -1154,6 +1159,8 @@ mod tests {
                 labels: true,
                 reduced_motion: Some(true),
             },
+            handoff: Default::default(),
+            selected_handoff: None,
         }
     }
 
@@ -1181,6 +1188,7 @@ mod tests {
             pp_decision_key: None,
             telemetry: TelemetryConfig::default(),
             hud: HudConfig::default(),
+            handoff: Default::default(),
         };
         let config = edit.to_config();
         assert_eq!(config.audio_source, None);
