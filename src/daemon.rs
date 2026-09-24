@@ -1967,11 +1967,7 @@ fn finish_audio(
     outcome.message = describe_delivery(
         &outcome,
         context.config.injection,
-        context
-            .config
-            .selected_handoff
-            .as_ref()
-            .map(|(name, target)| target.label.as_deref().unwrap_or(name)),
+        context.config.selected_handoff.as_ref(),
     );
     if let Err(error) = &pipeline.text {
         if outcome.completeness != Completeness::Cancelled {
@@ -2326,8 +2322,10 @@ fn deliver_with(
 fn describe_delivery(
     outcome: &TerminalOutcome,
     requested: InjectionMode,
-    handoff: Option<&str>,
+    selected_handoff: Option<&(String, crate::config::HandoffTarget)>,
 ) -> String {
+    // Messages name the person or tool, e.g. "Kaylee", not a technical target id.
+    let handoff = selected_handoff.map(|(name, target)| target.label.as_deref().unwrap_or(name));
     match (outcome.completeness, outcome.delivery) {
         (Completeness::Cancelled, _) => "Cancelled.".to_owned(),
         (Completeness::Empty, _) => "No text returned.".to_owned(),
@@ -3046,6 +3044,38 @@ mod tests {
         assert!(captured.contains("target=pepper"));
         assert!(!captured.contains(text));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handed_off_message_names_the_label_else_the_target() {
+        let mut outcome = setup_failure("", "");
+        outcome.completeness = Completeness::Complete;
+        outcome.delivery = Delivery::HandedOff;
+        let target = |label: Option<&str>| {
+            (
+                "pepper".to_owned(),
+                crate::config::HandoffTarget {
+                    command: vec!["/bin/true".to_owned()],
+                    timeout_seconds: 1,
+                    label: label.map(str::to_owned),
+                },
+            )
+        };
+        let labeled = target(Some("Kaylee"));
+        let unlabeled = target(None);
+        assert_eq!(
+            describe_delivery(&outcome, InjectionMode::Paste, Some(&labeled)),
+            "Sent to Kaylee."
+        );
+        assert_eq!(
+            describe_delivery(&outcome, InjectionMode::Paste, Some(&unlabeled)),
+            "Sent to pepper."
+        );
+        outcome.completeness = Completeness::Partial;
+        assert_eq!(
+            describe_delivery(&outcome, InjectionMode::Paste, Some(&labeled)),
+            "Partial text was not handed off."
+        );
     }
 
     #[test]
