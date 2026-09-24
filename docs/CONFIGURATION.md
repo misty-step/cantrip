@@ -215,15 +215,24 @@ Define a target with a lowercase name matching `[a-z0-9_-]{1,32}`:
 [handoff.pepper]
 command = ["/home/you/.local/bin/pepper-receive", "--stdin"]
 timeout_seconds = 15
+label = "Kaylee"
 ```
 
 The first argv element must be an absolute executable path; Cantrip does not
 invoke a shell. `timeout_seconds` defaults to 15 and is clamped to 1–120.
+`label` is optional (1–32 printable characters) and is what the HUD and
+`cantrip status` show, as in "Sent to Kaylee."; it defaults to the target name.
 After editing, run `cantrip reload`, then use `cantrip toggle --handoff pepper`
-to begin and toggle again (or `cantrip stop`) to finish. Alternatively use
+to begin and the same `cantrip toggle --handoff pepper` to finish. A toggle
+with a different or missing `--handoff` does nothing while that take records:
+one shortcut never stops another's take, so a desktop take is never handed
+off and a handoff take is never pasted. `cantrip stop` explicitly stops any
+take and delivers it where its start selected. Alternatively use
 `cantrip start --handoff pepper`; both start commands can also specify
-`--postproc clean` or `--postproc raw`. The destination is selected at start:
-changing config or omitting `--handoff` on the stop toggle does not change it.
+`--postproc clean` or `--postproc raw`. Changing config does not change the
+destination of a take already recording. On failure or timeout Cantrip kills
+the command's whole process group, so a wrapper script's children cannot
+deliver after the failure is reported.
 
 The complete final transcript goes to the target's stdin; `CANTRIP_TAKE_ID`
 identifies the retained take. No transcript is sent to the clipboard or focused

@@ -33,6 +33,9 @@ pub struct HandoffTarget {
         deserialize_with = "clamped_handoff_timeout"
     )]
     pub timeout_seconds: u64,
+    /// What the HUD and status call the target, e.g. "Kaylee"; defaults to its name.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 const fn default_handoff_timeout() -> u64 {
@@ -203,6 +206,14 @@ impl Config {
                 || !Path::new(&target.command[0]).is_absolute()
             {
                 bail!("handoff.{name}.command must start with an absolute executable path");
+            }
+            if let Some(label) = &target.label {
+                if label.trim().is_empty()
+                    || label.chars().count() > 32
+                    || label.chars().any(char::is_control)
+                {
+                    bail!("handoff.{name}.label must be 1-32 printable characters");
+                }
             }
         }
         if self.postproc.enabled && self.postproc.model.trim().is_empty() {
@@ -534,6 +545,35 @@ mod tests {
             let config: Config =
                 toml::from_str(&format!("[handoff.pepper]\ncommand = {command}")).unwrap();
             assert!(config.validate().is_err(), "accepted command {command}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod handoff_label_tests {
+    use super::Config;
+
+    #[test]
+    fn handoff_label_is_optional_and_must_be_short_printable_text() {
+        let config: Config = toml::from_str(
+            "[handoff.pepper]\ncommand = [\"/bin/true\"]\nlabel = \"Kaylee\"\n\
+             [handoff.other]\ncommand = [\"/bin/true\"]\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.handoff["pepper"].label.as_deref(), Some("Kaylee"));
+        assert_eq!(config.handoff["other"].label, None);
+        for label in [
+            "\"\"",
+            "\"   \"",
+            "\"a\\nb\"",
+            "\"123456789012345678901234567890123\"",
+        ] {
+            let config: Config = toml::from_str(&format!(
+                "[handoff.pepper]\ncommand = [\"/bin/true\"]\nlabel = {label}"
+            ))
+            .unwrap();
+            assert!(config.validate().is_err(), "accepted label {label}");
         }
     }
 }

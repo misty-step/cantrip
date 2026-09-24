@@ -926,6 +926,20 @@ fn execute(
     match command {
         Command::Toggle { postproc, handoff } => match &daemon.state {
             State::Idle => start_recording(daemon, runtime_dir, postproc, handoff),
+            // A shortcut stops only the take it started: another shortcut's toggle must
+            // never paste a handoff take or hand off a desktop take.
+            State::Recording { config, .. }
+                if config
+                    .selected_handoff
+                    .as_ref()
+                    .map(|(name, _)| name.as_str())
+                    != handoff.as_deref() =>
+            {
+                daemon.reject(
+                    "Recording continues; stop it with the shortcut that started it.",
+                    "handoff-mismatch",
+                )
+            }
             State::Recording { .. } => stop_recording(daemon, job_tx, false),
             State::Processing { .. } => daemon.busy(),
         },
@@ -1957,7 +1971,7 @@ fn finish_audio(
             .config
             .selected_handoff
             .as_ref()
-            .map(|(name, _)| name.as_str()),
+            .map(|(name, target)| target.label.as_deref().unwrap_or(name)),
     );
     if let Err(error) = &pipeline.text {
         if outcome.completeness != Completeness::Cancelled {
@@ -2160,6 +2174,16 @@ fn deliver_handoff(
     }
 }
 
+/// Kills the whole handoff process group: a wrapper script's children must not
+/// outlive a timeout or failure and still forward the take after it was reported.
+fn kill_handoff(child: &mut std::process::Child) {
+    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn run_handoff(
     text: &str,
     target: &crate::config::HandoffTarget,
@@ -2172,27 +2196,25 @@ fn run_handoff(
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .map_err(|_| "handoff-failed")?;
     let Some(mut stdin) = child.stdin.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_handoff(&mut child);
         return Err("handoff-failed");
     };
     let fd = stdin.as_raw_fd();
     // A child that stops reading must not block the worker's write past the deadline.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_handoff(&mut child);
         return Err("handoff-failed");
     }
     let bytes = text.as_bytes();
     let mut written = 0;
     while written < bytes.len() {
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_handoff(&mut child);
             return Err("handoff-timeout");
         }
         match stdin.write(&bytes[written..]) {
@@ -2207,14 +2229,12 @@ fn run_handoff(
     }
     drop(stdin);
     if written != bytes.len() {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_handoff(&mut child);
         return Err("handoff-failed");
     }
     loop {
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_handoff(&mut child);
             return Err("handoff-timeout");
         }
         match child.try_wait() {
@@ -2227,8 +2247,7 @@ fn run_handoff(
             }
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_handoff(&mut child);
                 return Err("handoff-failed");
             }
         }
@@ -2947,6 +2966,7 @@ mod tests {
         let target = crate::config::HandoffTarget {
             command: vec![executable.to_str().unwrap().to_owned()],
             timeout_seconds: 1,
+            label: None,
         };
         (root, target)
     }
@@ -3069,6 +3089,116 @@ mod tests {
         let pid = fs::read_to_string(&pid_file).unwrap();
         assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handoff_timeout_kills_a_wrapper_scripts_children() {
+        // A wrapper without `exec` leaves its client as a grandchild holding the pipe.
+        let (root, mut target) = handoff_fixture("sleep 30 &\nprintf '%s' \"$!\" > \"$1\"\nwait");
+        let pid_file = root.join("pid");
+        target.command.push(pid_file.display().to_string());
+        let report = deliver_handoff(
+            "private words",
+            &target,
+            "take",
+            false,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(report.error, Some("handoff-timeout"));
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        let alive = || {
+            fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+                .map(|stat| {
+                    !stat
+                        .rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                })
+                .unwrap_or(false)
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!alive(), "grandchild {pid} outlived the handoff timeout");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn recording_take(handoff: Option<&str>) -> Daemon {
+        let mut daemon = idle_daemon();
+        let operation = daemon.operation("take".to_owned(), Some(OperationKind::Dictation));
+        let config = Config {
+            selected_handoff: handoff.map(|name| {
+                (
+                    name.to_owned(),
+                    crate::config::HandoffTarget {
+                        command: vec!["/bin/true".to_owned()],
+                        timeout_seconds: 1,
+                        label: None,
+                    },
+                )
+            }),
+            ..Config::default()
+        };
+        daemon.state = State::Recording {
+            operation,
+            recorder: Box::new(FakeRecorder::default()),
+            wav: PathBuf::from("/tmp/unused.wav"),
+            config: Box::new(config),
+            started: Instant::now(),
+            signal: Box::new(None),
+            next_signal_sample: Instant::now() + Duration::from_secs(30),
+        };
+        daemon
+    }
+
+    #[test]
+    fn another_shortcuts_toggle_never_stops_a_take() {
+        for (started, pressed) in [
+            (None, Some("pepper")),
+            (Some("pepper"), None),
+            (Some("pepper"), Some("other")),
+        ] {
+            let mut daemon = recording_take(started);
+            let (job_tx, job_rx) = mpsc::channel();
+            let reply = execute(
+                Command::Toggle {
+                    postproc: None,
+                    handoff: pressed.map(str::to_owned),
+                },
+                &mut daemon,
+                Path::new("/tmp"),
+                &job_tx,
+            );
+            assert_eq!(
+                reply.error.as_deref(),
+                Some("handoff-mismatch"),
+                "{started:?} stopped by {pressed:?}"
+            );
+            assert!(matches!(daemon.state, State::Recording { .. }));
+            assert!(daemon.outcome.is_none());
+            assert!(job_rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn the_same_shortcut_stops_its_handoff_take() {
+        let mut daemon = recording_take(Some("pepper"));
+        let (job_tx, job_rx) = mpsc::channel();
+        let reply = execute(
+            Command::Toggle {
+                postproc: None,
+                handoff: Some("pepper".to_owned()),
+            },
+            &mut daemon,
+            Path::new("/tmp"),
+            &job_tx,
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(!matches!(daemon.state, State::Recording { .. }));
+        assert!(job_rx.try_recv().is_ok());
     }
 
     #[test]
