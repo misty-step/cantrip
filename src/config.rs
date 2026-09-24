@@ -3,8 +3,10 @@
 use crate::{inject::InjectionMode, models, paths};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -17,6 +19,45 @@ pub struct Config {
     pub postproc: PostprocConfig,
     pub telemetry: TelemetryConfig,
     pub hud: HudConfig,
+    pub handoff: BTreeMap<String, HandoffTarget>,
+    #[serde(skip)]
+    pub selected_handoff: Option<(String, HandoffTarget)>,
+}
+
+/// A local process receiving a completed take on standard input, without a shell.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct HandoffTarget {
+    pub command: Vec<String>,
+    #[serde(
+        default = "default_handoff_timeout",
+        deserialize_with = "clamped_handoff_timeout"
+    )]
+    pub timeout_seconds: u64,
+    /// What the HUD and status call the target, e.g. "Kaylee"; defaults to its name.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+const fn default_handoff_timeout() -> u64 {
+    15
+}
+fn clamped_handoff_timeout<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<u64, D::Error> {
+    u64::deserialize(deserializer).map(|value| value.clamp(1, 120))
+}
+
+impl HandoffTarget {
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.timeout_seconds.clamp(1, 120))
+    }
+}
+
+pub fn valid_handoff_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
 }
 
 /// Accessibility preferences for the passive dictation HUD.
@@ -76,6 +117,8 @@ impl Default for Config {
             postproc: PostprocConfig::default(),
             telemetry: TelemetryConfig::default(),
             hud: HudConfig::default(),
+            handoff: BTreeMap::new(),
+            selected_handoff: None,
         }
     }
 }
@@ -154,6 +197,25 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        for (name, target) in &self.handoff {
+            if !valid_handoff_name(name) {
+                bail!("handoff target name must match [a-z0-9_-]{{1,32}}: {name}");
+            }
+            if target.command.is_empty()
+                || target.command[0].is_empty()
+                || !Path::new(&target.command[0]).is_absolute()
+            {
+                bail!("handoff.{name}.command must start with an absolute executable path");
+            }
+            if let Some(label) = &target.label {
+                if label.trim().is_empty()
+                    || label.chars().count() > 32
+                    || label.chars().any(char::is_control)
+                {
+                    bail!("handoff.{name}.label must be 1-32 printable characters");
+                }
+            }
+        }
         if self.postproc.enabled && self.postproc.model.trim().is_empty() {
             bail!("postproc.enabled = true requires postproc.model");
         }
@@ -453,5 +515,65 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+    #[test]
+    fn named_handoff_parses_and_clamps_timeout() {
+        let config: Config = toml::from_str(
+            "[handoff.pepper]\ncommand = [\"/bin/cat\", \"--number\"]\ntimeout_seconds = 500\n\
+             [handoff.quiet_agent]\ncommand = [\"/bin/true\"]\ntimeout_seconds = 0\n\
+             [handoff.default]\ncommand = [\"/bin/true\"]\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.handoff["pepper"].command[1], "--number");
+        assert_eq!(config.handoff["pepper"].timeout_seconds, 120);
+        assert_eq!(config.handoff["quiet_agent"].timeout_seconds, 1);
+        assert_eq!(config.handoff["pepper"].timeout().as_secs(), 120);
+        assert_eq!(config.handoff["quiet_agent"].timeout().as_secs(), 1);
+        assert_eq!(config.handoff["default"].timeout().as_secs(), 15);
+    }
+
+    #[test]
+    fn named_handoff_rejects_invalid_names_and_empty_argv() {
+        for name in ["Pepper", "a.b", "123456789012345678901234567890123"] {
+            let config: Config =
+                toml::from_str(&format!("[handoff.\"{name}\"]\ncommand = [\"/bin/true\"]"))
+                    .unwrap();
+            assert!(config.validate().is_err(), "accepted invalid name {name}");
+        }
+        for command in ["[]", "[\"true\"]"] {
+            let config: Config =
+                toml::from_str(&format!("[handoff.pepper]\ncommand = {command}")).unwrap();
+            assert!(config.validate().is_err(), "accepted command {command}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod handoff_label_tests {
+    use super::Config;
+
+    #[test]
+    fn handoff_label_is_optional_and_must_be_short_printable_text() {
+        let config: Config = toml::from_str(
+            "[handoff.pepper]\ncommand = [\"/bin/true\"]\nlabel = \"Kaylee\"\n\
+             [handoff.other]\ncommand = [\"/bin/true\"]\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.handoff["pepper"].label.as_deref(), Some("Kaylee"));
+        assert_eq!(config.handoff["other"].label, None);
+        for label in [
+            "\"\"",
+            "\"   \"",
+            "\"a\\nb\"",
+            "\"123456789012345678901234567890123\"",
+        ] {
+            let config: Config = toml::from_str(&format!(
+                "[handoff.pepper]\ncommand = [\"/bin/true\"]\nlabel = {label}"
+            ))
+            .unwrap();
+            assert!(config.validate().is_err(), "accepted label {label}");
+        }
     }
 }

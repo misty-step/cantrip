@@ -1,7 +1,7 @@
 //! The cantrip daemon and its socket-driven state machine.
 
 use crate::capture::{self, InputSignal};
-use crate::config::{Config, SttConfig, TelemetryConfig};
+use crate::config::{valid_handoff_name, Config, SttConfig, TelemetryConfig};
 use crate::hud;
 use crate::inject::{
     self, DeliveryGuard, InjectionFailure, InjectionFailureKind, InjectionMode, InjectionOutcome,
@@ -21,6 +21,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -923,13 +924,27 @@ fn execute(
     job_tx: &Sender<Job>,
 ) -> CommandReply {
     match command {
-        Command::Toggle { postproc } => match &daemon.state {
-            State::Idle => start_recording(daemon, runtime_dir, postproc),
+        Command::Toggle { postproc, handoff } => match &daemon.state {
+            State::Idle => start_recording(daemon, runtime_dir, postproc, handoff),
+            // A shortcut stops only the take it started: another shortcut's toggle must
+            // never paste a handoff take or hand off a desktop take.
+            State::Recording { config, .. }
+                if config
+                    .selected_handoff
+                    .as_ref()
+                    .map(|(name, _)| name.as_str())
+                    != handoff.as_deref() =>
+            {
+                daemon.reject(
+                    "Recording continues; stop it with the shortcut that started it.",
+                    "handoff-mismatch",
+                )
+            }
             State::Recording { .. } => stop_recording(daemon, job_tx, false),
             State::Processing { .. } => daemon.busy(),
         },
-        Command::Start { postproc } => match &daemon.state {
-            State::Idle => start_recording(daemon, runtime_dir, postproc),
+        Command::Start { postproc, handoff } => match &daemon.state {
+            State::Idle => start_recording(daemon, runtime_dir, postproc, handoff),
             _ => daemon.busy(),
         },
         Command::Stop => match &daemon.state {
@@ -967,7 +982,19 @@ fn start_recording(
     daemon: &mut Daemon,
     runtime_dir: &Path,
     postproc: Option<bool>,
+    handoff: Option<String>,
 ) -> CommandReply {
+    let selected_handoff = if let Some(name) = handoff {
+        if !valid_handoff_name(&name) || !daemon.config.handoff.contains_key(&name) {
+            let mut outcome = setup_failure("Unknown handoff target.", "handoff-unknown");
+            outcome.event_id = daemon.event_id();
+            daemon.outcome = Some(outcome);
+            return daemon.reply(false, "Unknown handoff target.", Some("handoff-unknown"));
+        }
+        Some((name.clone(), daemon.config.handoff[&name].clone()))
+    } else {
+        None
+    };
     if !daemon.worker_available {
         return daemon.reject("Transcription worker unavailable.", "stt-failed");
     }
@@ -1006,6 +1033,7 @@ fn start_recording(
             if let Some(enabled) = postproc {
                 config.postproc.enabled = enabled;
             }
+            config.selected_handoff = selected_handoff;
             let started = Instant::now();
             daemon.outcome = None;
             daemon.notice = None;
@@ -1047,7 +1075,7 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, cancel: bool) -> Co
     if cancel {
         operation.request_cancel();
     }
-    let guard = (!cancel).then(DeliveryGuard::capture);
+    let guard = (!cancel && config.selected_handoff.is_none()).then(DeliveryGuard::capture);
     if recorder.request_stop().is_err() {
         tracing::warn!(
             "[Capture] immediate stop request failed; finalization will retry class=capture-failed"
@@ -1571,6 +1599,13 @@ impl WorkerContext<'_> {
 
     fn deliver(&self, text: &str, partial: bool) -> DeliveryReport {
         self.stage(Stage::Delivering);
+        if let Some((name, target)) = &self.config.selected_handoff {
+            tracing::info!(
+                "[Inject] handoff target={name} chars={}",
+                text.chars().count()
+            );
+            return deliver_handoff(text, target, self.id(), partial, &self.operation.cancel);
+        }
         deliver_with(
             text,
             self.config.injection,
@@ -1909,7 +1944,11 @@ fn finish_audio(
             saved.warning |= !resolved;
         }
     }
-    if context.cancelled() && !report.delivered() && report.delivery != Delivery::Uncertain {
+    if context.cancelled()
+        && !report.delivered()
+        && report.delivery != Delivery::Uncertain
+        && (context.config.selected_handoff.is_none() || report.delivery == Delivery::Deferred)
+    {
         outcome.completeness = Completeness::Cancelled;
         report.delivery = Delivery::Cancelled;
         report.error = None;
@@ -1925,7 +1964,11 @@ fn finish_audio(
             _ if outcome.cleanup == Cleanup::Failed => Some("cleanup-failed".to_owned()),
             _ => None,
         });
-    outcome.message = describe_delivery(&outcome, context.config.injection);
+    outcome.message = describe_delivery(
+        &outcome,
+        context.config.injection,
+        context.config.selected_handoff.as_ref(),
+    );
     if let Err(error) = &pipeline.text {
         if outcome.completeness != Completeness::Cancelled {
             let notice = stt::classify_failure(error);
@@ -2043,7 +2086,7 @@ fn replay_text(context: &WorkerContext<'_>) -> (TerminalOutcome, Option<telemetr
         .error
         .map(str::to_owned)
         .or_else(|| (completeness == Completeness::Partial).then(|| "stt-partial".to_owned()));
-    outcome.message = describe_delivery(&outcome, context.config.injection);
+    outcome.message = describe_delivery(&outcome, context.config.injection, None);
     if !report.delivered() || take.partial {
         describe_artifacts(&mut outcome);
     }
@@ -2087,8 +2130,123 @@ impl DeliveryReport {
     fn delivered(&self) -> bool {
         matches!(
             self.delivery,
-            Delivery::Typed | Delivery::Pasted | Delivery::Copied
+            Delivery::Typed | Delivery::Pasted | Delivery::Copied | Delivery::HandedOff
         )
+    }
+}
+
+/// A handoff has no desktop fallback: even a failed child leaves text in history only.
+fn deliver_handoff(
+    text: &str,
+    target: &crate::config::HandoffTarget,
+    take_id: &str,
+    partial: bool,
+    cancel: &AtomicBool,
+) -> DeliveryReport {
+    if cancel.load(Ordering::Acquire) {
+        return DeliveryReport {
+            delivery: Delivery::Cancelled,
+            ..DeliveryReport::none()
+        };
+    }
+    if partial {
+        return DeliveryReport {
+            delivery: Delivery::Deferred,
+            error: Some("stt-partial"),
+            ..DeliveryReport::none()
+        };
+    }
+    let started = Instant::now();
+    let result = run_handoff(text, target, take_id);
+    let (delivery, backend, error) = match result {
+        Ok(()) => (Delivery::HandedOff, Some("handoff"), None),
+        Err(class) => (Delivery::Failed, None, Some(class)),
+    };
+    DeliveryReport {
+        delivery,
+        backend,
+        error,
+        elapsed_ms: Some(milliseconds(started.elapsed().as_millis())),
+    }
+}
+
+/// Kills the whole handoff process group: a wrapper script's children must not
+/// outlive a timeout or failure and still forward the take after it was reported.
+fn kill_handoff(child: &mut std::process::Child) {
+    if let Ok(pgid) = libc::pid_t::try_from(child.id()) {
+        unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn run_handoff(
+    text: &str,
+    target: &crate::config::HandoffTarget,
+    take_id: &str,
+) -> std::result::Result<(), &'static str> {
+    let deadline = Instant::now() + target.timeout();
+    let mut child = ProcessCommand::new(&target.command[0])
+        .args(&target.command[1..])
+        .env("CANTRIP_TAKE_ID", take_id)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|_| "handoff-failed")?;
+    let Some(mut stdin) = child.stdin.take() else {
+        kill_handoff(&mut child);
+        return Err("handoff-failed");
+    };
+    let fd = stdin.as_raw_fd();
+    // A child that stops reading must not block the worker's write past the deadline.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        kill_handoff(&mut child);
+        return Err("handoff-failed");
+    }
+    let bytes = text.as_bytes();
+    let mut written = 0;
+    while written < bytes.len() {
+        if Instant::now() >= deadline {
+            kill_handoff(&mut child);
+            return Err("handoff-timeout");
+        }
+        match stdin.write(&bytes[written..]) {
+            Ok(0) => break,
+            Ok(count) => written += count,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+            },
+            Err(_) => break,
+        }
+    }
+    drop(stdin);
+    if written != bytes.len() {
+        kill_handoff(&mut child);
+        return Err("handoff-failed");
+    }
+    loop {
+        if Instant::now() >= deadline {
+            kill_handoff(&mut child);
+            return Err("handoff-timeout");
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err("handoff-failed")
+                }
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                kill_handoff(&mut child);
+                return Err("handoff-failed");
+            }
+        }
     }
 }
 
@@ -2161,11 +2319,20 @@ fn deliver_with(
     }
 }
 
-fn describe_delivery(outcome: &TerminalOutcome, requested: InjectionMode) -> String {
+fn describe_delivery(
+    outcome: &TerminalOutcome,
+    requested: InjectionMode,
+    selected_handoff: Option<&(String, crate::config::HandoffTarget)>,
+) -> String {
+    // Messages name the person or tool, e.g. "Kaylee", not a technical target id.
+    let handoff = selected_handoff.map(|(name, target)| target.label.as_deref().unwrap_or(name));
     match (outcome.completeness, outcome.delivery) {
         (Completeness::Cancelled, _) => "Cancelled.".to_owned(),
         (Completeness::Empty, _) => "No text returned.".to_owned(),
         (Completeness::Failed, _) => "Transcription failed.".to_owned(),
+        (Completeness::Partial, _) if handoff.is_some() => {
+            "Partial text was not handed off.".to_owned()
+        }
         (Completeness::Partial, Delivery::Copied) => {
             "Partial text copied. Review before pasting.".to_owned()
         }
@@ -2175,6 +2342,7 @@ fn describe_delivery(outcome: &TerminalOutcome, requested: InjectionMode) -> Str
         (Completeness::Partial, _) => "Partial text was not delivered.".to_owned(),
         (_, Delivery::Typed) => "Typed.".to_owned(),
         (_, Delivery::Pasted) => "Pasted.".to_owned(),
+        (_, Delivery::HandedOff) => format!("Sent to {}.", handoff.unwrap_or("handoff target")),
         (_, Delivery::Copied) if requested == InjectionMode::Clipboard => {
             "Copied. Paste when ready.".to_owned()
         }
@@ -2185,6 +2353,7 @@ fn describe_delivery(outcome: &TerminalOutcome, requested: InjectionMode) -> Str
         (_, Delivery::Deferred) => {
             "Not delivered to the changed or unverified destination.".to_owned()
         }
+        (_, Delivery::Failed) if handoff.is_some() => "Handoff failed.".to_owned(),
         (_, Delivery::Failed) => "Delivery failed.".to_owned(),
         _ => "No text delivered.".to_owned(),
     }
@@ -2302,7 +2471,10 @@ mod tests {
         let (mut daemon, _) = processing(WorkKind::Transcription);
         let (job_tx, job_rx) = mpsc::channel();
         let reply = execute(
-            Command::Start { postproc: None },
+            Command::Start {
+                postproc: None,
+                handoff: None,
+            },
             &mut daemon,
             Path::new("/tmp"),
             &job_tx,
@@ -2780,5 +2952,299 @@ mod tests {
         fn stop(self: Box<Self>) -> Result<PathBuf> {
             self.stop_result
         }
+    }
+    fn handoff_fixture(script: &str) -> (PathBuf, crate::config::HandoffTarget) {
+        let root = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join(".cache/tmp")
+            .join(format!("cantrip-handoff-{}", recovery::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("receiver");
+        fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = crate::config::HandoffTarget {
+            command: vec![executable.to_str().unwrap().to_owned()],
+            timeout_seconds: 1,
+            label: None,
+        };
+        (root, target)
+    }
+
+    #[test]
+    fn unknown_handoff_rejected_before_capture_starts() {
+        let mut daemon = idle_daemon();
+        let (sender, receiver) = mpsc::channel();
+        let reply = execute(
+            Command::Start {
+                postproc: None,
+                handoff: Some("missing".to_owned()),
+            },
+            &mut daemon,
+            Path::new("/does-not-exist"),
+            &sender,
+        );
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_deref(), Some("handoff-unknown"));
+        assert!(matches!(daemon.state, State::Idle));
+        assert_eq!(
+            daemon.outcome.as_ref().unwrap().error.as_deref(),
+            Some("handoff-unknown")
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    struct CapturedLog(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn handoff_success_sends_exact_text_and_take_id_without_logging_it() {
+        let (root, mut target) = handoff_fixture(
+            "cat > \"$1\"\nprintf '%s' \"$CANTRIP_TAKE_ID\" > \"$2\"\ncat \"$1\"\ncat \"$1\" >&2",
+        );
+        let output = root.join("text");
+        let identity = root.join("identity");
+        target
+            .command
+            .extend([output.display().to_string(), identity.display().to_string()]);
+        let text = "Sensitive composed transcript.\nNext line.";
+        let config = Config {
+            selected_handoff: Some(("pepper".to_owned(), target)),
+            ..Config::default()
+        };
+        let mut daemon = idle_daemon();
+        let operation = daemon.operation("take-123".to_owned(), None);
+        let (sender, _) = mpsc::channel();
+        let context = WorkerContext {
+            operation: &operation,
+            config: &config,
+            guard: None,
+            stages: &sender,
+        };
+        let logs = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || CapturedLog(writer.clone()))
+            .finish();
+        let report = tracing::subscriber::with_default(subscriber, || context.deliver(text, false));
+        assert_eq!(report.delivery, Delivery::HandedOff);
+        assert_eq!(fs::read_to_string(&output).unwrap(), text);
+        assert_eq!(fs::read_to_string(&identity).unwrap(), "take-123");
+        let captured = String::from_utf8(logs.lock().clone()).unwrap();
+        assert!(captured.contains("target=pepper"));
+        assert!(!captured.contains(text));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handed_off_message_names_the_label_else_the_target() {
+        let mut outcome = setup_failure("", "");
+        outcome.completeness = Completeness::Complete;
+        outcome.delivery = Delivery::HandedOff;
+        let target = |label: Option<&str>| {
+            (
+                "pepper".to_owned(),
+                crate::config::HandoffTarget {
+                    command: vec!["/bin/true".to_owned()],
+                    timeout_seconds: 1,
+                    label: label.map(str::to_owned),
+                },
+            )
+        };
+        let labeled = target(Some("Kaylee"));
+        let unlabeled = target(None);
+        assert_eq!(
+            describe_delivery(&outcome, InjectionMode::Paste, Some(&labeled)),
+            "Sent to Kaylee."
+        );
+        assert_eq!(
+            describe_delivery(&outcome, InjectionMode::Paste, Some(&unlabeled)),
+            "Sent to pepper."
+        );
+        outcome.completeness = Completeness::Partial;
+        assert_eq!(
+            describe_delivery(&outcome, InjectionMode::Paste, Some(&labeled)),
+            "Partial text was not handed off."
+        );
+    }
+
+    #[test]
+    fn handoff_failure_never_uses_desktop_fallback() {
+        let (root, target) = handoff_fixture("exit 7");
+        let config = Config {
+            injection: InjectionMode::Clipboard,
+            selected_handoff: Some(("pepper".to_owned(), target)),
+            ..Config::default()
+        };
+        let mut daemon = idle_daemon();
+        let operation = daemon.operation("failed-handoff".to_owned(), None);
+        let (sender, _) = mpsc::channel();
+        let context = WorkerContext {
+            operation: &operation,
+            config: &config,
+            guard: None,
+            stages: &sender,
+        };
+        let report = context.deliver("private words", false);
+        assert_eq!(report.delivery, Delivery::Failed);
+        assert_eq!(report.error, Some("handoff-failed"));
+        assert_eq!(report.backend, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handoff_timeout_kills_child() {
+        let (root, mut target) = handoff_fixture("printf '%s' \"$$\" > \"$1\"\nexec sleep 30");
+        let pid_file = root.join("pid");
+        target.command.push(pid_file.display().to_string());
+        let report = deliver_handoff(
+            "private words",
+            &target,
+            "take",
+            false,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(report.delivery, Delivery::Failed);
+        assert_eq!(report.error, Some("handoff-timeout"));
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handoff_timeout_kills_a_wrapper_scripts_children() {
+        // A wrapper without `exec` leaves its client as a grandchild holding the pipe.
+        let (root, mut target) = handoff_fixture("sleep 30 &\nprintf '%s' \"$!\" > \"$1\"\nwait");
+        let pid_file = root.join("pid");
+        target.command.push(pid_file.display().to_string());
+        let report = deliver_handoff(
+            "private words",
+            &target,
+            "take",
+            false,
+            &AtomicBool::new(false),
+        );
+        assert_eq!(report.error, Some("handoff-timeout"));
+        let pid = fs::read_to_string(&pid_file).unwrap();
+        let alive = || {
+            fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+                .map(|stat| {
+                    !stat
+                        .rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                })
+                .unwrap_or(false)
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while alive() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!alive(), "grandchild {pid} outlived the handoff timeout");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn recording_take(handoff: Option<&str>) -> Daemon {
+        let mut daemon = idle_daemon();
+        let operation = daemon.operation("take".to_owned(), Some(OperationKind::Dictation));
+        let config = Config {
+            selected_handoff: handoff.map(|name| {
+                (
+                    name.to_owned(),
+                    crate::config::HandoffTarget {
+                        command: vec!["/bin/true".to_owned()],
+                        timeout_seconds: 1,
+                        label: None,
+                    },
+                )
+            }),
+            ..Config::default()
+        };
+        daemon.state = State::Recording {
+            operation,
+            recorder: Box::new(FakeRecorder::default()),
+            wav: PathBuf::from("/tmp/unused.wav"),
+            config: Box::new(config),
+            started: Instant::now(),
+            signal: Box::new(None),
+            next_signal_sample: Instant::now() + Duration::from_secs(30),
+        };
+        daemon
+    }
+
+    #[test]
+    fn another_shortcuts_toggle_never_stops_a_take() {
+        for (started, pressed) in [
+            (None, Some("pepper")),
+            (Some("pepper"), None),
+            (Some("pepper"), Some("other")),
+        ] {
+            let mut daemon = recording_take(started);
+            let (job_tx, job_rx) = mpsc::channel();
+            let reply = execute(
+                Command::Toggle {
+                    postproc: None,
+                    handoff: pressed.map(str::to_owned),
+                },
+                &mut daemon,
+                Path::new("/tmp"),
+                &job_tx,
+            );
+            assert_eq!(
+                reply.error.as_deref(),
+                Some("handoff-mismatch"),
+                "{started:?} stopped by {pressed:?}"
+            );
+            assert!(matches!(daemon.state, State::Recording { .. }));
+            assert!(daemon.outcome.is_none());
+            assert!(job_rx.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn the_same_shortcut_stops_its_handoff_take() {
+        let mut daemon = recording_take(Some("pepper"));
+        let (job_tx, job_rx) = mpsc::channel();
+        let reply = execute(
+            Command::Toggle {
+                postproc: None,
+                handoff: Some("pepper".to_owned()),
+            },
+            &mut daemon,
+            Path::new("/tmp"),
+            &job_tx,
+        );
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(!matches!(daemon.state, State::Recording { .. }));
+        assert!(job_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn partial_and_cancelled_handoffs_never_spawn() {
+        let (root, target) = handoff_fixture("printf ran > \"$1\"");
+        let marker = root.join("ran");
+        let target = crate::config::HandoffTarget {
+            command: vec![target.command[0].clone(), marker.display().to_string()],
+            ..target
+        };
+        let partial = deliver_handoff("partial", &target, "take", true, &AtomicBool::new(false));
+        assert_eq!(partial.delivery, Delivery::Deferred);
+        assert_eq!(partial.error, Some("stt-partial"));
+        let cancelled = deliver_handoff("complete", &target, "take", false, &AtomicBool::new(true));
+        assert_eq!(cancelled.delivery, Delivery::Cancelled);
+        assert!(!marker.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -25,9 +25,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum Command {
     Toggle {
         postproc: Option<bool>,
+        #[serde(default)]
+        handoff: Option<String>,
     },
     Start {
         postproc: Option<bool>,
+        #[serde(default)]
+        handoff: Option<String>,
     },
     Stop,
     Cancel,
@@ -129,6 +133,7 @@ pub enum Delivery {
     None,
     Typed,
     Pasted,
+    HandedOff,
     Copied,
     Failed,
     Uncertain,
@@ -171,7 +176,7 @@ impl TerminalOutcome {
         self.completeness == Completeness::Complete
             && matches!(
                 self.delivery,
-                Delivery::Typed | Delivery::Pasted | Delivery::Copied
+                Delivery::Typed | Delivery::Pasted | Delivery::Copied | Delivery::HandedOff
             )
     }
 
@@ -564,5 +569,40 @@ mod tests {
         server.write_all(b"{}").unwrap();
         drop(server);
         assert!(read_reply(&mut client, Instant::now() + Duration::from_secs(1)).is_err());
+    }
+    #[test]
+    fn handoff_commands_roundtrip_and_old_clients_default_to_none() {
+        for command in [
+            Command::Toggle {
+                postproc: Some(true),
+                handoff: Some("pepper".into()),
+            },
+            Command::Start {
+                postproc: None,
+                handoff: Some("pepper".into()),
+            },
+        ] {
+            let json = serde_json::to_string(&command).unwrap();
+            assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), command);
+        }
+        assert_eq!(
+            serde_json::from_str::<Command>(r#"{"command":"toggle","postproc":null}"#).unwrap(),
+            Command::Toggle {
+                postproc: None,
+                handoff: None
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<Command>(r#"{"command":"start","postproc":false}"#).unwrap(),
+            Command::Start {
+                postproc: Some(false),
+                handoff: None
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&Delivery::HandedOff).unwrap(),
+            "\"handed-off\""
+        );
+        assert!(outcome(Completeness::Complete, Delivery::HandedOff).is_success());
     }
 }

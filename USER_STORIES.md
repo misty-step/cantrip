@@ -143,3 +143,24 @@ Criteria:
 No-gos: no sending private operator audio or non-synthetic dictations to the evaluation judge.
 
 Evidence: `examples/eval/judge.rs`, `examples/eval/main.rs`, `docs/adr/0026-typesafe-system-one-decisions.md`
+
+## Capability: Local Agent Handoff
+
+## US-011 Hand a completed take to a named local command
+
+Statement: When dictating to a local agent, I want a separate shortcut to send
+the finished transcript directly to its configured command, without using my
+clipboard or the focused window.
+
+Criteria:
+1. WHEN I start or toggle recording with `--handoff NAME`, THE SYSTEM SHALL reject unknown names before capture and snapshot the configured command for that take.
+2. WHEN complete text is available after optional cleanup, THE SYSTEM SHALL send its exact bytes on the command's stdin and provide `CANTRIP_TAKE_ID`, without a shell, keyboard, or clipboard.
+3. IF the command exits nonzero or times out, THEN THE SYSTEM SHALL mark delivery failed and preserve recovery artifacts without automatically retrying.
+4. IF transcription is partial, empty, or cancelled before dispatch, THEN THE SYSTEM SHALL NOT start the handoff command.
+5. WHEN a toggle's `--handoff` differs from the recording take's, including a missing one, THE SYSTEM SHALL keep recording and neither deliver nor hand off that take.
+6. IF a handoff command fails or times out, THEN THE SYSTEM SHALL kill its whole process group before reporting the failure.
+7. WHEN a target sets `label`, THE SYSTEM SHALL show that label instead of the target name in delivery messages.
+
+No-gos: no transcript or child output in logs or telemetry; no desktop fallback.
+
+Evidence: `src/daemon.rs`, `src/config.rs`, `src/ipc.rs`, `docs/adr/0027-named-handoff-targets.md`
