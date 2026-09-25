@@ -170,9 +170,9 @@ the same roles as the HUD.
 **Status hero** (Actions) — stamp, state title, one sentence, and only the
 controls that apply now. Idle never shows disabled Stop/Cancel.
 
-**Take row** — stamp, capture time (mono), facts sentence, duration (mono,
-right). Selected: `accent-soft` fill with an accent edge. Rows are grouped
-under "Today", "Yesterday" or the date.
+**Take row**: stamp, capture time with its relative day ("Today 10:42:07",
+"Yesterday 17:31:12", or the date; mono), facts sentence, duration (mono,
+right). Selected: `accent-soft` fill with an accent edge.
 
 **Segmented control** — Waiting/All in Actions; On this computer/Cloud
 provider, Delivery modes and Motion in Settings. Selected segment:
@@ -197,7 +197,7 @@ and what is kept, focuses "Keep recording"; the destructive button reads
 | Moment | Duration / easing | Purpose | Reduced motion |
 | --- | --- | --- | --- |
 | HUD appears | 120 ms ease-out alpha | soften the pop without delaying feedback | instant |
-| State colour change | 400 ms smoothstep, same clock as the field settle | one continuous instrument | instant |
+| State colour change | the field's own settle (400 ms; 280 ms onset while listening), smoothstep | one continuous instrument | instant |
 | Success settle | same 400 ms; columns start up to 45 % later by distance from centre | arrival radiates from the middle, never left-to-right | instant full grid |
 | Housing light | follows presented cells | light, not decoration | follows static frames |
 | Result fade | 140 ms (unchanged) | leave quietly | cut |

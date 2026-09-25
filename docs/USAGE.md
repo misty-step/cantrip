@@ -222,11 +222,12 @@ Open the native recovery window:
 "$HOME/.local/bin/cantrip" actions
 ```
 
-Select the recording by capture time and ID. Copy, recover, and confirmed Forget
-always target that selection, even if newer takes arrive. Use **Include
-completed history** for resolved recordings. Arrow keys, Page Up/Down, and
-Home/End navigate the list. Escape closes the window or confirmation without
-deleting a recording.
+Select the recording by capture time and ID. **Copy transcript**, **Recover
+locally**, **Recover with provider** and confirmed **Forget recording…** always
+target that selection, even if newer takes arrive. Choose **All** beside
+**Waiting** for resolved recordings. Arrow keys, Page Up/Down, and Home/End
+navigate the list. Escape closes the window or confirmation without deleting a
+recording.
 
 For the CLI, list metadata and choose an exact ID:
 

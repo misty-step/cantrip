@@ -303,7 +303,12 @@ the cells its signed peaks reach. Transcription raises full-height columns up to
 continuous left-to-right fill toward acknowledged work; a stalled report cannot
 invent more progress, and single-chunk or unknown work stays indeterminate.
 Cleanup pulses every cell independently at higher contrast; success raises the
-whole field.
+whole field, settling from the centre outward within the same transition.
+
+The field sits in a rounded, shadowed housing that is lit only by the cells'
+own light, so the glass glows where speech or work is and stays dark at rest.
+Colour and captions change with the field's transition, and the capsule fades
+in briefly when it first appears.
 
 Normal handoffs may visually trail the backend by up to 1.6 seconds to finish their
 transitions. This never delays transcription, cleanup requests, or delivery.
@@ -316,9 +321,10 @@ destination application.
 follow the desktop. Reduced motion freezes indeterminate activity and presents
 measurements directly. Stale or disconnected status stops live animation and
 shows unknown, not Ready. The HUD never takes focus or accepts pointer input.
-HUD, Actions, and Settings use the active Omarchy palette when available.
-See [ADR 0021](https://github.com/misty-step/cantrip/blob/master/docs/adr/0021-signed-pixel-waveform.md)
-for the rendering contract.
+HUD, Actions, and Settings use the active Omarchy palette when available, dark or
+light. See [ADR 0021](https://github.com/misty-step/cantrip/blob/master/docs/adr/0021-signed-pixel-waveform.md)
+for the rendering contract and [DESIGN.md](https://github.com/misty-step/cantrip/blob/master/docs/DESIGN.md)
+for the visual system.
 
 ## Opt-in telemetry (`[telemetry]`)
 

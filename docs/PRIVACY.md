@@ -121,7 +121,7 @@ redacting it.
 
 ## What Forget deletes
 
-**Forget retained recording** in Actions requires confirmation. The equivalent
+**Forget recording…** in Actions requires confirmation. The equivalent
 CLI operation is:
 
 ```sh
