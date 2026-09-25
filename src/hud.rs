@@ -367,10 +367,14 @@ struct Model {
     lost_since: Option<Instant>,
     lost_active: bool,
     kind: Option<Kind>,
-    // The composition being crossfaded away from since `activity_since`.
+    // The composition being crossfaded away from since `activity_since`, over
+    // `settle`, the same duration the field uses for that change.
     previous_kind: Option<Kind>,
+    settle: Duration,
     // When the capsule became visible from hidden; drives the appear fade.
     shown_since: Option<Instant>,
+    // The last visible composition, so internal resets still crossfade.
+    shown_kind: Option<Kind>,
     caption: Caption,
     activity_since: Instant,
     caption_revision: u64,
@@ -399,7 +403,9 @@ impl Model {
             lost_active: false,
             kind: None,
             previous_kind: None,
+            settle: SETTLE,
             shown_since: None,
+            shown_kind: None,
             caption: Caption::default(),
             activity_since: now,
             progress: None,
@@ -918,14 +924,24 @@ impl Model {
         now: Instant,
     ) {
         let changed = kind != self.kind;
+        let recording = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|status| status.state == StateKind::Recording);
         if changed {
             self.activity_since = now;
-            self.previous_kind = self.kind;
-            self.shown_since = match (self.kind, kind) {
-                (None, Some(_)) => Some(now),
-                (_, None) => None,
-                _ => self.shown_since,
-            };
+            self.settle = if recording { LISTENING_ONSET } else { SETTLE };
+            // Work and operation resets clear `kind` while the capsule stays on
+            // screen; they crossfade from what was shown and never re-fade in.
+            self.previous_kind = self.kind.or(self.shown_since.and(self.shown_kind));
+            if kind.is_some() && self.shown_since.is_none() {
+                self.shown_since = Some(now);
+            }
+        }
+        if kind.is_none() {
+            self.shown_since = None;
+        } else {
+            self.shown_kind = kind;
         }
         if self.caption != caption {
             self.caption_revision = self.caption_revision.wrapping_add(1);
@@ -971,15 +987,7 @@ impl Model {
                 if reset_progress {
                     Duration::ZERO
                 } else if changed {
-                    if self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|status| status.state == StateKind::Recording)
-                    {
-                        LISTENING_ONSET
-                    } else {
-                        SETTLE
-                    }
+                    self.settle
                 } else {
                     WAVEFORM_EASE
                 },
@@ -1075,7 +1083,7 @@ impl Model {
             .presentation_clock(now)
             .saturating_duration_since(self.activity_since)
             .as_secs_f32()
-            / SETTLE.as_secs_f32())
+            / self.settle.as_secs_f32())
         .min(1.0);
         t * t * (3.0 - 2.0 * t)
     }
@@ -3020,7 +3028,9 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
             restarted.epoch = "preview-restarted".to_owned();
             model.apply(restarted, now);
         }
+        // Present the settled notice: the field and its caption share one clock.
         model.track.since = now - SETTLE;
+        model.activity_since = now - SETTLE;
         return model;
     }
     let mut processing = preview_snapshot(StateKind::Processing);
@@ -3843,6 +3853,33 @@ mod tests {
                 assert!(!meter_column(&pixels[filled]));
             }
         }
+    }
+
+    #[test]
+    fn a_visible_capsule_never_fades_back_in_when_work_resets() {
+        // Retries and new passes clear the composition internally while the
+        // capsule stays on screen; that must not blink it transparent.
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Processing);
+        status.stage = Some(Stage::Transcribing {
+            completed: 2,
+            total: 3,
+        });
+        model.apply(status.clone(), now);
+        assert!(model.alpha(now) < 1.0, "a hidden capsule softens in");
+        let reset = now + Duration::from_secs(1);
+        assert_eq!(model.alpha(reset), 1.0);
+        status.stage = Some(Stage::Transcribing {
+            completed: 0,
+            total: 5,
+        });
+        model.apply(status, reset);
+        assert_eq!(
+            model.alpha(reset),
+            1.0,
+            "a reset while visible must not blink"
+        );
     }
     #[test]
     fn unmeasured_transcription_has_a_bounded_packet_and_never_a_completed_trail() {

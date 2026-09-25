@@ -1717,8 +1717,7 @@ fn banner(
     clicked
 }
 
-/// A setup fact: label on the left; state and controls, added right to left.
-/// A Lantern button with the 2 px accent focus ring keyboard users rely on.
+/// A Lantern button, enabled or not; `ui::button` owns hover, press and focus.
 fn button(
     ui: &mut egui::Ui,
     tones: &Tones,
@@ -1726,17 +1725,10 @@ fn button(
     text: &str,
     enabled: bool,
 ) -> egui::Response {
-    let response = ui.add_enabled(enabled, ui::button(tones, tone, text));
-    if response.has_focus() {
-        ui.painter().rect_stroke(
-            response.rect.expand(2.0),
-            egui::Rounding::same(ui::CONTROL_RADIUS + 2.0),
-            egui::Stroke::new(2.0_f32, color(tones.accent)),
-        );
-    }
-    response
+    ui.add_enabled(enabled, ui::button(tones, tone, text))
 }
 
+/// A setup fact: label on the left; state and controls, added right to left.
 fn setup_row(ui: &mut egui::Ui, tones: &Tones, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.set_min_height(30.0);

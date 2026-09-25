@@ -309,7 +309,39 @@ pub enum Tone {
     DangerFilled,
 }
 
-pub fn button<'a>(tones: &Tones, tone: Tone, text: &str) -> egui::Button<'a> {
+/// A Lantern button. Its fill and stroke are fixed by tone, so it paints its
+/// own hover and press wash and the 2 px accent focus ring keyboard users need.
+pub struct Button<'a> {
+    inner: egui::Button<'a>,
+    ink: [u8; 3],
+    ring: [u8; 3],
+}
+
+impl egui::Widget for Button<'_> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let response = self.inner.ui(ui);
+        let rounding = Rounding::same(CONTROL_RADIUS);
+        if ui.is_enabled() && response.hovered() {
+            let wash = if response.is_pointer_button_down_on() {
+                0.14
+            } else {
+                0.07
+            };
+            ui.painter()
+                .rect_filled(response.rect, rounding, color_alpha(self.ink, wash));
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                response.rect.expand(2.0),
+                Rounding::same(CONTROL_RADIUS + 2.0),
+                Stroke::new(2.0_f32, color(self.ring)),
+            );
+        }
+        response
+    }
+}
+
+pub fn button<'a>(tones: &Tones, tone: Tone, text: &str) -> Button<'a> {
     let (ink, fill, stroke) = match tone {
         Tone::Primary => (tones.on_accent, Some(tones.accent), None),
         Tone::Secondary => (tones.text, Some(tones.raised), Some(tones.hairline_strong)),
@@ -317,20 +349,25 @@ pub fn button<'a>(tones: &Tones, tone: Tone, text: &str) -> egui::Button<'a> {
         Tone::Danger => (tones.attention, None, Some(tones.attention_line)),
         Tone::DangerFilled => (tones.on_attention, Some(tones.attention), None),
     };
-    let mut button = egui::Button::new(
+    let mut inner = egui::Button::new(
         RichText::new(text)
             .family(fonts::medium())
             .color(color(ink)),
     )
     .rounding(Rounding::same(CONTROL_RADIUS))
     .min_size(Vec2::new(0.0, 30.0));
-    button = match fill {
-        Some(fill) => button.fill(color(fill)),
-        None => button.fill(Color32::TRANSPARENT),
+    inner = match fill {
+        Some(fill) => inner.fill(color(fill)),
+        None => inner.fill(Color32::TRANSPARENT),
     };
-    match stroke {
-        Some(stroke) => button.stroke(Stroke::new(1.0_f32, color(stroke))),
-        None => button.stroke(Stroke::NONE),
+    inner = match stroke {
+        Some(stroke) => inner.stroke(Stroke::new(1.0_f32, color(stroke))),
+        None => inner.stroke(Stroke::NONE),
+    };
+    Button {
+        inner,
+        ink,
+        ring: tones.accent,
     }
 }
 
