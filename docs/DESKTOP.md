@@ -294,9 +294,12 @@ For any daemon owner, operational details are also in
 text. A take never ends on silence or length; each
 `[Daemon] state recording -> …` line names the command class that ended it:
 `reason=toggle` (a toggle carrying the take's own handoff target, from any
-client), `reason=stop`, `reason=cancel`, or `reason=shutdown`. It does not
-identify which process sent the command. Refused commands log
-`[Daemon] command rejected class=…`. Check [configuration](CONFIGURATION.md)
+client), `reason=stop`, `reason=cancel`, or `reason=shutdown`. The sender is
+the line just before it: every command logs `[Daemon] command=… sender=pid=…
+exe=… parents=…` with the kernel-reported client process and up to three
+ancestor names (a Hyprland shortcut ends in `Hyprland`), never arguments or
+text. Refused commands log `[Daemon] command rejected class=…`. Check
+[configuration](CONFIGURATION.md)
 for invalid settings, model setup, cleanup, and audio source selection. Check
 [recording recovery](USAGE.md#recovery)
 before repeating a failed take. Never delete runtime or history directories as
