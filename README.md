@@ -181,13 +181,15 @@ Open the local developer gallery without starting dictation:
 
 ```sh
 cargo run --locked -- hud-gallery
-cargo run --locked -- hud-gallery --screenshot /tmp/cantrip-hud-gallery.png
+cargo run --locked -- hud-gallery --screenshot "$HOME/.cache/tmp/cantrip-hud-gallery.png"
+cargo run --locked -- hud-gallery --export "$HOME/.cache/tmp/cantrip-hud-states"
 ```
 
 The gallery uses fixture status events with the production HUD state machine,
 pixel renderer, font, and palette—not a browser imitation. Browse the full state
 catalog or replay transition journeys; pause, scrub, step frames, and zoom to
-inspect the pixels. Labels and reduced-motion controls affect only the gallery.
+inspect the pixels over a dark or light stand-in desktop. Labels,
+reduced-motion and desktop controls affect only the gallery.
 It does not start the daemon, capture audio, run speech models, make provider
 requests, or read recording history or credentials.
 Fixture stage durations are illustrative, not an STT latency benchmark; native
@@ -196,10 +198,19 @@ The “Three chunks, fast cleanup” journey exercises rapid backend handoffs.
 Its event markers describe fixture inputs; the visible phase may deliberately
 trail them while the production renderer finishes its bounded transition.
 
+`--export DIR` writes every catalog state (1× and 2×, labels off and on) and
+every journey (every other frame at 2×) as PNGs with an `index.json`, without
+opening a window or mapping a layer, so visual reviews never disturb a live
+desktop. The palette comes from the active theme, as in the HUD.
+
 `hud-gallery` is intentionally hidden from ordinary CLI help. It is a local
 native window, not a public website route or a separate development server.
 The existing `hud --screenshot PATH --state NAME` command still captures the
-actual layer-shell surface for compositor-specific verification.
+actual layer-shell surface for compositor-specific verification; it maps a
+real layer, so do not run it while a dictation is being delivered.
+
+The visual system for the HUD and windows is specified in
+[docs/DESIGN.md](docs/DESIGN.md) ([ADR 0028](docs/adr/0028-lantern-instrument.md)).
 
 ## Work and documentation ownership
 
