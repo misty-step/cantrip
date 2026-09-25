@@ -17,9 +17,13 @@ with comments preserved and reloads the running daemon.
 
 Settings can repair a file that parses as TOML but fails Cantrip validation:
 it loads the actual values, explains the validation error, and enables Save
-after correction. Malformed TOML keeps structured saving disabled; the explicit
-Repair flow edits the original text and keeps a backup. External file edits
-are not silently overwritten, and a pending reload disables overlapping saves.
+after correction. When the failing value has no control in the window (a
+handoff command, telemetry, or decision routing), **Edit file text** opens the
+text repair; it waits until unsaved changes are saved or reverted. Malformed
+TOML keeps structured saving disabled; the explicit Repair flow edits the
+original text and keeps a backup. External file edits are not silently
+overwritten, and a pending reload disables overlapping saves. Choosing Cloud
+provider requires an endpoint before Save.
 
 Use Save or `cantrip reload` after changing configuration. Accepted processing
 jobs keep their STT, cleanup, and delivery snapshot; reload affects subsequent

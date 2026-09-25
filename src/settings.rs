@@ -242,11 +242,19 @@ impl Problem {
     fn needs_repair(detail: String) -> Self {
         Self {
             title: "Configuration needs repair",
-            summary: "Cantrip can't use one of these values. Correct it below, then Save.",
+            summary: "Cantrip can't use one of these values. Correct it below and Save, or edit the file text if the value isn't shown here.",
             detail,
             repair: false,
         }
     }
+}
+
+/// The selected recognition mode's own requirement, checked before general
+/// validation. Without it, Cloud provider with no endpoint would be judged as
+/// local recognition: refused with a local-model error, or saved as local.
+fn recognition_mode_problem(cloud: bool, config: &Config) -> Option<&'static str> {
+    (cloud && config.stt.endpoint.is_none())
+        .then_some("Cloud provider needs its API base URL. Add it, or choose On this computer.")
 }
 
 fn completed_request<T>(receiver: Option<&Receiver<Result<T>>>) -> Option<Result<T>> {
@@ -572,6 +580,17 @@ impl SettingsApp {
                 ui.add_space(4.0);
                 open_repair = ui
                     .add(ui::button(tones, Tone::Primary, "Repair configuration"))
+                    .clicked();
+            } else if self.loaded_ok {
+                // Some values (handoff targets, telemetry, decision routing) have
+                // no control here; the text repair is their only in-window fix.
+                ui.add_space(4.0);
+                open_repair = ui
+                    .add_enabled(
+                        !self.dirty(),
+                        ui::button(tones, Tone::Secondary, "Edit file text"),
+                    )
+                    .on_disabled_hover_text("Save or revert your changes first.")
                     .clicked();
             }
         });
@@ -1122,9 +1141,12 @@ impl SettingsApp {
             return;
         }
         let config = self.edit.to_config();
-        if let Err(error) = config.validate() {
+        let problem = recognition_mode_problem(self.stt.cloud, &config)
+            .map(str::to_owned)
+            .or_else(|| config.validate().err().map(|error| format!("{error:#}")));
+        if let Some(problem) = problem {
             self.status = Some(StatusMsg {
-                text: format!("Not saved: {error:#}"),
+                text: format!("Not saved: {problem}"),
                 ok: false,
             });
             return;
@@ -2084,6 +2106,30 @@ mod tests {
             "returning to cloud restores the cloud values"
         );
         edit.to_config().validate().expect("restored cloud config");
+    }
+
+    #[test]
+    fn cloud_mode_is_never_saved_or_judged_as_local_without_an_endpoint() {
+        let mut edit = Editable::from_config(&sample_config());
+        let mut drafts = SttDrafts::from_edit(&edit);
+        assert!(!drafts.cloud);
+        drafts.select(&mut edit, true);
+        // A model name local recognition accepts must not let an endpoint-less
+        // Cloud provider save as local.
+        edit.stt_model = SttConfig::default().model;
+        let problem = recognition_mode_problem(drafts.cloud, &edit.to_config());
+        assert!(problem.is_some());
+
+        edit.stt_endpoint = "https://api.example.com/v1".to_owned();
+        assert_eq!(
+            recognition_mode_problem(drafts.cloud, &edit.to_config()),
+            None
+        );
+        drafts.select(&mut edit, false);
+        assert_eq!(
+            recognition_mode_problem(drafts.cloud, &edit.to_config()),
+            None
+        );
     }
 
     #[test]
