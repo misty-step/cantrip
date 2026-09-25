@@ -89,6 +89,17 @@ const GRID_HEIGHT: f32 = (ROWS - 1) as f32 * CELL_PITCH + CELL_SIZE;
 const FIELD_REST: f32 = 0.10;
 // Cleanup-style flicker beyond measured fill; 0 at this many columns past the front.
 const FRONTIER_RADIUS: f32 = 8.0;
+// Lantern presentation (docs/DESIGN.md). None of these change what lights up.
+const HOUSING_RADIUS: f32 = 10.0;
+// Housing light at a fully lit field; zero at the rest floor.
+const HOUSING_LIGHT: f32 = 0.22;
+// Soft shadow inside the surface's transparent 6 px margin.
+const SHADOW_REACH: f32 = 6.0;
+const SHADOW_ALPHA: f32 = 0.32;
+// The capsule softens in; feedback is still immediate.
+const APPEAR: Duration = Duration::from_millis(120);
+// Success settles centre-out: edge columns start this share of SETTLE later.
+const SUCCESS_STAGGER: f32 = 0.45;
 // Public samples/jfk.wav at 9.0 s: the newest 100 ms of chronological PCM pairs.
 const SCREENSHOT_WAVEFORM: AudioWaveform = [
     [-1326, 1927],
@@ -356,6 +367,10 @@ struct Model {
     lost_since: Option<Instant>,
     lost_active: bool,
     kind: Option<Kind>,
+    // The composition being crossfaded away from since `activity_since`.
+    previous_kind: Option<Kind>,
+    // When the capsule became visible from hidden; drives the appear fade.
+    shown_since: Option<Instant>,
     caption: Caption,
     activity_since: Instant,
     caption_revision: u64,
@@ -383,6 +398,8 @@ impl Model {
             lost_since: None,
             lost_active: false,
             kind: None,
+            previous_kind: None,
+            shown_since: None,
             caption: Caption::default(),
             activity_since: now,
             progress: None,
@@ -495,7 +512,7 @@ impl Model {
                         }
                         .to_owned();
                         if result.caption.action.is_empty() {
-                            result.caption.action = "Cantrip actions → Settings".to_owned();
+                            result.caption.action = "Choose a microphone in Settings".to_owned();
                         }
                     }
                     self.result = Some(result);
@@ -543,7 +560,7 @@ impl Model {
                     } else {
                         "The previous take's result is unknown.".to_owned()
                     },
-                    action: "Cantrip → Recordings and recovery".to_owned(),
+                    action: "Review it in Cantrip Actions".to_owned(),
                 },
                 visibility: Visibility::Until(now + NOTICE_HOLD),
                 dwell: NOTICE_HOLD,
@@ -645,7 +662,7 @@ impl Model {
                     Caption {
                         title: "Cantrip connection lost".to_owned(),
                         detail: "Recording and saved-audio status unknown.".to_owned(),
-                        action: "Cantrip actions → Check setup".to_owned(),
+                        action: "Check setup in Cantrip Actions".to_owned(),
                     },
                     None,
                     None,
@@ -681,7 +698,7 @@ impl Model {
                             Caption {
                                 title: "Input status unavailable".to_owned(),
                                 detail: "Capture is not confirmed by the input monitor.".to_owned(),
-                                action: "Cantrip actions → Settings".to_owned(),
+                                action: "Choose a microphone in Settings".to_owned(),
                             }
                         } else if status.hud.labels {
                             Caption::title("Starting microphone…")
@@ -762,7 +779,7 @@ impl Model {
                     Caption {
                         title: "Cantrip status unavailable".to_owned(),
                         detail: "Recording and delivery status unknown.".to_owned(),
-                        action: "Cantrip actions → Check setup".to_owned(),
+                        action: "Check setup in Cantrip Actions".to_owned(),
                     },
                     None,
                     None,
@@ -903,6 +920,12 @@ impl Model {
         let changed = kind != self.kind;
         if changed {
             self.activity_since = now;
+            self.previous_kind = self.kind;
+            self.shown_since = match (self.kind, kind) {
+                (None, Some(_)) => Some(now),
+                (_, None) => None,
+                _ => self.shown_since,
+            };
         }
         if self.caption != caption {
             self.caption_revision = self.caption_revision.wrapping_add(1);
@@ -963,6 +986,9 @@ impl Model {
                 changed || reset_progress,
                 self.reduced_motion,
             );
+            // Arrival radiates from the middle inside the same settle; it
+            // never sweeps left to right, which would read as progress.
+            self.track.stagger = changed && kind == Some(Kind::Resolved);
         }
         self.kind = kind;
         self.caption = caption;
@@ -991,19 +1017,88 @@ impl Model {
     }
 
     fn alpha(&self, now: Instant) -> f32 {
+        let appear = self.appear(now);
         if self.active() || self.lost_since.is_some() {
+            return appear;
+        }
+        appear
+            * self
+                .result
+                .as_ref()
+                .and_then(|result| {
+                    if !result.presented || result.waiting_for_settle {
+                        Some(1.0)
+                    } else {
+                        result.visibility.alpha(now, self.reduced_motion)
+                    }
+                })
+                .unwrap_or(1.0)
+    }
+
+    /// Lost status freezes presentation exactly as it freezes cells: nothing
+    /// keeps animating as if work were live, except the attention notice.
+    fn frozen(&self) -> bool {
+        self.lost_since.is_some() && self.kind != Some(Kind::Attention)
+    }
+
+    fn presentation_clock(&self, now: Instant) -> Instant {
+        match self.lost_since {
+            Some(lost) if self.frozen() => now.min(lost),
+            _ => now,
+        }
+    }
+
+    /// Ease-out fade while the capsule first becomes visible.
+    fn appear(&self, now: Instant) -> f32 {
+        match self.shown_since {
+            Some(since) if !self.reduced_motion => {
+                let t = (self
+                    .presentation_clock(now)
+                    .saturating_duration_since(since)
+                    .as_secs_f32()
+                    / APPEAR.as_secs_f32())
+                .min(1.0);
+                1.0 - (1.0 - t) * (1.0 - t)
+            }
+            _ => 1.0,
+        }
+    }
+
+    /// Eased settle of the current composition: 0 at a change, 1 once settled.
+    /// It shares the field transition's clock, so colour, rim and caption
+    /// arrive with the light rather than ahead of it.
+    fn blend(&self, now: Instant) -> f32 {
+        if self.reduced_motion || self.previous_kind.is_none() {
             return 1.0;
         }
-        self.result
-            .as_ref()
-            .and_then(|result| {
-                if !result.presented || result.waiting_for_settle {
-                    Some(1.0)
-                } else {
-                    result.visibility.alpha(now, self.reduced_motion)
-                }
-            })
-            .unwrap_or(1.0)
+        let t = (self
+            .presentation_clock(now)
+            .saturating_duration_since(self.activity_since)
+            .as_secs_f32()
+            / SETTLE.as_secs_f32())
+        .min(1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Presence of one composition while crossfading, 0 to 1.
+    fn weight(&self, kind: Kind, now: Instant) -> f32 {
+        let blend = self.blend(now);
+        let current = if self.kind == Some(kind) { blend } else { 0.0 };
+        let previous = if self.previous_kind == Some(kind) {
+            1.0 - blend
+        } else {
+            0.0
+        };
+        current + previous
+    }
+
+    /// The field's light colour, crossfading from the previous composition.
+    fn tint(&self, palette: Palette, now: Instant) -> [u8; 3] {
+        let to = kind_rgb(self.kind, palette);
+        match self.previous_kind {
+            Some(previous) => theme::mix(kind_rgb(Some(previous), palette), to, self.blend(now)),
+            None => to,
+        }
     }
 
     fn render_key(
@@ -1012,6 +1107,7 @@ impl Model {
         size: (u32, u32, u32),
         palette: Palette,
         alpha: f32,
+        now: Instant,
     ) -> RenderKey {
         RenderKey {
             kind: self.kind,
@@ -1023,6 +1119,8 @@ impl Model {
                     .map(|opacity| (opacity * 255.0).round() as u8)
             }),
             alpha: (alpha * 255.0).round() as u8,
+            blend: (self.blend(now) * 255.0).round() as u8,
+            tint: self.tint(palette, now),
             size,
             palette,
         }
@@ -1041,7 +1139,17 @@ impl Model {
                     .as_ref()
                     .is_some_and(|r| matches!(r.visibility, Visibility::Until(_))))
                 || (self.lost_since.is_none() || self.kind == Some(Kind::Attention))
-                    && self.track.moving(now))
+                    && self.track.moving(now)
+                || !self.frozen() && (self.appear(now) < 1.0 || self.blend(now) < 1.0))
+    }
+}
+
+/// Light colour of a composition. Success is the accent; there is no success colour.
+fn kind_rgb(kind: Option<Kind>, palette: Palette) -> [u8; 3] {
+    match kind {
+        Some(Kind::Recording | Kind::Working | Kind::Finishing | Kind::Resolved) => palette.accent,
+        Some(Kind::Attention) => palette.attention,
+        Some(Kind::Neutral) | None => palette.foreground,
     }
 }
 
@@ -1157,18 +1265,18 @@ fn present_outcome(
     if !delivered && !(copied && outcome.completeness == Completeness::Complete) {
         caption.action =
             if text && status.capabilities.copy && outcome.completeness == Completeness::Complete {
-                "Cantrip actions → Copy this transcript"
+                "Copy transcript in Cantrip Actions"
             } else if audio && status.capabilities.recover && status.capabilities.local_model {
-                "Cantrip actions → Recover locally to clipboard"
+                "Recover locally in Cantrip Actions"
             } else if audio && status.capabilities.recover && status.capabilities.remote_configured
             {
-                "Cantrip actions → Recover with configured provider to clipboard"
+                "Recover with provider in Cantrip Actions"
             } else if audio && !status.capabilities.local_model {
-                "Cantrip actions → Install local model"
+                "Install local model in Cantrip Actions"
             } else if text && status.capabilities.copy {
-                "Cantrip actions → Copy this transcript"
+                "Copy transcript in Cantrip Actions"
             } else if attention {
-                "Cantrip actions → Check setup"
+                "Check setup in Cantrip Actions"
             } else {
                 ""
             }
@@ -1180,7 +1288,7 @@ fn present_outcome(
         }
         caption
             .action
-            .push_str("Dismiss outcome keeps saved recordings.");
+            .push_str("Dismissing keeps the saved recording.");
     }
     let dwell = if kind == Kind::Resolved && delivered && outcome.cleanup != Cleanup::Failed {
         if reduced_motion {
@@ -1256,6 +1364,41 @@ struct TrackFrame {
     columns: [TrackColumn; CELLS],
 }
 
+impl TrackFrame {
+    /// Housing light per column: each column's presented light above the rest
+    /// floor, spread by a wide Gaussian so the glass glows where cells are lit.
+    /// The housing is lit by exactly this, so it can never show activity the
+    /// cells do not.
+    fn housing_light(&self) -> [f32; CELLS] {
+        const SIGMA: f32 = 6.0;
+        const REACH: usize = 18;
+        let lit: [f32; CELLS] = std::array::from_fn(|index| {
+            self.columns[index]
+                .opacities
+                .iter()
+                .map(|opacity| (opacity - FIELD_REST).max(0.0))
+                .sum::<f32>()
+                / (ROWS as f32 * (1.0 - FIELD_REST))
+        });
+        std::array::from_fn(|index| {
+            let start = index.saturating_sub(REACH);
+            let (mut total, mut weights) = (0.0, 0.0);
+            for (other, light) in lit
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(index + REACH + 1 - start)
+            {
+                let distance = (other as f32 - index as f32) / SIGMA;
+                let weight = (-0.5 * distance * distance).exp();
+                total += light * weight;
+                weights += weight;
+            }
+            (total / weights).clamp(0.0, 1.0)
+        })
+    }
+}
+
 struct FillMotion {
     from: f32,
     to: f32,
@@ -1286,6 +1429,9 @@ struct TrackMotion {
     since: Instant,
     duration: Duration,
     signal_easing: bool,
+    // Success settle: columns farther from the centre start later, all
+    // finishing at the same SETTLE boundary.
+    stagger: bool,
     fill: Option<FillMotion>,
 }
 
@@ -1301,6 +1447,7 @@ impl TrackMotion {
             since: now,
             duration: Duration::ZERO,
             signal_easing: false,
+            stagger: false,
             fill: None,
         }
     }
@@ -1351,6 +1498,7 @@ impl TrackMotion {
         self.since = now;
         self.duration = if reduced { Duration::ZERO } else { duration };
         self.signal_easing = !state_change;
+        self.stagger = false;
     }
 
     fn frame(&self, now: Instant) -> TrackFrame {
@@ -1394,10 +1542,17 @@ impl TrackMotion {
             return to;
         }
         let t = elapsed.as_secs_f32() / self.duration.as_secs_f32();
-        let eased = t * t * (3.0 - 2.0 * t);
+        let ease = |t: f32| t * t * (3.0 - 2.0 * t);
+        let middle = (CELLS - 1) as f32 / 2.0;
         TrackFrame {
             columns: std::array::from_fn(|index| {
-                self.from.columns[index].interpolate(to.columns[index], eased)
+                let local = if self.stagger {
+                    let delay = SUCCESS_STAGGER * (index as f32 - middle).abs() / middle;
+                    ((t - delay) / (1.0 - SUCCESS_STAGGER)).clamp(0.0, 1.0)
+                } else {
+                    t
+                };
+                self.from.columns[index].interpolate(to.columns[index], ease(local))
             }),
         }
     }
@@ -1866,6 +2021,9 @@ struct RenderKey {
     interaction_event: Option<u64>,
     opacities: [[u8; ROWS]; CELLS],
     alpha: u8,
+    // Settle progress and blended light colour; both change pixels mid-crossfade.
+    blend: u8,
+    tint: [u8; 3],
     size: (u32, u32, u32),
     palette: Palette,
 }
@@ -1951,6 +2109,7 @@ impl HudState {
             (self.width, self.height, self.buffer_scale),
             self.palette,
             alpha,
+            model_now,
         );
         if self.last_render.as_ref() == Some(&key)
             && shown == self.visible
@@ -1989,6 +2148,7 @@ impl HudState {
             self.palette,
             &heights,
             container_width,
+            model_now,
         );
         canvas.fade(alpha);
         let _ = layer.set_buffer_scale(self.buffer_scale);
@@ -2189,7 +2349,42 @@ struct Canvas<'a> {
     alpha: f32,
 }
 
+/// Geometry and light for one housing paint.
+struct Housing {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    palette: Palette,
+    // Presented light per field column above the rest floor, 0 to 1, with the
+    // field geometry that places it under the cells that emit it.
+    light: [f32; CELLS],
+    field_left: f32,
+    field_slot: f32,
+    light_rgb: [u8; 3],
+    // Presence of the attention composition, 0 to 1, for the rim.
+    attention: f32,
+}
+
+/// Signed distance in logical pixels from a rounded rectangle's edge,
+/// negative inside.
+fn rounded_rect_distance(
+    x: f32,
+    y: f32,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    radius: f32,
+) -> f32 {
+    let (half_width, half_height) = (width / 2.0, height / 2.0);
+    let qx = (x - left - half_width).abs() - (half_width - radius);
+    let qy = (y - top - half_height).abs() - (half_height - radius);
+    (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - radius
+}
+
 impl Canvas<'_> {
+    #[allow(clippy::too_many_arguments)] // Frame, geometry and clock are explicit.
     fn paint_hud(
         &mut self,
         model: &Model,
@@ -2197,6 +2392,7 @@ impl Canvas<'_> {
         palette: Palette,
         frame: &TrackFrame,
         container_width: f32,
+        now: Instant,
     ) {
         self.bytes.fill(0);
         let Some(kind) = model.kind else {
@@ -2206,44 +2402,50 @@ impl Canvas<'_> {
         let left = (logical_width - container_width) / 2.0;
         let top = 6.0;
         let body_height = self.height as f32 / self.scale - 12.0;
-        self.rect(left, top, container_width, body_height, palette.border, 1.0);
-        self.rect(
-            left + 1.0,
-            top + 1.0,
-            container_width - 2.0,
-            body_height - 2.0,
-            palette.surface,
-            1.0,
-        );
-        if kind == Kind::Attention {
-            self.rect(left, top, 2.0, body_height, palette.attention, 1.0);
-        }
-        let rgb = match kind {
-            Kind::Recording | Kind::Working | Kind::Finishing | Kind::Resolved => palette.accent,
-            Kind::Attention => palette.attention,
-            Kind::Neutral => palette.foreground,
-        };
+        let rgb = model.tint(palette, now);
         // The field always fills the container at full width; state changes only
         // raise cell light above FIELD_REST, never the field's geometry.
         let field_width = (container_width - 12.0).max(0.0);
         let slot_width = field_width / CELLS as f32;
         let cell_width = (slot_width * CELL_SIZE / CELL_PITCH).min(CELL_SIZE);
         let track_left = (logical_width - field_width) / 2.0;
+        self.housing(&Housing {
+            left,
+            top,
+            width: container_width,
+            height: body_height,
+            palette,
+            light: frame.housing_light(),
+            field_left: track_left,
+            field_slot: slot_width,
+            light_rgb: rgb,
+            attention: model.weight(Kind::Attention, now),
+        });
+        // Each cell is an LED: a flat body in the surface colour, lit by the
+        // field colour, so housing light can never masquerade as cell light.
         for (index, column) in frame.columns.iter().copied().enumerate() {
+            let x = track_left + index as f32 * slot_width + (slot_width - cell_width) / 2.0;
+            let center = top + TRACK_HEIGHT / 2.0;
             self.pixel_column(
-                track_left + index as f32 * slot_width + (slot_width - cell_width) / 2.0,
-                top + TRACK_HEIGHT / 2.0,
+                x,
+                center,
                 cell_width,
-                column,
-                rgb,
+                TrackColumn::filled(),
+                palette.surface,
             );
+            self.pixel_column(x, center, cell_width, column, rgb);
         }
+        // Words arrive with the light: the caption shares the settle clock.
+        let muted = theme::mix(palette.foreground, palette.surface, 0.32);
+        let resting_alpha = self.alpha;
+        self.alpha = resting_alpha * model.blend(now);
+        let text_left = left + 16.0;
         let text_width = (container_width - 32.0).max(16.0);
         let mut y = top + TRACK_HEIGHT;
         y += self.text(
             font,
             &model.caption.title,
-            left + 16.0,
+            text_left,
             y,
             text_width,
             12.0,
@@ -2255,12 +2457,12 @@ impl Canvas<'_> {
             y += self.text(
                 font,
                 &model.caption.detail,
-                left + 16.0,
+                text_left,
                 y,
                 text_width,
                 11.0,
                 3,
-                palette.foreground,
+                muted,
             );
         }
         if !model.caption.action.is_empty() {
@@ -2268,7 +2470,7 @@ impl Canvas<'_> {
             y += self.text(
                 font,
                 &model.caption.action,
-                left + 16.0,
+                text_left,
                 y,
                 text_width,
                 10.0,
@@ -2276,18 +2478,26 @@ impl Canvas<'_> {
                 if kind == Kind::Attention {
                     palette.attention
                 } else {
-                    palette.foreground
+                    muted
                 },
             );
         }
         if let Some((interaction, _)) = &model.interaction {
             y += 7.0;
-            self.rect(left + 16.0, y, text_width, 1.0, palette.border, 1.0);
+            let rule = (text_width * 0.28).min(88.0);
+            self.rect(
+                left + (container_width - rule) / 2.0,
+                y,
+                rule,
+                1.0,
+                theme::mix(palette.surface, palette.border, 0.5),
+                1.0,
+            );
             y += 6.0;
             self.text(
                 font,
                 interaction,
-                left + 16.0,
+                text_left,
                 y,
                 text_width,
                 11.0,
@@ -2295,6 +2505,139 @@ impl Canvas<'_> {
                 palette.foreground,
             );
         }
+        self.alpha = resting_alpha;
+    }
+
+    /// Shadow, housing, housing light and rim in one pass over the surface.
+    /// The fill's gradient and light are fixed to the field band, so captions
+    /// below never change the band's pixels.
+    fn housing(&mut self, housing: &Housing) {
+        let &Housing {
+            left,
+            top,
+            width,
+            height,
+            palette,
+            light,
+            field_left,
+            field_slot,
+            light_rgb,
+            attention,
+        } = housing;
+        let radius = HOUSING_RADIUS.min(height / 2.0).min(width / 2.0).max(0.0);
+        let surface = palette.surface;
+        // Lit from above: toward white on light themes, toward the (light)
+        // foreground on dark ones.
+        let sheen = if palette.is_light() {
+            [255; 3]
+        } else {
+            palette.foreground
+        };
+        let top_fill = theme::mix(surface, sheen, 0.06);
+        let floor_fill = theme::mix(surface, palette.background, 0.3);
+        let rim = theme::mix(
+            theme::mix(surface, palette.border, 0.32),
+            theme::mix(surface, palette.attention, 0.75),
+            attention,
+        );
+        let lit = light.iter().any(|column| *column > 0.0);
+        let glow_y = top + TRACK_HEIGHT / 2.0;
+        let reach_y = TRACK_HEIGHT * 0.62;
+        let last = (CELLS - 1) as f32;
+        let scale = self.scale;
+        let span = |from: f32, to: f32, limit: u32| {
+            ((from * scale).floor().max(0.0) as u32)..((to * scale).ceil().min(limit as f32) as u32)
+        };
+        let rows = span(top - SHADOW_REACH, top + height + SHADOW_REACH, self.height);
+        let columns = span(left - SHADOW_REACH, left + width + SHADOW_REACH, self.width);
+        let inner = (left + radius + 1.5, left + width - radius - 1.5);
+        // Hot loop: float colours, no per-pixel rounding helpers or allocation.
+        let float = |rgb: [u8; 3]| rgb.map(f32::from);
+        let (top_fill, floor_fill) = (float(top_fill), float(floor_fill));
+        let (rim, light_rgb) = (float(rim), float(light_rgb));
+        let lerp = |from: [f32; 3], to: [f32; 3], amount: f32| {
+            [
+                from[0] + (to[0] - from[0]) * amount,
+                from[1] + (to[1] - from[1]) * amount,
+                from[2] + (to[2] - from[2]) * amount,
+            ]
+        };
+        for py in rows {
+            let y = (py as f32 + 0.5) / scale;
+            let band = lerp(
+                top_fill,
+                floor_fill,
+                ((y - top) / TRACK_HEIGHT).clamp(0.0, 1.0),
+            );
+            let straight_row = y > top + radius + 1.5 && y < top + height - radius - 1.5;
+            let inside_rows = y > top + 1.5 && y < top + height - 1.5;
+            let dy = (y - glow_y) / reach_y;
+            let vertical = (1.0 - dy * dy).max(0.0);
+            let row_glow = if lit {
+                HOUSING_LIGHT * vertical * vertical
+            } else {
+                0.0
+            };
+            for px in columns.clone() {
+                let x = (px as f32 + 0.5) / scale;
+                // Deep inside: no edge, rim or shadow work, only fill and light.
+                let interior = inside_rows && x > inner.0 && x < inner.1
+                    || straight_row && x > left + 1.5 && x < left + width - 1.5;
+                let (coverage, ring, shadow) = if interior {
+                    (1.0, 0.0, 0.0)
+                } else {
+                    let distance = rounded_rect_distance(x, y, left, top, width, height, radius);
+                    let coverage = (0.5 - distance * scale).clamp(0.0, 1.0);
+                    let inset = (0.5 - (distance + 1.0) * scale).clamp(0.0, 1.0);
+                    let below = rounded_rect_distance(x, y - 1.0, left, top, width, height, radius)
+                        .max(0.0);
+                    let fall = (1.0 - below / SHADOW_REACH).clamp(0.0, 1.0);
+                    let ring = if coverage > 0.0 {
+                        ((coverage - inset) / coverage).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    (coverage, ring, SHADOW_ALPHA * fall * fall)
+                };
+                let index = ((py * self.width + px) * 4) as usize;
+                if coverage <= 0.0 {
+                    self.bytes[index..index + 4].copy_from_slice(&[
+                        0,
+                        0,
+                        0,
+                        (shadow * 255.0 + 0.5) as u8,
+                    ]);
+                    continue;
+                }
+                let mut rgb = band;
+                if row_glow > 0.0 {
+                    let column = ((x - field_left) / field_slot - 0.5).clamp(0.0, last);
+                    let base = column as usize;
+                    let next = (base + 1).min(CELLS - 1);
+                    let here = light[base] + (light[next] - light[base]) * (column - base as f32);
+                    rgb = lerp(rgb, light_rgb, row_glow * here);
+                }
+                if ring > 0.0 {
+                    rgb = lerp(rgb, rim, ring);
+                }
+                let alpha = coverage + shadow * (1.0 - coverage);
+                self.bytes[index..index + 4].copy_from_slice(&[
+                    (rgb[2] * coverage + 0.5) as u8,
+                    (rgb[1] * coverage + 0.5) as u8,
+                    (rgb[0] * coverage + 0.5) as u8,
+                    (alpha * 255.0 + 0.5) as u8,
+                ]);
+            }
+        }
+        // A hairline of reflected light along the top edge, clear of the corners.
+        self.rect(
+            left + radius,
+            top + 1.0,
+            (width - 2.0 * radius).max(0.0),
+            1.0,
+            theme::mix(surface, sheen, 0.12),
+            1.0,
+        );
     }
 
     fn fade(&mut self, alpha: f32) {
@@ -2313,6 +2656,11 @@ impl Canvas<'_> {
         }
         let index = ((y * self.width + x) * 4) as usize;
         let alpha = coverage.clamp(0.0, 1.0) * self.alpha;
+        if alpha >= 1.0 {
+            // Opaque source-over is a plain write (LED bodies, full light).
+            self.bytes[index..index + 4].copy_from_slice(&[rgb[2], rgb[1], rgb[0], 255]);
+            return;
+        }
         for (channel, value) in rgb.into_iter().rev().enumerate() {
             self.bytes[index + channel] = (f32::from(value) * alpha
                 + f32::from(self.bytes[index + channel]) * (1.0 - alpha))
@@ -2395,7 +2743,11 @@ impl Canvas<'_> {
             } else {
                 max_chars
             };
-            let mut cursor = x * self.scale;
+            // Centre each line under the field; snap to a whole pixel so the
+            // monospace glyphs stay crisp.
+            let glyphs = line.chars().take(limit).count() + usize::from(truncated);
+            let line_width = glyphs as f32 * advance;
+            let mut cursor = (x * self.scale + (width * self.scale - line_width) / 2.0).round();
             let baseline = (y + row as f32 * (size + 5.0)) * self.scale + scaled.ascent();
             for character in line.chars().take(limit).chain(truncated.then_some('…')) {
                 let glyph = font
@@ -2952,6 +3304,7 @@ mod tests {
             },
             &model.frame(now),
             container_width,
+            now,
         );
         (bytes, width)
     }
@@ -3005,12 +3358,19 @@ mod tests {
                     assert_eq!(bounds[3], (44.5 * scale).round() as u32);
                     model.caption = Caption::title("Finishing text…");
                     let (labelled, _) = raster_hud(&model, now, width, scale);
-                    let track_end = (45.5 * scale).floor() as usize * physical_width as usize * 4;
-                    assert_eq!(
-                        &plain[..track_end],
-                        &labelled[..track_end],
-                        "captions must remain below the visualization"
-                    );
+                    // A taller housing legitimately rounds its corners lower, so
+                    // compare the field's span: captions never touch the band.
+                    let rows = (45.5 * scale).floor() as usize;
+                    let (from, to) = (left.floor() as usize, right.ceil() as usize);
+                    for row in 0..rows {
+                        let start = row * physical_width as usize;
+                        let span = (start + from) * 4..(start + to) * 4;
+                        assert_eq!(
+                            &plain[span.clone()],
+                            &labelled[span],
+                            "captions must remain below the visualization"
+                        );
+                    }
                 }
             }
         }

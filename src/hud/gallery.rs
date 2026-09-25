@@ -745,6 +745,7 @@ impl Preview {
             (SURFACE_WIDTH, logical_height, self.scale),
             palette,
             alpha,
+            now,
         );
         if self.last_render.as_ref() == Some(&key) {
             return;
@@ -759,7 +760,7 @@ impl Preview {
             scale: self.scale as f32,
             alpha: 1.0,
         };
-        canvas.paint_hud(model, font, palette, &frame, CONTAINER_WIDTH);
+        canvas.paint_hud(model, font, palette, &frame, CONTAINER_WIDTH, now);
         canvas.fade(alpha);
         // Every simulated presentation is really painted, including frames crossed
         // during seeking. A later phase starts from this production appearance.
