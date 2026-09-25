@@ -292,6 +292,7 @@ impl Daemon {
     }
 
     fn reject(&mut self, message: &str, error: &str) -> CommandReply {
+        tracing::info!("[Daemon] command rejected class={error}");
         self.notice(message, Some(error));
         self.reply(false, message, Some(error))
     }
@@ -940,7 +941,7 @@ fn execute(
                     "handoff-mismatch",
                 )
             }
-            State::Recording { .. } => stop_recording(daemon, job_tx, false),
+            State::Recording { .. } => stop_recording(daemon, job_tx, StopReason::Toggle),
             State::Processing { .. } => daemon.busy(),
         },
         Command::Start { postproc, handoff } => match &daemon.state {
@@ -948,7 +949,7 @@ fn execute(
             _ => daemon.busy(),
         },
         Command::Stop => match &daemon.state {
-            State::Recording { .. } => stop_recording(daemon, job_tx, false),
+            State::Recording { .. } => stop_recording(daemon, job_tx, StopReason::Stop),
             State::Idle => daemon.reject("Nothing is recording.", "not-recording"),
             State::Processing { .. } => daemon.busy(),
         },
@@ -1059,7 +1060,26 @@ fn start_recording(
     }
 }
 
-fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, cancel: bool) -> CommandReply {
+/// Which explicit command ended a recording. Logged as a class so an unexpected
+/// stop names its path; the daemon never ends a take on its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopReason {
+    Toggle,
+    Stop,
+    Cancel,
+}
+
+impl StopReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Toggle => "toggle",
+            Self::Stop => "stop",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, reason: StopReason) -> CommandReply {
     let State::Recording {
         operation,
         mut recorder,
@@ -1072,6 +1092,7 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, cancel: bool) -> Co
         unreachable!("stop_recording called outside recording");
     };
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let cancel = reason == StopReason::Cancel;
     if cancel {
         operation.request_cancel();
     }
@@ -1097,6 +1118,10 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, cancel: bool) -> Co
         Stage::FinalizingAudio
     };
     if let Err(mpsc::SendError(job)) = job_tx.send(job) {
+        tracing::warn!(
+            "[Daemon] state recording -> retaining reason={} class=worker-failed",
+            reason.as_str()
+        );
         daemon.worker_available = false;
         daemon.begin(operation, stage, WorkKind::Retain);
         daemon.retainer = Some(thread::spawn(move || {
@@ -1118,7 +1143,10 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, cancel: bool) -> Co
         );
     }
     daemon.begin(operation, stage, WorkKind::Transcription);
-    tracing::info!("[Daemon] state recording -> processing");
+    tracing::info!(
+        "[Daemon] state recording -> processing reason={}",
+        reason.as_str()
+    );
     if cancel {
         daemon.reply(true, "cancelling", None)
     } else {
@@ -1129,7 +1157,7 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, cancel: bool) -> Co
 fn cancel_command(daemon: &mut Daemon, job_tx: &Sender<Job>) -> CommandReply {
     match &daemon.state {
         State::Idle => daemon.reject("Nothing to cancel.", "nothing-to-cancel"),
-        State::Recording { .. } => stop_recording(daemon, job_tx, true),
+        State::Recording { .. } => stop_recording(daemon, job_tx, StopReason::Cancel),
         State::Processing { kind, .. }
             if !matches!(kind, WorkKind::Transcription | WorkKind::Delivery) =>
         {
@@ -1488,6 +1516,7 @@ fn shutdown_state(state: &mut State) {
             started,
             ..
         } => {
+            tracing::info!("[Daemon] state recording -> retaining reason=shutdown");
             let duration_ms = milliseconds(started.elapsed().as_millis());
             let wav = recorder.stop().unwrap_or(wav);
             let saved = persist_attempt(
@@ -2871,7 +2900,7 @@ mod tests {
         daemon.config.injection = InjectionMode::Clipboard;
         daemon.config.hud.labels = false;
         let (sender, receiver) = mpsc::channel();
-        assert!(stop_recording(&mut daemon, &sender, false).ok);
+        assert!(stop_recording(&mut daemon, &sender, StopReason::Toggle).ok);
         assert!(stop_requested.load(Ordering::Acquire));
         assert!(daemon.snapshot().hud.labels);
         let job = receiver.try_recv().unwrap();
