@@ -28,6 +28,8 @@ Criteria:
 2. WHILE multi-chunk transcription runs, THE SYSTEM SHALL display determinate progress advancing only with completed chunks.
 3. WHEN delivery completes, THE SYSTEM SHALL hold an acknowledgement indicator for a bounded duration before fading.
 4. THE SYSTEM SHALL present HUD feedback without stealing window keyboard focus from the active client.
+5. WHILE recording, THE SYSTEM SHALL keep capturing through silence and at any take length until a toggle, stop, cancel, or daemon shutdown ends the take.
+6. WHEN a take stops recording, THE SYSTEM SHALL log which of those ended it, as a reason class without transcript text.
 
 No-gos: no interactive notification popups or chatty notification daemon alerts.
 
