@@ -16,12 +16,18 @@ pub fn color(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 
+/// A translucent colour whose `alpha` means an sRGB mix over what lies beneath,
+/// the same arithmetic the HUD painter uses. egui's unmultiplied constructor
+/// premultiplies in linear light, which makes light ink on dark themes read
+/// several times stronger than asked and dark ink on light themes weaker.
 pub fn color_alpha(rgb: [u8; 3], alpha: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(
-        rgb[0],
-        rgb[1],
-        rgb[2],
-        (alpha.clamp(0.0, 1.0) * 255.0) as u8,
+    let alpha = alpha.clamp(0.0, 1.0);
+    let premultiply = |channel: u8| (f32::from(channel) * alpha).round() as u8;
+    Color32::from_rgba_premultiplied(
+        premultiply(rgb[0]),
+        premultiply(rgb[1]),
+        premultiply(rgb[2]),
+        (alpha * 255.0).round() as u8,
     )
 }
 
@@ -169,7 +175,7 @@ pub fn wordmark(ui: &mut Ui, tones: &Tones, text: &str) -> Response {
             let (rgb, light) = if lit {
                 (tones.accent, 1.0)
             } else {
-                (tones.text, 0.07)
+                (tones.text, 0.1)
             };
             painter.rect_filled(
                 egui::Rect::from_min_size(

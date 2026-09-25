@@ -106,7 +106,7 @@ Sentence case everywhere. No all-caps labels, no tracked eyebrows.
 
 The wordmark is not a typeface: it is lit on the HUD's own LED matrix
 (`ui::wordmark`). Lowercase 5×9 glyphs — x-height 5 cells, two-row ascenders
-and descenders — sit in one continuous panel whose unlit cells show at 7 %
+and descenders — sit in one continuous panel whose unlit cells show at 10 %
 ink and whose lit cells take the accent. Words in use: "cantrip",
 "settings", "hud gallery".
 
