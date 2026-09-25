@@ -292,9 +292,10 @@ journalctl --user -u cantrip.service -b --no-pager
 For any daemon owner, operational details are also in
 `${XDG_STATE_HOME:-$HOME/.local/state}/cantrip/daemon.log`, without transcript
 text. A take never ends on silence or length; each
-`[Daemon] state recording -> …` line names the command that ended it:
-`reason=toggle` (the shortcut that started the take), `reason=stop`,
-`reason=cancel`, or `reason=shutdown`. Refused commands log
+`[Daemon] state recording -> …` line names the command class that ended it:
+`reason=toggle` (a toggle carrying the take's own handoff target, from any
+client), `reason=stop`, `reason=cancel`, or `reason=shutdown`. It does not
+identify which process sent the command. Refused commands log
 `[Daemon] command rejected class=…`. Check [configuration](CONFIGURATION.md)
 for invalid settings, model setup, cleanup, and audio source selection. Check
 [recording recovery](USAGE.md#recovery)
