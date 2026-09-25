@@ -28,12 +28,14 @@ future work must not quietly undo are:
   transition and reduced-motion rule for free and can never show activity the
   cells do not. Each cell is an LED with a flat body in the surface colour, so
   housing light never masquerades as cell light.
-- **Presentation shares the field's clock.** Colour, rim and caption cross-
-  fade over the field's own settle (400 ms, or the 280 ms listening onset);
-  success settles centre-out inside that settle (never left to right, which
-  would read as progress); the capsule fades in over 120 ms only when it
-  first appears, never when work resets while it is visible. Reduced motion is
-  instant. Lost status freezes presentation exactly as it freezes cells.
+- **Presentation shares the field's clock; words do not wait.** Colour and rim
+  crossfade over the field's own settle (400 ms, or the 280 ms listening
+  onset); success settles centre-out inside that settle (never left to right,
+  which would read as progress); the capsule fades in over 120 ms only when it
+  first appears, never when work resets while it is visible. Captions change
+  at once, so an exception's guidance is readable at its first frame. Reduced
+  motion is instant. Lost status freezes presentation exactly as it freezes
+  cells.
 - **HUD typography is preserved.** Captions stay in Hack (ADR 0021); they gain
   hierarchy through colour and centred lines. Action lines name the button
   they point to ("Copy transcript in Cantrip Actions"), one name per action.

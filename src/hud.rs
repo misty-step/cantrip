@@ -1073,8 +1073,8 @@ impl Model {
     }
 
     /// Eased settle of the current composition: 0 at a change, 1 once settled.
-    /// It shares the field transition's clock, so colour, rim and caption
-    /// arrive with the light rather than ahead of it.
+    /// It shares the field transition's clock, so colour and rim arrive with
+    /// the light rather than ahead of it. Captions never wait for it.
     fn blend(&self, now: Instant) -> f32 {
         if self.reduced_motion || self.previous_kind.is_none() {
             return 1.0;
@@ -2443,10 +2443,9 @@ impl Canvas<'_> {
             );
             self.pixel_column(x, center, cell_width, column, rgb);
         }
-        // Words arrive with the light: the caption shares the settle clock.
+        // Words are feedback: they arrive at once. Only colour and rim settle,
+        // so an exception's guidance is readable the moment it appears.
         let muted = theme::mix(palette.foreground, palette.surface, 0.32);
-        let resting_alpha = self.alpha;
-        self.alpha = resting_alpha * model.blend(now);
         let text_left = left + 16.0;
         let text_width = (container_width - 32.0).max(16.0);
         let mut y = top + TRACK_HEIGHT;
@@ -2513,7 +2512,6 @@ impl Canvas<'_> {
                 palette.foreground,
             );
         }
-        self.alpha = resting_alpha;
     }
 
     /// Shadow, housing, housing light and rim in one pass over the surface.
@@ -3879,6 +3877,38 @@ mod tests {
             model.alpha(reset),
             1.0,
             "a reset while visible must not blink"
+        );
+    }
+
+    #[test]
+    fn exception_words_are_readable_the_moment_they_replace_work() {
+        // Colour and rim settle into Attention; its guidance must not.
+        let start = Instant::now();
+        let mut model = Model::new(start);
+        model.apply(preview_snapshot(StateKind::Processing), start);
+        let failed_at = start + Duration::from_secs(1);
+        let mut outcome = preview_outcome(Completeness::Complete, Delivery::Failed);
+        outcome.artifacts.text = true;
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.outcome = Some(outcome);
+        model.apply(idle, failed_at);
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert!(!model.caption.title.is_empty());
+        // The raster palette draws caption titles in pure blue on black; the
+        // canvas is premultiplied BGRA.
+        let title_pixels = |now| {
+            let (bytes, _) = raster_hud(&model, now, 420, 2.0);
+            let (pixels, _) = bytes.as_chunks::<4>();
+            pixels
+                .iter()
+                .filter(|[blue, green, red, _]| *blue > 200 && *green < 60 && *red < 60)
+                .count()
+        };
+        let settled = title_pixels(failed_at + Duration::from_secs(1));
+        assert!(settled > 0);
+        assert!(
+            title_pixels(failed_at) * 10 >= settled * 9,
+            "an exception caption must be legible at its first frame"
         );
     }
     #[test]

@@ -311,8 +311,9 @@ whole field, settling from the centre outward within the same transition.
 
 The field sits in a rounded, shadowed housing that is lit only by the cells'
 own light, so the glass glows where speech or work is and stays dark at rest.
-Colour and captions change with the field's transition, and the capsule fades
-in briefly when it first appears.
+Colour changes with the field's transition, captions change at once so an
+exception is readable immediately, and the capsule fades in briefly when it
+first appears.
 
 Normal handoffs may visually trail the backend by up to 1.6 seconds to finish their
 transitions. This never delays transcription, cleanup requests, or delivery.

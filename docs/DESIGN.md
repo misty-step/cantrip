@@ -197,7 +197,8 @@ and what is kept, focuses "Keep recording"; the destructive button reads
 | Moment | Duration / easing | Purpose | Reduced motion |
 | --- | --- | --- | --- |
 | HUD appears | 120 ms ease-out alpha | soften the pop without delaying feedback | instant |
-| State colour change | the field's own settle (400 ms; 280 ms onset while listening), smoothstep | one continuous instrument | instant |
+| State colour and rim change | the field's own settle (400 ms; 280 ms onset while listening), smoothstep | one continuous instrument | instant |
+| Caption change | immediate | words are feedback; exception guidance is legible at its first frame | immediate |
 | Success settle | same 400 ms; columns start up to 45 % later by distance from centre | arrival radiates from the middle, never left-to-right | instant full grid |
 | Housing light | follows presented cells | light, not decoration | follows static frames |
 | Result fade | 140 ms (unchanged) | leave quietly | cut |

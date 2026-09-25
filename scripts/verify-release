@@ -20,7 +20,7 @@ REPOSITORY = "misty-step/cantrip"
 SIGNER = f"{REPOSITORY}/.github/workflows/release.yml"
 PAYLOAD = {"cantrip", "install.sh", "cantrip.service", "LICENSE", "INSTALLATION.md", "sample.wav", "manifest.json", "checksums.txt"}
 USER_GUIDES = {"USAGE.md", "CONFIGURATION.md", "DESKTOP.md", "PRIVACY.md"}
-# Releases that bundle Geist ship its OFL text; earlier archives predate the fonts.
+# Releases that bundle Geist ship its OFL text.
 FONT_LICENSE = "FONTS-LICENSE.txt"
 
 
@@ -64,17 +64,20 @@ def verify_assets(directory, revision, expected_checksums):
     return data
 
 
-def unpack(directory, destination):
+def unpack(directory, destination, legacy=False):
     data = json.loads((directory / "release.json").read_text())
     root_name = f"cantrip-{data['tag']}-{data['target']}"
     require(data["archive"]["name"] == f"{root_name}.tar.gz", "noncanonical archive name")
     with tarfile.open(directory / data["archive"]["name"], "r:gz") as archive:
         members = archive.getmembers()
         names = {member.name.rstrip("/") for member in members}
-        # Public v0.1.0 predates the bundled manual. Keep that immutable rollback
-        # baseline readable while accepting only the complete new manual.
-        guides = USER_GUIDES if names & {f"{root_name}/{name}" for name in USER_GUIDES} else set()
-        fonts = {FONT_LICENSE} if f"{root_name}/{FONT_LICENSE}" in names else set()
+        if legacy:
+            # Only the immutable rollback baseline may predate the bundled
+            # manual (public v0.1.0) or the fonts' licence (before Lantern).
+            guides = USER_GUIDES if names & {f"{root_name}/{name}" for name in USER_GUIDES} else set()
+            fonts = {FONT_LICENSE} if f"{root_name}/{FONT_LICENSE}" in names else set()
+        else:
+            guides, fonts = USER_GUIDES, {FONT_LICENSE}
         expected = {root_name} | {f"{root_name}/{name}" for name in PAYLOAD | guides | fonts}
         require(len(members) == len(expected) and names == expected, "archive payload is not the public allowlist")
         root = destination / root_name
@@ -116,7 +119,7 @@ def inside(mode):
     previous = candidate
     previous_data = data
     if Path("/previous/release.json").is_file():
-        previous, previous_data = unpack(Path("/previous"), home / "previous")
+        previous, previous_data = unpack(Path("/previous"), home / "previous", legacy=True)
     prefix = home / "installation"
     installed = prefix / "bin/cantrip"
     run(str(previous / "install.sh"), "install", "--prefix", str(prefix))
