@@ -759,7 +759,7 @@ impl SettingsApp {
         }
         ui.add(
             egui::Label::new(ui::muted(
-                "A chat model tidies each transcript before delivery. Transcript text is sent to this endpoint; if cleanup fails, the raw transcript is delivered.",
+                "A chat model tidies each transcript before delivery. Transcript text is sent to this provider; if cleanup fails, the raw transcript is delivered.",
                 tones,
             ))
             .wrap(),
@@ -778,7 +778,7 @@ impl SettingsApp {
             ui,
             tones,
             "Model",
-            "A model this endpoint serves.",
+            "A model this provider serves.",
             |ui, width| {
                 text_field(
                     ui,
@@ -793,7 +793,7 @@ impl SettingsApp {
             ui,
             tones,
             "Keyring ID",
-            "Leave empty when the endpoint needs no key.",
+            "Leave empty when the provider needs no key.",
             |ui, width| {
                 text_field(
                     ui,

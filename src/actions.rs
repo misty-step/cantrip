@@ -1270,7 +1270,7 @@ impl ActionsApp {
                     ui.label(ui::faint("Recover locally transcribes again with installed Parakeet and copies the result. Audio stays here; no cloud cleanup.", tones));
                 }
                 if remote {
-                    ui.label(ui::faint("Recover with provider sends audio to your configured STT endpoint and copies the result; configured cleanup may also run. No automatic cloud fallback.", tones));
+                    ui.label(ui::faint("Recover with provider sends audio to your configured speech provider and copies the result; configured cleanup may also run. No automatic cloud fallback.", tones));
                 }
                 if forget {
                     ui.add_space(4.0);
@@ -2013,12 +2013,12 @@ fn detail_time(unix_ms: u64, days: &CalendarDays) -> String {
     )
 }
 
-/// "1:12", "0:38" or "740 ms".
+/// "1:12", "0:38", "740 ms" or "length unknown".
 fn short_duration(duration_ms: Option<u64>) -> String {
     match duration_ms {
         Some(ms) if ms < 1000 => format!("{ms} ms"),
         Some(ms) => format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60),
-        None => "—".to_owned(),
+        None => "length unknown".to_owned(),
     }
 }
 

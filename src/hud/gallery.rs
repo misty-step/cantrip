@@ -78,8 +78,8 @@ impl Journey {
         match self {
             Self::Measured => "Recorded PCM fixture, a speech gap, reported chunk completions, cleanup, delivery, success hold, fade, and idle.",
             Self::ThreeChunkHandoff => "Three reported chunk completions arrive close together, followed by rapid cleanup and delivery. Review the continuous fill and bounded visual handoffs without delaying actual work.",
-            Self::Raw => "One backend chunk stays indeterminate. Its completion goes directly to delivery without cleanup, then success fades to idle.",
-            Self::Cancellation => "A cancellation request waits for current work, then a cancelled outcome expires. No backend work runs here.",
+            Self::Raw => "One transcription chunk stays indeterminate. Its completion goes directly to delivery without cleanup, then success fades to idle.",
+            Self::Cancellation => "A cancellation request waits for current work, then a cancelled outcome expires. This preview runs no real work.",
             Self::Interruption => "A new operation arrives during the success transition. The next take owns the instrument immediately and completes independently.",
             Self::Failure => "A failed take remains actionable until its fixture outcome is dismissed. Dismissal does not remove the saved-recording metadata.",
             Self::Uncertain => "Delivery cannot be confirmed. The production outcome remains visible until the fixture dismisses it; no retry or insertion is attempted.",
