@@ -1334,6 +1334,44 @@ impl eframe::App for GalleryApp {
     }
 }
 
+/// One production catalogue still for in-app previews: the same fixture
+/// replay, model and painter as the gallery, as a premultiplied egui image.
+pub(crate) fn still(
+    state: ScreenshotState,
+    labels: bool,
+    palette: Palette,
+    scale: u32,
+) -> Option<egui::ColorImage> {
+    let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).ok()?;
+    let source = Source::State(state);
+    let reduced_motion = matches!(
+        state,
+        ScreenshotState::ReducedMotion
+            | ScreenshotState::ReducedMotionCleaning
+            | ScreenshotState::ReducedMotionSent
+    );
+    let origin = Instant::now();
+    let mut replay = Replay::new(origin, timeline(source, origin, reduced_motion));
+    let mut preview = Preview::new(scale.max(1));
+    let focus = replay.timeline.focus;
+    let options = ViewOptions {
+        labels,
+        reduced_motion,
+    };
+    replay.seek(focus, options, &mut preview, &font, palette);
+    let pixels = preview
+        .bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bgra| egui::Color32::from_rgba_premultiplied(bgra[2], bgra[1], bgra[0], bgra[3]))
+        .collect();
+    Some(egui::ColorImage {
+        size: preview.size,
+        pixels,
+    })
+}
+
 /// Write every catalog still and every journey's frames as PNGs through the same
 /// fixture replay, model and production painter, without a window or compositor.
 /// Stills cover 1x and 2x buffers with and without continuous labels; journeys
