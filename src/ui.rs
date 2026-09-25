@@ -352,7 +352,7 @@ pub fn segmented<T: PartialEq + Copy>(
         .sum::<f32>()
         + 4.0;
     let height = 30.0;
-    let (outer, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+    let (outer, frame) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     let painter = ui.painter_at(outer.expand(2.0));
     painter.rect(
         outer,
@@ -361,13 +361,15 @@ pub fn segmented<T: PartialEq + Copy>(
         Stroke::new(1.0_f32, color(tones.hairline)),
     );
     let mut x = outer.left() + 2.0;
-    for ((option, label), galley) in options.iter().zip(galleys) {
+    for (index, ((option, label), galley)) in options.iter().zip(galleys).enumerate() {
         let segment = egui::Rect::from_min_size(
             egui::pos2(x, outer.top() + 2.0),
             Vec2::new(galley.size().x + padding.x * 2.0, height - 4.0),
         );
         x = segment.right();
-        let id = ui.id().with(("segment", *label));
+        // Keyed by position within this control, so focus survives label
+        // changes such as a live count.
+        let id = frame.id.with(("segment", index));
         let response = ui.interact(segment, id, Sense::click());
         let selected = *value == *option;
         response.widget_info(|| {
@@ -479,21 +481,20 @@ pub fn stamp(ui: &mut Ui, tones: &Tones, stamp: Stamp) -> Response {
     );
     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
     let origin = ui.painter().round_pos_to_pixels(rect.min);
+    // Unlit cells share one floor on every stamp, strong enough to read on
+    // light themes without competing with lit cells.
+    const REST: f32 = 0.2;
     for column in 0..COLUMNS {
         for row in 0..ROWS {
             let (rgb, light) = match stamp {
-                Stamp::Rest => (tones.text, 0.14),
-                Stamp::Idle => (tones.text, if row == 1 { 0.5 } else { 0.14 }),
+                Stamp::Rest => (tones.text, REST),
+                Stamp::Idle => (tones.text, if row == 1 { 0.55 } else { REST }),
                 Stamp::Live => (tones.accent, if row == 1 { 1.0 } else { 0.4 }),
                 Stamp::Complete => (tones.accent, 1.0),
-                Stamp::Partial => (tones.accent, if column < COLUMNS / 2 { 1.0 } else { 0.18 }),
-                Stamp::Attention => {
-                    if row == 1 {
-                        (tones.attention, 1.0)
-                    } else {
-                        (tones.text, 0.14)
-                    }
-                }
+                Stamp::Partial if column < COLUMNS / 2 => (tones.accent, 1.0),
+                Stamp::Partial => (tones.text, REST),
+                Stamp::Attention if row == 1 => (tones.attention, 1.0),
+                Stamp::Attention => (tones.text, REST),
             };
             let min = origin + Vec2::new(column as f32 * pitch, row as f32 * pitch);
             ui.painter().rect_filled(
@@ -512,10 +513,13 @@ pub fn scrim(ctx: &egui::Context, tones: &Tones) {
         egui::Order::PanelResizeLine,
         egui::Id::new("cantrip-scrim"),
     ));
+    // Dim toward black on every theme; lightening a light theme reads as a
+    // wash-out, not as depth.
+    let light = crate::theme::luminance(tones.canvas) > 0.5;
     painter.rect_filled(
         ctx.screen_rect(),
         Rounding::ZERO,
-        color_alpha(tones.canvas, 0.62),
+        Color32::from_black_alpha(if light { 64 } else { 150 }),
     );
 }
 
