@@ -126,14 +126,116 @@ pub fn apply(ctx: &egui::Context, palette: Palette) {
     });
 }
 
-/// The pixel wordmark: square pixels, the same unit as the HUD cell.
+/// The wordmark is lit on the HUD's own matrix: square LED cells in one
+/// continuous panel, rest cells faintly visible, lit cells in the accent.
+/// Lowercase 5×9 glyphs (x-height 5, two-row ascenders and descenders);
+/// unknown characters render as space.
+///
+/// Optical variants (docs/DESIGN.md, Mark): the display variant draws LEDs with
+/// gaps and the rest matrix; where that does not fit, the compact variant packs
+/// one-pixel cells without gaps or rest cells, the form proven at 16 px.
 pub fn wordmark(ui: &mut Ui, tones: &Tones, text: &str) -> Response {
-    ui.label(
-        RichText::new(text)
-            .family(fonts::pixel())
-            .size(26.0)
-            .color(color(tones.text)),
-    )
+    const ROWS: usize = 9;
+    let glyphs: Vec<[&str; ROWS]> = text.chars().map(led_glyph).collect();
+    let columns = (glyphs.len() * 6).saturating_sub(1);
+    let ppp = ui.ctx().pixels_per_point();
+    // Whole physical pixels keep every LED square and every gap even.
+    let extent = |cell: f32, gap: f32| {
+        let pitch = cell + gap;
+        Vec2::new(
+            ((columns as f32 - 1.0).max(0.0) * pitch + cell) / ppp,
+            ((ROWS - 1) as f32 * pitch + cell) / ppp,
+        )
+    };
+    let display = ((2.0 * ppp).round().max(2.0), ppp.round().max(1.0));
+    let compact = extent(display.0, display.1).x > ui.available_width();
+    let (cell, gap) = if compact {
+        (ppp.round().max(1.0), 0.0)
+    } else {
+        display
+    };
+    let (rect, response) = ui.allocate_exact_size(extent(cell, gap), Sense::hover());
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, text));
+    let origin = ui.painter().round_pos_to_pixels(rect.min);
+    let painter = ui.painter();
+    let pitch = (cell + gap) / ppp;
+    for column in 0..columns {
+        let glyph = &glyphs[column / 6];
+        for (row, line) in glyph.iter().enumerate() {
+            let lit = column % 6 < 5 && line.as_bytes()[column % 6] == b'#';
+            if !lit && compact {
+                continue;
+            }
+            let (rgb, light) = if lit {
+                (tones.accent, 1.0)
+            } else {
+                (tones.text, 0.07)
+            };
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    origin + Vec2::new(column as f32 * pitch, row as f32 * pitch),
+                    Vec2::splat(cell / ppp),
+                ),
+                Rounding::ZERO,
+                color_alpha(rgb, light),
+            );
+        }
+    }
+    response
+}
+
+fn led_glyph(character: char) -> [&'static str; 9] {
+    match character {
+        'a' => [
+            ".....", ".....", ".###.", "....#", ".####", "#...#", ".####", ".....", ".....",
+        ],
+        'c' => [
+            ".....", ".....", ".####", "#....", "#....", "#....", ".####", ".....", ".....",
+        ],
+        'd' => [
+            "....#", "....#", ".####", "#...#", "#...#", "#...#", ".####", ".....", ".....",
+        ],
+        'e' => [
+            ".....", ".....", ".###.", "#...#", "#####", "#....", ".####", ".....", ".....",
+        ],
+        'g' => [
+            ".....", ".....", ".####", "#...#", "#...#", "#...#", ".####", "....#", ".###.",
+        ],
+        'h' => [
+            "#....", "#....", "#.##.", "##..#", "#...#", "#...#", "#...#", ".....", ".....",
+        ],
+        'i' => [
+            "..#..", ".....", ".##..", "..#..", "..#..", "..#..", ".###.", ".....", ".....",
+        ],
+        'l' => [
+            ".##..", "..#..", "..#..", "..#..", "..#..", "..#..", ".###.", ".....", ".....",
+        ],
+        'n' => [
+            ".....", ".....", "#.##.", "##..#", "#...#", "#...#", "#...#", ".....", ".....",
+        ],
+        'o' => [
+            ".....", ".....", ".###.", "#...#", "#...#", "#...#", ".###.", ".....", ".....",
+        ],
+        'p' => [
+            ".....", ".....", "####.", "#...#", "#...#", "#...#", "####.", "#....", "#....",
+        ],
+        'r' => [
+            ".....", ".....", "#.##.", "##..#", "#....", "#....", "#....", ".....", ".....",
+        ],
+        's' => [
+            ".....", ".....", ".####", "#....", ".###.", "....#", "####.", ".....", ".....",
+        ],
+        't' => [
+            ".#...", ".#...", "####.", ".#...", ".#...", ".#..#", "..##.", ".....", ".....",
+        ],
+        'u' => [
+            ".....", ".....", "#...#", "#...#", "#...#", "#..##", ".##.#", ".....", ".....",
+        ],
+        'y' => [
+            ".....", ".....", "#...#", "#...#", "#...#", "#...#", ".####", "....#", ".###.",
+        ],
+        _ => ["....."; 9],
+    }
 }
 
 pub fn heading(text: impl Into<String>, tones: &Tones) -> RichText {

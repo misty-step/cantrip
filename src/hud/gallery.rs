@@ -884,6 +884,13 @@ struct Capture {
     result: CaptureResult,
 }
 
+/// What the preview sits on. A review aid only; never saved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Backdrop {
+    Dark,
+    Light,
+}
+
 struct GalleryApp {
     entries: Vec<Entry>,
     selected: usize,
@@ -893,6 +900,7 @@ struct GalleryApp {
     palette: Palette,
     options: ViewOptions,
     zoom: u32,
+    backdrop: Backdrop,
     speed: f64,
     playing: bool,
     playback_anchor: Instant,
@@ -922,6 +930,11 @@ impl GalleryApp {
             palette,
             options: ViewOptions::default(),
             zoom: 2,
+            backdrop: if palette.is_light() {
+                Backdrop::Light
+            } else {
+                Backdrop::Dark
+            },
             speed: 1.0,
             playing: false,
             playback_anchor: origin,
@@ -1054,15 +1067,22 @@ impl GalleryApp {
             .max_width(360.0)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Transition journeys");
+                    let tones = self.palette.tones();
+                    ui.add_space(4.0);
+                    ui.label(ui::heading("Transition journeys", &tones));
+                    ui.add_space(2.0);
                     for (index, entry) in self.entries.iter().enumerate() {
                         if index == Journey::ALL.len() {
-                            ui.add_space(14.0);
-                            ui.heading("Production catalog");
-                            ui.weak(format!(
-                                "All {} screenshot states",
-                                ScreenshotState::value_variants().len()
+                            ui.add_space(16.0);
+                            ui.label(ui::heading("Production catalogue", &tones));
+                            ui.label(ui::faint(
+                                format!(
+                                    "All {} screenshot states",
+                                    ScreenshotState::value_variants().len()
+                                ),
+                                &tones,
                             ));
+                            ui.add_space(2.0);
                         }
                         let response = ui.selectable_label(index == self.selected, &entry.title);
                         if reveal_selected && index == self.selected {
@@ -1080,14 +1100,20 @@ impl GalleryApp {
     }
 
     fn controls(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::bottom("playback-controls").show(ctx, |ui| {
-            ui.add_space(6.0);
+        let tones = self.palette.tones();
+        egui::TopBottomPanel::bottom("playback-controls")
+            .frame(
+                egui::Frame::none()
+                    .fill(color(tones.panel))
+                    .inner_margin(egui::Margin::symmetric(18.0, 12.0)),
+            )
+            .show(ctx, |ui| {
             let mut frame = self.replay.frame.unwrap_or(0);
             let end = self.replay.timeline.end;
             ui.horizontal(|ui| {
-                ui.label(if self.playing { "Playing" } else { "Paused" });
-                ui.monospace(format!("{:06.3} / {:06.3} s", (FRAME_INTERVAL * frame).as_secs_f64(), (FRAME_INTERVAL * end).as_secs_f64()));
-                ui.weak(format!("Frame {frame} / {end}"));
+                ui.label(ui::heading(if self.playing { "Playing" } else { "Paused" }, &tones));
+                ui.label(ui::data(format!("{:06.3} / {:06.3} s", (FRAME_INTERVAL * frame).as_secs_f64(), (FRAME_INTERVAL * end).as_secs_f64()), &tones));
+                ui.label(ui::faint(format!("Frame {frame} / {end}"), &tones));
             });
             let response = ui.scope(|ui| {
                 ui.spacing_mut().slider_width = (ui.available_width() - 100.0).max(160.0);
@@ -1098,10 +1124,10 @@ impl GalleryApp {
                 self.seek(frame);
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.button(if self.playing { "Pause" } else { "Play" }).clicked() { self.toggle_play(); }
-                if ui.button("Replay").on_hover_text("Play the complete history from idle").clicked() { self.replay(); }
-                if ui.add_enabled(frame > 0, egui::Button::new("Back frame")).clicked() { self.step(false); }
-                if ui.add_enabled(frame < end, egui::Button::new("Frame step")).clicked() { self.step(true); }
+                if ui.add(ui::button(&tones, ui::Tone::Primary, if self.playing { "Pause" } else { "Play" })).clicked() { self.toggle_play(); }
+                if ui.add(ui::button(&tones, ui::Tone::Secondary, "Replay")).on_hover_text("Play the complete history from idle").clicked() { self.replay(); }
+                if ui.add_enabled(frame > 0, ui::button(&tones, ui::Tone::Secondary, "Back frame")).clicked() { self.step(false); }
+                if ui.add_enabled(frame < end, ui::button(&tones, ui::Tone::Secondary, "Frame step")).clicked() { self.step(true); }
                 let old_speed = self.speed;
                 egui::ComboBox::from_id_salt("playback-speed").selected_text(format!("{}x speed", self.speed)).show_ui(ui, |ui| {
                     for speed in [0.25, 0.5, 1.0, 2.0, 4.0] { ui.selectable_value(&mut self.speed, speed, format!("{speed}x")); }
@@ -1112,16 +1138,22 @@ impl GalleryApp {
                 }
             });
             ui.horizontal_wrapped(|ui| {
-                ui.label("Pixel zoom");
-                for zoom in [1, 2, 4] { ui.selectable_value(&mut self.zoom, zoom, format!("{zoom}x")); }
-                let reduced = ui.checkbox(&mut self.options.reduced_motion, "Reduced motion").changed();
-                let labels = ui.checkbox(&mut self.options.labels, "HUD labels").changed();
+                ui.label(ui::muted("Pixel zoom", &tones));
+                ui::segmented(ui, &tones, &mut self.zoom, &[(1, "1x"), (2, "2x"), (4, "4x")]);
+                ui.add_space(8.0);
+                ui.label(ui::muted("Desktop", &tones));
+                ui::segmented(ui, &tones, &mut self.backdrop, &[(Backdrop::Dark, "Dark"), (Backdrop::Light, "Light")]);
+                ui.add_space(8.0);
+                let reduced = ui::switch(ui, &tones, &mut self.options.reduced_motion, "Reduced motion").changed();
+                ui.label("Reduced motion");
+                let labels = ui::switch(ui, &tones, &mut self.options.labels, "HUD labels").changed();
+                ui.label("HUD labels");
                 if reduced || labels { self.rebuild(false); }
             });
             let active = self.replay.checkpoint();
             let mut jump = None;
             ui.horizontal_wrapped(|ui| {
-                ui.label("Fixture event");
+                ui.label(ui::muted("Fixture event", &tones));
                 egui::ComboBox::from_id_salt("fixture-event").selected_text(self.replay.timeline.checkpoints[active].label).width(300.0).show_ui(ui, |ui| {
                     for (index, checkpoint) in self.replay.timeline.checkpoints.iter().enumerate() {
                         if ui.selectable_label(index == active, format!("{:06.3}  {}", checkpoint.at.as_secs_f64(), checkpoint.label)).clicked() {
@@ -1131,30 +1163,32 @@ impl GalleryApp {
                 });
             });
             if let Some(frame) = jump { self.playing = false; self.seek(frame); }
-            ui.small("Space play/pause  ·  R replay  ·  Left/Right one frame  ·  Home/End seek");
-            ui.small("PgUp/PgDn choose fixture  ·  Tab and Enter operate controls  ·  View options are never saved");
-            ui.add_space(4.0);
+            ui.label(ui::faint("Space play/pause  ·  R replay  ·  Left/Right one frame  ·  Home/End seek  ·  PgUp/PgDn choose fixture  ·  View options are never saved", &tones));
         });
     }
 
     fn surface(&mut self, ctx: &egui::Context) {
         self.preview.upload(ctx);
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let tones = self.palette.tones();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(color(tones.canvas)).inner_margin(egui::Margin::same(20.0)))
+            .show(ctx, |ui| {
             let entry = &self.entries[self.selected];
-            ui.heading(&entry.title);
-            ui.label(entry.description());
+            ui.label(ui::hero(&entry.title, &tones));
+            ui.label(ui::muted(entry.description(), &tones));
             ui.add_space(6.0);
             if let Some(status) = &self.replay.model.snapshot {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(format!("Fixture status: {}", status.state_name()));
-                    if let Some(stage) = &status.stage { ui.label(stage.to_string()); }
-                    ui.weak(&status.epoch);
+                    ui.label(ui::faint("Fixture status", &tones));
+                    ui.label(ui::data(status.state_name(), &tones));
+                    if let Some(stage) = &status.stage { ui.label(ui::data(stage.to_string(), &tones)); }
+                    ui.label(ui::faint(&status.epoch, &tones));
                 });
             }
-            ui.weak(format!("Production surface: {} × {} pixels  ·  Nearest-neighbor {}x  ·  Scroll to inspect at full size",
-                self.preview.size[0], self.preview.size[1], self.zoom));
+            ui.label(ui::faint(format!("Production surface {} × {} px  ·  nearest-neighbour {}x  ·  scroll to inspect at full size",
+                self.preview.size[0], self.preview.size[1], self.zoom), &tones));
             if self.replay.model.kind.is_none() {
-                ui.label("HUD hidden: the production surface is transparent.");
+                ui.label(ui::muted("HUD hidden: the production surface is transparent.", &tones));
             }
             ui.add_space(12.0);
             let available = ui.available_size();
@@ -1163,11 +1197,24 @@ impl GalleryApp {
                 let image_size = egui::vec2(self.preview.size[0] as f32, self.preview.size[1] as f32) * self.zoom as f32 / pixels_per_point;
                 let area_size = egui::vec2(image_size.x + 32.0, image_size.y + 32.0).max(available);
                 let (area, _) = ui.allocate_exact_size(area_size, egui::Sense::click());
+                // A stand-in desktop so the housing's shadow and rim read as
+                // they will over real wallpaper.
+                let (top, bottom) = match self.backdrop {
+                    Backdrop::Dark => (theme::mix(self.palette.background, self.palette.accent, 0.14), theme::mix(self.palette.background, [0; 3], 0.45)),
+                    Backdrop::Light => ([0xec, 0xf0, 0xf2], [0xc4, 0xcf, 0xd5]),
+                };
+                let mut mesh = egui::Mesh::default();
+                for (corner, rgb) in [(area.left_top(), top), (area.right_top(), top), (area.left_bottom(), bottom), (area.right_bottom(), bottom)] {
+                    mesh.colored_vertex(corner, color(rgb));
+                }
+                mesh.add_triangle(0, 1, 2);
+                mesh.add_triangle(1, 3, 2);
+                ui.painter().add(mesh);
                 let mut min = area.center() - image_size * 0.5;
                 min.x = (min.x * pixels_per_point).round() / pixels_per_point;
                 min.y = (min.y * pixels_per_point).round() / pixels_per_point;
                 let rect = egui::Rect::from_min_size(min, image_size);
-                ui.painter().rect_stroke(rect.expand(1.0), 0.0, egui::Stroke::new(1.0_f32, color(self.palette.border)));
+                ui.painter().rect_stroke(rect.expand(1.0), 0.0, egui::Stroke::new(1.0_f32, ui::color_alpha(tones.hairline_strong, 0.35)));
                 if let Some(texture) = &self.preview.texture {
                     ui.painter().image(texture.id(), rect, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
                 }
@@ -1255,13 +1302,24 @@ impl eframe::App for GalleryApp {
                 self.playing = false;
             }
         }
-        egui::TopBottomPanel::top("gallery-header").show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.heading("Cantrip HUD Gallery");
-            ui.label("Fixture inputs. Production HUD state and pixels. No microphone, daemon, or delivery connection.");
-            ui.weak("Stage durations are scripted, not STT latency. Transitions, result hold, and fade use production timing.");
-            ui.add_space(4.0);
-        });
+        let tones = self.palette.tones();
+        egui::TopBottomPanel::top("gallery-header")
+            .frame(
+                egui::Frame::none()
+                    .fill(color(tones.panel))
+                    .inner_margin(egui::Margin::symmetric(20.0, 14.0)),
+            )
+            .show(ctx, |ui| {
+                ui::wordmark(ui, &tones, "hud gallery");
+                ui.label(ui::muted(
+                    "Fixture inputs, production HUD state and pixels. No microphone, daemon, or delivery connection.",
+                    &tones,
+                ));
+                ui.label(ui::faint(
+                    "Stage durations are scripted, not STT latency. Transitions, result hold and fade use production timing.",
+                    &tones,
+                ));
+            });
         self.sidebar(ctx, previous_selection != self.selected);
         self.controls(ctx);
         self.surface(ctx);

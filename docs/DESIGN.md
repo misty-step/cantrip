@@ -20,8 +20,8 @@ colors:
     attention-soft: "mix({colors.surface}, {colors.attention}, 0.14)"
 typography:
   wordmark:
-    family: Geist Pixel Grid
-    size: 26px
+    family: LED matrix (5x9 cells, src/ui.rs)
+    size: 9 cells tall; 2 px cells, 1 px gaps at 1x
   hero:
     family: Geist SemiBold
     size: 19px
@@ -90,11 +90,8 @@ visuals.
 
 The deliberate windows use the Geist family (Vercel, SIL OFL 1.1), bundled
 in the binary from `assets/fonts/`, so rendering never depends on installed
-fonts. Its licence ships inside `LICENSE`.
+fonts. Release archives carry its licence as `FONTS-LICENSE.txt`.
 
-- **Geist Pixel Grid** — wordmark only ("cantrip", "settings", "hud gallery").
-  Each glyph is drawn from separate square pixels, the same unit as the HUD
-  cell. Never below 22 px.
 - **Geist** (Regular, Medium, SemiBold) — every sentence, label and button.
 - **Geist Mono** — data whose columns should align: capture times, durations,
   recording IDs, paths, key IDs, endpoints, diagnosis output.
@@ -104,6 +101,24 @@ fonts. Its licence ships inside `LICENSE`.
   under the field.
 
 Sentence case everywhere. No all-caps labels, no tracked eyebrows.
+
+## Mark
+
+The wordmark is not a typeface: it is lit on the HUD's own LED matrix
+(`ui::wordmark`). Lowercase 5×9 glyphs — x-height 5 cells, two-row ascenders
+and descenders — sit in one continuous panel whose unlit cells show at 7 %
+ink and whose lit cells take the accent. Words in use: "cantrip",
+"settings", "hud gallery".
+
+- Designed 16-first: the compact optical variant (1 px cells, no gaps, no
+  rest matrix, 9 px tall) reads "cantrip" inside a 16 px line on dark
+  (operator and Tokyo Night), light, and light/dark browser-tab backgrounds;
+  proof sheet `design/mark/mark-proof-zoom.png` in the review run.
+- The display variant (2 px cells and 1 px gaps at 1×, whole-pixel cells at
+  every scale) is the window header. `ui::wordmark` falls back to the compact
+  variant whenever the display variant does not fit the available width.
+- The mark is always the accent on the theme's own ground; never outlined,
+  shadowed, gradient-filled or recoloured to a success colour.
 
 ## Layout
 

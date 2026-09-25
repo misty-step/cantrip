@@ -9,12 +9,6 @@ pub const REGULAR: &[u8] = include_bytes!("../assets/fonts/Geist-Regular.ttf");
 pub const MEDIUM: &[u8] = include_bytes!("../assets/fonts/Geist-Medium.ttf");
 pub const SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Geist-SemiBold.ttf");
 pub const MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono-Regular.ttf");
-pub const PIXEL: &[u8] = include_bytes!("../assets/fonts/GeistPixel-Grid.ttf");
-
-/// Wordmark only: square pixels, the same unit as a HUD cell.
-pub fn pixel() -> FontFamily {
-    FontFamily::Name("pixel".into())
-}
 
 pub fn medium() -> FontFamily {
     FontFamily::Name("medium".into())
@@ -33,7 +27,6 @@ pub fn install(ctx: &egui::Context) {
         ("Geist Medium", MEDIUM),
         ("Geist SemiBold", SEMIBOLD),
         ("Geist Mono", MONO),
-        ("Geist Pixel Grid", PIXEL),
     ] {
         fonts
             .font_data
@@ -59,9 +52,6 @@ pub fn install(ctx: &egui::Context) {
     fonts
         .families
         .insert(semibold(), with_fallback("Geist SemiBold"));
-    fonts
-        .families
-        .insert(pixel(), with_fallback("Geist Pixel Grid"));
     if let Some(mono) = fonts.families.get_mut(&FontFamily::Monospace) {
         mono.insert(0, "Geist Mono".to_owned());
     }
