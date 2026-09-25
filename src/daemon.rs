@@ -699,12 +699,19 @@ fn serve(
                 ClientPoll::Ready(request) => {
                     let client = &mut clients[index];
                     let reply = match request {
-                        Ok(Request::Command(command)) => Some(encode_reply(&execute(
-                            command,
-                            daemon,
-                            runtime_dir,
-                            job_tx,
-                        ))?),
+                        Ok(Request::Command(command)) => {
+                            tracing::info!(
+                                "[Daemon] command={} sender={}",
+                                command.class(),
+                                sender(&client.stream)
+                            );
+                            Some(encode_reply(&execute(
+                                command,
+                                daemon,
+                                runtime_dir,
+                                job_tx,
+                            ))?)
+                        }
                         Ok(Request::Status) => Some(encode_reply(&daemon.snapshot())?),
                         Ok(Request::Recordings) => {
                             client.history_wait = true;
@@ -834,6 +841,43 @@ fn accept_client(stream: UnixStream) -> Option<PendingClient> {
         history_wait: false,
         deadline: Instant::now() + CLIENT_DEADLINE,
     })
+}
+
+/// Operational identity of a command's sender: kernel-reported peer pid, its
+/// executable, and up to three ancestor process names (a shortcut shows as
+/// `…<-Hyprland`, a bar click as `…<-quickshell`). Never arguments or text.
+fn sender(stream: &UnixStream) -> String {
+    let Ok(pid) = crate::desktop::peer_pid(stream) else {
+        return "unknown".to_owned();
+    };
+    let exe = fs::read_link(format!("/proc/{pid}/exe"))
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "?".to_owned());
+    let mut chain = Vec::new();
+    let mut current = pid;
+    for _ in 0..3 {
+        let Some(parent) = parent_pid(current) else {
+            break;
+        };
+        if parent <= 1 {
+            break;
+        }
+        let name = fs::read_to_string(format!("/proc/{parent}/comm")).unwrap_or_default();
+        chain.push(format!("{}:{parent}", name.trim()));
+        current = parent;
+    }
+    format!("pid={pid} exe={exe} parents={}", chain.join("<-"))
+}
+
+fn parent_pid(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name may contain spaces or parentheses; fields resume after the last ')'.
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 fn poll_client(client: &mut PendingClient) -> ClientPoll {

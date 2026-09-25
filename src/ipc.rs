@@ -55,6 +55,34 @@ pub enum Command {
     Reload,
 }
 
+impl Command {
+    /// Log class: the command and, for recording starts, its handoff target name.
+    /// Target names are operator configuration, never transcript text; a malformed
+    /// client-supplied name is logged as `invalid`, not echoed.
+    pub(crate) fn class(&self) -> String {
+        let with_handoff = |name: &str, handoff: &Option<String>| match handoff.as_deref() {
+            None => format!("{name} handoff=none"),
+            Some(target) if crate::config::valid_handoff_name(target) => {
+                format!("{name} handoff={target}")
+            }
+            Some(_) => format!("{name} handoff=invalid"),
+        };
+        match self {
+            Self::Toggle { handoff, .. } => with_handoff("toggle", handoff),
+            Self::Start { handoff, .. } => with_handoff("start", handoff),
+            Self::Stop => "stop".to_owned(),
+            Self::Cancel => "cancel".to_owned(),
+            Self::Last => "last".to_owned(),
+            Self::Recover { .. } => "recover".to_owned(),
+            Self::Copy { .. } => "copy".to_owned(),
+            Self::Dismiss { .. } => "dismiss".to_owned(),
+            Self::Forget { .. } => "forget".to_owned(),
+            Self::Ping => "ping".to_owned(),
+            Self::Reload => "reload".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Request {
     Command(Command),
