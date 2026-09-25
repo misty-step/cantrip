@@ -3,8 +3,9 @@
 Use the [latest published Linux x86-64 release](https://github.com/misty-step/cantrip/releases/latest)
 for a CPU-only executable. No source checkout, Rust installation, GPU, or CUDA
 runtime is needed. The archive contains the executable, user documentation,
-`install.sh`, the optional `cantrip.service`, `LICENSE`, the public JFK
-`sample.wav`, `manifest.json`, and `checksums.txt`.
+`install.sh`, the optional `cantrip.service`, `LICENSE`, the bundled fonts'
+`FONTS-LICENSE.txt`, the public JFK `sample.wav`, `manifest.json`, and
+`checksums.txt`.
 
 Installation is binary-only. It does not download models, enable a service, add
 shortcuts, or change configuration, credentials, or retained recordings.

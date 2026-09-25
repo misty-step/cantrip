@@ -89,6 +89,103 @@ fn hex_rgb(text: &str) -> Option<[u8; 3]> {
     ])
 }
 
+/// Linear blend of two sRGB colours; `amount` 0 is `from`, 1 is `to`.
+pub fn mix(from: [u8; 3], to: [u8; 3], amount: f32) -> [u8; 3] {
+    let amount = amount.clamp(0.0, 1.0);
+    std::array::from_fn(|channel| {
+        (f32::from(from[channel]) + (f32::from(to[channel]) - f32::from(from[channel])) * amount)
+            .round() as u8
+    })
+}
+
+/// WCAG relative luminance, 0 (black) to 1 (white).
+pub fn luminance(rgb: [u8; 3]) -> f32 {
+    let linear = |channel: u8| {
+        let value = f32::from(channel) / 255.0;
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
+}
+
+/// WCAG contrast ratio between two colours, 1 to 21.
+pub fn contrast(a: [u8; 3], b: [u8; 3]) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Every surface tone is a mix of two theme roles, so any installed theme,
+/// dark or light, stays coherent without a second palette to maintain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tones {
+    pub canvas: [u8; 3],
+    pub panel: [u8; 3],
+    pub raised: [u8; 3],
+    pub well: [u8; 3],
+    pub hairline: [u8; 3],
+    pub hairline_strong: [u8; 3],
+    pub text: [u8; 3],
+    pub text_muted: [u8; 3],
+    pub text_faint: [u8; 3],
+    pub accent: [u8; 3],
+    pub accent_soft: [u8; 3],
+    pub accent_line: [u8; 3],
+    pub on_accent: [u8; 3],
+    pub attention: [u8; 3],
+    pub attention_soft: [u8; 3],
+    pub attention_line: [u8; 3],
+    pub on_attention: [u8; 3],
+}
+
+impl Palette {
+    pub fn is_light(&self) -> bool {
+        luminance(self.background) > 0.5
+    }
+
+    pub fn tones(&self) -> Tones {
+        let surface = self.surface;
+        // Prefer the theme's own ink on filled controls; fall back to pure
+        // black or white only when neither role reaches 4.5:1.
+        let readable_on = |fill: [u8; 3]| {
+            let best = |candidates: [[u8; 3]; 2]| {
+                if contrast(fill, candidates[0]) >= contrast(fill, candidates[1]) {
+                    candidates[0]
+                } else {
+                    candidates[1]
+                }
+            };
+            let themed = best([self.background, self.foreground]);
+            if contrast(fill, themed) >= 4.5 {
+                themed
+            } else {
+                best([[0; 3], [255; 3]])
+            }
+        };
+        Tones {
+            canvas: self.background,
+            panel: surface,
+            raised: mix(surface, self.foreground, 0.05),
+            well: mix(surface, self.background, 0.6),
+            hairline: mix(surface, self.border, 0.35),
+            hairline_strong: mix(surface, self.border, 0.6),
+            text: self.foreground,
+            text_muted: mix(self.foreground, surface, 0.32),
+            text_faint: mix(self.foreground, surface, 0.52),
+            accent: self.accent,
+            accent_soft: mix(surface, self.accent, 0.2),
+            accent_line: mix(surface, self.accent, 0.55),
+            on_accent: readable_on(self.accent),
+            attention: self.attention,
+            attention_soft: mix(surface, self.attention, 0.14),
+            attention_line: mix(surface, self.attention, 0.6),
+            on_attention: readable_on(self.attention),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse;

@@ -53,6 +53,9 @@ enum CliCommand {
         /// Capture the actual gallery window to PNG, then exit.
         #[arg(long, value_name = "PATH")]
         screenshot: Option<PathBuf>,
+        /// Write every state still and journey frame to DIR as PNGs, then exit.
+        #[arg(long, value_name = "DIR", conflicts_with = "screenshot")]
+        export: Option<PathBuf>,
     },
     /// Open the configuration window.
     Settings {
@@ -278,7 +281,10 @@ fn run(cli: Cli) -> Result<()> {
             daemon::run(config, preload)
         }
         CliCommand::Hud { screenshot, state } => hud::run(screenshot, state),
-        CliCommand::HudGallery { screenshot } => hud::gallery::run(screenshot),
+        CliCommand::HudGallery {
+            export: Some(dir), ..
+        } => hud::gallery::export(&dir),
+        CliCommand::HudGallery { screenshot, .. } => hud::gallery::run(screenshot),
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
         CliCommand::Toggle { postproc, handoff } => send_command(Command::Toggle {

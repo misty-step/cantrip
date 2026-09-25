@@ -26,6 +26,7 @@ PUBLIC_FILES = {
     "DESKTOP.md": "docs/DESKTOP.md",
     "PRIVACY.md": "docs/PRIVACY.md",
     "LICENSE": "LICENSE",
+    "FONTS-LICENSE.txt": "assets/fonts/OFL.txt",
     "cantrip.service": "contrib/cantrip.service",
     "install.sh": "contrib/install.sh",
     "sample.wav": "samples/jfk.wav",

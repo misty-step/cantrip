@@ -2012,7 +2012,8 @@ impl HudState {
         // Keep a transparent mapped frame while idle: remapping requires a
         // second configure handshake some compositors do not send.
         if let Some(path) = &self.screenshot {
-            save_screenshot(path, bytes, width, height)?;
+            write_png(path, bytes, width, height)?;
+            eprintln!("saved HUD screenshot to {}", path.display());
             self.screenshot_done = true;
         }
         Ok(())
@@ -2478,7 +2479,8 @@ fn caption_height(
     height.ceil() as u32
 }
 
-fn save_screenshot(path: &Path, bytes: &[u8], width: u32, height: u32) -> Result<()> {
+/// Encode a premultiplied BGRA HUD frame as straight-alpha RGBA PNG.
+pub(crate) fn write_png(path: &Path, bytes: &[u8], width: u32, height: u32) -> Result<()> {
     // A shared-memory slot can be larger than the visible frame. The PNG
     // encoder requires exactly width × height pixels, not the slot's padding.
     let length = (width as usize)
@@ -2502,10 +2504,15 @@ fn save_screenshot(path: &Path, bytes: &[u8], width: u32, height: u32) -> Result
             rgba.extend_from_slice(&[un(r), un(g), un(b), a]);
         }
     }
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating HUD screenshot directory {}", parent.display()))?;
+    }
     image::save_buffer(path, &rgba, width, height, image::ColorType::Rgba8)
-        .with_context(|| format!("writing HUD screenshot {}", path.display()))?;
-    eprintln!("saved HUD screenshot to {}", path.display());
-    Ok(())
+        .with_context(|| format!("writing HUD screenshot {}", path.display()))
 }
 
 /// Deterministic, offline compositions rendered by the real Wayland surface.
@@ -4173,11 +4180,11 @@ mod tests {
             std::env::temp_dir().join(format!("cantrip-hud-screenshot-{}.png", std::process::id()));
         let mut bytes = [255_u8; 64];
         bytes[..4].copy_from_slice(&[10, 20, 30, 128]);
-        save_screenshot(&path, &bytes, 1, 1).unwrap();
+        write_png(&path, &bytes, 1, 1).unwrap();
         let image = image::open(&path).unwrap().into_rgba8();
         assert_eq!(image.dimensions(), (1, 1));
         assert_eq!(image.get_pixel(0, 0).0, [60, 40, 20, 128]);
-        assert!(save_screenshot(&path, &bytes[..3], 1, 1).is_err());
+        assert!(write_png(&path, &bytes[..3], 1, 1).is_err());
         fs::remove_file(path).unwrap();
     }
 

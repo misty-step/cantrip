@@ -21,7 +21,7 @@ VERSION = "0.1.0"
 EPOCH = 1710000000
 ROOT_NAME = f"cantrip-v{VERSION}-x86_64-unknown-linux-gnu"
 PAYLOAD = {
-    "cantrip", "install.sh", "cantrip.service", "LICENSE", "INSTALLATION.md",
+    "cantrip", "install.sh", "cantrip.service", "LICENSE", "FONTS-LICENSE.txt", "INSTALLATION.md",
     "USAGE.md", "CONFIGURATION.md", "DESKTOP.md", "PRIVACY.md",
     "sample.wav", "manifest.json", "checksums.txt",
 }
@@ -144,6 +144,7 @@ class ReleaseArtifactContracts(unittest.TestCase):
             "docs/DESKTOP.md": "Supported desktop setup.\n",
             "docs/PRIVACY.md": "Privacy and retained data.\n",
             "LICENSE": "Public license.\n",
+            "assets/fonts/OFL.txt": "Font license.\n",
             "samples/jfk.wav": "Public sample bytes.\n",
         }
         for name, contents in sources.items():

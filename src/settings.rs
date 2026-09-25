@@ -14,6 +14,7 @@
 use crate::config::{Config, HudConfig, PostprocConfig, SttConfig, TelemetryConfig};
 use crate::inject::InjectionMode;
 use crate::ipc;
+use crate::ui::{self, color};
 use crate::{paths, theme};
 use anyhow::{anyhow, Context, Result};
 use eframe::egui;
@@ -238,7 +239,7 @@ impl SettingsApp {
         config_path: PathBuf,
     ) -> Self {
         let palette = theme::load();
-        apply_theme(&cc.egui_ctx, palette);
+        ui::setup(&cc.egui_ctx, palette);
         let (edit, loaded_ok, loaded_text, status) = match load_editable_config(&config_path) {
             EditableConfigLoad::Ready {
                 config,
@@ -955,54 +956,6 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
     .map_err(|error| anyhow!("settings window error: {error}"))
 }
 
-pub(crate) fn color(rgb: [u8; 3]) -> egui::Color32 {
-    egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
-}
-
-/// Egui adapter for the same live desktop palette as the passive HUD.
-pub(crate) fn apply_theme(ctx: &egui::Context, palette: theme::Palette) {
-    let mut visuals = egui::Visuals::dark();
-    let foreground = color(palette.foreground);
-    let accent = color(palette.accent);
-    let border = egui::Stroke::new(1.0_f32, color(palette.border));
-    visuals.panel_fill = color(palette.background);
-    visuals.window_fill = color(palette.background);
-    visuals.extreme_bg_color = color(palette.background);
-    visuals.faint_bg_color = color(palette.surface);
-    visuals.override_text_color = Some(foreground);
-    visuals.hyperlink_color = accent;
-    visuals.warn_fg_color = color(palette.attention);
-    visuals.error_fg_color = color(palette.attention);
-    for widget in [
-        &mut visuals.widgets.noninteractive,
-        &mut visuals.widgets.inactive,
-        &mut visuals.widgets.hovered,
-        &mut visuals.widgets.active,
-        &mut visuals.widgets.open,
-    ] {
-        widget.rounding = egui::Rounding::ZERO;
-        widget.bg_fill = color(palette.surface);
-        widget.weak_bg_fill = color(palette.surface);
-        widget.bg_stroke = border;
-        widget.fg_stroke = egui::Stroke::new(1.0_f32, foreground);
-    }
-    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, accent);
-    visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0_f32, accent);
-    visuals.selection.bg_fill = accent.linear_multiply(0.18);
-    visuals.selection.stroke = egui::Stroke::new(1.0_f32, accent);
-    visuals.text_cursor.stroke = egui::Stroke::new(2.0_f32, accent);
-    visuals.window_rounding = egui::Rounding::ZERO;
-    ctx.set_visuals(visuals);
-    ctx.style_mut(|style| {
-        style.animation_time = 0.0;
-        for font in style.text_styles.values_mut() {
-            font.family = egui::FontFamily::Monospace;
-        }
-        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-        style.spacing.button_padding = egui::vec2(12.0, 8.0);
-    });
-}
-
 /// Full app loop; also handles the `--screenshot` dump then closes.
 #[allow(clippy::collapsible_if)]
 impl eframe::App for SettingsApp {
@@ -1057,8 +1010,11 @@ impl eframe::App for SettingsApp {
         }
         if self.last_poll.elapsed() >= DAEMON_POLL && self.poll_result.is_none() {
             self.last_poll = Instant::now();
-            self.palette = theme::load();
-            apply_theme(ctx, self.palette);
+            let palette = theme::load();
+            if palette != self.palette {
+                self.palette = palette;
+                ui::apply(ctx, palette);
+            }
             let (tx, rx) = mpsc::channel();
             let context = ctx.clone();
             std::thread::spawn(move || {

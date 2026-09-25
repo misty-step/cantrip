@@ -2,7 +2,8 @@
 
 use std::{
     cell::RefCell,
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -14,15 +15,15 @@ use clap::ValueEnum;
 use eframe::egui;
 
 use super::{
-    layout_height, present_outcome, preview_snapshot, screenshot_model, Canvas, Model, RenderKey,
-    ScreenshotState, Visibility, CONTAINER_WIDTH, FRAME_INTERVAL, MAX_PRESENTATION_LAG,
+    layout_height, present_outcome, preview_snapshot, screenshot_model, write_png, Canvas, Model,
+    RenderKey, ScreenshotState, Visibility, CONTAINER_WIDTH, FRAME_INTERVAL, MAX_PRESENTATION_LAG,
     NOTICE_HOLD, RESULT_FADE, SURFACE_WIDTH,
 };
 use crate::{
     ipc::{StateKind, StatusSnapshot},
     pipeline::Stage,
-    settings::{apply_theme, color},
     theme::{self, Palette},
+    ui::{self, color},
 };
 
 const SCREENSHOT_DELAY_FRAMES: u32 = 6;
@@ -705,8 +706,9 @@ struct ViewOptions {
     reduced_motion: bool,
 }
 
-#[derive(Default)]
 struct Preview {
+    // Integer buffer scale, as a compositor would request for a HiDPI output.
+    scale: u32,
     bytes: Vec<u8>,
     size: [usize; 2],
     last_render: Option<RenderKey>,
@@ -715,22 +717,46 @@ struct Preview {
     dirty: bool,
 }
 
+impl Default for Preview {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
 impl Preview {
+    fn new(scale: u32) -> Self {
+        Self {
+            scale,
+            bytes: Vec::new(),
+            size: [0; 2],
+            last_render: None,
+            image: Arc::default(),
+            texture: None,
+            dirty: false,
+        }
+    }
+
     fn paint(&mut self, model: &mut Model, font: &FontRef<'_>, palette: Palette, now: Instant) {
-        let height = layout_height(model, font, CONTAINER_WIDTH);
+        let logical_height = layout_height(model, font, CONTAINER_WIDTH);
         let frame = model.frame(now);
         let alpha = model.alpha(now);
-        let key = model.render_key(&frame, (SURFACE_WIDTH, height, 1), palette, alpha);
+        let key = model.render_key(
+            &frame,
+            (SURFACE_WIDTH, logical_height, self.scale),
+            palette,
+            alpha,
+        );
         if self.last_render.as_ref() == Some(&key) {
             return;
         }
-        self.size = [SURFACE_WIDTH as usize, height as usize];
+        let (width, height) = (SURFACE_WIDTH * self.scale, logical_height * self.scale);
+        self.size = [width as usize, height as usize];
         self.bytes.resize(self.size[0] * self.size[1] * 4, 0);
         let mut canvas = Canvas {
             bytes: &mut self.bytes,
-            width: SURFACE_WIDTH,
+            width,
             height,
-            scale: 1.0,
+            scale: self.scale as f32,
             alpha: 1.0,
         };
         canvas.paint_hud(model, font, palette, &frame, CONTAINER_WIDTH);
@@ -740,6 +766,10 @@ impl Preview {
         model.track.presented = frame;
         self.last_render = Some(key);
         self.dirty = true;
+    }
+
+    fn write(&self, path: &Path) -> Result<()> {
+        write_png(path, &self.bytes, self.size[0] as u32, self.size[1] as u32)
     }
 
     fn upload(&mut self, ctx: &egui::Context) {
@@ -877,7 +907,7 @@ impl GalleryApp {
         capture_result: CaptureResult,
     ) -> Self {
         let palette = theme::load();
-        apply_theme(ctx, palette);
+        ui::setup(ctx, palette);
         let entries = Entry::catalog();
         let origin = Instant::now();
         let replay = Replay::new(origin, timeline(entries[0].source, origin, false));
@@ -1243,6 +1273,98 @@ impl eframe::App for GalleryApp {
     fn persist_egui_memory(&self) -> bool {
         false
     }
+}
+
+/// Write every catalog still and every journey's frames as PNGs through the same
+/// fixture replay, model and production painter, without a window or compositor.
+/// Stills cover 1x and 2x buffers with and without continuous labels; journeys
+/// are sampled every other frame at 2x. `index.json` names each file.
+pub fn export(dir: &Path) -> Result<()> {
+    let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR)
+        .context("loading HUD typeface")?;
+    let palette = theme::load();
+    let mut index = Vec::new();
+    for entry in Entry::catalog() {
+        let reduced_motion = entry.reduced_motion();
+        match entry.source {
+            Source::State(_) => {
+                let mut files = Vec::new();
+                for scale in [1, 2] {
+                    for labels in [false, true] {
+                        let origin = Instant::now();
+                        let mut replay =
+                            Replay::new(origin, timeline(entry.source, origin, reduced_motion));
+                        let mut preview = Preview::new(scale);
+                        let focus = replay.timeline.focus;
+                        let options = ViewOptions {
+                            labels,
+                            reduced_motion,
+                        };
+                        replay.seek(focus, options, &mut preview, &font, palette);
+                        let file = format!(
+                            "states@{scale}x/{}{}.png",
+                            entry.title,
+                            if labels { "--labels" } else { "" }
+                        );
+                        preview.write(&dir.join(&file))?;
+                        files.push(file);
+                    }
+                }
+                index.push(serde_json::json!({
+                    "kind": "state",
+                    "name": entry.title,
+                    "description": entry.description(),
+                    "files": files,
+                }));
+            }
+            Source::Journey(_) => {
+                let slug: String = entry
+                    .title
+                    .to_lowercase()
+                    .chars()
+                    .filter(|character| character.is_alphanumeric() || *character == ' ')
+                    .map(|character| if character == ' ' { '-' } else { character })
+                    .collect();
+                let origin = Instant::now();
+                let mut replay = Replay::new(origin, timeline(entry.source, origin, false));
+                let mut preview = Preview::new(2);
+                let mut frames = Vec::new();
+                for frame in (0..=replay.timeline.end).step_by(2) {
+                    replay.seek(frame, ViewOptions::default(), &mut preview, &font, palette);
+                    let file = format!("journeys/{slug}/{frame:05}.png");
+                    preview.write(&dir.join(&file))?;
+                    frames.push(file);
+                }
+                let checkpoints: Vec<_> = replay
+                    .timeline
+                    .checkpoints
+                    .iter()
+                    .map(|checkpoint| {
+                        serde_json::json!({
+                            "frame": frame_at(checkpoint.at),
+                            "label": checkpoint.label,
+                        })
+                    })
+                    .collect();
+                index.push(serde_json::json!({
+                    "kind": "journey",
+                    "name": slug,
+                    "title": entry.title,
+                    "description": entry.description(),
+                    "frame_ms": FRAME_INTERVAL.as_millis() * 2,
+                    "frames": frames,
+                    "checkpoints": checkpoints,
+                }));
+            }
+        }
+    }
+    fs::write(
+        dir.join("index.json"),
+        serde_json::to_vec_pretty(&index).context("encoding gallery export index")?,
+    )
+    .context("writing gallery export index")?;
+    eprintln!("exported HUD gallery to {}", dir.display());
+    Ok(())
 }
 
 /// Open the local fixture gallery; screenshot mode captures this actual window.

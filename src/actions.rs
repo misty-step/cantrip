@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::ipc::{self, Command, StateKind, StatusSnapshot};
 use crate::recovery::{self, Take};
-use crate::settings::{apply_theme, color};
+use crate::ui::{self, color};
 use crate::{inject, keys, models, theme};
 use anyhow::{anyhow, Context, Result};
 use eframe::egui;
@@ -434,7 +434,7 @@ struct ActionsApp {
 impl ActionsApp {
     fn new(cc: &eframe::CreationContext<'_>, screenshot: Option<PathBuf>, doctor: bool) -> Self {
         let palette = theme::load();
-        apply_theme(&cc.egui_ctx, palette);
+        ui::setup(&cc.egui_ctx, palette);
         Self {
             observation: None,
             poll_result: None,
@@ -630,8 +630,11 @@ impl ActionsApp {
         }
         if self.last_poll.elapsed() >= POLL && self.poll_result.is_none() {
             self.last_poll = Instant::now();
-            self.palette = theme::load();
-            apply_theme(ctx, self.palette);
+            let palette = theme::load();
+            if palette != self.palette {
+                self.palette = palette;
+                ui::apply(ctx, palette);
+            }
             let (tx, rx) = mpsc::channel();
             let context = ctx.clone();
             let revision = if std::mem::take(&mut self.refresh_history) {
