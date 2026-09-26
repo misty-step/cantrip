@@ -79,6 +79,12 @@ const SURFACE_WIDTH: u32 = 420;
 const SURFACE_HEIGHT: u32 = 56;
 const CONTAINER_WIDTH: f32 = 336.0;
 const TRACK_HEIGHT: f32 = 44.0;
+// A take headed to a non-default target: an upper-left "to <label>" row above the
+// field, and that target's color on the border, a surface wash and the active field.
+const ROUTE_HEADER: f32 = 15.0;
+const ROUTE_LABEL_SIZE: f32 = 11.0;
+const ROUTE_WASH: f32 = 0.12;
+const ROUTE_LABEL_LIFT: f32 = 0.15;
 const CELLS: usize = AUDIO_WAVEFORM_BINS;
 const ROWS: usize = 7;
 const CELL_SIZE: f32 = 3.0;
@@ -229,6 +235,15 @@ struct ResultView {
     dwell: Duration,
     presented: bool,
     waiting_for_settle: bool,
+    /// The outcome's non-default target; the default flow and notices have none.
+    route: Option<ipc::Handoff>,
+}
+
+/// How a take headed to a non-default target is named on the instrument.
+struct Route {
+    handoff: ipc::Handoff,
+    /// "to <label>", formatted once per take rather than per painted frame.
+    text: String,
 }
 
 /// Signal absence at the beginning is actionable; silence after real input is
@@ -367,6 +382,8 @@ struct Model {
     desktop_reduced_motion: bool,
     track: TrackMotion,
     work: Option<WorkPresentation>,
+    route: Option<Route>,
+    route_revision: u64,
 }
 
 impl Model {
@@ -394,6 +411,8 @@ impl Model {
             desktop_reduced_motion: false,
             track: TrackMotion::new(now),
             work: None,
+            route: None,
+            route_revision: 0,
         }
     }
 
@@ -549,6 +568,7 @@ impl Model {
                 dwell: NOTICE_HOLD,
                 presented: false,
                 waiting_for_settle: false,
+                route: None,
             });
         }
         if status.notice.is_none() {
@@ -568,6 +588,28 @@ impl Model {
         self.observe_work(&status, now);
         self.snapshot = Some(status);
         self.refresh(now);
+    }
+
+    /// Only a take headed to a non-default target is tinted and labelled: the active
+    /// take's target, else the presented outcome's. Reconciled on every refresh so an
+    /// expiring result cannot leave its tint on later idle feedback.
+    fn sync_route(&mut self) {
+        let route = if self.active() {
+            self.snapshot
+                .as_ref()
+                .and_then(|status| status.handoff.as_ref())
+        } else {
+            self.result
+                .as_ref()
+                .and_then(|result| result.route.as_ref())
+        };
+        if self.route.as_ref().map(|route| &route.handoff) != route {
+            self.route = route.map(|handoff| Route {
+                text: format!("to {}", handoff.label),
+                handoff: handoff.clone(),
+            });
+            self.route_revision = self.route_revision.wrapping_add(1);
+        }
     }
 
     fn refresh_connection(&mut self, last_status: Instant, now: Instant) {
@@ -638,6 +680,7 @@ impl Model {
         }) {
             self.result = None;
         }
+        self.sync_route();
         if let Some(since) = self.lost_since {
             if self.lost_active && now.duration_since(since) >= DISCONNECT_DELAY {
                 self.set_composition(
@@ -1016,6 +1059,7 @@ impl Model {
         RenderKey {
             kind: self.kind,
             caption_revision: self.caption_revision,
+            route_revision: self.route_revision,
             interaction_event: self.interaction.as_ref().and(self.notice_event),
             opacities: std::array::from_fn(|index| {
                 frame.columns[index]
@@ -1205,6 +1249,7 @@ fn present_outcome(
         waiting_for_settle: kind == Kind::Resolved
             && delivered
             && outcome.cleanup != Cleanup::Failed,
+        route: outcome.handoff.clone(),
     }
 }
 
@@ -1662,9 +1707,13 @@ fn preference_output(program: &str, args: &[&str]) -> Option<String> {
 
 /// Run the native layer-shell HUD. Screenshot mode skips IPC and the instance
 /// lock and renders a composed scenario, including deliberately aged transitions.
-pub fn run(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Result<()> {
+pub fn run(
+    screenshot: Option<PathBuf>,
+    state: Option<ScreenshotState>,
+    handoff: Option<String>,
+) -> Result<()> {
     let visual_proof = screenshot.is_some();
-    let result = run_native(screenshot, state);
+    let result = run_native(screenshot, state, handoff);
     if visual_proof {
         return result;
     }
@@ -1674,7 +1723,11 @@ pub fn run(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Resul
     Ok(())
 }
 
-fn run_native(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Result<()> {
+fn run_native(
+    screenshot: Option<PathBuf>,
+    state: Option<ScreenshotState>,
+    handoff: Option<String>,
+) -> Result<()> {
     let _lock = if screenshot.is_some() {
         None
     } else {
@@ -1694,7 +1747,18 @@ fn run_native(screenshot: Option<PathBuf>, state: Option<ScreenshotState>) -> Re
         .context("allocating HUD buffer pool")?;
     let now = Instant::now();
     let model = if screenshot.is_some() {
-        screenshot_model(state.unwrap_or(ScreenshotState::Recording), now)
+        // A preview handoff is the first target in the live theme, like a real
+        // single configured target.
+        let handoff = handoff.map(|label| ipc::Handoff {
+            name: label.to_lowercase(),
+            color: theme::load().target(0),
+            label,
+        });
+        screenshot_model(
+            state.unwrap_or(ScreenshotState::Recording),
+            now,
+            handoff.as_ref(),
+        )
     } else {
         Model::new(now)
     };
@@ -1863,6 +1927,7 @@ impl SurfaceLifecycle {
 struct RenderKey {
     kind: Option<Kind>,
     caption_revision: u64,
+    route_revision: u64,
     interaction_event: Option<u64>,
     opacities: [[u8; ROWS]; CELLS],
     alpha: u8,
@@ -2205,22 +2270,49 @@ impl Canvas<'_> {
         let left = (logical_width - container_width) / 2.0;
         let top = 6.0;
         let body_height = self.height as f32 / self.scale - 12.0;
-        self.rect(left, top, container_width, body_height, palette.border, 1.0);
+        // A non-default target owns the border, a surface wash and the active field;
+        // the default flow keeps the theme's own colors.
+        let route = model.route.as_ref();
+        let (border, surface, active) = match route {
+            Some(route) => (
+                route.handoff.color,
+                mix(palette.surface, route.handoff.color, ROUTE_WASH),
+                route.handoff.color,
+            ),
+            None => (palette.border, palette.surface, palette.accent),
+        };
+        self.rect(left, top, container_width, body_height, border, 1.0);
         self.rect(
             left + 1.0,
             top + 1.0,
             container_width - 2.0,
             body_height - 2.0,
-            palette.surface,
+            surface,
             1.0,
         );
         if kind == Kind::Attention {
             self.rect(left, top, 2.0, body_height, palette.attention, 1.0);
         }
         let rgb = match kind {
-            Kind::Recording | Kind::Working | Kind::Finishing | Kind::Resolved => palette.accent,
+            Kind::Recording | Kind::Working | Kind::Finishing | Kind::Resolved => active,
             Kind::Attention => palette.attention,
             Kind::Neutral => palette.foreground,
+        };
+        let track_top = match route {
+            Some(route) => {
+                self.text(
+                    font,
+                    &route.text,
+                    left + 10.0,
+                    top + 5.0,
+                    (container_width - 20.0).max(16.0),
+                    ROUTE_LABEL_SIZE,
+                    1,
+                    mix(route.handoff.color, palette.foreground, ROUTE_LABEL_LIFT),
+                );
+                top + ROUTE_HEADER
+            }
+            None => top,
         };
         // The field always fills the container at full width; state changes only
         // raise cell light above FIELD_REST, never the field's geometry.
@@ -2231,14 +2323,14 @@ impl Canvas<'_> {
         for (index, column) in frame.columns.iter().copied().enumerate() {
             self.pixel_column(
                 track_left + index as f32 * slot_width + (slot_width - cell_width) / 2.0,
-                top + TRACK_HEIGHT / 2.0,
+                track_top + TRACK_HEIGHT / 2.0,
                 cell_width,
                 column,
                 rgb,
             );
         }
         let text_width = (container_width - 32.0).max(16.0);
-        let mut y = top + TRACK_HEIGHT;
+        let mut y = track_top + TRACK_HEIGHT;
         y += self.text(
             font,
             &model.caption.title,
@@ -2424,6 +2516,13 @@ fn line_capacity(font: &FontRef<'_>, width: f32, size: f32) -> usize {
         .max(1.0) as usize
 }
 
+fn mix(from: [u8; 3], to: [u8; 3], amount: f32) -> [u8; 3] {
+    std::array::from_fn(|channel| {
+        (f32::from(from[channel]) + (f32::from(to[channel]) - f32::from(from[channel])) * amount)
+            .round() as u8
+    })
+}
+
 fn wrap_line(text: &str, max_chars: usize) -> (&str, &str) {
     let mut space = None;
     for (count, (index, character)) in text.char_indices().enumerate() {
@@ -2444,7 +2543,12 @@ fn wrap_line(text: &str, max_chars: usize) -> (&str, &str) {
 fn layout_height(model: &Model, font: &FontRef<'_>, container_width: f32) -> u32 {
     let text_width = (container_width - 32.0).max(16.0);
     let interaction = model.interaction.as_ref().map(|(text, _)| text.as_str());
-    SURFACE_HEIGHT + caption_height(font, &model.caption, interaction, text_width)
+    let header = if model.route.is_some() {
+        ROUTE_HEADER as u32
+    } else {
+        0
+    };
+    SURFACE_HEIGHT + header + caption_height(font, &model.caption, interaction, text_width)
 }
 
 fn caption_height(
@@ -2586,6 +2690,7 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
             remote_configured: false,
         },
         hud: crate::config::HudConfig::default(),
+        handoff: None,
     }
 }
 
@@ -2600,10 +2705,12 @@ fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOu
         error: None,
         artifacts: ipc::Artifacts::default(),
         dismissed: false,
+        handoff: None,
     }
 }
 
-fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
+/// `handoff` composes the same scenario for a take headed to that target.
+fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::Handoff>) -> Model {
     let start = now - Duration::from_secs(3);
     let mut model = Model::new(start);
     model.apply(preview_snapshot(StateKind::Idle), start);
@@ -2637,6 +2744,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
         }
         _ => {}
     }
+    recording.handoff = handoff.cloned();
     model.apply(recording, start);
     model.track.presented = model.track.frame(now);
     if matches!(
@@ -2722,6 +2830,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
         ScreenshotState::Busy => now - Duration::from_secs(1),
         _ => now - Duration::from_secs(2),
     };
+    processing.handoff = handoff.cloned();
     model.apply(processing, processing_at);
     if state == ScreenshotState::Settling {
         model.track.presented = model.frame(now);
@@ -2764,6 +2873,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
         ScreenshotState::Copied | ScreenshotState::CopiedInstead => {
             (Completeness::Complete, Delivery::Copied)
         }
+        _ if handoff.is_some() => (Completeness::Complete, Delivery::HandedOff),
         _ => (Completeness::Complete, Delivery::Pasted),
     };
     let mut outcome = preview_outcome(completeness, delivery);
@@ -2775,6 +2885,15 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
         _ => "Transcription failed.",
     }
     .to_owned();
+    if let Some(handoff) = handoff {
+        // The daemon's handoff delivery messages.
+        match outcome.delivery {
+            Delivery::HandedOff => outcome.message = format!("Sent to {}.", handoff.label),
+            Delivery::Failed => outcome.message = "Handoff failed.".to_owned(),
+            _ => {}
+        }
+    }
+    outcome.handoff = handoff.cloned();
     outcome.artifacts = ipc::Artifacts {
         take_id: Some("preview-take".to_owned()),
         audio: matches!(
@@ -2826,6 +2945,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant) -> Model {
             silent: false,
             waveform: SCREENSHOT_WAVEFORM,
         });
+        next.handoff = handoff.cloned();
         model.apply(next, now - Duration::from_millis(180));
     }
     let mut at = if state == ScreenshotState::Interrupted {
@@ -2949,6 +3069,60 @@ mod tests {
         (bytes, width)
     }
 
+    #[test]
+    fn only_handoff_takes_are_tinted_and_labelled_and_the_tint_ends_with_its_take() {
+        let now = Instant::now();
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let kaylee = ipc::Handoff {
+            name: "kaylee".to_owned(),
+            label: "Kaylee".to_owned(),
+            color: [0xe6, 0x8b, 0xd5],
+        };
+        // Capsule top border at scale 1 (BGRA), right of any attention rail.
+        let border = |model: &Model| {
+            let (bytes, width) = raster_hud(model, now, SURFACE_WIDTH, 1.0);
+            let x = (SURFACE_WIDTH - CONTAINER_WIDTH as u32) / 2 + 10;
+            let index = ((6 * width + x) * 4) as usize;
+            [bytes[index + 2], bytes[index + 1], bytes[index]]
+        };
+        for state in [
+            ScreenshotState::Recording,
+            ScreenshotState::Progress,
+            ScreenshotState::Sent,
+            ScreenshotState::DeliveryFailed,
+            ScreenshotState::Cancelled,
+        ] {
+            let default = screenshot_model(state, now, None);
+            let routed = screenshot_model(state, now, Some(&kaylee));
+            assert!(default.route.is_none(), "{state:?}");
+            assert_eq!(
+                routed.route.as_ref().map(|route| route.text.as_str()),
+                Some("to Kaylee"),
+                "{state:?}"
+            );
+            assert_eq!(
+                layout_height(&routed, &font, CONTAINER_WIDTH),
+                layout_height(&default, &font, CONTAINER_WIDTH) + ROUTE_HEADER as u32,
+                "{state:?}"
+            );
+            assert_eq!(border(&default), [0, 255, 0], "{state:?}");
+            assert_eq!(border(&routed), kaylee.color, "{state:?}");
+        }
+        // An expiring Kaylee result must not leave its tint on later idle feedback.
+        let mut model = screenshot_model(ScreenshotState::Cancelled, now, Some(&kaylee));
+        model.interaction = Some(("Nothing is recording.".to_owned(), now + NOTICE_HOLD * 3));
+        model.refresh(now + NOTICE_HOLD * 2);
+        assert!(model.result.is_none());
+        assert!(model.route.is_none());
+        // A persistent Kaylee failure must not tint the next default take.
+        let mut model = screenshot_model(ScreenshotState::DeliveryFailed, now, Some(&kaylee));
+        let mut next = recording(0, Some(signal(true)));
+        next.operation_id = Some("next-default-take".to_owned());
+        model.apply(next, now + Duration::from_secs(1));
+        assert!(model.route.is_none());
+        assert_eq!(border(&model), [0, 255, 0]);
+    }
+
     fn grid_bounds(bytes: &[u8], width: u32, scale: f32) -> [u32; 4] {
         let mut bounds = [width, u32::MAX, 0, 0];
         for (index, pixel) in bytes.as_chunks::<4>().0.iter().enumerate() {
@@ -2976,7 +3150,7 @@ mod tests {
             ScreenshotState::ReducedMotionCleaning,
             ScreenshotState::ReducedMotionSent,
         ] {
-            let mut model = screenshot_model(state, now);
+            let mut model = screenshot_model(state, now, None);
             let unlabelled = model.caption.clone();
             for width in [80, 240, SURFACE_WIDTH] {
                 for scale in [1.0, 1.25, 2.0] {

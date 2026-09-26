@@ -15,6 +15,7 @@ BarWidget {
     readonly property string currentState: snapshot ? snapshot.state : "unknown"
     readonly property bool working: currentState === "recording" || currentState === "processing"
     readonly property string tooltip: Status.tooltip(snapshot, lastPending)
+    readonly property var handoff: Status.handoff(snapshot)
 
     implicitWidth: Style.bar.iconSlot
     implicitHeight: Style.bar.iconSlot
@@ -56,7 +57,8 @@ BarWidget {
         text: "󰍬"
         active: root.working
         useActiveColor: true
-        activeColor: Color.accent
+        // A take headed to a non-default target shows in that target's color.
+        activeColor: root.handoff ? root.handoff.color : Color.accent
         tooltipText: root.tooltip
         // The host caches tooltip text on entry; refresh it while hovered too.
         onTooltipTextChanged: if (bar && tooltipHovered) bar.showTooltip(button, tooltipText)

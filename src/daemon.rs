@@ -84,6 +84,8 @@ struct Operation {
     cancel: Arc<AtomicBool>,
     lifecycle: Arc<AtomicU8>,
     hud: crate::config::HudConfig,
+    /// Set only for a take started toward a named handoff target.
+    handoff: Option<ipc::Handoff>,
     started: Instant,
 }
 
@@ -251,7 +253,12 @@ impl Daemon {
         self.history_revision += 1;
     }
 
-    fn operation(&mut self, take_id: String, kind: Option<OperationKind>) -> Operation {
+    fn operation(
+        &mut self,
+        take_id: String,
+        kind: Option<OperationKind>,
+        handoff: Option<ipc::Handoff>,
+    ) -> Operation {
         self.operation_sequence += 1;
         Operation {
             identity: Arc::new(Identity {
@@ -263,7 +270,24 @@ impl Daemon {
             cancel: Arc::new(AtomicBool::new(false)),
             lifecycle: Arc::new(AtomicU8::new(CANCEL_OPEN)),
             hud: self.config.hud,
+            handoff,
             started: Instant::now(),
+        }
+    }
+
+    /// How clients show a target: its label, and the theme color of its slot in name
+    /// order, resolved now so every client shows this take the same way.
+    fn handoff_view(&self, name: &str, target: &crate::config::HandoffTarget) -> ipc::Handoff {
+        let slot = self
+            .config
+            .handoff
+            .keys()
+            .position(|key| key == name)
+            .unwrap_or(0);
+        ipc::Handoff {
+            name: name.to_owned(),
+            label: target.label.clone().unwrap_or_else(|| name.to_owned()),
+            color: crate::theme::load().target(slot),
         }
     }
 
@@ -381,6 +405,10 @@ impl Daemon {
                 remote_configured: self.config.stt.endpoint.is_some(),
             },
             hud,
+            handoff: self
+                .state
+                .operation()
+                .and_then(|operation| operation.handoff.clone()),
         }
     }
 }
@@ -1073,7 +1101,10 @@ fn start_recording(
     let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
     match capture::Recorder::start(&wav, daemon.config.audio_source.as_deref()) {
         Ok(recorder) => {
-            let operation = daemon.operation(take_id, Some(OperationKind::Dictation));
+            let handoff = selected_handoff
+                .as_ref()
+                .map(|(name, target)| daemon.handoff_view(name, target));
+            let operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
             let mut config = daemon.config.clone();
             if let Some(enabled) = postproc {
                 config.postproc.enabled = enabled;
@@ -1287,7 +1318,7 @@ fn recover_take(
     if clipboard {
         config.injection = InjectionMode::Clipboard;
     }
-    let operation = daemon.operation(take.id, Some(OperationKind::Recovery));
+    let operation = daemon.operation(take.id, Some(OperationKind::Recovery), None);
     let job = Job {
         operation: operation.clone(),
         config: Box::new(config),
@@ -1326,7 +1357,7 @@ fn forget_take(daemon: &mut Daemon, job_tx: &Sender<Job>, id: String) -> Command
     if select_take(&daemon.recordings, Some(&id), |_| true).is_none() {
         return daemon.reject("That recording is not available.", "no-recording");
     }
-    let operation = daemon.operation(id, Some(OperationKind::Forget));
+    let operation = daemon.operation(id, Some(OperationKind::Forget), None);
     let job = Job {
         operation: operation.clone(),
         config: Box::new(daemon.config.clone()),
@@ -1349,7 +1380,7 @@ fn dispatch_text(
 ) -> CommandReply {
     let mut config = daemon.config.clone();
     config.injection = mode;
-    let operation = daemon.operation(take.id, Some(OperationKind::Replay));
+    let operation = daemon.operation(take.id, Some(OperationKind::Replay), None);
     let job = Job {
         operation: operation.clone(),
         config: Box::new(config),
@@ -1417,6 +1448,7 @@ fn setup_failure(message: &str, error: &str) -> TerminalOutcome {
         error: Some(error.to_owned()),
         artifacts: Artifacts::default(),
         dismissed: false,
+        handoff: None,
     }
 }
 
@@ -1471,6 +1503,7 @@ fn finish_retention(daemon: &mut Daemon, telemetry_reporter: &TelemetryReporter)
             );
             if let Some(operation) = daemon.state.operation() {
                 outcome.operation_id = Some(operation.identity.operation_id.clone());
+                outcome.handoff = operation.handoff.clone();
                 outcome.artifacts = facts(&operation.identity.take_id);
                 operation.lifecycle.store(CANCEL_SEALED, Ordering::Release);
             }
@@ -1502,6 +1535,7 @@ fn drain_worker_results(
                         "worker-failed",
                     );
                     outcome.operation_id = Some(operation.identity.operation_id.clone());
+                    outcome.handoff = operation.handoff.clone();
                     outcome.artifacts = facts(&operation.identity.take_id);
                     describe_artifacts(&mut outcome);
                     daemon.state = State::Idle;
@@ -1591,6 +1625,7 @@ fn retain_rejected_capture(job: Job) -> TerminalOutcome {
         "worker-failed",
     );
     outcome.operation_id = Some(job.operation.identity.operation_id.clone());
+    outcome.handoff = job.operation.handoff.clone();
     if let Work::Capture {
         recorder,
         wav,
@@ -1667,6 +1702,7 @@ impl WorkerContext<'_> {
             error: None,
             artifacts: facts(self.id()),
             dismissed: false,
+            handoff: self.operation.handoff.clone(),
         }
     }
 
@@ -2493,7 +2529,8 @@ mod tests {
 
     fn processing(kind: WorkKind) -> (Daemon, Operation) {
         let mut daemon = idle_daemon();
-        let operation = daemon.operation("keep-me".to_owned(), Some(OperationKind::Dictation));
+        let operation =
+            daemon.operation("keep-me".to_owned(), Some(OperationKind::Dictation), None);
         daemon.begin(
             operation.clone(),
             Stage::Transcribing {
@@ -2522,7 +2559,7 @@ mod tests {
     #[test]
     fn capture_signal_none_is_starting_not_proved_listening() {
         let mut daemon = idle_daemon();
-        let operation = daemon.operation("new".to_owned(), Some(OperationKind::Dictation));
+        let operation = daemon.operation("new".to_owned(), Some(OperationKind::Dictation), None);
         daemon.state = State::Recording {
             operation,
             recorder: Box::new(FakeRecorder::default()),
@@ -2584,8 +2621,11 @@ mod tests {
     #[test]
     fn cancelling_capture_revokes_delivery_before_finalization() {
         let mut daemon = idle_daemon();
-        let operation =
-            daemon.operation("cancelled-take".to_owned(), Some(OperationKind::Dictation));
+        let operation = daemon.operation(
+            "cancelled-take".to_owned(),
+            Some(OperationKind::Dictation),
+            None,
+        );
         daemon.state = State::Recording {
             operation,
             recorder: Box::new(FakeRecorder::default()),
@@ -2613,7 +2653,7 @@ mod tests {
     fn stale_worker_result_cannot_replace_a_newer_operation() {
         let (mut daemon, old) = processing(WorkKind::Transcription);
         let reporter = TelemetryReporter::spawn();
-        let newer = daemon.operation("keep-me".to_owned(), Some(OperationKind::Replay));
+        let newer = daemon.operation("keep-me".to_owned(), Some(OperationKind::Replay), None);
         daemon.begin(newer.clone(), Stage::Delivering, WorkKind::Delivery);
         apply_worker_result(
             &mut daemon,
@@ -2629,6 +2669,7 @@ mod tests {
                     error: None,
                     artifacts: Artifacts::default(),
                     dismissed: false,
+                    handoff: None,
                 },
                 recordings: Some(Vec::new()),
                 telemetry: None,
@@ -2663,6 +2704,7 @@ mod tests {
                 text: true,
             },
             dismissed: false,
+            handoff: None,
         });
         let event = daemon.outcome.as_ref().unwrap().event_id;
         let (job_tx, _) = mpsc::channel();
@@ -2929,7 +2971,11 @@ mod tests {
         let mut daemon = idle_daemon();
         daemon.config.injection = InjectionMode::Type;
         daemon.config.hud.labels = true;
-        let operation = daemon.operation("stable-take".to_owned(), Some(OperationKind::Dictation));
+        let operation = daemon.operation(
+            "stable-take".to_owned(),
+            Some(OperationKind::Dictation),
+            None,
+        );
         let recorder = FakeRecorder::default();
         let stop_requested = recorder.stop_requested.clone();
         daemon.state = State::Recording {
@@ -3094,7 +3140,7 @@ mod tests {
             ..Config::default()
         };
         let mut daemon = idle_daemon();
-        let operation = daemon.operation("take-123".to_owned(), None);
+        let operation = daemon.operation("take-123".to_owned(), None, None);
         let (sender, _) = mpsc::channel();
         let context = WorkerContext {
             operation: &operation,
@@ -3117,6 +3163,50 @@ mod tests {
         assert!(captured.contains("target=pepper"));
         assert!(!captured.contains(text));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_handoff_take_names_its_target_in_status_and_outcome_and_a_default_take_does_not() {
+        let mut daemon = idle_daemon();
+        for name in ["alpha", "kaylee"] {
+            daemon.config.handoff.insert(
+                name.to_owned(),
+                crate::config::HandoffTarget {
+                    command: vec!["/bin/true".to_owned()],
+                    timeout_seconds: 1,
+                    label: (name == "kaylee").then(|| "Kaylee".to_owned()),
+                },
+            );
+        }
+        let view =
+            |daemon: &Daemon, name: &str| daemon.handoff_view(name, &daemon.config.handoff[name]);
+        let alpha = view(&daemon, "alpha");
+        let kaylee = view(&daemon, "kaylee");
+        assert_eq!(
+            (alpha.label.as_str(), kaylee.label.as_str()),
+            ("alpha", "Kaylee")
+        );
+        assert_ne!(alpha.color, kaylee.color, "each target needs its own color");
+        let (sender, _) = mpsc::channel();
+        for handoff in [None, Some(kaylee)] {
+            let operation = daemon.operation("take".to_owned(), None, handoff.clone());
+            daemon.begin(operation.clone(), Stage::Delivering, WorkKind::Delivery);
+            assert_eq!(daemon.snapshot().handoff, handoff);
+            let context = WorkerContext {
+                operation: &operation,
+                config: &daemon.config,
+                guard: None,
+                stages: &sender,
+            };
+            assert_eq!(
+                context
+                    .outcome(Completeness::Failed, Delivery::Failed)
+                    .handoff,
+                handoff
+            );
+            daemon.state = State::Idle;
+            assert_eq!(daemon.snapshot().handoff, None);
+        }
     }
 
     #[test]
@@ -3160,7 +3250,7 @@ mod tests {
             ..Config::default()
         };
         let mut daemon = idle_daemon();
-        let operation = daemon.operation("failed-handoff".to_owned(), None);
+        let operation = daemon.operation("failed-handoff".to_owned(), None, None);
         let (sender, _) = mpsc::channel();
         let context = WorkerContext {
             operation: &operation,
@@ -3231,7 +3321,7 @@ mod tests {
 
     fn recording_take(handoff: Option<&str>) -> Daemon {
         let mut daemon = idle_daemon();
-        let operation = daemon.operation("take".to_owned(), Some(OperationKind::Dictation));
+        let operation = daemon.operation("take".to_owned(), Some(OperationKind::Dictation), None);
         let config = Config {
             selected_handoff: handoff.map(|name| {
                 (

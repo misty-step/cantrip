@@ -46,6 +46,10 @@ enum CliCommand {
         /// Available scenarios cover live signal, progress, and recovery outcomes.
         #[arg(long, value_enum, requires = "screenshot")]
         state: Option<hud::ScreenshotState>,
+        /// Compose the --screenshot scenario for a take headed to a handoff target
+        /// with this label, tinted in the live theme's first target color.
+        #[arg(long, value_name = "LABEL", requires = "screenshot")]
+        handoff: Option<String>,
     },
     /// Review production HUD states and transitions without running dictation.
     #[command(hide = true)]
@@ -277,7 +281,11 @@ fn run(cli: Cli) -> Result<()> {
             let config = Config::load().context("loading configuration")?;
             daemon::run(config, preload)
         }
-        CliCommand::Hud { screenshot, state } => hud::run(screenshot, state),
+        CliCommand::Hud {
+            screenshot,
+            state,
+            handoff,
+        } => hud::run(screenshot, state, handoff),
         CliCommand::HudGallery { screenshot } => hud::gallery::run(screenshot),
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
@@ -524,6 +532,9 @@ fn print_status(json: bool) -> Result<()> {
     if status.state != ipc::StateKind::Idle {
         println!("elapsed: {}s", status.elapsed);
     }
+    if let Some(handoff) = &status.handoff {
+        println!("handoff: {} ({})", handoff.label, handoff.name);
+    }
     if let Some(stage) = &status.stage {
         println!("stage: {stage}");
     }
@@ -548,6 +559,9 @@ fn print_outcome(outcome: Option<&ipc::TerminalOutcome>) {
         return;
     };
     println!("last: {}", outcome.message);
+    if let Some(handoff) = &outcome.handoff {
+        println!("last-handoff: {} ({})", handoff.label, handoff.name);
+    }
     println!("event: {}", outcome.event_id);
     println!("completeness: {}", enum_label(&outcome.completeness));
     println!("delivery: {}", enum_label(&outcome.delivery));

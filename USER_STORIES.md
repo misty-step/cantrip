@@ -162,7 +162,8 @@ Criteria:
 5. WHEN a toggle's `--handoff` differs from the recording take's, including a missing one, THE SYSTEM SHALL keep recording and neither deliver nor hand off that take.
 6. IF a handoff command fails or times out, THEN THE SYSTEM SHALL kill its whole process group before reporting the failure.
 7. WHEN a target sets `label`, THE SYSTEM SHALL show that label instead of the target name in delivery messages.
+8. WHILE a handoff take records, processes, or shows its outcome, THE SYSTEM SHALL tint the HUD in that target's own theme-derived color and show "to LABEL" in its upper left, use the same color and words in the bar widget and actions window, and leave default takes unchanged.
 
-No-gos: no transcript or child output in logs or telemetry; no desktop fallback.
+No-gos: no transcript or child output in logs or telemetry; no desktop fallback; no destination indicator on default takes.
 
-Evidence: `src/daemon.rs`, `src/config.rs`, `src/ipc.rs`, `docs/adr/0027-named-handoff-targets.md`
+Evidence: `src/daemon.rs`, `src/config.rs`, `src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/adr/0027-named-handoff-targets.md`, `docs/adr/0028-handoff-destination-tint.md`

@@ -884,7 +884,7 @@ impl ActionsApp {
             .as_ref()
             .and_then(|observation| observation.status.as_ref())
         {
-            let caption = status.stage.as_ref().map_or_else(
+            let mut caption = status.stage.as_ref().map_or_else(
                 || match &status.state {
                     StateKind::Idle => "Ready".to_owned(),
                     StateKind::Recording if status.signal.is_none() => {
@@ -895,7 +895,20 @@ impl ActionsApp {
                 },
                 ToString::to_string,
             );
-            ui.label(egui::RichText::new(caption).size(18.0));
+            // Only a take headed to a non-default target is named, in that target's color.
+            let mut text = egui::RichText::new(match &status.handoff {
+                Some(handoff) => {
+                    caption.push_str(" · to ");
+                    caption.push_str(&handoff.label);
+                    caption
+                }
+                None => caption,
+            })
+            .size(18.0);
+            if let Some(handoff) = &status.handoff {
+                text = text.color(color(handoff.color));
+            }
+            ui.label(text);
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
@@ -918,7 +931,13 @@ impl ActionsApp {
             });
             if let Some(outcome) = &status.outcome {
                 if !outcome.dismissed {
-                    ui.label(&outcome.message);
+                    match &outcome.handoff {
+                        Some(handoff) => ui.colored_label(
+                            color(handoff.color),
+                            format!("{} · to {}", outcome.message, handoff.label),
+                        ),
+                        None => ui.label(&outcome.message),
+                    };
                     if let Some(error) = &outcome.error {
                         ui.colored_label(color(self.palette.attention), error);
                     }

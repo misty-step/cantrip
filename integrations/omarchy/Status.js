@@ -31,14 +31,32 @@ function tooltip(snapshot, lastPending) {
     } else {
         state = "State unknown"
     }
-    var detail = snapshot.outcome && !snapshot.outcome.dismissed
-        && typeof snapshot.outcome.message === "string" ? " " + snapshot.outcome.message : ""
+    var outcome = snapshot.outcome && !snapshot.outcome.dismissed
+        && typeof snapshot.outcome.message === "string" ? snapshot.outcome : null
+    var detail = outcome ? " " + outcome.message : ""
+    var last = outcome && valid(outcome.handoff)
+    if (last) detail += " (to " + last.label + ")"
     if (snapshot.notice && typeof snapshot.notice.message === "string") {
         detail += " " + snapshot.notice.message
     }
+    // Only a take headed to a non-default target is named; the default flow is unchanged.
+    var target = handoff(snapshot)
+    if (target) state += " to " + target.label
     var pending = snapshot.pending_recordings > 0 ? " " + snapshot.pending_recordings + " recording(s) waiting for recovery." : ""
     return "Cantrip: " + state + "." + detail + pending
         + " Left-click: raw dictation. Right-click: recordings, cancel and setup."
 }
 
-if (typeof module !== "undefined") module.exports = { parse: parse, tooltip: tooltip }
+// A well-formed handoff target, or null for the default flow and malformed data.
+function valid(value) {
+    if (!value || typeof value.label !== "string" || typeof value.color !== "string"
+            || !/^#[0-9a-f]{6}$/i.test(value.color)) return null
+    return value
+}
+
+// The active take's handoff target; colors the bar only while that take is working.
+function handoff(snapshot) {
+    return valid(snapshot && snapshot.handoff)
+}
+
+if (typeof module !== "undefined") module.exports = { parse: parse, tooltip: tooltip, handoff: handoff }
