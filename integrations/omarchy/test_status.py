@@ -34,7 +34,8 @@ class BarStatusContract(unittest.TestCase):
     def view(self, value):
         script = ("const S = require(process.argv[1]); const s = JSON.parse(process.argv[2]);"
                   "const h = S.handoff(s);"
-                  "console.log(JSON.stringify({tone: S.tone(s), tooltip: S.tooltip(s), color: h && h.color}))")
+                  "console.log(JSON.stringify({tone: S.tone(s), tooltip: S.tooltip(s), color: h && h.color,"
+                  " dismiss: S.dismissCommand(s)}))")
         out = subprocess.run(["node", "-e", script, str(STATUS), json.dumps(value)],
                              check=True, capture_output=True, text=True, timeout=10).stdout
         return json.loads(out)
@@ -62,6 +63,9 @@ class BarStatusContract(unittest.TestCase):
         self.assertEqual(view["tone"], "attention")
         self.assertIn("Handoff failed. (to Kaylee)", view["tooltip"])
         self.assertIn("Middle-click: dismiss", view["tooltip"])
+        # Dismiss targets exactly the shown outcome, never an independent notice.
+        self.assertEqual(view["dismiss"], "cantrip dismiss --event-id 9")
+        self.assertIsNone(self.view(snapshot(outcome=failed))["dismiss"])
         # Dismissed or replaced outcomes are no longer flagged by the daemon.
         self.assertEqual(self.view(snapshot(outcome={**failed, "dismissed": True}))["tone"], "rest")
         self.assertEqual(self.view(snapshot("recording", attention=True))["tone"], "recording")

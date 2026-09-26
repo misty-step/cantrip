@@ -28,7 +28,8 @@ The operator chose the quiet mark, drawn as the solid pixel C.
   flag is set. The daemon owns that rule (`TerminalOutcome::needs_attention`
   on the current outcome), so the widget never re-derives it. It clears when
   the next take starts (the daemon replaces the outcome) or when middle-click
-  runs `cantrip dismiss`. Dismissal never deletes recordings.
+  runs `cantrip dismiss --event-id` for the outcome shown, leaving any
+  independent notice. Dismissal never deletes recordings.
 - The tooltip carries state, target and the latest outcome. Unresolved takes
   remain listed in Actions (right-click); the bar no longer counts them.
 

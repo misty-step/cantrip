@@ -357,10 +357,10 @@ The bar item is one fixed slot holding the Cantrip mark, with no count or text:
   deferred) the mark uses the theme's urgent color until the next take starts
   or the outcome is dismissed.
 
-Left-click toggles raw dictation, middle-click dismisses an outcome that needs
-attention (the recording stays in history), and right-click opens Actions,
-where saved recordings are listed. The tooltip names the state, the target and
-the latest outcome. See [ADR 0029](adr/0029-quiet-bar-mark.md).
+Left-click toggles raw dictation, middle-click dismisses the outcome that needs
+attention (only that outcome, by event id; the recording stays in history), and
+right-click opens Actions, where saved recordings are listed. The tooltip names
+the state, the target and the latest undismissed outcome. See [ADR 0029](adr/0029-quiet-bar-mark.md).
 
 The installer preserves unrelated shell/menu content, stages complete plugin
 updates, and reports private rollback backups. To roll back, disable

@@ -42,6 +42,14 @@ function tone(snapshot) {
     return snapshot.attention === true ? "attention" : "rest"
 }
 
+// Middle-click: dismiss exactly the outcome being shown, never an independent notice
+// or an outcome that replaced it since the last poll. Null when nothing needs it.
+function dismissCommand(snapshot) {
+    var value = tone(snapshot) === "attention" ? outcome(snapshot) : null
+    if (!value || !Number.isSafeInteger(value.event_id) || value.event_id < 0) return null
+    return "cantrip dismiss --event-id " + value.event_id
+}
+
 function tooltip(snapshot) {
     var mode = tone(snapshot)
     if (mode === "unavailable") {
@@ -68,5 +76,5 @@ function tooltip(snapshot) {
 }
 
 if (typeof module !== "undefined") {
-    module.exports = { parse: parse, handoff: handoff, tone: tone, tooltip: tooltip }
+    module.exports = { parse: parse, handoff: handoff, tone: tone, tooltip: tooltip, dismissCommand: dismissCommand }
 }

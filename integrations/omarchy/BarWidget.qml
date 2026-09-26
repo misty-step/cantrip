@@ -112,7 +112,8 @@ BarWidget {
                 root.bar.run("cantrip toggle --postproc raw")
             } else if (mouseButton === Qt.MiddleButton) {
                 // Dismissal acknowledges the outcome; it never deletes a recording.
-                if (root.tone === "attention") root.bar.run("cantrip dismiss")
+                var dismiss = Status.dismissCommand(root.snapshot)
+                if (dismiss) root.bar.run(dismiss)
                 root.refresh()
             } else if (mouseButton === Qt.RightButton) {
                 root.bar.run("cantrip actions")
