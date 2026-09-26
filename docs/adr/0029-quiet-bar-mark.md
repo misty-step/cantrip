@@ -39,3 +39,13 @@ The backlog of unresolved takes is no longer visible from the bar; it is only
 discoverable in Actions and `cantrip status`. On monochrome themes the default
 flow's recording color differs from rest mainly by brightness. The status
 snapshot keeps `pending_recordings` for other clients.
+
+## Addendum (2026-09-26): publishing the widget live
+
+After installing, the running Omarchy shell logged a plugin reload and
+rescanned, but kept drawing the previous widget. Pointing the manifest at a
+newly named copy of the same files made the running shell show the new widget.
+The installer therefore publishes `BarWidget.qml` and `Status.js` under
+`payload-<first 16 hex of their SHA-256>/`, names that path as the manifest's
+`barWidget` entry point, and removes root-level sources and older payloads while
+keeping unrelated files in the plugin directory.

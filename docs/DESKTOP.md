@@ -362,6 +362,12 @@ attention (only that outcome, by event id; the recording stays in history), and
 right-click opens Actions, where saved recordings are listed. The tooltip names
 the state, the target and the latest undismissed outcome. See [ADR 0029](adr/0029-quiet-bar-mark.md).
 
+The running Omarchy shell keeps drawing an already-loaded widget until its entry
+file path changes, so the installer publishes the widget sources under a
+content-addressed `payload-<hash>/` directory named in the plugin manifest and
+removes superseded Cantrip sources. A changed widget therefore appears without
+restarting the shell.
+
 The installer preserves unrelated shell/menu content, stages complete plugin
 updates, and reports private rollback backups. To roll back, disable
 `cantrip.dictation`, restore the previous bar widget, and remove only the managed
