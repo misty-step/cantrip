@@ -68,30 +68,37 @@ BarWidget {
     Component {
         id: cantripMark
         Item {
-            id: mark
             // The solid pixel C of Cantrip's mark (site/public/favicon.svg), on a 4×4 cell grid.
-            readonly property real cell: width / 4
-            readonly property var cells: [[3, 0], [2, 0], [1, 0], [0, 1], [0, 2], [1, 3], [2, 3], [3, 3]]
-            Repeater {
-                model: mark.cells
-                Rectangle {
-                    required property var modelData
-                    required property int index
-                    x: modelData[0] * mark.cell
-                    y: modelData[1] * mark.cell
-                    width: mark.cell
-                    height: mark.cell
-                    antialiasing: false
-                    color: root.tone === "attention" ? Color.urgent
-                        : root.tone === "recording" || root.tone === "processing" ? root.routeColor
-                        : root.restColor
-                    opacity: root.tone === "unavailable" ? 0.3
-                        : root.tone === "rest" ? 0.55
-                        : root.tone === "processing" && (index - root.chase + 8) % 8 > 2 ? 0.35
-                        : 1
-                    Behavior on color {
-                        enabled: root.animate
-                        ColorAnimation { duration: 160 }
+            // Whole-pixel cells sized from the bar's icon font, so the mark's ink matches
+            // neighbouring Nerd Font glyphs instead of filling the whole 16 px canvas.
+            Item {
+                id: mark
+                anchors.centerIn: parent
+                readonly property int cell: Math.max(2, Math.floor(Style.bar.iconFont / 4))
+                width: cell * 4
+                height: cell * 4
+                readonly property var cells: [[3, 0], [2, 0], [1, 0], [0, 1], [0, 2], [1, 3], [2, 3], [3, 3]]
+                Repeater {
+                    model: mark.cells
+                    Rectangle {
+                        required property var modelData
+                        required property int index
+                        x: modelData[0] * mark.cell
+                        y: modelData[1] * mark.cell
+                        width: mark.cell
+                        height: mark.cell
+                        antialiasing: false
+                        color: root.tone === "attention" ? Color.urgent
+                            : root.tone === "recording" || root.tone === "processing" ? root.routeColor
+                            : root.restColor
+                        opacity: root.tone === "unavailable" ? 0.3
+                            : root.tone === "rest" ? 0.55
+                            : root.tone === "processing" && (index - root.chase + 8) % 8 > 2 ? 0.35
+                            : 1
+                        Behavior on color {
+                            enabled: root.animate
+                            ColorAnimation { duration: 160 }
+                        }
                     }
                 }
             }
