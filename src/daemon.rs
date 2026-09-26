@@ -391,6 +391,10 @@ impl Daemon {
             outcome: self.outcome.clone(),
             notice: self.notice.clone(),
             pending_recordings: self.pending_recordings,
+            attention: self
+                .outcome
+                .as_ref()
+                .is_some_and(TerminalOutcome::needs_attention),
             capabilities: Capabilities {
                 stop: matches!(self.state, State::Recording { .. }),
                 cancel: cancellable,
@@ -2687,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn targeted_dismiss_does_not_hide_an_independent_notice_or_delete_artifacts() {
+    fn targeted_dismiss_clears_attention_without_hiding_a_notice_or_deleting_artifacts() {
         let mut daemon = idle_daemon();
         daemon.notice("busy", Some("busy"));
         daemon.publish(TerminalOutcome {
@@ -2707,6 +2711,8 @@ mod tests {
             handoff: None,
         });
         let event = daemon.outcome.as_ref().unwrap().event_id;
+        // The bar's attention mark follows the outcome and clears when it is dismissed.
+        assert!(daemon.snapshot().attention);
         let (job_tx, _) = mpsc::channel();
         let reply = execute(
             Command::Dismiss {
@@ -2717,6 +2723,7 @@ mod tests {
             &job_tx,
         );
         assert!(reply.ok);
+        assert!(!daemon.snapshot().attention);
         assert!(daemon.notice.is_some());
         let outcome = daemon.outcome.unwrap();
         assert!(outcome.dismissed);

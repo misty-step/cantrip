@@ -35,6 +35,21 @@ No-gos: no interactive notification popups or chatty notification daemon alerts.
 
 Evidence: `src/hud.rs`, `src/daemon.rs`
 
+## US-012 See Cantrip's state in the Omarchy bar at a glance
+
+Statement: When Cantrip runs on Omarchy, I want one quiet, branded mark in the bar that shows where a take is going and whether my last take needs me, without a backlog counter I can't clear.
+
+Criteria:
+1. WHILE idle with no outcome needing attention, THE SYSTEM SHALL show only the dimmed Cantrip mark, with no count or text.
+2. WHILE a take records or processes, THE SYSTEM SHALL color the mark with that take's route color: the theme accent, or the handoff target's color.
+3. WHEN the latest outcome needs attention, THE SYSTEM SHALL color the mark with the theme's urgent color until the next take starts or the outcome is dismissed.
+4. WHEN I middle-click the mark while it shows attention, THE SYSTEM SHALL dismiss that outcome without deleting any recording.
+5. THE SYSTEM SHALL keep the mark in one fixed-width slot in every state.
+
+No-gos: no count of unresolved recordings in the bar; no text or width changes in the bar item.
+
+Evidence: `integrations/omarchy/BarWidget.qml`, `integrations/omarchy/Status.js`, `docs/adr/0029-quiet-bar-mark.md`
+
 ## Capability: Guarded Delivery and Session Safety
 
 ## US-003 Guard against uncertain delivery destinations

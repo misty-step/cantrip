@@ -2680,6 +2680,7 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
         outcome: None,
         notice: None,
         pending_recordings: 0,
+        attention: false,
         capabilities: ipc::Capabilities {
             stop: true,
             cancel: true,
