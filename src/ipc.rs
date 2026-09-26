@@ -356,6 +356,10 @@ pub struct StatusSnapshot {
     pub outcome: Option<TerminalOutcome>,
     pub notice: Option<InteractionNotice>,
     pub pending_recordings: usize,
+    /// The latest outcome needs the operator (`TerminalOutcome::needs_attention`);
+    /// clears when the next take replaces it or it is dismissed.
+    #[serde(default)]
+    pub attention: bool,
     pub capabilities: Capabilities,
     pub hud: HudConfig,
     /// The active take's non-default target; None for the default flow and when idle.

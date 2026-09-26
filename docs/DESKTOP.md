@@ -344,9 +344,23 @@ already-current no-ops do not mutate or require a session probe; a distinct
 offline `--config-dir` fixture can be installed without a running desktop.
 
 When replacing a personal badge, add `--replace-widget OLD_PLUGIN_ID` to both
-installer commands. Left-click keeps raw dictation; right-click opens Actions.
-Existing hotkeys are not redefined. Status failures show unknown, not Ready;
-the badge retains only the last confirmed pending count.
+installer commands. Existing hotkeys are not redefined.
+
+The bar item is one fixed slot holding the Cantrip mark, with no count or text:
+
+- **At rest** the mark is dimmed foreground; when status is unknown it is
+  dimmer still and the tooltip says so, never Ready.
+- **Recording and processing** show the take's route color: the theme accent,
+  or a handoff target's own color. While processing, three lit cells travel
+  around the mark (static when the shell disables foreground animation).
+- **When the latest take needs attention** (failed, partial, uncertain, or
+  deferred) the mark uses the theme's urgent color until the next take starts
+  or the outcome is dismissed.
+
+Left-click toggles raw dictation, middle-click dismisses an outcome that needs
+attention (the recording stays in history), and right-click opens Actions,
+where saved recordings are listed. The tooltip names the state, the target and
+the latest outcome. See [ADR 0029](adr/0029-quiet-bar-mark.md).
 
 The installer preserves unrelated shell/menu content, stages complete plugin
 updates, and reports private rollback backups. To roll back, disable

@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "id": "cantrip.dictation",
   "name": "Cantrip Dictation",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "author": "Cantrip contributors",
-  "description": "Quiet dictation status, explicit recovery, and safe cancellation",
+  "description": "Quiet Cantrip mark: route color while dictating, urgent color when a take needs you",
   "kinds": ["bar-widget"],
   "entryPoints": {"barWidget": "BarWidget.qml"},
   "barWidget": {
     "displayName": "Cantrip Dictation",
-    "description": "Raw dictation on left-click; native recording actions on right-click",
+    "description": "Raw dictation on left-click; dismiss on middle-click; recordings on right-click",
     "category": "System",
     "allowMultiple": false
   }
