@@ -222,6 +222,14 @@ The first argv element must be an absolute executable path; Cantrip does not
 invoke a shell. `timeout_seconds` defaults to 15 and is clamped to 1–120.
 `label` is optional (1–32 printable characters) and is what the HUD and
 `cantrip status` show, as in "Sent to Kaylee."; it defaults to the target name.
+While a handoff take records, processes, and shows its outcome, the HUD tints it
+in the target's own color and labels it "to Kaylee" in its upper left; the bar
+widget and actions window use the same color and words, and `cantrip status`
+prints `handoff:` for the active take and `last-handoff:` for its outcome. Each target's color comes
+from the active Omarchy theme's magenta, blue, green and cyan, choosing the hue
+farthest from the theme accent, yellow and earlier targets (targets in name order).
+The default flow is not tinted or labelled. See
+[ADR 0028](adr/0028-handoff-destination-tint.md).
 After editing, run `cantrip reload`, then use `cantrip toggle --handoff pepper`
 to begin and the same `cantrip toggle --handoff pepper` to finish. A toggle
 with a different or missing `--handoff` does nothing while that take records:
@@ -311,6 +319,11 @@ New recordings, cancellation, errors, dismissal and connection changes interrupt
 pending handoffs immediately. Routine success holds for 1.2 seconds after its grid
 has settled. That feedback acknowledges the delivery mechanism, not receipt by the
 destination application.
+
+A take started with `--handoff NAME` adds an upper-left "to LABEL" row and uses
+that target's color for the border, a light surface wash and the active field;
+failures keep their yellow rail and cancellation its neutral field. Default takes
+look exactly as described above.
 
 `reduced_motion = true` or `false` overrides the desktop preference; omit it to
 follow the desktop. Reduced motion freezes indeterminate activity and presents

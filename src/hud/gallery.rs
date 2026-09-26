@@ -182,7 +182,7 @@ fn frame_at(at: Duration) -> u32 {
 fn fixture(state: ScreenshotState, origin: Instant) -> StatusSnapshot {
     // Only fixture payloads are borrowed. Never borrow the still's pre-aged model,
     // track targets, or presented frame: those must arise from this replay.
-    screenshot_model(state, origin + Duration::from_secs(3))
+    screenshot_model(state, origin + Duration::from_secs(3), None)
         .snapshot
         .expect("HUD screenshot fixtures contain a status snapshot")
 }

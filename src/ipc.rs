@@ -196,6 +196,34 @@ pub struct TerminalOutcome {
     pub error: Option<String>,
     pub artifacts: Artifacts,
     pub dismissed: bool,
+    /// The non-default target this outcome's take was sent toward; None for the default.
+    #[serde(default)]
+    pub handoff: Option<Handoff>,
+}
+
+/// A take headed to a named handoff target instead of the default desktop delivery.
+/// Fixed when the take starts; clients show `label` in `color` and never the default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Handoff {
+    pub name: String,
+    pub label: String,
+    /// `#rrggbb` from the active theme when the take started.
+    #[serde(serialize_with = "serialize_rgb", deserialize_with = "deserialize_rgb")]
+    pub color: [u8; 3],
+}
+
+fn serialize_rgb<S: Serializer>(
+    [r, g, b]: &[u8; 3],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(&format!("#{r:02x}{g:02x}{b:02x}"))
+}
+
+fn deserialize_rgb<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<[u8; 3], D::Error> {
+    let text = String::deserialize(deserializer)?;
+    crate::theme::hex_rgb(&text).ok_or_else(|| serde::de::Error::custom("expected #rrggbb"))
 }
 
 impl TerminalOutcome {
@@ -330,6 +358,9 @@ pub struct StatusSnapshot {
     pub pending_recordings: usize,
     pub capabilities: Capabilities,
     pub hud: HudConfig,
+    /// The active take's non-default target; None for the default flow and when idle.
+    #[serde(default)]
+    pub handoff: Option<Handoff>,
 }
 
 impl StatusSnapshot {
@@ -471,6 +502,7 @@ mod tests {
             error: None,
             artifacts: Artifacts::default(),
             dismissed: false,
+            handoff: None,
         }
     }
 
@@ -598,6 +630,29 @@ mod tests {
         drop(server);
         assert!(read_reply(&mut client, Instant::now() + Duration::from_secs(1)).is_err());
     }
+
+    #[test]
+    fn handoff_travels_as_a_hex_color_and_its_absence_is_the_default_flow() {
+        let mut value = outcome(Completeness::Complete, Delivery::HandedOff);
+        value.handoff = Some(Handoff {
+            name: "kaylee".to_owned(),
+            label: "Kaylee".to_owned(),
+            color: [0xe6, 0x8b, 0x05],
+        });
+        let json = serde_json::to_value(&value).unwrap();
+        // The Omarchy bar widget uses this string directly as a QML color.
+        assert_eq!(json["handoff"]["color"], "#e68b05");
+        let back: TerminalOutcome = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, value);
+        let mut old = json.clone();
+        old.as_object_mut().unwrap().remove("handoff");
+        let old: TerminalOutcome = serde_json::from_value(old).unwrap();
+        assert_eq!(old.handoff, None);
+        let mut bad = json;
+        bad["handoff"]["color"] = "magenta".into();
+        assert!(serde_json::from_value::<TerminalOutcome>(bad).is_err());
+    }
+
     #[test]
     fn handoff_commands_roundtrip_and_old_clients_default_to_none() {
         for command in [
