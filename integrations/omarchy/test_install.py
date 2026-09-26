@@ -5,6 +5,7 @@ import json
 from io import StringIO
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -190,6 +191,41 @@ class PluginPublicationContracts(unittest.TestCase):
                 if path.parent == installation.plugin:
                     self.assertEqual((backups[0] / path.name).read_text(), contents)
             self.assertEqual({path.name for path in installation.plugin.parent.iterdir()}, {PLUGIN_ID})
+
+    def test_changed_widget_gets_a_new_entry_url_and_drops_superseded_sources(self):
+        # Omarchy keeps drawing an already-loaded widget while its entry URL is
+        # unchanged, so every widget revision must be published under a new path.
+        with tempfile.TemporaryDirectory() as directory:
+            installation, old_files = self.installation(directory)
+            apply_plan(installation)
+            plugin = installation.plugin
+
+            def entry():
+                return json.loads((plugin / "manifest.json").read_text())["entryPoints"]["barWidget"]
+
+            first = entry()
+            self.assertTrue((plugin / first).is_file())
+            self.assertFalse((plugin / "BarWidget.qml").exists())
+            self.assertFalse((plugin / "Status.js").exists())
+            root = Path(directory)
+            self.assertEqual(plan(root / "config", root / "omarchy", None).removals, [])
+            assets = root / "assets"
+            shutil.copytree(Path(__file__).parent, assets, ignore=shutil.ignore_patterns("__pycache__"))
+            (assets / "Status.js").write_text((assets / "Status.js").read_text() + "\n// revised\n")
+            with patch("install.__file__", str(assets / "install.py")):
+                apply_plan(plan(root / "config", root / "omarchy", None))
+            second = entry()
+            self.assertNotEqual(first.split("/")[0], second.split("/")[0])
+            self.assertTrue((plugin / second).is_file())
+            self.assertFalse((plugin / first.split("/")[0]).exists())
+            personal = plugin / "Personal.qml"
+            self.assertEqual(personal.read_text(), old_files[personal])
+            # Only installer-shaped payloads are cleaned up, never similarly named user files.
+            (plugin / "payload-notes.txt").write_text("mine\n")
+            (plugin / "payload-0123456789abcdef").mkdir()
+            (plugin / "payload-0123456789abcdef" / "Personal.qml").write_text("mine\n")
+            with patch("install.__file__", str(assets / "install.py")):
+                self.assertEqual(plan(root / "config", root / "omarchy", None).removals, [])
 
     def test_repeat_install_preserves_user_shell_formatting(self):
         with tempfile.TemporaryDirectory() as directory:

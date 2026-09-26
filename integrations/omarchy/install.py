@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
 import shutil
 import socket
 import stat
@@ -425,17 +426,20 @@ class InstallPlan:
     plugin: Path
     writes: list
     previous_plugin: object
+    # Plugin-relative paths of superseded Cantrip widget sources to drop when staging.
+    removals: list = None
 
 
 def apply_plan(installation):
     changes = [(path, content, old) for path, content, old in installation.writes if content != old]
-    if not changes:
+    removals = installation.removals or []
+    if not changes and not removals:
         return
     config_dir = installation.plugin.parent.parent.parent
     session = require_unlocked_session(config_dir) if is_live_config(config_dir) else None
     plugin = installation.plugin
-    plugin_changes = [change for change in changes if change[0].parent == plugin]
-    references = [change for change in changes if change[0].parent != plugin]
+    plugin_changes = [change for change in changes if plugin in change[0].parents] or removals
+    references = [change for change in changes if plugin not in change[0].parents]
     prepared = []
     workspace = None
     staged = None
@@ -460,9 +464,16 @@ def apply_plan(installation):
                 staged.mkdir(mode=0o700)
             else:
                 shutil.copytree(plugin, staged, symlinks=True)
+            for relative in removals:
+                target = staged / relative
+                if target.is_dir() and not target.is_symlink():
+                    shutil.rmtree(target)
+                elif target.exists() or target.is_symlink():
+                    target.unlink()
             for path, contents, _ in installation.writes:
-                if path.parent == plugin:
-                    candidate = staged / path.name
+                if plugin in path.parents:
+                    candidate = staged / path.relative_to(plugin)
+                    candidate.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                     if candidate.exists():
                         candidate.unlink()
                     write_private(candidate, contents.encode())
@@ -526,7 +537,18 @@ def plan(config_dir, omarchy_path, replace_widget):
     plugin = config_dir / "omarchy/plugins" / PLUGIN_ID
     shell_path = config_dir / "omarchy/shell.json"
     menu_path = config_dir / "omarchy/extensions/omarchy-menu.jsonc"
-    plugin_files = [plugin / name for name in ("manifest.json", "BarWidget.qml", "Status.js")]
+    # Omarchy swaps a loaded bar widget only when its entry URL changes, so the
+    # widget sources live under a content-addressed directory named in the manifest.
+    sources = {name: (assets / name).read_text() for name in ("BarWidget.qml", "Status.js")}
+    digest = hashlib.sha256()
+    for name, contents in sources.items():
+        digest.update(name.encode() + b"\0" + contents.encode() + b"\0")
+    payload = "payload-" + digest.hexdigest()[:16]
+    manifest = json.loads((assets / "manifest.json").read_text())
+    manifest["entryPoints"]["barWidget"] = payload + "/BarWidget.qml"
+    plugin_writes = {plugin / "manifest.json": json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"}
+    plugin_writes.update({plugin / payload / name: contents for name, contents in sources.items()})
+    plugin_files = list(plugin_writes)
     originals = {path: read_optional(path, None) for path in [*plugin_files, shell_path, menu_path]}
     previous_plugin = tree_snapshot(plugin)
     current_manifest = originals[plugin / "manifest.json"]
@@ -540,11 +562,26 @@ def plan(config_dir, omarchy_path, replace_widget):
     updated_shell = merge_layout(shell, defaults, replace_widget)
     menu = originals[menu_path] if originals[menu_path] is not None else "{\n}\n"
     updated_menu = menu_insert(menu, json.loads((assets / "menu.json").read_text()))
-    writes = [(path, (assets / path.name).read_text()) for path in plugin_files]
+    writes = list(plugin_writes.items())
+    # Earlier layouts: sources at the plugin root, or an older installer payload,
+    # recognized by its generated name and holding nothing but widget sources.
+    snapshot = previous_plugin or {}
+
+    def superseded_payload(relative):
+        if relative == payload or not re.fullmatch(r"payload-[0-9a-f]{16}", relative):
+            return False
+        if snapshot[relative][0] != "directory":
+            return False
+        children = {key[len(relative) + 1:] for key in snapshot if key.startswith(relative + "/")}
+        return bool(children) and children <= set(sources)
+
+    removals = sorted(relative for relative in snapshot
+                      if (relative in sources and snapshot[relative][0] == "file") or superseded_payload(relative))
     shell_contents = (originals[shell_path] if updated_shell == shell and originals[shell_path] is not None
                       else json.dumps(updated_shell, ensure_ascii=False, indent=2) + "\n")
     writes.extend(((shell_path, shell_contents), (menu_path, updated_menu)))
-    return InstallPlan(plugin, [(destination, contents, originals[destination]) for destination, contents in writes], previous_plugin)
+    return InstallPlan(plugin, [(destination, contents, originals[destination]) for destination, contents in writes],
+                       previous_plugin, removals)
 
 
 def main():
@@ -558,9 +595,11 @@ def main():
     changes = [(path, content, original) for path, content, original in writes.writes if original != content]
     for path, _, _ in changes:
         print(("Installing " if args.apply else "Would install ") + str(path))
+    for relative in writes.removals:
+        print(("Removing superseded " if args.apply else "Would remove superseded ") + str(writes.plugin / relative))
     if args.apply:
         apply_plan(writes)
-    if not changes:
+    if not changes and not writes.removals:
         print("Cantrip integration is already current.")
     elif not args.apply:
         print("Dry run only. Add --apply after reviewing these paths.")
@@ -568,7 +607,7 @@ def main():
     print("Left-click remains raw toggle. Right-click opens native Cantrip actions.")
     print("Existing Super+R and Super+Shift+R bindings are preserved, not redefined.")
     if args.apply:
-        print("Omarchy hot-reloads these files. If needed: omarchy-shell shell rescanPlugins")
+        print("Omarchy loads the widget from a new path whenever it changes; no shell restart is needed.")
         print("Open the menu route with: omarchy menu summon cantrip")
 
 
