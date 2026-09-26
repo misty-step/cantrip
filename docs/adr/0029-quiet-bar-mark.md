@@ -19,7 +19,10 @@ The operator chose the quiet mark, drawn as the solid pixel C.
 
 - The item is one fixed `Style.bar.iconSlot` holding Cantrip's pixel C (the
   favicon's eight cells, drawn touching so the stroke matches neighbouring
-  Nerd Font glyphs). It never shows a count or text and never changes width.
+  Nerd Font glyphs). Its whole-pixel cells are a quarter of `Style.bar.iconFont`
+  (12 px at the default 13 px icon font), so its ink matches neighbouring glyphs
+  rather than filling the 16 px icon canvas. It never shows a count or text and
+  never changes width.
 - Rest: bar foreground at 55% opacity. Unknown status: 30%.
 - Recording and processing: the route color from ADR 0028, the theme accent or
   the handoff target's color. Processing moves three lit cells around the C
