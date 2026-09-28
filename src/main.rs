@@ -1058,6 +1058,7 @@ mod tests {
             command: vec![executable.display().to_string()],
             timeout_seconds: 15,
             label: None,
+            local_only: false,
         };
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(handoff_diagnosis("pepper", &target).contains("handoff.pepper: ready"));
