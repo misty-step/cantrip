@@ -36,6 +36,10 @@ pub struct HandoffTarget {
     /// What the HUD and status call the target, e.g. "Kaylee"; defaults to its name.
     #[serde(default)]
     pub label: Option<String>,
+    /// Keeps this target's takes on this computer: the installed local model transcribes
+    /// them, cleanup never runs, and a missing local model refuses the take before capture.
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 const fn default_handoff_timeout() -> u64 {
@@ -520,6 +524,7 @@ mod tests {
     fn named_handoff_parses_and_clamps_timeout() {
         let config: Config = toml::from_str(
             "[handoff.pepper]\ncommand = [\"/bin/cat\", \"--number\"]\ntimeout_seconds = 500\n\
+             local_only = true\n\
              [handoff.quiet_agent]\ncommand = [\"/bin/true\"]\ntimeout_seconds = 0\n\
              [handoff.default]\ncommand = [\"/bin/true\"]\n",
         )
@@ -531,6 +536,8 @@ mod tests {
         assert_eq!(config.handoff["pepper"].timeout().as_secs(), 120);
         assert_eq!(config.handoff["quiet_agent"].timeout().as_secs(), 1);
         assert_eq!(config.handoff["default"].timeout().as_secs(), 15);
+        assert!(config.handoff["pepper"].local_only);
+        assert!(!config.handoff["default"].local_only);
     }
 
     #[test]

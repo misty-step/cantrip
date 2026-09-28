@@ -1072,6 +1072,18 @@ fn start_recording(
     } else {
         None
     };
+    if postproc == Some(true)
+        && selected_handoff
+            .as_ref()
+            .is_some_and(|(_, target)| target.local_only)
+    {
+        let message = "This target keeps takes on this computer, so cleanup is off.";
+        let mut outcome = setup_failure(message, "handoff-local-only");
+        outcome.event_id = daemon.event_id();
+        daemon.outcome = Some(outcome);
+        return daemon.reply(false, message, Some("handoff-local-only"));
+    }
+    let config = take_config(&daemon.config, postproc, selected_handoff);
     if !daemon.worker_available {
         return daemon.reject("Transcription worker unavailable.", "stt-failed");
     }
@@ -1088,7 +1100,7 @@ fn start_recording(
             Some("postproc-model-unset"),
         );
     }
-    if daemon.config.stt.endpoint.is_none() && !local_model_ready(&daemon.config.stt) {
+    if config.stt.endpoint.is_none() && !local_model_ready(&config.stt) {
         let mut outcome = setup_failure(
             "Local model unavailable — run: cantrip models pull",
             "local-model-unavailable",
@@ -1103,17 +1115,13 @@ fn start_recording(
     }
     let take_id = recovery::new_id();
     let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
-    match capture::Recorder::start(&wav, daemon.config.audio_source.as_deref()) {
+    match capture::Recorder::start(&wav, config.audio_source.as_deref()) {
         Ok(recorder) => {
-            let handoff = selected_handoff
+            let handoff = config
+                .selected_handoff
                 .as_ref()
                 .map(|(name, target)| daemon.handoff_view(name, target));
             let operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
-            let mut config = daemon.config.clone();
-            if let Some(enabled) = postproc {
-                config.postproc.enabled = enabled;
-            }
-            config.selected_handoff = selected_handoff;
             let started = Instant::now();
             daemon.outcome = None;
             daemon.notice = None;
@@ -1137,6 +1145,29 @@ fn start_recording(
             daemon.reply(false, "Starting recording failed", Some("capture-failed"))
         }
     }
+}
+
+/// The configuration one take runs with, fixed when it starts. A local-only target pins the
+/// take to the installed local model with cleanup off, whatever the configured cloud lanes are,
+/// so its audio and words never leave this computer (US-011).
+fn take_config(
+    base: &Config,
+    postproc: Option<bool>,
+    handoff: Option<(String, crate::config::HandoffTarget)>,
+) -> Config {
+    let mut config = base.clone();
+    if let Some(enabled) = postproc {
+        config.postproc.enabled = enabled;
+    }
+    if handoff
+        .as_ref()
+        .is_some_and(|(_, target)| target.local_only)
+    {
+        config.stt = SttConfig::default();
+        config.postproc.enabled = false;
+    }
+    config.selected_handoff = handoff;
+    config
 }
 
 /// Which explicit command ended a recording. Logged as a class so an unexpected
@@ -2299,7 +2330,19 @@ fn run_handoff(
     take_id: &str,
 ) -> std::result::Result<(), &'static str> {
     let deadline = Instant::now() + target.timeout();
-    let mut child = ProcessCommand::new(&target.command[0])
+    let mut command = ProcessCommand::new(&target.command[0]);
+    // A receiver that must only ever get local transcripts can refuse any take without this.
+    if target.local_only {
+        command.env("CANTRIP_LOCAL_ONLY", "1");
+    } else {
+        command.env_remove("CANTRIP_LOCAL_ONLY");
+    }
+    // The retained recording, for a receiver that keeps or transcribes the audio itself.
+    match recovery::audio_path(take_id) {
+        Ok(audio) => command.env("CANTRIP_TAKE_AUDIO", audio),
+        Err(_) => command.env_remove("CANTRIP_TAKE_AUDIO"),
+    };
+    let mut child = command
         .args(&target.command[1..])
         .env("CANTRIP_TAKE_ID", take_id)
         .stdin(Stdio::piped())
@@ -3091,6 +3134,7 @@ mod tests {
             command: vec![executable.to_str().unwrap().to_owned()],
             timeout_seconds: 1,
             label: None,
+            local_only: false,
         };
         (root, target)
     }
@@ -3118,6 +3162,74 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
+    fn cloud_config_with(name: &str, local_only: bool) -> Config {
+        let target = crate::config::HandoffTarget {
+            command: vec!["/bin/true".to_owned()],
+            timeout_seconds: 1,
+            label: None,
+            local_only,
+        };
+        Config {
+            stt: SttConfig {
+                model: "cloud-model".to_owned(),
+                endpoint: Some("https://stt.invalid/v1".to_owned()),
+                api_key_id: Some("cloud".to_owned()),
+            },
+            postproc: crate::config::PostprocConfig {
+                enabled: true,
+                model: "cleanup-model".to_owned(),
+                ..crate::config::PostprocConfig::default()
+            },
+            handoff: [(name.to_owned(), target)].into(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn a_local_only_target_keeps_its_take_off_every_cloud_lane() {
+        let base = cloud_config_with("pile", true);
+        let pile = Some(("pile".to_owned(), base.handoff["pile"].clone()));
+        for postproc in [None, Some(false)] {
+            let take = take_config(&base, postproc, pile.clone());
+            assert_eq!(take.stt, SttConfig::default());
+            assert!(take.stt.endpoint.is_none());
+            assert!(!take.postproc.enabled);
+            assert_eq!(take.selected_handoff, pile);
+        }
+        // Another target, and the desktop, keep the configured cloud lanes.
+        let shared = cloud_config_with("kaylee", false);
+        let kaylee = Some(("kaylee".to_owned(), shared.handoff["kaylee"].clone()));
+        for handoff in [kaylee, None] {
+            let take = take_config(&shared, None, handoff);
+            assert_eq!(take.stt, shared.stt);
+            assert!(take.postproc.enabled);
+        }
+        assert!(!take_config(&shared, Some(false), None).postproc.enabled);
+    }
+
+    #[test]
+    fn a_local_only_target_refuses_cleanup_before_capture() {
+        let mut daemon = Daemon::new(cloud_config_with("pile", true), Vec::new(), true);
+        let (sender, receiver) = mpsc::channel();
+        let reply = execute(
+            Command::Toggle {
+                postproc: Some(true),
+                handoff: Some("pile".to_owned()),
+            },
+            &mut daemon,
+            Path::new("/does-not-exist"),
+            &sender,
+        );
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_deref(), Some("handoff-local-only"));
+        assert!(matches!(daemon.state, State::Idle));
+        assert_eq!(
+            daemon.outcome.as_ref().unwrap().error.as_deref(),
+            Some("handoff-local-only")
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
     struct CapturedLog(Arc<parking_lot::Mutex<Vec<u8>>>);
 
     impl Write for CapturedLog {
@@ -3129,6 +3241,24 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn only_a_local_only_target_is_told_its_take_stayed_local() {
+        let (root, target) =
+            handoff_fixture("printf '%s' \"${CANTRIP_LOCAL_ONLY-unset}\" > \"$1\"");
+        let seen = root.join("seen");
+        for (local_only, expected) in [(true, "1"), (false, "unset")] {
+            let target = crate::config::HandoffTarget {
+                command: vec![target.command[0].clone(), seen.display().to_string()],
+                local_only,
+                ..target.clone()
+            };
+            let report = deliver_handoff("words", &target, "take", false, &AtomicBool::new(false));
+            assert_eq!(report.delivery, Delivery::HandedOff);
+            assert_eq!(fs::read_to_string(&seen).unwrap(), expected);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3182,6 +3312,7 @@ mod tests {
                     command: vec!["/bin/true".to_owned()],
                     timeout_seconds: 1,
                     label: (name == "kaylee").then(|| "Kaylee".to_owned()),
+                    local_only: false,
                 },
             );
         }
@@ -3228,6 +3359,7 @@ mod tests {
                     command: vec!["/bin/true".to_owned()],
                     timeout_seconds: 1,
                     label: label.map(str::to_owned),
+                    local_only: false,
                 },
             )
         };
@@ -3337,6 +3469,7 @@ mod tests {
                         command: vec!["/bin/true".to_owned()],
                         timeout_seconds: 1,
                         label: None,
+                        local_only: false,
                     },
                 )
             }),

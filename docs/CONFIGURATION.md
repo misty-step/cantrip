@@ -243,7 +243,10 @@ the command's whole process group, so a wrapper script's children cannot
 deliver after the failure is reported.
 
 The complete final transcript goes to the target's stdin; `CANTRIP_TAKE_ID`
-identifies the retained take. No transcript is sent to the clipboard or focused
+identifies the retained take, and `CANTRIP_TAKE_AUDIO` is the path of its
+retained recording (a WAV file in transcript history) when that is available,
+for a receiver that keeps or transcribes the audio itself. The receiver must
+copy what it keeps: Forget deletes that file. No transcript is sent to the clipboard or focused
 window. Partial/empty takes are not handed off. A failed or timed-out command
 does not retry or fall back to desktop delivery; `cantrip status` shows
 `delivery: handed-off` on exit zero, or `delivery: failed` with
@@ -252,6 +255,25 @@ does not retry or fall back to desktop delivery; `cantrip status` shows
 command exists and is executable; it does not prove the target processes a take.
 Treat the executable as trusted code with access to the transcript. See
 [ADR 0027](adr/0027-named-handoff-targets.md).
+
+Set `local_only = true` on a target whose takes must never leave this computer:
+
+```toml
+[handoff.pile]
+command = ["/home/you/.local/bin/pile", "add", "--cantrip"]
+label = "Pile"
+local_only = true
+```
+
+Its takes are transcribed by the installed default local model
+(`parakeet-tdt-0.6b-v3-int8`) whatever `[stt]` names, cleanup never runs, and
+there is no cloud attempt to fall back from. A missing local model refuses the
+take before recording (`local-model-unavailable`), and asking such a target for
+`--postproc clean` refuses it too (`handoff-local-only`). Other targets and the
+desktop keep the configured lanes. Its command runs with `CANTRIP_LOCAL_ONLY=1`
+(other targets never see that variable), so a receiver can refuse any take that
+was not kept local. See
+[ADR 0030](adr/0030-local-only-handoff-targets.md).
 
 ## Transcript history
 

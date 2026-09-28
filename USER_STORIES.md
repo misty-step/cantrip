@@ -171,7 +171,7 @@ clipboard or the focused window.
 
 Criteria:
 1. WHEN I start or toggle recording with `--handoff NAME`, THE SYSTEM SHALL reject unknown names before capture and snapshot the configured command for that take.
-2. WHEN complete text is available after optional cleanup, THE SYSTEM SHALL send its exact bytes on the command's stdin and provide `CANTRIP_TAKE_ID`, without a shell, keyboard, or clipboard.
+2. WHEN complete text is available after optional cleanup, THE SYSTEM SHALL send its exact bytes on the command's stdin and provide `CANTRIP_TAKE_ID`, plus `CANTRIP_TAKE_AUDIO` with the retained recording's path when it is available, without a shell, keyboard, or clipboard.
 3. IF the command exits nonzero or times out, THEN THE SYSTEM SHALL mark delivery failed and preserve recovery artifacts without automatically retrying.
 4. IF transcription is partial, empty, or cancelled before dispatch, THEN THE SYSTEM SHALL NOT start the handoff command.
 5. WHEN a toggle's `--handoff` differs from the recording take's, including a missing one, THE SYSTEM SHALL keep recording and neither deliver nor hand off that take.
@@ -179,6 +179,8 @@ Criteria:
 7. WHEN a target sets `label`, THE SYSTEM SHALL show that label instead of the target name in delivery messages.
 8. WHILE a handoff take records, processes, or shows its outcome, THE SYSTEM SHALL tint the HUD in that target's own theme-derived color and show "to LABEL" in its upper left, use the same color and words in the bar widget and actions window, and leave default takes unchanged.
 
+9. WHEN a target sets `local_only`, THE SYSTEM SHALL transcribe its takes with the installed default local model only, SHALL NOT run cleanup or any cloud attempt for them, SHALL refuse the take before capture if the local model is missing or cleanup was asked for, and SHALL run its command with `CANTRIP_LOCAL_ONLY=1`, which no other target's command sees.
+
 No-gos: no transcript or child output in logs or telemetry; no desktop fallback; no destination indicator on default takes.
 
-Evidence: `src/daemon.rs`, `src/config.rs`, `src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/adr/0027-named-handoff-targets.md`, `docs/adr/0028-handoff-destination-tint.md`
+Evidence: `src/daemon.rs`, `src/config.rs`, `src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/adr/0027-named-handoff-targets.md`, `docs/adr/0028-handoff-destination-tint.md`, `docs/adr/0030-local-only-handoff-targets.md`
