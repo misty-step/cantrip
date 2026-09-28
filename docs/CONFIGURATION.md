@@ -243,7 +243,10 @@ the command's whole process group, so a wrapper script's children cannot
 deliver after the failure is reported.
 
 The complete final transcript goes to the target's stdin; `CANTRIP_TAKE_ID`
-identifies the retained take. No transcript is sent to the clipboard or focused
+identifies the retained take, and `CANTRIP_TAKE_AUDIO` is the path of its
+retained recording (a WAV file in transcript history) when that is available,
+for a receiver that keeps or transcribes the audio itself. The receiver must
+copy what it keeps: Forget deletes that file. No transcript is sent to the clipboard or focused
 window. Partial/empty takes are not handed off. A failed or timed-out command
 does not retry or fall back to desktop delivery; `cantrip status` shows
 `delivery: handed-off` on exit zero, or `delivery: failed` with

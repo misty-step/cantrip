@@ -31,6 +31,13 @@ command runs with that variable removed, so a receiver whose destination
 requires local speech to text can refuse a take from a misconfigured target
 instead of silently accepting a cloud transcript.
 
+Every handoff command also gets `CANTRIP_TAKE_AUDIO`, the path of the take's
+retained recording when it is available. The pile keeps its own copy of the
+recording and makes its own transcript from it in a sandbox with no network,
+because its rule is stricter than "no cloud lane": nothing that transcribes a
+pile capture may be able to reach the network. Cantrip's local transcript still
+drives the HUD and Cantrip's history; the pile does not use it.
+
 ## Consequences
 
 - Other targets and desktop takes keep the configured lanes; changing `[stt]`

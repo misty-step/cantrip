@@ -171,7 +171,7 @@ clipboard or the focused window.
 
 Criteria:
 1. WHEN I start or toggle recording with `--handoff NAME`, THE SYSTEM SHALL reject unknown names before capture and snapshot the configured command for that take.
-2. WHEN complete text is available after optional cleanup, THE SYSTEM SHALL send its exact bytes on the command's stdin and provide `CANTRIP_TAKE_ID`, without a shell, keyboard, or clipboard.
+2. WHEN complete text is available after optional cleanup, THE SYSTEM SHALL send its exact bytes on the command's stdin and provide `CANTRIP_TAKE_ID`, plus `CANTRIP_TAKE_AUDIO` with the retained recording's path when it is available, without a shell, keyboard, or clipboard.
 3. IF the command exits nonzero or times out, THEN THE SYSTEM SHALL mark delivery failed and preserve recovery artifacts without automatically retrying.
 4. IF transcription is partial, empty, or cancelled before dispatch, THEN THE SYSTEM SHALL NOT start the handoff command.
 5. WHEN a toggle's `--handoff` differs from the recording take's, including a missing one, THE SYSTEM SHALL keep recording and neither deliver nor hand off that take.

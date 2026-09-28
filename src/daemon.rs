@@ -2337,6 +2337,11 @@ fn run_handoff(
     } else {
         command.env_remove("CANTRIP_LOCAL_ONLY");
     }
+    // The retained recording, for a receiver that keeps or transcribes the audio itself.
+    match recovery::audio_path(take_id) {
+        Ok(audio) => command.env("CANTRIP_TAKE_AUDIO", audio),
+        Err(_) => command.env_remove("CANTRIP_TAKE_AUDIO"),
+    };
     let mut child = command
         .args(&target.command[1..])
         .env("CANTRIP_TAKE_ID", take_id)
