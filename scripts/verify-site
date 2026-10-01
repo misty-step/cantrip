@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Wait, bounded, for the public edge to serve the exact built page, then judge it.
+
+A healthy edge that still serves the previous build is a deployment-state
+transition, not a failure: poll up to --timeout seconds. HTTP errors and
+transport errors fail immediately; a page that never converges fails naming
+the first differing byte.
+"""
+
+import argparse
+import hashlib
+from pathlib import Path
+import sys
+import time
+import urllib.error
+import urllib.request
+
+
+class Mismatch(RuntimeError):
+    pass
+
+
+def fetch(url, timeout=15):
+    request = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache", "User-Agent": "cantrip-site-smoke"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(f"{url}: HTTP {response.status}")
+            return response.read()
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"{url}: HTTP {error.code}") from error
+    except (urllib.error.URLError, OSError) as error:
+        raise RuntimeError(f"{url}: {error}") from error
+
+
+def describe_difference(expected, actual):
+    offset = next((i for i, (a, b) in enumerate(zip(expected, actual)) if a != b), min(len(expected), len(actual)))
+    window = slice(max(0, offset - 30), offset + 30)
+    return (
+        f"first difference at byte {offset + 1}; built {len(expected)} bytes "
+        f"sha256 {hashlib.sha256(expected).hexdigest()[:12]}, served {len(actual)} bytes "
+        f"sha256 {hashlib.sha256(actual).hexdigest()[:12]}; "
+        f"built …{expected[window].decode('utf-8', 'replace')!r}, served …{actual[window].decode('utf-8', 'replace')!r}"
+    )
+
+
+def wait_for_page(expected, url, timeout=180, interval=5, get=fetch, clock=time.monotonic, sleep=time.sleep):
+    deadline = clock() + timeout
+    while True:
+        actual = get(url)
+        if actual == expected:
+            return
+        difference = describe_difference(expected, actual)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise Mismatch(f"{url}: served page never matched the built page within {timeout}s: {difference}")
+        print(f"{url}: awaiting build ({difference})", flush=True)
+        sleep(min(interval, remaining))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("built", type=Path, help="built HTML file")
+    parser.add_argument("url", help="public URL that must serve it")
+    parser.add_argument("--timeout", type=float, default=180)
+    parser.add_argument("--interval", type=float, default=5)
+    args = parser.parse_args()
+    wait_for_page(args.built.read_bytes(), args.url, args.timeout, args.interval)
+    print(f"{args.url}: serves {args.built}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError) as error:
+        print(f"verify-site: {error}", file=sys.stderr)
+        sys.exit(1)

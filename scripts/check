@@ -31,3 +31,6 @@ python3 -m unittest discover -s tests -p 'test_release_*.py'
 
 echo "── check: source installer"
 python3 -m unittest discover -s tests -p 'test_install_from_source.py'
+
+echo "── check: website deploy smoke"
+python3 -m unittest discover -s tests -p 'test_verify_site.py'
