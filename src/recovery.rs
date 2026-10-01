@@ -1095,6 +1095,22 @@ mod tests {
                     "raw_transcript": "Older transcript.",
                     "postprocessed_transcript": null,
                     "audio": { "duration_ms": 2_000 },
+                    "stt": { "model": "historical-model", "partial": true },
+                }),
+            )
+            .unwrap();
+        let empty_text_id = new_id();
+        store
+            .write_record(
+                &empty_text_id,
+                &json!({
+                    "schema_version": 2,
+                    "session_id": empty_text_id,
+                    "completed_at_unix_ms": 2_000,
+                    "source": "dictation",
+                    "raw_transcript": " ",
+                    "postprocessed_transcript": null,
+                    "audio": { "duration_ms": 1_000 },
                     "stt": { "model": "historical-model", "partial": false },
                 }),
             )
@@ -1113,6 +1129,7 @@ mod tests {
         assert!(!summaries[0].take.audio_available);
         assert_eq!(summaries[0].opening_words, "Clean words.");
         assert_eq!(summaries[1].take.id, older_id);
+        assert!(summaries[1].take.partial);
         assert_eq!(summaries[1].take.created_at_unix_ms, 1_000);
         assert_eq!(summaries[1].opening_words, "Older transcript.");
 
