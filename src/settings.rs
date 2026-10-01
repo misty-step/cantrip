@@ -35,8 +35,9 @@ const SCREENSHOT_DELAY_FRAMES: u32 = 6;
 const DAEMON_POLL: Duration = Duration::from_secs(1);
 /// Upper bound on frames a `--screenshot` waits for the history list.
 const SCREENSHOT_MAX_FRAMES: u32 = 100;
-/// Visible rows in the past-transcript list; the half row signals more below.
-const HISTORY_VISIBLE_ROWS: f32 = 3.5;
+/// Complete rows visible in the past-transcript list. Odd, so centering a
+/// focused Copy button leaves whole rows above and below it.
+const HISTORY_VISIBLE_ROWS: f32 = 5.0;
 /// Vertical padding inside each past-transcript row.
 const ROW_PAD: f32 = 6.0;
 /// Gap between a row's capture details and its opening words.
@@ -414,7 +415,8 @@ fn transcript_row(
         egui::vec2(ui.available_width(), transcript_row_height(ui)),
         egui::Sense::hover(),
     );
-    if separator {
+    // A row ending at the list's lower edge is closed by the list border.
+    if separator && rect.bottom() < ui.clip_rect().bottom() - 1.0 {
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
         ui.painter()
             .hline(rect.x_range(), rect.bottom() - 0.5, stroke);
@@ -825,11 +827,21 @@ impl SettingsApp {
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                    // Clip at the list edge, so rows never paint over its border and
+                    // centering a focused Copy measures the real viewport.
+                    ui.visuals_mut().clip_rect_margin = 0.0;
                     let row_height = transcript_row_height(ui);
+                    // The form reports no spare height (it sits inside a horizontal
+                    // row), so max_height alone collapses to egui's 64-point minimum.
+                    let height = row_height * HISTORY_VISIBLE_ROWS;
                     egui::ScrollArea::vertical()
                         .id_salt("past-transcripts")
-                        .max_height(row_height * HISTORY_VISIBLE_ROWS)
+                        .min_scrolled_height(height)
+                        .max_height(height)
                         .auto_shrink([false, true])
+                        // Centering the first or last rows aims past either end; jump
+                        // to the clamped offset instead of animating rows out of place.
+                        .animated(false)
                         .show_rows(ui, row_height, self.history.rows.len(), |ui, range| {
                             request = self.history.visible_rows(ui, range, self.palette);
                         });
