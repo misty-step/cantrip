@@ -24,6 +24,11 @@ pub struct Take {
     pub unresolved: bool,
 }
 
+pub(crate) struct Transcript {
+    pub take: Take,
+    pub preview: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct AudioMismatch;
 
@@ -41,6 +46,10 @@ pub fn new_id() -> String {
 
 pub fn list() -> Result<Vec<Take>> {
     list_in(&Store::open(&paths::transcript_history_dir()?)?)
+}
+
+pub(crate) fn transcripts() -> Result<Vec<Transcript>> {
+    transcripts_in(&Store::open(&paths::transcript_history_dir()?)?)
 }
 
 pub fn get(id: &str) -> Result<Take> {
@@ -135,7 +144,52 @@ fn list_in(store: &Store) -> Result<Vec<Take>> {
     Ok(takes)
 }
 
+fn transcripts_in(store: &Store) -> Result<Vec<Transcript>> {
+    let mut transcripts = Vec::new();
+    for name in store.names()? {
+        let Some(id) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Ok((take, record)) = get_with_record_in(store, id) else {
+            continue;
+        };
+        let Some(text) = record.as_ref().and_then(archive::final_text) else {
+            continue;
+        };
+        transcripts.push(Transcript {
+            take,
+            preview: transcript_preview(text),
+        });
+    }
+    transcripts.sort_by(|left, right| {
+        right
+            .take
+            .created_at_unix_ms
+            .cmp(&left.take.created_at_unix_ms)
+            .then_with(|| right.take.id.cmp(&left.take.id))
+    });
+    Ok(transcripts)
+}
+
+fn transcript_preview(text: &str) -> String {
+    const MAX_CHARACTERS: usize = 120;
+    let mut characters = text
+        .split_whitespace()
+        .enumerate()
+        .flat_map(|(index, word)| (index != 0).then_some(' ').into_iter().chain(word.chars()));
+    let mut preview: String = characters.by_ref().take(MAX_CHARACTERS).collect();
+    if characters.next().is_some() {
+        preview.pop();
+        preview.push('…');
+    }
+    preview
+}
+
 fn get_in(store: &Store, id: &str) -> Result<Take> {
+    get_with_record_in(store, id).map(|(take, _)| take)
+}
+
+fn get_with_record_in(store: &Store, id: &str) -> Result<(Take, Option<Value>)> {
     archive::validate_id(id)?;
     // A corrupt JSON record must not hide an independently durable WAV, and
     // a corrupt/missing WAV must never produce a recoverable-audio claim.
@@ -156,7 +210,7 @@ fn get_in(store: &Store, id: &str) -> Result<Take> {
         .and_then(|file| audio_duration(file).ok());
     let record = store.read_record(id).ok().flatten();
     let created_at = record.as_ref().map(archive::created_at_ms).unwrap_or(0);
-    Ok(Take {
+    let take = Take {
         id: id.to_owned(),
         created_at_unix_ms: if created_at == 0 {
             fallback_created_at
@@ -177,7 +231,8 @@ fn get_in(store: &Store, id: &str) -> Result<Take> {
             .and_then(|record| record.pointer("/recovery/unresolved"))
             .and_then(Value::as_bool)
             .unwrap_or(audio_file.is_some() || record.is_none()),
-    })
+    };
+    Ok((take, record))
 }
 
 fn confirm_in(store: &Store, id: &str) -> Result<Take> {
@@ -1015,6 +1070,11 @@ mod tests {
         assert_eq!(take.duration_ms, Some(5_000));
         assert!(take.text_available);
         assert!(!take.audio_available);
+        let transcripts = transcripts_in(&store).unwrap();
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].take, take);
+        assert_eq!(transcripts[0].preview, "Clean words.");
+        assert!(!transcripts[0].take.unresolved);
         persist_in(&store, &id, 10, None, Some(&fixture.wav), false, true).unwrap();
         forget_in(&store, &id).unwrap();
         assert_eq!(read_text_in(&store, &id).unwrap(), "Clean words.");
@@ -1038,6 +1098,87 @@ mod tests {
         .unwrap();
         forget_in(&store, &incomplete).unwrap();
         assert!(get_in(&store, &incomplete).is_err());
+        let transcripts = transcripts_in(&store).unwrap();
+        assert_eq!(transcripts.len(), 1);
+        assert_eq!(transcripts[0].take.id, id);
+        assert!(!transcripts[0].take.unresolved);
+    }
+
+    #[test]
+    fn transcript_history_lists_old_resolved_and_partial_text_without_changing_full_content() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let full_text = format!("\t你好\u{2003} café\n{}\r\nfinal words ", "界".repeat(130));
+        store
+            .write_record(
+                "old",
+                &json!({
+                    "schema_version": 1,
+                    "session_id": "old",
+                    "completed_at_unix_ms": 100,
+                    "raw_transcript": full_text,
+                    "stt": { "partial": true },
+                }),
+            )
+            .unwrap();
+        for id in ["a-resolved", "z-resolved"] {
+            store
+                .write_record(
+                    id,
+                    &json!({
+                        "schema_version": 2,
+                        "session_id": id,
+                        "completed_at_unix_ms": 200,
+                        "raw_transcript": "\nResolved\t words.\u{2003}",
+                        "recovery": { "unresolved": false },
+                    }),
+                )
+                .unwrap();
+        }
+        for (id, record) in [
+            (
+                "empty",
+                json!({ "session_id": "empty", "raw_transcript": " \n\t " }),
+            ),
+            ("no-text", json!({ "session_id": "no-text" })),
+            (
+                "wrong-id",
+                json!({ "session_id": "another-id", "raw_transcript": "untrusted" }),
+            ),
+        ] {
+            store.write_record(id, &record).unwrap();
+        }
+        store
+            .publish("corrupt.json", |file| {
+                file.write_all(b"{corrupt")?;
+                Ok(())
+            })
+            .unwrap();
+        retain_audio(&store, "corrupt.wav", &fixture.wav).unwrap();
+        retain_audio(&store, "audio-only.wav", &fixture.wav).unwrap();
+
+        let transcripts = transcripts_in(&store).unwrap();
+        assert_eq!(
+            transcripts
+                .iter()
+                .map(|transcript| transcript.take.id.as_str())
+                .collect::<Vec<_>>(),
+            ["z-resolved", "a-resolved", "old"]
+        );
+        for transcript in &transcripts[..2] {
+            assert_eq!(transcript.take.created_at_unix_ms, 200);
+            assert_eq!(transcript.take.duration_ms, None);
+            assert!(!transcript.take.unresolved);
+            assert_eq!(transcript.preview, "Resolved words.");
+        }
+        let old = &transcripts[2];
+        assert_eq!(old.take.created_at_unix_ms, 100);
+        assert_eq!(old.take.duration_ms, None);
+        assert!(old.take.partial);
+        assert!(!old.take.audio_available);
+        assert_eq!(old.preview, format!("你好 café {}…", "界".repeat(111)));
+        assert_eq!(old.preview.chars().count(), 120);
+        assert_eq!(read_text_in(&store, "old").unwrap(), full_text);
     }
 
     #[test]

@@ -175,6 +175,27 @@ do not contact providers.
 - **Architecture decisions:** [`docs/adr/`](docs/adr/). Operational log tags:
   `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 
+### Verify Settings transcript copy headlessly
+
+US-005 has an isolated native Settings journey. Build the binary, then run:
+
+```sh
+BROWSER=none CI=1 python3 scripts/verify-settings-history.py \
+  --binary target/debug/cantrip --out /path/to/empty/evidence-directory
+```
+
+It requires `sway`, `grim`, `wtype`, `wl-copy`, `wl-paste`, `tesseract`, and
+`wf-recorder` on `PATH`. The runner creates its own headless software-rendered
+compositor and HOME/XDG directories; it never uses the live desktop or daemon.
+It checks exact full-text clipboard bytes, unchanged archive contents, stale-row
+failure, and refresh to empty history. Screenshots, a screen recording, and a
+content-free proof report are saved under `--out`.
+
+To verify a real old archive, pass `--fixture /path/to/TAKE_ID.json`. The source is
+read-only; the runner copies it into disposable history. Review its opening words
+before sharing the recording or screenshots. Private transcripts are not fixtures
+to commit or upload automatically.
+
 ### Review the native HUD
 
 Open the local developer gallery without starting dictation:
