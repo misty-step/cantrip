@@ -60,6 +60,5 @@ jobs:
           for path in / /docs/install /docs/use /docs/configuration /docs/desktop /docs/privacy /releases; do
             curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 "https://cantrip.mistystep.io$path" --output /dev/null
           done
-          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 \
-            "https://cantrip.mistystep.io/" --output "$RUNNER_TEMP/cantrip-home.html"
-          cmp site/dist/index.html "$RUNNER_TEMP/cantrip-home.html"
+          # A healthy edge may still serve the previous build for a moment after deploy.
+          scripts/verify-site site/dist/index.html https://cantrip.mistystep.io/
