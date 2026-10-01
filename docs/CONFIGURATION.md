@@ -12,8 +12,10 @@ snapshot. `config init` creates the annotated defaults only when the file does
 not exist. `config edit` opens the file in `$EDITOR`. Do not reinitialize an
 existing configuration during updates.
 
-`cantrip settings` opens a window for common settings. Save writes the file back
-with comments preserved and reloads the running daemon.
+`cantrip settings` opens the common configuration window and shows saved
+transcripts from the existing local history. **Copy** puts the selected take's
+full saved text on the clipboard while the daemon is idle. Save writes the file
+back with comments preserved and reloads the running daemon.
 
 Settings can repair a file that parses as TOML but fails Cantrip validation:
 it loads the actual values, explains the validation error, and enables Save

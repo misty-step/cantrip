@@ -23,6 +23,16 @@ pub struct Take {
     pub partial: bool,
     pub unresolved: bool,
 }
+/// Display-only details for the Settings transcript list; never sent over IPC.
+pub(crate) struct TranscriptSummary {
+    pub(crate) take: Take,
+    pub(crate) opening_words: String,
+}
+
+struct ReadTake {
+    take: Take,
+    record: Option<Value>,
+}
 
 #[derive(Debug)]
 pub(crate) struct AudioMismatch;
@@ -41,6 +51,10 @@ pub fn new_id() -> String {
 
 pub fn list() -> Result<Vec<Take>> {
     list_in(&Store::open(&paths::transcript_history_dir()?)?)
+}
+
+pub(crate) fn list_transcript_summaries() -> Result<Vec<TranscriptSummary>> {
+    list_transcript_summaries_in(&Store::open(&paths::transcript_history_dir()?)?)
 }
 
 pub fn get(id: &str) -> Result<Take> {
@@ -115,17 +129,10 @@ pub fn import_runtime(runtime: &Path) -> Result<()> {
 }
 
 fn list_in(store: &Store) -> Result<Vec<Take>> {
-    let ids: BTreeSet<_> = store
-        .names()?
-        .into_iter()
-        .filter_map(|name| {
-            name.strip_suffix(".json")
-                .or_else(|| name.strip_suffix(".wav"))
-                .filter(|id| archive::validate_id(id).is_ok())
-                .map(str::to_owned)
-        })
+    let mut takes: Vec<_> = history_ids(store)?
+        .iter()
+        .filter_map(|id| get_in(store, id).ok())
         .collect();
-    let mut takes: Vec<_> = ids.iter().filter_map(|id| get_in(store, id).ok()).collect();
     takes.sort_by(|left, right| {
         right
             .created_at_unix_ms
@@ -135,7 +142,73 @@ fn list_in(store: &Store) -> Result<Vec<Take>> {
     Ok(takes)
 }
 
+fn list_transcript_summaries_in(store: &Store) -> Result<Vec<TranscriptSummary>> {
+    let mut summaries = Vec::new();
+    for id in history_ids(store)? {
+        let Ok(entry) = read_take_in(store, &id) else {
+            continue;
+        };
+        let Some(text) = entry.record.as_ref().and_then(archive::final_text) else {
+            continue;
+        };
+        summaries.push(TranscriptSummary {
+            take: entry.take,
+            opening_words: opening_words(text),
+        });
+    }
+    summaries.sort_by(|left, right| {
+        right
+            .take
+            .created_at_unix_ms
+            .cmp(&left.take.created_at_unix_ms)
+            .then_with(|| right.take.id.cmp(&left.take.id))
+    });
+    Ok(summaries)
+}
+
+fn history_ids(store: &Store) -> Result<BTreeSet<String>> {
+    Ok(store
+        .names()?
+        .into_iter()
+        .filter_map(|name| {
+            name.strip_suffix(".json")
+                .or_else(|| name.strip_suffix(".wav"))
+                .filter(|id| archive::validate_id(id).is_ok())
+                .map(str::to_owned)
+        })
+        .collect())
+}
+
+const OPENING_WORD_LIMIT: usize = 12;
+const OPENING_CHAR_LIMIT: usize = 96;
+
+fn opening_words(text: &str) -> String {
+    let (mut end, char_limited) = match text.char_indices().nth(OPENING_CHAR_LIMIT) {
+        Some((index, _)) => (index, true),
+        None => (text.len(), false),
+    };
+    if char_limited {
+        end = text[..end].rfind(char::is_whitespace).unwrap_or(end);
+    }
+    let mut words = text[..end].split_whitespace();
+    let mut preview = String::new();
+    for word in words.by_ref().take(OPENING_WORD_LIMIT) {
+        if !preview.is_empty() {
+            preview.push(' ');
+        }
+        preview.push_str(word);
+    }
+    if char_limited || words.next().is_some() {
+        preview.push('…');
+    }
+    preview
+}
+
 fn get_in(store: &Store, id: &str) -> Result<Take> {
+    Ok(read_take_in(store, id)?.take)
+}
+
+fn read_take_in(store: &Store, id: &str) -> Result<ReadTake> {
     archive::validate_id(id)?;
     // A corrupt JSON record must not hide an independently durable WAV, and
     // a corrupt/missing WAV must never produce a recoverable-audio claim.
@@ -156,7 +229,7 @@ fn get_in(store: &Store, id: &str) -> Result<Take> {
         .and_then(|file| audio_duration(file).ok());
     let record = store.read_record(id).ok().flatten();
     let created_at = record.as_ref().map(archive::created_at_ms).unwrap_or(0);
-    Ok(Take {
+    let take = Take {
         id: id.to_owned(),
         created_at_unix_ms: if created_at == 0 {
             fallback_created_at
@@ -177,7 +250,8 @@ fn get_in(store: &Store, id: &str) -> Result<Take> {
             .and_then(|record| record.pointer("/recovery/unresolved"))
             .and_then(Value::as_bool)
             .unwrap_or(audio_file.is_some() || record.is_none()),
-    })
+    };
+    Ok(ReadTake { take, record })
 }
 
 fn confirm_in(store: &Store, id: &str) -> Result<Take> {
@@ -1009,12 +1083,55 @@ mod tests {
                 }),
             )
             .unwrap();
+        let older_id = new_id();
+        store
+            .write_record(
+                &older_id,
+                &json!({
+                    "schema_version": 2,
+                    "session_id": older_id,
+                    "completed_at_unix_ms": 1_000,
+                    "source": "dictation",
+                    "raw_transcript": "Older transcript.",
+                    "postprocessed_transcript": null,
+                    "audio": { "duration_ms": 2_000 },
+                    "stt": { "model": "historical-model", "partial": false },
+                }),
+            )
+            .unwrap();
         assert_eq!(read_text_in(&store, &id).unwrap(), "Clean words.");
         let take = get_in(&store, &id).unwrap();
         assert_eq!(take.created_at_unix_ms, 1_234);
         assert_eq!(take.duration_ms, Some(5_000));
         assert!(take.text_available);
         assert!(!take.audio_available);
+        let summaries = list_transcript_summaries_in(&store).unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].take.id, id);
+        assert_eq!(summaries[0].take.created_at_unix_ms, 1_234);
+        assert_eq!(summaries[0].take.duration_ms, Some(5_000));
+        assert!(!summaries[0].take.audio_available);
+        assert_eq!(summaries[0].opening_words, "Clean words.");
+        assert_eq!(summaries[1].take.id, older_id);
+        assert_eq!(summaries[1].take.created_at_unix_ms, 1_000);
+        assert_eq!(summaries[1].opening_words, "Older transcript.");
+
+        assert_eq!(
+            opening_words(
+                "one two three four five six seven eight nine ten eleven twelve thirteen"
+            ),
+            "one two three four five six seven eight nine ten eleven twelve…"
+        );
+        assert_eq!(
+            opening_words("one two three four five six seven eight nine ten eleven twelve"),
+            "one two three four five six seven eight nine ten eleven twelve"
+        );
+
+        let long = format!("{} later words", "é".repeat(100));
+        let preview = opening_words(&long);
+        assert_eq!(preview.chars().count(), OPENING_CHAR_LIMIT + 1);
+        assert!(preview.ends_with('…'));
+        assert!(!preview.contains("later words"));
         persist_in(&store, &id, 10, None, Some(&fixture.wav), false, true).unwrap();
         forget_in(&store, &id).unwrap();
         assert_eq!(read_text_in(&store, &id).unwrap(), "Clean words.");

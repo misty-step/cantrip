@@ -228,6 +228,12 @@ completed history** for resolved recordings. Arrow keys, Page Up/Down, and
 Home/End navigate the list. Escape closes the window or confirmation without
 deleting a recording.
 
+The **Past transcripts** section at the top of `cantrip settings` lists text-bearing
+history by capture time, stored audio duration, and opening words. Choose **Copy**
+to put that take's full saved text on the clipboard; partial transcripts are
+labeled. The daemon must be running and idle. Copy does not retranscribe or send
+keys. Use **Refresh** if a new transcript was saved while Settings was open.
+
 For the CLI, list metadata and choose an exact ID:
 
 ```sh

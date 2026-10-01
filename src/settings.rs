@@ -14,6 +14,7 @@
 use crate::config::{Config, HudConfig, PostprocConfig, SttConfig, TelemetryConfig};
 use crate::inject::InjectionMode;
 use crate::ipc;
+use crate::recovery::{self, TranscriptSummary};
 use crate::{paths, theme};
 use anyhow::{anyhow, Context, Result};
 use eframe::egui;
@@ -27,6 +28,7 @@ use std::time::{Duration, Instant};
 const SCREENSHOT_DELAY_FRAMES: u32 = 6;
 /// How often to refresh the live daemon state in the header.
 const DAEMON_POLL: Duration = Duration::from_secs(1);
+const COPY_CONFIRM_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A flat, editable view of the config, bound directly to egui text fields.
 struct Editable {
@@ -150,6 +152,13 @@ struct StatusMsg {
     ok: bool,
 }
 
+struct CopyProgress {
+    take_id: String,
+    epoch: String,
+    previous_event_id: Option<u64>,
+    started: Instant,
+}
+
 fn completed_request<T>(receiver: Option<&Receiver<Result<T>>>) -> Option<Result<T>> {
     match receiver?.try_recv() {
         Ok(result) => Some(result),
@@ -158,6 +167,19 @@ fn completed_request<T>(receiver: Option<&Receiver<Result<T>>>) -> Option<Result
             Some(Err(anyhow!("The daemon request stopped unexpectedly")))
         }
     }
+}
+
+fn copy_saved_transcript(id: String) -> Result<()> {
+    let takes = ipc::recordings().context("refreshing saved transcript history")?;
+    anyhow::ensure!(
+        takes
+            .iter()
+            .any(|take| take.id == id && take.text_available),
+        "saved transcript is no longer available"
+    );
+    let reply = ipc::command(ipc::Command::Copy { id })?;
+    anyhow::ensure!(reply.ok, "Cantrip rejected the copy request");
+    Ok(())
 }
 
 enum EditableConfigLoad {
@@ -220,9 +242,21 @@ struct SettingsApp {
     loaded_text: String,
     daemon_online: bool,
     daemon_state: String,
+    daemon_idle: bool,
+    daemon_epoch: String,
+    daemon_event_id: Option<u64>,
     last_poll: Instant,
     poll_result: Option<Receiver<anyhow::Result<ipc::StatusSnapshot>>>,
     reload_result: Option<Receiver<anyhow::Result<ipc::CommandReply>>>,
+    transcripts: Vec<TranscriptSummary>,
+    transcripts_loaded: bool,
+    transcripts_error: bool,
+    refresh_transcripts: bool,
+    transcript_result: Option<Receiver<Result<Vec<TranscriptSummary>>>>,
+    copy_result: Option<Receiver<Result<()>>>,
+    copy_progress: Option<CopyProgress>,
+    copy_message: Option<StatusMsg>,
+    copy_message_id: Option<String>,
     palette: theme::Palette,
     repair: Option<(String, String)>,
     frames: u32,
@@ -262,10 +296,22 @@ impl SettingsApp {
             loaded_ok,
             loaded_text,
             daemon_online: false,
+            daemon_idle: false,
+            daemon_epoch: String::new(),
+            daemon_event_id: None,
             daemon_state: "offline".to_owned(),
             last_poll: Instant::now() - DAEMON_POLL,
             poll_result: None,
             reload_result: None,
+            transcripts: Vec::new(),
+            transcripts_loaded: false,
+            transcripts_error: false,
+            refresh_transcripts: true,
+            transcript_result: None,
+            copy_result: None,
+            copy_progress: None,
+            copy_message: None,
+            copy_message_id: None,
             palette,
             repair: None,
             frames: 0,
@@ -306,6 +352,7 @@ impl SettingsApp {
             });
             ui.colored_label(color, &status.text);
         }
+        Self::section(ui, "Past transcripts", "", |ui| self.transcript_history(ui));
         if !self.loaded_ok && self.repair.is_none() && ui.button("Repair configuration").clicked() {
             match fs::read_to_string(&self.config_path) {
                 Ok(text) => self.repair = Some((text.clone(), text)),
@@ -411,7 +458,9 @@ impl SettingsApp {
 
     fn section(ui: &mut egui::Ui, title: &str, hint: &str, add: impl FnOnce(&mut egui::Ui)) {
         ui.label(egui::RichText::new(title).strong().size(16.0));
-        ui.label(egui::RichText::new(hint).weak().small());
+        if !hint.is_empty() {
+            ui.label(egui::RichText::new(hint).weak().small());
+        }
         ui.add_space(5.0);
         egui::Frame::group(ui.style())
             .fill(ui.visuals().faint_bg_color)
@@ -689,6 +738,197 @@ impl SettingsApp {
             let _ = tx.send(ipc::command(ipc::Command::Reload));
         });
         self.reload_result = Some(rx);
+    }
+
+    fn request_transcript_refresh(&mut self, ctx: &egui::Context) {
+        if self.transcript_result.is_some() {
+            self.refresh_transcripts = true;
+            return;
+        }
+        self.refresh_transcripts = false;
+        self.transcripts_error = false;
+        let (tx, rx) = mpsc::channel();
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(recovery::list_transcript_summaries());
+            context.request_repaint();
+        });
+        self.transcript_result = Some(rx);
+    }
+
+    fn start_copy(&mut self, id: String, ctx: &egui::Context) {
+        if self.copy_result.is_some() || self.copy_progress.is_some() {
+            return;
+        }
+        self.copy_message_id = Some(id.clone());
+        self.copy_message = Some(StatusMsg {
+            text: "Copying…".to_owned(),
+            ok: true,
+        });
+        self.copy_progress = Some(CopyProgress {
+            take_id: id.clone(),
+            epoch: self.daemon_epoch.clone(),
+            previous_event_id: self.daemon_event_id,
+            started: Instant::now(),
+        });
+        let (tx, rx) = mpsc::channel();
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(copy_saved_transcript(id));
+            context.request_repaint();
+        });
+        self.copy_result = Some(rx);
+    }
+
+    fn observe_copy_status(&mut self, status: &ipc::StatusSnapshot) {
+        let result = self.copy_progress.as_ref().and_then(|progress| {
+            if status.epoch != progress.epoch {
+                Some((
+                    "Cantrip restarted. Check the clipboard before retrying.",
+                    false,
+                ))
+            } else if progress.started.elapsed() >= COPY_CONFIRM_TIMEOUT {
+                Some((
+                    "Copy status unconfirmed. Check the clipboard before retrying.",
+                    false,
+                ))
+            } else {
+                status.outcome.as_ref().and_then(|outcome| {
+                    (Some(outcome.event_id) != progress.previous_event_id
+                        && outcome.artifacts.take_id.as_deref() == Some(progress.take_id.as_str()))
+                    .then_some(if outcome.delivery == ipc::Delivery::Copied {
+                        ("Copied to the clipboard. Nothing was typed.", true)
+                    } else {
+                        ("Cantrip could not copy this transcript.", false)
+                    })
+                })
+            }
+        });
+        if let Some((text, ok)) = result {
+            self.copy_progress = None;
+            self.copy_message = Some(StatusMsg {
+                text: text.to_owned(),
+                ok,
+            });
+        }
+    }
+
+    fn transcript_history(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            egui::RichText::new(
+                "Saved locally. Copy replaces the clipboard; nothing is typed into another app.",
+            )
+            .color(color(self.palette.foreground)),
+        );
+        ui.horizontal_centered(|ui| {
+            if let Some(message) = &self.copy_message {
+                let copied = message.ok && self.copy_progress.is_none();
+                if copied {
+                    ui.label(egui::RichText::new("✓").color(color(self.palette.accent)));
+                }
+                ui.colored_label(
+                    color(if copied {
+                        self.palette.accent
+                    } else if message.ok {
+                        self.palette.foreground
+                    } else {
+                        self.palette.attention
+                    }),
+                    &message.text,
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Refresh").clicked() {
+                    self.refresh_transcripts = true;
+                    ui.ctx().request_repaint();
+                }
+                if self.transcript_result.is_some() {
+                    ui.spinner();
+                }
+            });
+        });
+        ui.add_space(6.0);
+        if self.transcripts_error {
+            ui.colored_label(
+                color(self.palette.attention),
+                "Saved transcripts could not be refreshed. The displayed list may be out of date.",
+            );
+        }
+        if !self.transcripts_loaded {
+            ui.label("Loading past transcripts…");
+            return;
+        }
+        if self.transcripts.is_empty() {
+            if !self.transcripts_error {
+                ui.label("No saved transcripts yet.");
+            }
+            return;
+        }
+        if !self.daemon_online {
+            ui.label("Cantrip must be running before a transcript can be copied.");
+        } else if !self.daemon_idle {
+            ui.label("Wait for Cantrip to finish before copying a transcript.");
+        }
+        let copy_enabled = self.daemon_online
+            && self.daemon_idle
+            && self.copy_result.is_none()
+            && self.copy_progress.is_none();
+        let row_height = ui.spacing().interact_size.y
+            + ui.text_style_height(&egui::TextStyle::Body) * 2.0
+            + ui.spacing().item_spacing.y * 3.0
+            + 1.0;
+        let mut selected = None;
+        egui::ScrollArea::vertical()
+            .id_salt("past-transcripts")
+            .max_height(240.0)
+            .min_scrolled_height(row_height * 2.5)
+            .show_rows(ui, row_height, self.transcripts.len(), |ui, range| {
+                for row in range {
+                    let summary = &self.transcripts[row];
+                    let take = &summary.take;
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(crate::actions::take_time(take.created_at_unix_ms))
+                                .strong()
+                                .color(color(self.palette.accent)),
+                        );
+                        ui.label("·");
+                        ui.label(format!(
+                            "Duration: {}",
+                            crate::actions::take_duration(take.duration_ms)
+                        ));
+                        if take.partial {
+                            ui.label(
+                                egui::RichText::new("Partial")
+                                    .small()
+                                    .color(color(self.palette.attention)),
+                            );
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let copied = self.copy_message_id.as_deref() == Some(take.id.as_str())
+                                && self.copy_message.as_ref().is_some_and(|message| message.ok)
+                                && self.copy_progress.is_none();
+                            let label = if copied { "Copied" } else { "Copy" };
+                            if ui
+                                .add_enabled(copy_enabled, egui::Button::new(label))
+                                .clicked()
+                            {
+                                selected = Some(take.id.clone());
+                            }
+                        });
+                    });
+                    ui.label(
+                        egui::RichText::new(&summary.opening_words)
+                            .color(color(self.palette.foreground)),
+                    );
+                    if row + 1 < self.transcripts.len() {
+                        ui.separator();
+                    }
+                }
+            });
+        if let Some(id) = selected {
+            self.start_copy(id, ui.ctx());
+        }
     }
 
     fn repair_form(&mut self, ui: &mut egui::Ui) {
@@ -1008,10 +1248,43 @@ pub(crate) fn apply_theme(ctx: &egui::Context, palette: theme::Palette) {
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
+        if let Some(result) = completed_request(self.transcript_result.as_ref()) {
+            self.transcript_result = None;
+            self.transcripts_loaded = true;
+            match result {
+                Ok(transcripts) => {
+                    self.transcripts = transcripts;
+                    self.transcripts_error = false;
+                }
+                Err(_) => self.transcripts_error = true,
+            }
+        }
+        if let Some(result) = completed_request(self.copy_result.as_ref()) {
+            self.copy_result = None;
+            if result.is_err() {
+                self.copy_progress = None;
+                self.copy_message = Some(StatusMsg {
+                    text: "Copy failed. Refresh and make sure Cantrip is idle.".to_owned(),
+                    ok: false,
+                });
+            } else if self.copy_progress.is_some() {
+                self.copy_message = Some(StatusMsg {
+                    text: "Copying…".to_owned(),
+                    ok: true,
+                });
+            }
+        }
+        if self.refresh_transcripts && self.transcript_result.is_none() {
+            self.request_transcript_refresh(ctx);
+        }
         if let Some(result) = completed_request(self.poll_result.as_ref()) {
             match result {
                 Ok(status) => {
+                    self.observe_copy_status(&status);
                     self.daemon_online = true;
+                    self.daemon_idle = status.state == ipc::StateKind::Idle;
+                    self.daemon_epoch = status.epoch.clone();
+                    self.daemon_event_id = status.outcome.as_ref().map(|outcome| outcome.event_id);
                     self.daemon_state = status.stage.as_ref().map_or_else(
                         || {
                             if status.state == ipc::StateKind::Recording && status.signal.is_none()
@@ -1026,7 +1299,15 @@ impl eframe::App for SettingsApp {
                 }
                 Err(_) => {
                     self.daemon_online = false;
+                    self.daemon_idle = false;
                     self.daemon_state = "unreachable".to_owned();
+                    if self.copy_progress.take().is_some() {
+                        self.copy_message = Some(StatusMsg {
+                            text: "Cantrip disconnected. Check the clipboard before retrying."
+                                .to_owned(),
+                            ok: false,
+                        });
+                    }
                 }
             }
             self.poll_result = None;

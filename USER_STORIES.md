@@ -88,10 +88,12 @@ Criteria:
 1. WHEN recording stops, THE SYSTEM SHALL durably retain the raw audio WAV file under the take identity before running speech recognition.
 2. WHEN transcription succeeds, THE SYSTEM SHALL write transcript text atomically to owner-only local storage under XDG_STATE_HOME.
 3. THE SYSTEM SHALL omit spoken transcript text and audio content from operational logs and telemetry.
+4. WHEN I open Cantrip Settings, THE SYSTEM SHALL list each saved transcript with its capture time, duration, and opening words, and let me copy its full saved text to the clipboard without typing into an application.
 
 No-gos: no automatic cloud syncing of local history files.
 
-Evidence: `src/archive.rs`, `src/recovery.rs`
+Evidence: `src/archive.rs`, `src/recovery.rs`, `src/settings.rs`
+Agent QA: `./scripts/check`; `./scripts/qa-settings-history`
 
 ## US-006 Forget retained take audio on explicit confirmation
 

@@ -68,9 +68,13 @@ cannot replace another recording. Successful delivery or recovery marks a take
 resolved without deleting its audio. There is no silent expiry.
 
 Native 16 kHz mono PCM16 audio uses about **1.92 MB per minute (115 MB per hour)**.
-The Actions window shows retained recordings; use its **Include completed
-history** option to find resolved takes as well. [Copy and recovery](USAGE.md#recovery)
-always operate on a selected recording, not an interchangeable failure slot.
+Settings lists text-bearing transcripts by capture time, stored duration, and
+opening words. **Copy** writes that take's saved text to the clipboard and sends
+no keys; the daemon must be idle. Clipboard managers or other local software may
+retain copied text. The Actions window shows retained recordings; use its
+**Include completed history** option to find resolved takes as well. [Copy and
+recovery](USAGE.md#recovery) always operate on one selected recording, not an
+interchangeable failure slot.
 
 Graceful shutdown stops and retains live capture. On startup, Cantrip imports
 trusted, finalized runtime leftovers under their original IDs. Runtime originals

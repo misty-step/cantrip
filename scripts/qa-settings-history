@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# Exercise Settings transcript discovery and the production daemon clipboard path
+# in private Xvfb and nested Sway sessions. Accepts an optional real archive.
+set -euo pipefail
+umask 077
+
+SCRIPT=$(realpath "$0")
+ROOT=$(git -C "$(dirname "$SCRIPT")/.." rev-parse --show-toplevel)
+cd "$ROOT"
+
+if [[ "${1:-}" == "--app-session" ]]; then
+    shift
+    cantrip_bin=$1
+    qa_root=$2
+    : "${WAYLAND_DISPLAY:?Sway did not expose a private Wayland display}"
+    : "${XDG_RUNTIME_DIR:?Private runtime directory is required}"
+    printf '%s\n%s\n' "$WAYLAND_DISPLAY" "$XDG_RUNTIME_DIR" >"$qa_root/wayland.env"
+    "$cantrip_bin" daemon >"$qa_root/daemon.log" 2>&1 &
+    daemon_pid=$!
+    printf '%s\n' "$daemon_pid" >"$qa_root/daemon.pid"
+    settings_pid=
+    stop_session() {
+        trap - EXIT INT TERM
+        if [[ -n "$settings_pid" ]] && kill -0 "$settings_pid" 2>/dev/null; then
+            kill -TERM "$settings_pid" 2>/dev/null || true
+            wait "$settings_pid" 2>/dev/null || true
+        fi
+        if kill -0 "$daemon_pid" 2>/dev/null; then
+            kill -INT "$daemon_pid" 2>/dev/null || true
+        fi
+        wait "$daemon_pid" 2>/dev/null || true
+    }
+    trap stop_session EXIT INT TERM
+    for _ in {1..100}; do
+        if "$cantrip_bin" ping >/dev/null 2>&1; then
+            break
+        fi
+        if ! kill -0 "$daemon_pid" 2>/dev/null; then
+            printf 'Cantrip daemon exited before becoming ready.\n' >&2
+            cat "$qa_root/daemon.log" >&2
+            exit 1
+        fi
+        sleep 0.1
+    done
+    if ! "$cantrip_bin" ping >/dev/null 2>&1; then
+        printf 'Cantrip daemon did not become ready.\n' >&2
+        cat "$qa_root/daemon.log" >&2
+        exit 1
+    fi
+    env -u DISPLAY WINIT_UNIX_BACKEND=wayland \
+        "$cantrip_bin" settings >"$qa_root/settings.log" 2>&1 &
+    settings_pid=$!
+    printf '%s\n' "$settings_pid" >"$qa_root/settings.pid"
+    if ! wait "$settings_pid"; then
+        cat "$qa_root/settings.log" >&2
+        exit 1
+    fi
+    exit 0
+fi
+
+original_home=${HOME:?HOME is required}
+if (($# > 2)); then
+    printf 'Usage: %s [RECORDING.mp4] [ARCHIVE.json]\n' "$SCRIPT" >&2
+    exit 2
+fi
+output=${1:-"$original_home/.cache/tmp/cantrip-settings-history-$(date -u +%Y%m%dT%H%M%SZ).mp4"}
+output=$(realpath -m "$output")
+archive_source=${2:-}
+
+if [[ "${QA_PREPARED:-}" != 1 ]]; then
+    for tool in cargo dbus-run-session sway timeout xvfb-run xdotool ffmpeg wl-copy wl-paste; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            printf 'Missing QA prerequisite: %s\n' "$tool" >&2
+            exit 1
+        fi
+    done
+    if [[ -n "$archive_source" ]] && ! command -v jq >/dev/null 2>&1; then
+        printf 'Missing QA prerequisite: jq\n' >&2
+        exit 1
+    fi
+    cargo build --locked --bin cantrip
+    cantrip_bin="$ROOT/target/debug/cantrip"
+
+    cache_tmp="$original_home/.cache/tmp"
+    mkdir -p "$cache_tmp" "$(dirname "$output")"
+    qa_root=$(mktemp -d "$cache_tmp/cantrip-settings-history.XXXXXX")
+    trap 'rm -rf -- "$qa_root"' EXIT
+    mkdir -m 700 -p \
+        "$qa_root/home" \
+        "$qa_root/runtime" \
+        "$qa_root/config/cantrip" \
+        "$qa_root/state/cantrip/transcripts" \
+        "$qa_root/data" \
+        "$qa_root/tmp"
+    printf 'keep_warm = false\n' >"$qa_root/config/cantrip/config.toml"
+
+    write_archive() {
+        local id=$1 created_at=$2 duration_ms=$3 partial=$4 text=$5
+        cat >"$qa_root/state/cantrip/transcripts/$id.json" <<EOF
+{
+  "schema_version": 3,
+  "session_id": "$id",
+  "completed_at_unix_ms": $created_at,
+  "source": "dictation",
+  "audio": { "duration_ms": $duration_ms },
+  "stt": { "model": "parakeet-tdt-0.6b-v3-int8", "partial": $partial },
+  "raw_transcript": "$text",
+  "postprocessed_transcript": null,
+  "recovery": {
+    "created_at_unix_ms": $created_at,
+    "partial": $partial,
+    "unresolved": false
+  }
+}
+EOF
+    }
+    if [[ -n "$archive_source" ]]; then
+        if [[ ! -f "$archive_source" || ! -r "$archive_source" ]]; then
+            printf 'The selected transcript archive is not readable.\n' >&2
+            exit 1
+        fi
+        archive_id=$(jq -er '.session_id | select(type == "string" and length > 0)' "$archive_source")
+        archive_name=$(basename -- "$archive_source")
+        if [[ "$archive_name" != "$archive_id.json" ]]; then
+            printf 'The selected transcript archive name does not match its record ID.\n' >&2
+            exit 1
+        fi
+        archive_created_at=$(jq -er '.completed_at_unix_ms | select(type == "number" and . > 86400000)' "$archive_source")
+        jq -e '.audio.duration_ms | type == "number" and . > 0' "$archive_source" >/dev/null
+        jq -ej '((.postprocessed_transcript | select(type == "string")) // (.raw_transcript | select(type == "string"))) | select(test("\\S"))' \
+            "$archive_source" >"$qa_root/expected"
+        cp -- "$archive_source" "$qa_root/state/cantrip/transcripts/$archive_name"
+        write_archive qa-newer-transcript $((archive_created_at + 86400000)) 45000 false \
+            "A newer synthetic transcript provides a comparison."
+        write_archive qa-oldest-partial-transcript $((archive_created_at - 86400000)) 12700 true \
+            "An older partial synthetic transcript provides a compact comparison."
+    else
+        transcript='This synthetic archived transcript verifies full clipboard copying beyond the visible opening words.'
+        printf '%s' "$transcript" >"$qa_root/expected"
+        write_archive qa-newer-transcript 1789700000000 45000 false \
+            "A newer synthetic transcript provides a comparison."
+        write_archive qa-old-transcript-20260930 1789613600000 83452 false "$transcript"
+        write_archive qa-oldest-partial-transcript 1789527200000 12700 true \
+            "An older partial synthetic transcript provides a compact comparison."
+    fi
+    chmod 600 "$qa_root/config/cantrip/config.toml" \
+        "$qa_root/expected" "$qa_root"/state/cantrip/transcripts/*.json
+    cat >"$qa_root/sway.conf" <<EOF
+output * mode 620x700
+default_border none
+default_floating_border none
+exec $SCRIPT --app-session $cantrip_bin $qa_root
+EOF
+    if [[ -e "$output" ]]; then
+        printf 'Refusing to overwrite recording: %s\n' "$output" >&2
+        exit 1
+    fi
+
+    set +e
+    env -i \
+        PATH="$PATH" \
+        LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" \
+        HOME="$qa_root/home" \
+        TMPDIR="$qa_root/tmp" \
+        XDG_RUNTIME_DIR="$qa_root/runtime" \
+        XDG_CONFIG_HOME="$qa_root/config" \
+        XDG_STATE_HOME="$qa_root/state" \
+        XDG_DATA_HOME="$qa_root/data" \
+        QA_PREPARED=1 \
+        QA_ROOT="$qa_root" \
+        CANTRIP_BIN="$cantrip_bin" \
+        OUTPUT="$output" \
+        NO_AT_BRIDGE=1 \
+        CI=1 \
+        BROWSER=none \
+        xvfb-run -e "$output.xvfb.log" -a -s '-screen 0 620x700x24 -nolisten tcp' \
+        dbus-run-session -- "$SCRIPT" "$output"
+    runner_status=$?
+    set -e
+    if [[ "$runner_status" != 0 ]]; then
+        printf 'Xvfb runner exited with status %s:\n' "$runner_status" >&2
+        cat "$output.xvfb.log" >&2 2>/dev/null || true
+    fi
+    rm -f -- "$output.xvfb.log"
+    exit "$runner_status"
+fi
+
+: "${DISPLAY:?Xvfb display is required}"
+: "${QA_ROOT:?QA scratch directory is required}"
+: "${CANTRIP_BIN:?Built Cantrip binary is required}"
+: "${OUTPUT:?Recording path is required}"
+
+ffmpeg_pid=
+compositor_pid=
+settings_pid=
+cleanup() {
+    local exit_status=$?
+    trap - EXIT INT TERM
+    set +e
+    if [[ -f "$QA_ROOT/settings.pid" ]]; then
+        settings_pid=$(<"$QA_ROOT/settings.pid")
+        if kill -0 "$settings_pid" 2>/dev/null; then
+            xdotool key --clearmodifiers Escape >/dev/null 2>&1
+            sleep 0.2
+            kill -TERM "$settings_pid" 2>/dev/null || true
+            wait "$settings_pid" 2>/dev/null || true
+        fi
+    fi
+    if [[ -f "$QA_ROOT/daemon.pid" ]]; then
+        daemon_pid=$(<"$QA_ROOT/daemon.pid")
+        if kill -0 "$daemon_pid" 2>/dev/null; then
+            kill -INT "$daemon_pid" 2>/dev/null || true
+        fi
+    fi
+    if [[ -n "$compositor_pid" ]] && kill -0 "$compositor_pid" 2>/dev/null; then
+        kill -INT "$compositor_pid" 2>/dev/null || true
+        wait "$compositor_pid" 2>/dev/null || true
+    fi
+    if [[ -n "$ffmpeg_pid" ]] && kill -0 "$ffmpeg_pid" 2>/dev/null; then
+        kill -INT "$ffmpeg_pid" 2>/dev/null || true
+        wait "$ffmpeg_pid" 2>/dev/null || true
+    fi
+    return "$exit_status"
+}
+trap cleanup EXIT INT TERM
+
+mkdir -p "$(dirname "$OUTPUT")"
+if [[ -e "$OUTPUT" ]]; then
+    printf 'Refusing to overwrite recording: %s\n' "$OUTPUT" >&2
+    exit 1
+fi
+
+
+WLR_BACKENDS=x11 WLR_LIBINPUT_NO_DEVICES=1 WLR_NO_HARDWARE_CURSORS=1 \
+    WLR_RENDERER=pixman sway --config "$QA_ROOT/sway.conf" \
+    >"$QA_ROOT/sway.log" 2>&1 &
+compositor_pid=$!
+
+ready=false
+for _ in {1..100}; do
+    if "$CANTRIP_BIN" ping >/dev/null 2>&1 && [[ -f "$QA_ROOT/settings.pid" ]]; then
+        settings_pid=$(<"$QA_ROOT/settings.pid")
+        if kill -0 "$settings_pid" 2>/dev/null; then
+            ready=true
+            break
+        fi
+    fi
+    if ! kill -0 "$compositor_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+if [[ "$ready" != true ]]; then
+    printf 'Cantrip Settings did not become ready in nested Sway.\n' >&2
+    cat "$QA_ROOT/sway.log" "$QA_ROOT/daemon.log" "$QA_ROOT/settings.log" >&2 2>/dev/null || true
+    exit 1
+fi
+sleep 2
+ffmpeg -nostdin -hide_banner -loglevel error \
+    -f x11grab -video_size 620x700 -framerate 15 -i "$DISPLAY" \
+    -vf 'crop=620:650:0:50' -an -c:v libx264 -preset ultrafast -crf 28 \
+    -pix_fmt yuv420p "$OUTPUT" >"$QA_ROOT/ffmpeg.log" 2>&1 &
+ffmpeg_pid=$!
+sleep 0.5
+xdotool mousemove --sync 300 235 click 5
+sleep 0.5
+xdotool mousemove --sync 300 235 click 5
+sleep 0.5
+xdotool mousemove --sync 300 235 click 4
+sleep 0.5
+xdotool mousemove --sync 300 235 click 4
+sleep 0.5
+xdotool mousemove --sync 570 278 click 1
+mapfile -t wayland_env <"$QA_ROOT/wayland.env"
+if (( ${#wayland_env[@]} < 2 )) || [[ -z "${wayland_env[0]}" || -z "${wayland_env[1]}" ]]; then
+    printf 'Private Sway Wayland environment was not recorded.\n' >&2
+    exit 1
+fi
+copied=false
+for _ in {1..20}; do
+    if env XDG_RUNTIME_DIR="${wayland_env[1]}" WAYLAND_DISPLAY="${wayland_env[0]}" \
+        timeout --kill-after=0.2s 1s wl-paste --no-newline --type 'text/plain;charset=utf-8' \
+            >"$QA_ROOT/copied" 2>/dev/null \
+        && cmp -s "$QA_ROOT/expected" "$QA_ROOT/copied"; then
+        copied=true
+        break
+    fi
+    sleep 0.25
+done
+if [[ "$copied" != true ]]; then
+    printf 'Clipboard did not match the selected archived transcript.\n' >&2
+    clipboard_types=$(env XDG_RUNTIME_DIR="${wayland_env[1]}" WAYLAND_DISPLAY="${wayland_env[0]}" \
+        timeout --kill-after=0.2s 1s wl-paste --list-types 2>/dev/null || true)
+    if [[ -n "$clipboard_types" ]]; then
+        printf 'Available clipboard MIME types: %s\n' "$clipboard_types" >&2
+    else
+        printf 'No clipboard MIME types were offered.\n' >&2
+    fi
+    printf 'Expected/pasted byte counts: %s/%s\n' \
+        "$(wc -c <"$QA_ROOT/expected")" "$(wc -c <"$QA_ROOT/copied")" >&2
+    cat "$QA_ROOT/settings.log" "$QA_ROOT/daemon.log" "$QA_ROOT/sway.log" >&2 2>/dev/null || true
+    exit 1
+fi
+sleep 3
+kill -INT "$ffmpeg_pid"
+wait "$ffmpeg_pid" 2>/dev/null || true
+ffmpeg_pid=
+[[ -s "$OUTPUT" ]]
+kill -INT "$compositor_pid"
+wait "$compositor_pid" 2>/dev/null || true
+compositor_pid=
+for _ in {1..50}; do
+    if ! kill -0 "$settings_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+printf 'Clipboard matches the archived transcript.\nHeadless Settings recording: %s\n' "$OUTPUT"

@@ -14,9 +14,10 @@ destination can be verified; explicit clipboard delivery is available elsewhere.
 - **Local by default.** CPU-only Parakeet speech recognition through
   [transcribe-rs](https://github.com/cjpais/transcribe-rs). Download the model
   deliberately once; it is not bundled in the executable.
-- **Quiet native feedback.** A passive pixel HUD shows microphone activity and
-  processing without taking focus or inventing progress. Native Settings and
-  Actions handle configuration and selected-recording recovery.
+- **Quiet native controls.** A passive pixel HUD shows microphone activity and
+  processing without taking focus or inventing progress. Settings handles
+  configuration and copies saved transcripts; Actions handles recording recovery
+  and setup.
 - **Guarded delivery.** Automatic paste/typing requires supported Hyprland/logind
   focus and session history. Other desktops can use clipboard/manual paste.
   An uncertain handoff is not automatically retried.
