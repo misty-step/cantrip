@@ -88,10 +88,12 @@ Criteria:
 1. WHEN recording stops, THE SYSTEM SHALL durably retain the raw audio WAV file under the take identity before running speech recognition.
 2. WHEN transcription succeeds, THE SYSTEM SHALL write transcript text atomically to owner-only local storage under XDG_STATE_HOME.
 3. THE SYSTEM SHALL omit spoken transcript text and audio content from operational logs and telemetry.
+4. WHEN I open Settings, THE SYSTEM SHALL show past transcripts newest first with local time, audio duration when known, and opening words, including completed takes from older archives.
+5. WHEN I choose Copy for a past transcript in Settings, THE SYSTEM SHALL copy its full saved text to the clipboard without retranscribing, sending keys, or requiring a running daemon.
 
 No-gos: no automatic cloud syncing of local history files.
 
-Evidence: `src/archive.rs`, `src/recovery.rs`
+Evidence: `src/archive.rs`, `src/recovery.rs`, `src/settings.rs`, `scripts/verify-settings-history.py`
 
 ## US-006 Forget retained take audio on explicit confirmation
 

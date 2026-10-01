@@ -7,19 +7,25 @@
 //! header also shows the live daemon state (idle / recording / processing /
 //! offline) by polling the socket every second.
 //!
-//! `cantrip settings --screenshot <path>` renders the window and dumps a PNG of
-//! one frame, then exits. It exists for visual testing on machines without a
-//! screenshot utility.
+//! Past transcripts sit above the configuration: saved history read off the UI
+//! thread, newest first, each with a Copy button that reads that transcript
+//! fresh by ID and hands it to the clipboard. History needs neither a valid
+//! config file nor a running daemon.
+//!
+//! `cantrip settings --screenshot <path>` renders the window, lets the history
+//! list load, and dumps a PNG of one frame, then exits. It exists for visual
+//! testing on machines without a screenshot utility.
 
 use crate::config::{Config, HudConfig, PostprocConfig, SttConfig, TelemetryConfig};
-use crate::inject::InjectionMode;
+use crate::inject::{self, DeliveryGuard, InjectionFailureKind, InjectionMode};
 use crate::ipc;
-use crate::{paths, theme};
+use crate::{actions, paths, recovery, theme};
 use anyhow::{anyhow, Context, Result};
 use eframe::egui;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
@@ -27,6 +33,14 @@ use std::time::{Duration, Instant};
 const SCREENSHOT_DELAY_FRAMES: u32 = 6;
 /// How often to refresh the live daemon state in the header.
 const DAEMON_POLL: Duration = Duration::from_secs(1);
+/// Upper bound on frames a `--screenshot` waits for the history list.
+const SCREENSHOT_MAX_FRAMES: u32 = 100;
+/// Visible rows in the past-transcript list; the half row signals more below.
+const HISTORY_VISIBLE_ROWS: f32 = 3.5;
+/// Vertical padding inside each past-transcript row.
+const ROW_PAD: f32 = 6.0;
+/// Gap between a row's capture details and its opening words.
+const ROW_LINE_GAP: f32 = 2.0;
 
 /// A flat, editable view of the config, bound directly to egui text fields.
 struct Editable {
@@ -155,9 +169,302 @@ fn completed_request<T>(receiver: Option<&Receiver<Result<T>>>) -> Option<Result
         Ok(result) => Some(result),
         Err(TryRecvError::Empty) => None,
         Err(TryRecvError::Disconnected) => {
-            Some(Err(anyhow!("The daemon request stopped unexpectedly")))
+            Some(Err(anyhow!("The background request stopped unexpectedly")))
         }
     }
+}
+
+/// One saved transcript, formatted once per load so frames only borrow text.
+struct PastTranscript {
+    id: String,
+    time: String,
+    /// Capture time and duration, as in the recordings list.
+    meta: String,
+    preview: String,
+    partial: bool,
+}
+
+impl PastTranscript {
+    fn new(transcript: recovery::Transcript) -> Self {
+        let take = transcript.take;
+        let time = actions::take_time(take.created_at_unix_ms);
+        Self {
+            meta: format!("{time}   {}", actions::take_duration(take.duration_ms)),
+            time,
+            preview: transcript.preview,
+            partial: take.partial,
+            id: take.id,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CopyPhase {
+    Copying,
+    Copied,
+    NotCopied,
+    Uncertain,
+}
+
+/// Why a Copy did not finish. Causes are fixed messages, never transcript text.
+enum CopyFailure {
+    /// Nothing reached the clipboard.
+    NotCopied(String),
+    /// The clipboard handoff may have happened.
+    Uncertain(String),
+}
+
+/// The latest Copy request, bound to the transcript ID it was made for.
+struct CopyStatus {
+    id: String,
+    time: String,
+    phase: CopyPhase,
+    message: String,
+}
+
+/// Past transcripts, loaded and copied off the UI thread. Independent of the
+/// config file and the daemon, so history stays usable when either fails.
+#[derive(Default)]
+struct History {
+    rows: Vec<PastTranscript>,
+    /// "N saved transcripts", formatted when a load succeeds.
+    count: String,
+    /// True once any load has finished; later loads are refreshes.
+    loaded: bool,
+    error: Option<String>,
+    load: Option<Receiver<Result<Vec<PastTranscript>>>>,
+    copy: Option<Receiver<Result<(), CopyFailure>>>,
+    copy_status: Option<CopyStatus>,
+    /// The focused Copy button that started a request; focus returns to it.
+    copy_focus: Option<egui::Id>,
+}
+
+impl History {
+    /// Start a load unless one is running; listed rows stay visible meanwhile.
+    fn refresh(&mut self, ctx: &egui::Context) {
+        if self.load.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let rows: Result<Vec<_>> = recovery::transcripts()
+                .map(|transcripts| transcripts.into_iter().map(PastTranscript::new).collect());
+            let _ = tx.send(rows);
+            context.request_repaint();
+        });
+        self.load = Some(rx);
+    }
+
+    /// Copy one listed transcript. The worker gets only its ID, never the preview.
+    fn start_copy(&mut self, index: usize, focus: Option<egui::Id>, ctx: &egui::Context) {
+        if self.copy.is_some() {
+            return;
+        }
+        let Some(row) = self.rows.get(index) else {
+            return;
+        };
+        let id = row.id.clone();
+        self.copy_status = Some(CopyStatus {
+            id: id.clone(),
+            time: row.time.clone(),
+            phase: CopyPhase::Copying,
+            message: format!("Copying transcript from {}…", row.time),
+        });
+        let (tx, rx) = mpsc::channel();
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(copy_transcript(&id));
+            context.request_repaint();
+        });
+        self.copy = Some(rx);
+        self.copy_focus = focus;
+    }
+
+    /// Apply finished background work; called every frame before drawing.
+    fn poll(&mut self, ctx: &egui::Context) {
+        if let Some(result) = completed_request(self.load.as_ref()) {
+            self.load = None;
+            self.loaded = true;
+            match result {
+                Ok(rows) => {
+                    self.count = match rows.len() {
+                        1 => "1 saved transcript".to_owned(),
+                        count => format!("{count} saved transcripts"),
+                    };
+                    self.rows = rows;
+                    self.error = None;
+                }
+                Err(error) if self.rows.is_empty() => {
+                    self.error = Some(format!("Transcript history could not be read: {error:#}"));
+                }
+                Err(error) => {
+                    self.error = Some(format!(
+                        "Transcript history could not be refreshed: {error:#}. The list below may be out of date."
+                    ));
+                }
+            }
+        }
+        let finished = match self.copy.as_ref().map(Receiver::try_recv) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(TryRecvError::Disconnected)) => Some(Err(CopyFailure::Uncertain(
+                "The copy stopped unexpectedly. Check the clipboard before pasting.".to_owned(),
+            ))),
+            _ => None,
+        };
+        let Some(result) = finished else {
+            return;
+        };
+        self.copy = None;
+        if let Some(status) = &mut self.copy_status {
+            (status.phase, status.message) = match result {
+                Ok(()) => (
+                    CopyPhase::Copied,
+                    format!("Copied transcript from {}. Paste when ready.", status.time),
+                ),
+                Err(CopyFailure::NotCopied(cause)) => (
+                    CopyPhase::NotCopied,
+                    format!("Transcript from {} was not copied. {cause}", status.time),
+                ),
+                Err(CopyFailure::Uncertain(cause)) => (
+                    CopyPhase::Uncertain,
+                    format!(
+                        "Transcript from {} may not have been copied. {cause}",
+                        status.time
+                    ),
+                ),
+            };
+        }
+        if let Some(id) = self.copy_focus.take() {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+    }
+
+    /// Lay out the rows in `range`. Returns the row whose Copy was chosen, with
+    /// the button's id when it had keyboard focus.
+    fn visible_rows(
+        &self,
+        ui: &mut egui::Ui,
+        range: std::ops::Range<usize>,
+        palette: theme::Palette,
+    ) -> Option<(usize, Option<egui::Id>)> {
+        let latest = self.copy_status.as_ref();
+        let mut request = None;
+        for index in range {
+            let row = &self.rows[index];
+            let phase = latest
+                .filter(|status| status.id == row.id)
+                .map(|status| status.phase);
+            let separator = index + 1 < self.rows.len();
+            // show_rows skips one auto id per row and push_id uses exactly one,
+            // so widget ids (and keyboard focus) stay stable while scrolling.
+            let copy = ui
+                .push_id(&row.id, |ui| {
+                    transcript_row(ui, row, palette, self.copy.is_none(), phase, separator)
+                })
+                .inner;
+            if copy.clicked() {
+                request = Some((index, copy.has_focus().then_some(copy.id)));
+            }
+        }
+        request
+    }
+}
+
+/// Read one transcript fresh by ID and hand it to the existing clipboard lane.
+/// The text stays in this worker; failure causes never include it.
+fn copy_transcript(id: &str) -> Result<(), CopyFailure> {
+    let text = recovery::read_text(id).map_err(|error| {
+        CopyFailure::NotCopied(format!(
+            "It could not be read from saved history ({error:#}). The clipboard was not changed; choose Refresh to update the list."
+        ))
+    })?;
+    inject::inject(
+        &text,
+        InjectionMode::Clipboard,
+        &DeliveryGuard::capture(),
+        &AtomicBool::new(false),
+    )
+    .map(|_| ())
+    .map_err(|failure| match failure.kind {
+        InjectionFailureKind::Uncertain => CopyFailure::Uncertain(failure.message),
+        _ => CopyFailure::NotCopied(failure.message),
+    })
+}
+
+/// Two text lines or the Copy button, whichever is taller, plus padding.
+fn transcript_row_height(ui: &egui::Ui) -> f32 {
+    let line = ui.text_style_height(&egui::TextStyle::Body);
+    let button =
+        ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+    (2.0 * line + ROW_LINE_GAP).max(button) + 2.0 * ROW_PAD
+}
+
+/// One fixed-height row: capture time and duration over the opening words, and
+/// the latest Copy result for this ID beside its Copy button.
+fn transcript_row(
+    ui: &mut egui::Ui,
+    row: &PastTranscript,
+    palette: theme::Palette,
+    enabled: bool,
+    phase: Option<CopyPhase>,
+    separator: bool,
+) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), transcript_row_height(ui)),
+        egui::Sense::hover(),
+    );
+    if separator {
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter()
+            .hline(rect.x_range(), rect.bottom() - 0.5, stroke);
+    }
+    let mut ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(0.0, ROW_PAD)))
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    let copy = ui.add_enabled(enabled, egui::Button::new("Copy"));
+    copy.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            enabled,
+            format!("Copy transcript from {}", row.time),
+        )
+    });
+    if copy.gained_focus() {
+        copy.scroll_to_me(Some(egui::Align::Center));
+    }
+    if let Some(phase) = phase {
+        let (tag, ink) = match phase {
+            CopyPhase::Copying => ("copying…", ui.visuals().weak_text_color()),
+            CopyPhase::Copied => ("copied", color(palette.accent)),
+            CopyPhase::NotCopied => ("not copied", color(palette.attention)),
+            CopyPhase::Uncertain => ("uncertain", color(palette.attention)),
+        };
+        ui.colored_label(ink, tag);
+    }
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = ROW_LINE_GAP;
+        ui.add(
+            egui::Label::new(egui::RichText::new(&row.meta).weak())
+                .truncate()
+                .selectable(false),
+        );
+        let line = ui.text_style_height(&egui::TextStyle::Body);
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), line),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                if row.partial {
+                    ui.colored_label(color(palette.attention), "Partial:")
+                        .on_hover_text("Saved text may not cover the whole recording.");
+                }
+                ui.add(egui::Label::new(&row.preview).truncate().selectable(false));
+            },
+        );
+    });
+    copy
 }
 
 enum EditableConfigLoad {
@@ -223,6 +530,8 @@ struct SettingsApp {
     last_poll: Instant,
     poll_result: Option<Receiver<anyhow::Result<ipc::StatusSnapshot>>>,
     reload_result: Option<Receiver<anyhow::Result<ipc::CommandReply>>>,
+    /// Past transcripts; loaded and copied off the UI thread.
+    history: History,
     palette: theme::Palette,
     repair: Option<(String, String)>,
     frames: u32,
@@ -239,6 +548,8 @@ impl SettingsApp {
     ) -> Self {
         let palette = theme::load();
         apply_theme(&cc.egui_ctx, palette);
+        let mut history = History::default();
+        history.refresh(&cc.egui_ctx);
         let (edit, loaded_ok, loaded_text, status) = match load_editable_config(&config_path) {
             EditableConfigLoad::Ready {
                 config,
@@ -266,6 +577,7 @@ impl SettingsApp {
             last_poll: Instant::now() - DAEMON_POLL,
             poll_result: None,
             reload_result: None,
+            history,
             palette,
             repair: None,
             frames: 0,
@@ -323,6 +635,14 @@ impl SettingsApp {
         }
         ui.add_space(8.0);
 
+        Self::section(
+            ui,
+            "Past transcripts",
+            "Saved on this computer, newest first. Copy replaces your clipboard.",
+            |ui| {
+                self.history_section(ui);
+            },
+        );
         Self::section(
             ui,
             "General",
@@ -461,6 +781,73 @@ impl SettingsApp {
             egui::FontId::proportional(12.0),
             color(self.palette.foreground),
         );
+    }
+
+    /// Count and Refresh, a bounded newest-first list, then the latest Copy
+    /// result. Shown whatever state the config file or daemon is in.
+    fn history_section(&mut self, ui: &mut egui::Ui) {
+        let loading = self.history.load.is_some();
+        let summary = if loading && self.history.loaded {
+            "Refreshing…"
+        } else if loading {
+            "Loading transcripts…"
+        } else if !self.history.rows.is_empty() {
+            self.history.count.as_str()
+        } else if self.history.error.is_some() {
+            "History unavailable"
+        } else {
+            "No saved transcripts yet."
+        };
+        let mut refresh = false;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(summary).weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                refresh = ui
+                    .add_enabled(!loading, egui::Button::new("Refresh"))
+                    .clicked();
+            });
+        });
+        if let Some(error) = &self.history.error {
+            ui.colored_label(color(self.palette.attention), error);
+        } else if !loading && self.history.rows.is_empty() {
+            ui.label(
+                egui::RichText::new("Dictate, then choose Refresh to see it here.")
+                    .weak()
+                    .small(),
+            );
+        }
+        let mut request = None;
+        if !self.history.rows.is_empty() {
+            egui::Frame::none()
+                .fill(ui.visuals().extreme_bg_color)
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .inner_margin(egui::Margin::symmetric(8.0, 0.0))
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                    let row_height = transcript_row_height(ui);
+                    egui::ScrollArea::vertical()
+                        .id_salt("past-transcripts")
+                        .max_height(row_height * HISTORY_VISIBLE_ROWS)
+                        .auto_shrink([false, true])
+                        .show_rows(ui, row_height, self.history.rows.len(), |ui, range| {
+                            request = self.history.visible_rows(ui, range, self.palette);
+                        });
+                });
+        }
+        if let Some(status) = &self.history.copy_status {
+            let ink = match status.phase {
+                CopyPhase::Copying | CopyPhase::Copied => self.palette.foreground,
+                CopyPhase::NotCopied | CopyPhase::Uncertain => self.palette.attention,
+            };
+            ui.colored_label(color(ink), &status.message);
+        }
+        if let Some((index, focus)) = request {
+            self.history.start_copy(index, focus, ui.ctx());
+        }
+        if refresh {
+            self.history.refresh(ui.ctx());
+        }
     }
 
     fn general_section(&mut self, ui: &mut egui::Ui) {
@@ -1008,6 +1395,7 @@ pub(crate) fn apply_theme(ctx: &egui::Context, palette: theme::Palette) {
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
+        self.history.poll(ctx);
         if let Some(result) = completed_request(self.poll_result.as_ref()) {
             match result {
                 Ok(status) => {
@@ -1085,6 +1473,7 @@ impl eframe::App for SettingsApp {
         if self.screenshot.is_some()
             && !self.screenshot_requested
             && self.frames >= SCREENSHOT_DELAY_FRAMES
+            && (self.history.load.is_none() || self.frames >= SCREENSHOT_MAX_FRAMES)
         {
             self.screenshot_requested = true;
             self.screenshot_deadline = Some(Instant::now() + Duration::from_secs(5));

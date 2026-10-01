@@ -216,6 +216,20 @@ uncertain, and failed outcomes remain explicit.
 
 ## Recovery
 
+### Copy a past transcript from Settings
+
+Open `cantrip settings` and use **Past transcripts**. Entries are newest first
+and show their local time, recording duration (or “duration unknown”), and opening
+words. Partial text is marked. Completed takes and older archived transcripts are
+included, even when the daemon is offline.
+
+Choose **Copy** beside the transcript you want. This copies the full saved text,
+using cleaned text when available, not just the opening words. Wait for the copied
+confirmation, then paste manually. Copy does not retranscribe, send keys, or change
+the recording. Use **Refresh** to pick up newly saved transcripts.
+
+### Recover a selected recording
+
 Open the native recovery window:
 
 ```sh
