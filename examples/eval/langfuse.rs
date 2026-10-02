@@ -18,6 +18,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -356,7 +357,7 @@ impl Client {
         };
         let auth = format!(
             "Basic {}",
-            base64(format!("{}:{}", telemetry.public_key, secret).as_bytes())
+            STANDARD.encode(format!("{}:{}", telemetry.public_key, secret).as_bytes())
         );
         Ok(Self {
             agent: ureq::AgentBuilder::new()
@@ -818,33 +819,6 @@ fn percent_encode_component(input: &str) -> String {
 
 fn hex(buf: &[u8]) -> String {
     buf.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b = [
-            chunk[0],
-            chunk.get(1).copied().unwrap_or(0),
-            chunk.get(2).copied().unwrap_or(0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(BASE64[(n >> 18) as usize & 63] as char);
-        out.push(BASE64[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            BASE64[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            BASE64[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 #[cfg(test)]

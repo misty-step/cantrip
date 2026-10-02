@@ -165,6 +165,10 @@ files, command lines, source control, or screenshots. Binary installation,
 update, rollback, and uninstall do not remove keyring entries; `key rm ID` is a
 separate deliberate action.
 
+Langfuse's daemon exporter and evaluation publisher both use standard padded
+Base64 for HTTP Basic authentication. Encoding is not encryption; keep remote
+telemetry endpoints on HTTPS.
+
 Opt-in telemetry carries character and token counts, durations, model/backend
 names, completeness/delivery metadata, and coarse error classifications. It
 never carries audio, transcript text, or provider error bodies containing text.
