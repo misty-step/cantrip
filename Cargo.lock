@@ -672,6 +672,7 @@ version = "0.1.3"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "base64",
  "clap",
  "dbus",
  "dirs",
