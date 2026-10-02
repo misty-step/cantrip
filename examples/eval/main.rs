@@ -526,13 +526,6 @@ struct OpenAiTranscription {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiUsage {
-    /// Schema fields retained for full-fidelity parsing; not consumed by cost math.
-    #[allow(dead_code)]
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default)]
-    seconds: f64,
     #[serde(default)]
     input_tokens: u64,
     #[serde(default)]
@@ -584,8 +577,6 @@ fn openai_transcribe(
             serde_json::from_str(&raw).map_err(|e| anyhow!("bad OpenAI transcript response: {e}"))
         })?;
     let usage = parsed.usage.unwrap_or(OpenAiUsage {
-        kind: None,
-        seconds: 0.0,
         input_tokens: 0,
         output_tokens: 0,
     });
@@ -672,10 +663,6 @@ fn deepgram_transcribe(agent: &ureq::Agent, lane: &SttLane, wav: &Path) -> Resul
 #[derive(Debug, Deserialize)]
 struct ElevenResponse {
     text: String,
-    /// Schema field retained for full-fidelity parsing.
-    #[allow(dead_code)]
-    #[serde(default)]
-    words: Option<serde_json::Value>,
 }
 
 fn elevenlabs_transcribe(agent: &ureq::Agent, lane: &SttLane, wav: &Path) -> Result<String> {
@@ -2044,7 +2031,7 @@ fn build_boards(
 
     // Per-clip WER/CER for each STT lane.
     let mut stt_rows: Vec<SttRow> = Vec::new();
-    for lane in unique_lanes(stt_results) {
+    for lane in unique_lanes(stt_results.iter().map(|r| &r.lane)) {
         let lane_results: Vec<&SttResult> = stt_results.iter().filter(|r| r.lane == lane).collect();
         let mut wers = Vec::new();
         let mut cers = Vec::new();
@@ -2129,7 +2116,7 @@ fn build_boards(
 
     // Postproc board.
     let mut ppr_rows: Vec<PprRow> = Vec::new();
-    for lane in unique_lanes_ppr(ppr_results) {
+    for lane in unique_lanes(ppr_results.iter().map(|r| &r.lane)) {
         let lane_results: Vec<&PprResult> = ppr_results.iter().filter(|r| r.lane == lane).collect();
         let mut before = Vec::new();
         let mut after = Vec::new();
@@ -2181,8 +2168,8 @@ fn build_boards(
         "\n## Arrangements (STT x postproc, ranked by final WER)"
     );
     let mut arr: Vec<(String, String, f64, f64, f64, f64)> = Vec::new();
-    for lane in unique_lanes(stt_results) {
-        for ppr in unique_lanes_ppr(ppr_results) {
+    for lane in unique_lanes(stt_results.iter().map(|r| &r.lane)) {
+        for ppr in unique_lanes(ppr_results.iter().map(|r| &r.lane)) {
             let mut wers = Vec::new();
             let mut lats = Vec::new();
             let mut costs = 0.0;
@@ -2225,21 +2212,11 @@ fn build_boards(
     out
 }
 
-fn unique_lanes(results: &[SttResult]) -> Vec<String> {
+fn unique_lanes<'a>(lanes: impl Iterator<Item = &'a String>) -> Vec<String> {
     let mut seen = Vec::new();
-    for r in results {
-        if !seen.contains(&r.lane) {
-            seen.push(r.lane.clone());
-        }
-    }
-    seen
-}
-
-fn unique_lanes_ppr(results: &[PprResult]) -> Vec<String> {
-    let mut seen = Vec::new();
-    for r in results {
-        if !seen.contains(&r.lane) {
-            seen.push(r.lane.clone());
+    for lane in lanes {
+        if !seen.contains(lane) {
+            seen.push(lane.clone());
         }
     }
     seen

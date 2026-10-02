@@ -118,6 +118,12 @@ Cantrip has two related but different evaluation surfaces:
   post-processor and compares the response with reviewed accepted outputs. It
   currently groups cases as cleanup, role, preservation, and formatting.
 
+Audio-provider responses retain transcript text and OpenAI input/output token
+counts for cost accounting; unused provider metadata (including ElevenLabs word
+alignment) is ignored. Audio scoreboards deduplicate lane names case-sensitively
+in first-seen order before their existing metric ranking; equal-ranked lanes
+keep that order, including failed post-processing rows.
+
 The audio matrix is useful for transcription and systems trade-offs. It is
 not a sufficient post-processing quality test: the current audio transcripts
 are mostly clean, so a harmful answer can retain a good WER. The behavior
