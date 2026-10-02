@@ -153,7 +153,7 @@ impl Default for TelemetryConfig {
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
-            model: "parakeet-tdt-0.6b-v3-int8".to_owned(),
+            model: models::PARAKEET_V3_INT8.dir_name.to_owned(),
             endpoint: None,
             api_key_id: None,
         }
