@@ -83,6 +83,9 @@ network and has no per-request API charge.
 |---|---|
 | `parakeet-tdt-0.6b-v3-int8` | Default selection; download weights separately. The only current local registry model. |
 
+The supported local name and configuration default come from the same model
+specification in `src/models.rs`.
+
 **Cloud.** Set `endpoint` to an OpenAI-compatible API **base** URL (for example
 `https://api.openai.com/v1`). Cantrip posts to `{endpoint}/audio/transcriptions`.
 Also set `model` and `api_key_id`. Store the credential id ahead of time:

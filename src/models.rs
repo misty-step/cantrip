@@ -36,7 +36,7 @@ pub const PARAKEET_V3_INT8: ModelSpec = ModelSpec {
     sha256: "43d37191602727524a7d8c6da0eef11c4ba24320f5b4730f1a2497befc2efa77",
 };
 
-pub const MODEL_NAMES: &[&str] = &["parakeet-tdt-0.6b-v3-int8"];
+pub const MODEL_NAMES: &[&str] = &[PARAKEET_V3_INT8.dir_name];
 
 fn spec(name: &str) -> Option<&'static ModelSpec> {
     if PARAKEET_V3_INT8.dir_name == name {
@@ -447,7 +447,6 @@ mod tests {
             Some("parakeet-tdt-0.6b-v3-int8")
         );
         assert!(spec("missing-model").is_none());
-        assert_eq!(MODEL_NAMES, &["parakeet-tdt-0.6b-v3-int8"]);
     }
 
     #[test]
