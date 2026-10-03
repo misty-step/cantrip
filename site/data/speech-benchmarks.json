@@ -1,0 +1,33 @@
+{
+  "checked_at": "2026-10-03",
+  "benchmarks": [
+    {
+      "id": "aa-wer-v2",
+      "title": "Artificial Analysis AA-WER v2",
+      "kind": "independent",
+      "url": "https://artificialanalysis.ai/speech-to-text/non-streaming",
+      "methodology_url": "https://artificialanalysis.ai/methodology/speech-to-text",
+      "description": "Independent English batch recognition across roughly eight hours: AA-AgentTalk (50%), VoxPopuli-Cleaned-AA (25%), and Earnings22-Cleaned-AA (25%). WER is duration-weighted within each dataset. Speed includes network time and uses ten-minute audio trials.",
+      "limitations": "A source snapshot, not a Cantrip run. Their Whisper-based number, spelling, contraction, and filler normalization differs from Cantrip's ASCII scorer. Ten-minute throughput is not short-dictation latency. Fish Transcribe 1 Pro is not listed in this source; no independent score is invented. Parakeet v2 below is not Cantrip's local v3 model.",
+      "rows": [
+        { "model": "MAI-Transcribe-2", "wer": 0.02, "speed_factor": 373.9, "price_per_1000_minutes_usd": 1.67, "note": "Microsoft AI hosted API" },
+        { "model": "Scribe v2", "wer": 0.022, "speed_factor": 88.1, "price_per_1000_minutes_usd": 3.67, "note": "ElevenLabs hosted API; not available in the inspected OpenRouter transcription catalog" },
+        { "model": "GPT Transcribe", "wer": 0.033, "speed_factor": 44.2, "price_per_1000_minutes_usd": null, "note": "OpenAI hosted API" },
+        { "model": "Nova-3", "wer": 0.052, "speed_factor": 569.1, "price_per_1000_minutes_usd": 4.3, "note": "Deepgram hosted API" },
+        { "model": "Parakeet TDT 0.6B v2", "wer": 0.064, "speed_factor": 99.9, "price_per_1000_minutes_usd": 0, "note": "NVIDIA hosted API, not Cantrip's installed local v3 baseline" }
+      ]
+    },
+    {
+      "id": "microsoft-fleurs-20260903",
+      "title": "Microsoft's FLEURS report",
+      "kind": "vendor-reported",
+      "url": "https://microsoft.ai/news/mai-transcribe-2-is-the-fastest-most-accurate-and-cheapest-speech-recognition-model-in-the-world/",
+      "methodology_url": null,
+      "description": "Microsoft's September 3, 2026 announcement reports MAI-Transcribe-2 averaging 5.2% WER on FLEURS across 60 languages.",
+      "limitations": "Vendor-reported multilingual result, not an independent replication or English dictation score. The announcement does not provide enough per-language protocol detail to reproduce the aggregate here. The advertised $0.10 per audio hour is promotional through December 31, 2026, not a perpetual price.",
+      "rows": [
+        { "model": "MAI-Transcribe-2", "wer": 0.052, "speed_factor": null, "price_per_1000_minutes_usd": null, "note": "60-language aggregate; vendor-reported" }
+      ]
+    }
+  ]
+}

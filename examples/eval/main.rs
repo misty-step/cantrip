@@ -36,6 +36,7 @@ use transcribe_rs::onnx::Quantization;
 
 mod judge;
 mod langfuse;
+mod schedule;
 mod speech;
 mod wer;
 const BOUNDARY: &str = "cantrip-eval-boundary-3fa91c";
@@ -79,8 +80,10 @@ fn main() -> Result<()> {
         "langfuse" => langfuse::publish(rest),
         "judge-probe" => run_judge_probe(rest),
         "living-speech" => speech::run(rest),
+        "scheduled-speech" => schedule::run(rest),
+        "install-speech-schedule" => schedule::install(rest),
         other => bail!(
-            "unknown subcommand '{other}' (expected list | run | behavior | langfuse | judge-probe | living-speech)"
+            "unknown subcommand '{other}' (expected list | run | behavior | langfuse | judge-probe | living-speech | scheduled-speech | install-speech-schedule)"
         ),
     }
 }

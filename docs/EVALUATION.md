@@ -54,6 +54,139 @@ records the observed USD-per-token prices. The comparison's detailed board
 reports strict exact-accepted scores, nearest-rank percentiles, variability,
 and separately identified vocabulary corruptions without relaxing the oracle.
 
+## Living speech results
+
+The [speech results page](https://cantrip.mistystep.io/evals) publishes observed
+model comparisons, immutable JSON/log receipts, and separately cited public
+benchmarks. The `living-speech` command shares this crate and its existing ASCII
+WER/CER scorer; it does not change the application's configured model.
+
+A real dictation reference is not an archived STT hypothesis relabeled as truth.
+Explicitly select the take, review/correct its verbatim reference, and approve
+each disclosure before cloud processing. Keep original take identities, audio,
+references, and provider transcripts out of public receipts. A reviewed private
+corpus may remain local; publishing its numeric results does not authorize
+publishing the corpus or copying credentials to CI.
+
+Build the existing example, then validate without credentials or paid calls:
+
+```sh
+cargo build --locked --jobs 1 --example eval
+target/debug/examples/eval living-speech \
+  --config /private/eval/config.json --out /private/eval/preflight-unique \
+  --run-id preflight-unique --source-revision SOURCE_GIT_SHA --dry-run
+```
+
+For one explicitly authorized run, inject `OPENROUTER_API_KEY` through the
+operator's credential system and replace `--dry-run` with `--allow-paid`, using
+a fresh output directory and run ID. Do not add the key to the JSON config.
+The [runner contract](../eval/cloud-stt-contracts.md#living-speech-runner--openrouter-transcription-route)
+defines the reviewed corpus/config fields, duration-price ceilings, locked
+append-only budget journal, and failure accounting.
+
+Copy only an observed run's `results.json` and text-free `run.log` into
+`site/public/evals/runs/RUN_ID.json` and `RUN_ID.log`. The latest published JSON
+is `site/public/evals/latest.json`. Keep prior runs immutable. A nonzero
+`incomplete_run` exit still preserves numeric failure receipts; it is not an
+all-successful benchmark. Unknown charges are never zero, and failed or empty
+responses remain full deletions in quality scores.
+
+The results page separates dictation-only macro WER from the public regression
+slice, reports successful-call latency percentiles and actual provider charges,
+and exposes corpus/scorer/model version limitations. Public benchmarks use
+their own corpora and normalization; their percentages are not interchangeable
+with ours. Refresh `site/data/speech-benchmarks.json` from cited primary sources
+deliberately and record the evidence date.
+
+Recurring paid execution, corpus transfer, and scheduler credentials require
+separate operator approval. A single `--allow-paid` run does not authorize a
+schedule. Keep the durable commission journal across invocations; never reset
+it to restart spending after a failure or a budget stop.
+
+### Local weekly schedule
+
+The user timer keeps original dictation audio, reviewed references, installed
+models, and the append-only budget journal on the workstation. Use durable
+absolute corpus paths, not a disposable worktree. Forgetting a selected take
+or removing a model makes preflight fail; the scheduler never replaces it or
+downloads anything. An isolated publishing checkout contains only public
+repository data and numeric receipts, never the private corpus/config.
+
+Build the reviewed, merged source and install without activating paid work:
+
+```sh
+cargo build --locked --jobs 1 --example eval
+EVAL_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/cantrip/speech-eval/COMMISSION"
+target/debug/examples/eval install-speech-schedule \
+  --config "$EVAL_ROOT/config.json" --out-root "$EVAL_ROOT/weekly-runs" \
+  --publish-checkout "$HOME/.local/share/cantrip/speech-eval/publish" \
+  --source-revision "$(git rev-parse HEAD)"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+systemd-analyze --user verify \
+  "$UNIT_DIR/cantrip-speech-eval.service" "$UNIT_DIR/cantrip-speech-eval.timer"
+"$HOME/.local/bin/cantrip-speech-eval" scheduled-speech --dry-run
+```
+
+`COMMISSION` names the existing approved private corpus/config directory; the
+commissioning session supplies its exact path. Installation copies the compiled
+example to `~/.local/bin/cantrip-speech-eval`, writes owner-only scheduling
+metadata to `$XDG_STATE_HOME/cantrip/speech-eval/schedule.json`, installs the
+two user units, and clones the dedicated public publishing checkout. It does
+not change the application model, the corpus config, any key, or the ledger.
+It never reloads, enables, or starts a service. Different existing unit contents
+are an owner conflict; existing drop-ins are preserved.
+
+The no-credential dry run executes the installed binary's actual scheduled
+command, allocates a unique `weekly-...` receipt directory, validates all five
+model lanes and the cumulative budget, and produces `preflight.json` and
+`run.log`. It makes no paid call, creates no publishing branch, and opens no PR.
+
+**Activation belongs to the operator after recurring budget/key approval.**
+The service uses only
+`workstation/OPENROUTER_MISTY_STEP_CANTRIP_WORKSTATION_SPEECH_EVAL_API_KEY`
+through native `pass-env`; it never falls back to production speech. A terminal
+LF from `pass-env` is removed only from the child invocation environment; the
+credential validator and stored entry are unchanged. Unlock the operator's
+credential session and confirm native GitHub/signing access before activation:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now cantrip-speech-eval.timer
+systemctl --user list-timers --all cantrip-speech-eval.timer
+```
+
+The schedule is Monday 09:00 UTC plus up to 15 minutes of jitter.
+`Persistent=true` permits one catch-up after the user manager resumes; this is
+not an always-on service and does not enable lingering. No paid retry is added.
+Inspect `journalctl --user -u cantrip-speech-eval.service` and the private
+`weekly-runs` receipts after execution. Disable future execution with
+`systemctl --user disable --now cantrip-speech-eval.timer`.
+
+Each paid invocation starts from `origin/master` in its dedicated checkout,
+uses a unique run ID, and proposes only `latest.json` and that run's immutable
+JSON/log files in a `speech-eval/weekly-...` review PR. Partial result files are
+also proposed; publisher failures leave the private receipts intact and fail
+the service. No auto-merge is added: normal review, merge, CI and site deployment
+are the publication boundary. Public benchmark snapshots still need deliberate,
+dated source review.
+
+For the seven-clip, 88.7725625-second reviewed corpus, the complete observed
+five-model run reported **$0.027089811/week** (about **$1.41/year** at unchanged
+prices). Four cloud lanes at the configured $1/audio-hour ceiling reserve
+**$0.101111124/run**; the per-run ceiling is $0.20. The provider's own upfront
+audio reservation may require more key headroom than the eventual bill.
+Prices can change, including Microsoft's dated promotional pricing.
+
+The first-run commission contract remains unchanged: a locked, fsynced
+reservation precedes each paid request; only a successful known charge settles
+it down. Error, empty, missing-cost and interrupted calls retain reservations.
+The same journal controls every invocation, stops at **$4.50 cumulative
+accounted liability**, and is never reset, copied to a fresh spending authority,
+or silently extended. The initial five-model run's public receipts record the
+current liability; recurring key sizing and any future authorization belong to
+the operator.
+
+
 ## Langfuse publish
 
 `eval` can mirror the already-written result JSONs into a Langfuse dataset

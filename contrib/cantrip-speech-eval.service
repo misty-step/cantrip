@@ -1,0 +1,11 @@
+[Unit]
+Description=Cantrip reviewed speech evaluation (private corpus)
+Documentation=https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md#local-weekly-schedule
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+ExecStart=%h/.local/bin/pass-env run -e OPENROUTER_API_KEY=workstation/OPENROUTER_MISTY_STEP_CANTRIP_WORKSTATION_SPEECH_EVAL_API_KEY -- %h/.local/bin/cantrip-speech-eval scheduled-speech --allow-paid
+UMask=0077
+TimeoutStartSec=1h
+Restart=no

@@ -316,7 +316,11 @@ impl BudgetState {
                     model: model.clone(),
                     clip: clip.clone(),
                 };
-                if *nanos == 0 || self.entries.contains_key(&key) {
+                if *nanos == 0
+                    || self.halted
+                    || *nanos > COMMISSION_CAP_NANOS.saturating_sub(self.liability_nanos)
+                    || self.entries.contains_key(&key)
+                {
                     return Err("budget_journal_invalid".into());
                 }
                 self.entries.insert(
@@ -327,10 +331,19 @@ impl BudgetState {
                         release_reservation: false,
                     },
                 );
-                self.liability_nanos = self.liability_nanos.saturating_add(*nanos);
+                self.liability_nanos = self
+                    .liability_nanos
+                    .checked_add(*nanos)
+                    .ok_or("budget_journal_invalid")?;
                 let run = self.runs.entry(run_id.clone()).or_default();
-                run.liability_nanos = run.liability_nanos.saturating_add(*nanos);
-                run.reservation_nanos = run.reservation_nanos.saturating_add(*nanos);
+                run.liability_nanos = run
+                    .liability_nanos
+                    .checked_add(*nanos)
+                    .ok_or("budget_journal_invalid")?;
+                run.reservation_nanos = run
+                    .reservation_nanos
+                    .checked_add(*nanos)
+                    .ok_or("budget_journal_invalid")?;
             }
             BudgetRecord::Report {
                 run_id,
@@ -352,22 +365,29 @@ impl BudgetState {
                     return Err("budget_journal_invalid".into());
                 }
                 let old = entry.liability();
-                // A finite but enormous reported bill saturates to u64::MAX;
-                // it still permanently closes the commission to new spending.
-                let reported = (*cost_usd * NANOS_PER_USD).ceil() as u64;
+                let scaled = (*cost_usd * NANOS_PER_USD).ceil();
+                if !scaled.is_finite() || scaled >= u64::MAX as f64 {
+                    return Err("budget_journal_invalid".into());
+                }
+                let reported = scaled as u64;
                 entry.reported_nanos = Some(reported);
                 entry.release_reservation = *release_reservation;
                 if reported > entry.nanos {
                     self.halted = true;
                 }
                 let new = entry.liability();
-                self.liability_nanos = self.liability_nanos.saturating_sub(old).saturating_add(new);
+                self.liability_nanos = self
+                    .liability_nanos
+                    .checked_sub(old)
+                    .and_then(|remaining| remaining.checked_add(new))
+                    .ok_or("budget_journal_invalid")?;
                 let run = self.runs.get_mut(run_id).ok_or("budget_journal_invalid")?;
-                run.liability_nanos = run.liability_nanos.saturating_sub(old).saturating_add(new);
+                run.liability_nanos = run
+                    .liability_nanos
+                    .checked_sub(old)
+                    .and_then(|remaining| remaining.checked_add(new))
+                    .ok_or("budget_journal_invalid")?;
                 run.reported_usd += *cost_usd;
-                if !run.reported_usd.is_finite() {
-                    self.halted = true;
-                }
             }
             BudgetRecord::Commission { .. } => return Err("budget_journal_invalid".into()),
         }
@@ -382,14 +402,28 @@ struct BudgetLedger {
 
 impl BudgetLedger {
     fn open(path: &Path, commission_id: &str, create: bool) -> ClassResult<Self> {
-        let mut file = match OpenOptions::new()
+        let mut options = OpenOptions::new();
+        options
             .read(true)
             .write(true)
-            .create(create)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(path)
-        {
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+        let mut newly_created = false;
+        let opened = if create {
+            match options.create_new(true).open(path) {
+                Ok(file) => {
+                    newly_created = true;
+                    Ok(file)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    options.create_new(false).open(path)
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            options.open(path)
+        };
+        let mut file = match opened {
             Ok(file) => file,
             Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self {
@@ -399,6 +433,9 @@ impl BudgetLedger {
             }
             Err(_) => return Err("budget_open".into()),
         };
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err("budget_locked".into());
+        }
         let metadata = file.metadata().map_err(|_| "budget_metadata")?;
         if !metadata.is_file()
             || metadata.uid() != unsafe { libc::geteuid() }
@@ -407,12 +444,9 @@ impl BudgetLedger {
         {
             return Err("budget_not_private".into());
         }
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err("budget_locked".into());
-        }
         let mut state = BudgetState::default();
         if metadata.len() == 0 {
-            if !create {
+            if !newly_created {
                 return Err("budget_journal_invalid".into());
             }
             append_record(
@@ -541,11 +575,16 @@ impl Receipts {
     }
 
     fn write<T: Serialize>(&self, name: &str, value: &T) -> ClassResult<()> {
-        let mut file = new_file(&self.dir.join(name))?;
+        let destination = self.dir.join(name);
+        let partial = destination.with_extension("partial");
+        let mut file = new_file(&partial)?;
         serde_json::to_writer_pretty(&mut file, value).map_err(|_| "receipt_write")?;
         file.write_all(b"\n").map_err(|_| "receipt_write")?;
         file.sync_all().map_err(|_| "receipt_sync")?;
-        File::open(self.dir.join(name).parent().ok_or("receipt_path_invalid")?)
+        // Publish a complete inode without replacing any prior immutable receipt.
+        fs::hard_link(&partial, &destination).map_err(|_| "receipt_publish")?;
+        fs::remove_file(&partial).map_err(|_| "receipt_publish")?;
+        File::open(destination.parent().ok_or("receipt_path_invalid")?)
             .and_then(|parent| parent.sync_all())
             .map_err(|_| "receipt_sync")?;
         Ok(())
@@ -923,7 +962,6 @@ fn prepare(path: &Path, out: &Path, agent: &ureq::Agent) -> ClassResult<Prepared
                 samples.push(f32::from(sample) / 32768.0);
             }
         }
-        drop(reader);
         if sample_count == 0 {
             return Err("clip_audio_empty".into());
         }
@@ -1054,10 +1092,9 @@ fn catalog_versions(agent: &ureq::Agent) -> ClassResult<BTreeMap<String, String>
                 .any(|modality| modality == "transcription")
             && model_id(&model.id)
             && model_id(&model.canonical_slug)
+            && versions.insert(model.id, model.canonical_slug).is_some()
         {
-            if versions.insert(model.id, model.canonical_slug).is_some() {
-                return Err("catalog_duplicate_model".into());
-            }
+            return Err("catalog_duplicate_model".into());
         }
     }
     Ok(versions)
@@ -1065,7 +1102,8 @@ fn catalog_versions(agent: &ureq::Agent) -> ClassResult<BTreeMap<String, String>
 
 #[derive(Deserialize)]
 struct TranscriptionResponse {
-    text: String,
+    #[serde(default)]
+    text: Value,
     #[serde(default)]
     usage: Option<Value>,
 }
@@ -1131,8 +1169,7 @@ fn cloud_call(
         .set("Content-Length", &length.to_string())
         .send(body);
     let mut outcome = match response {
-        Ok(response) if response.status() == 200 => parse_response(response),
-        Ok(response) => Outcome::error(format!("http_{}", response.status())),
+        Ok(response) | Err(ureq::Error::Status(_, response)) => parse_response(response),
         Err(error) => Outcome::error(http_error_class(error)),
     };
     outcome.latency_ms = elapsed_ms(started);
@@ -1140,10 +1177,17 @@ fn cloud_call(
 }
 
 fn parse_response(response: ureq::Response) -> Outcome {
+    let status = response.status();
     let parsed: TranscriptionResponse =
         match serde_json::from_reader(response.into_reader().take(RESPONSE_LIMIT)) {
             Ok(parsed) => parsed,
-            Err(_) => return Outcome::error("response_shape".into()),
+            Err(_) => {
+                return Outcome::error(if status == 200 {
+                    "response_shape".into()
+                } else {
+                    format!("http_{status}")
+                })
+            }
         };
     let cost = parsed
         .usage
@@ -1151,14 +1195,28 @@ fn parse_response(response: ureq::Response) -> Outcome {
         .and_then(|usage| usage.get("cost"))
         .and_then(Value::as_f64)
         .filter(|cost| cost.is_finite() && *cost >= 0.0);
-    Outcome::text(parsed.text, cost, 0)
+    if status != 200 {
+        return Outcome {
+            cost_usd: cost,
+            ..Outcome::error(format!("http_{status}"))
+        };
+    }
+    match parsed.text {
+        Value::String(text) => Outcome::text(text, cost, 0),
+        _ => Outcome {
+            cost_usd: cost,
+            ..Outcome::error("response_shape".into())
+        },
+    }
 }
 
 fn http_error_class(error: ureq::Error) -> String {
     match error {
         ureq::Error::Status(status, _) => format!("http_{status}"),
         ureq::Error::Transport(error) => {
-            format!("transport_{:?}", error.kind()).to_ascii_lowercase()
+            let mut class = format!("transport_{:?}", error.kind());
+            class.make_ascii_lowercase();
+            class
         }
     }
 }
@@ -1383,6 +1441,109 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_receipt_is_never_published_under_its_final_name() {
+        struct Interrupted;
+        impl Serialize for Interrupted {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> std::result::Result<S::Ok, S::Error> {
+                use serde::ser::SerializeSeq;
+                let mut sequence = serializer.serialize_seq(Some(2))?;
+                sequence.serialize_element(&1_u32)?;
+                Err(serde::ser::Error::custom("interrupted receipt"))
+            }
+        }
+
+        let temp = PrivateTemp::new();
+        let receipts = Receipts::create(&temp.0.join("run")).unwrap();
+        assert!(receipts.write("results.json", &Interrupted).is_err());
+        assert!(!receipts.dir.join("results.json").exists());
+    }
+
+    #[test]
+    fn existing_empty_journal_cannot_restart_commission_spending() {
+        let temp = PrivateTemp::new();
+        let path = temp.0.join("commission.jsonl");
+        drop(new_file(&path).unwrap());
+        assert!(BudgetLedger::open(&path, "commission", true).is_err());
+    }
+
+    #[test]
+    fn impossible_reservation_history_is_rejected_even_after_zero_cost_release() {
+        let temp = PrivateTemp::new();
+        let path = temp.0.join("commission.jsonl");
+        let mut file = new_file(&path).unwrap();
+        for record in [
+            BudgetRecord::Commission {
+                schema_version: 1,
+                commission_id: "commission".into(),
+                cap_nanos: COMMISSION_CAP_NANOS,
+            },
+            BudgetRecord::Reserve {
+                run_id: "run-a".into(),
+                model: "vendor/model".into(),
+                clip: "dictation-01".into(),
+                nanos: COMMISSION_CAP_NANOS + 1,
+            },
+            BudgetRecord::Report {
+                run_id: "run-a".into(),
+                model: "vendor/model".into(),
+                clip: "dictation-01".into(),
+                cost_usd: 0.0,
+                release_reservation: true,
+            },
+        ] {
+            append_record(&mut file, &record).unwrap();
+        }
+        drop(file);
+        assert!(BudgetLedger::open(&path, "commission", false).is_err());
+    }
+
+    #[test]
+    fn malformed_recognition_cannot_hide_reported_charge_or_ceiling_overrun() {
+        let temp = PrivateTemp::new();
+        let path = temp.0.join("commission.jsonl");
+        let mut ledger = BudgetLedger::open(&path, "commission", true).unwrap();
+        let call_key = key("run-a", "dictation-01");
+        ledger.reserve(&call_key, 100_000_000, 200_000_000).unwrap();
+        let outcome = parse_response(
+            ureq::Response::new(200, "OK", r#"{"text":null,"usage":{"cost":0.11}}"#).unwrap(),
+        );
+        assert!(outcome.status == Status::Error);
+        ledger
+            .report(
+                &call_key,
+                outcome
+                    .cost_usd
+                    .expect("reported bill must survive invalid text"),
+                outcome.status == Status::Ok,
+            )
+            .unwrap();
+        drop(ledger);
+        let mut ledger = BudgetLedger::open(&path, "commission", false).unwrap();
+        assert_eq!(ledger.state.liability_nanos, 110_000_000);
+        assert!(ledger
+            .reserve(&key("run-b", "extra"), 1, COMMISSION_CAP_NANOS)
+            .is_err());
+    }
+
+    #[test]
+    fn failed_http_output_cannot_become_recognition_or_hide_its_charge() {
+        let outcome = parse_response(
+            ureq::Response::new(
+                503,
+                "Service Unavailable",
+                r#"{"text":"provider diagnostic, not a transcript","usage":{"cost":0.05}}"#,
+            )
+            .unwrap(),
+        );
+        assert!(outcome.status == Status::Error);
+        assert_eq!(outcome.error_class.as_deref(), Some("http_503"));
+        assert_eq!(outcome.cost_usd, Some(0.05));
+    }
+
+    #[test]
     fn reservations_survive_failure_empty_unknown_and_restart() {
         let temp = PrivateTemp::new();
         let path = temp.0.join("commission.jsonl");
@@ -1570,14 +1731,11 @@ mod tests {
         let temp = PrivateTemp::new();
         let mut receipts = Receipts::create(&temp.0.join("run")).unwrap();
         let private_body = "provider private response /secret/source/path original-take-identifier";
-        let error = ureq::Error::Status(
-            503,
-            ureq::Response::new(503, "Service Unavailable", private_body).unwrap(),
-        );
+        let error_response = ureq::Response::new(503, "Service Unavailable", private_body).unwrap();
         let clip = clip();
         let calls = [
             scored_call("vendor/model", &clip, parse_response(ureq::Response::new(200, "OK", r#"{"text":"private provider transcript","usage":{"cost":0.01,"seconds":2}}"#).unwrap())),
-            scored_call("vendor/model", &clip, Outcome::error(http_error_class(error))),
+            scored_call("vendor/model", &clip, parse_response(error_response)),
         ];
         for (index, call) in calls.iter().enumerate() {
             record_call(&mut receipts, index, call).unwrap();
