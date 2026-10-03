@@ -11,7 +11,7 @@ import { repositoryUrl } from '../lib/docs.mjs';
 interface Props {
   title: string;
   description: string;
-  section?: 'home' | 'docs' | 'releases';
+  section?: 'home' | 'docs' | 'releases' | 'evals';
   noindex?: boolean;
 }
 
@@ -48,6 +48,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
       <nav class="primary-nav" aria-label="Primary">
         <a href="/docs/install" aria-current={section === 'docs' ? 'true' : undefined}>Documentation</a>
         <a href="/releases" aria-current={section === 'releases' ? 'true' : undefined}>Releases</a>
+        <a href="/evals" aria-current={section === 'evals' ? 'page' : undefined}>Speech evals</a>
         <a href={repositoryUrl}>GitHub</a>
       </nav>
     </header>

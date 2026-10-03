@@ -142,10 +142,12 @@ are separate choices described there.
 
 ## Evaluation gauntlet
 
-`examples/eval` is a reproducible harness that scores configured STT and cleanup
-lanes over a five-clip reference set (WER/CER, latency, cost) and ranks
-arrangements. Reproduction procedures, accepted contracts, and clearly separated
-historical findings/design proposals: [evaluation guide](docs/EVALUATION.md).
+`examples/eval` scores STT and cleanup lanes for WER/CER, latency, and cost.
+The `living-speech` command compares at least five current models on explicitly
+reviewed real dictation, retains text-free run receipts, and enforces a durable
+$4.50 commission spending cap. [Published speech results](https://cantrip.mistystep.io/evals)
+keep our measurements separate from cited independent and vendor benchmarks.
+Reproduction, privacy, and scheduling procedures: [evaluation guide](docs/EVALUATION.md).
 
 ## Development
 

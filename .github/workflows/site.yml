@@ -57,8 +57,9 @@ jobs:
       - name: Verify public routes
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         run: |
-          for path in / /docs/install /docs/use /docs/configuration /docs/desktop /docs/privacy /releases; do
+          for path in / /docs/install /docs/use /docs/configuration /docs/desktop /docs/privacy /releases /evals /evals/latest.json; do
             curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 "https://cantrip.mistystep.io$path" --output /dev/null
           done
           # A healthy edge may still serve the previous build for a moment after deploy.
           scripts/verify-site site/dist/index.html https://cantrip.mistystep.io/
+          scripts/verify-site site/dist/evals/index.html https://cantrip.mistystep.io/evals

@@ -1,0 +1,12 @@
+[Unit]
+Description=Weekly Cantrip speech evidence refresh
+Documentation=https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md#local-weekly-schedule
+
+[Timer]
+OnCalendar=Mon *-*-* 09:00:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=cantrip-speech-eval.service
+
+[Install]
+WantedBy=timers.target

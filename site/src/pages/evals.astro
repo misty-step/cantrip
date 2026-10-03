@@ -1,0 +1,184 @@
+---
+import fs from 'node:fs';
+import path from 'node:path';
+import SiteLayout from '../layouts/SiteLayout.astro';
+import external from '../../data/speech-benchmarks.json';
+
+type Call = {
+  model: string; clip: string; category: string; audio_secs: number;
+  status: 'ok' | 'error' | 'empty'; error_class: string | null;
+  latency_ms: number; wer: number; cer: number; cost_usd: number | null;
+};
+type Model = {
+  id: string; name: string; backend: string; model_version: string;
+  successful_calls: number; failed_calls: number; wer: number | null;
+  cer: number | null; median_latency_ms: number | null; p95_latency_ms: number | null;
+  cost_usd: number | null; cost_status: string;
+};
+type Result = {
+  schema_version: number; run_id: string; started_at_unix_ms: number;
+  completed_at_unix_ms: number; source_revision: string;
+  corpus: { id: string; version: string; sha256: string; clip_count: number;
+    dictation_clip_count: number; audio_secs: number; description: string };
+  scorer: { id: string; description: string; aggregation: string };
+  models: Model[]; calls: Call[];
+  budget: { commission_cap_usd: number; reserved_usd: number; reported_usd: number; unknown_cost_calls: number };
+  limitations: string[];
+};
+// npm/Astro and scripts/check-site run with site/ as the working directory.
+const receiptsDirectory = path.resolve('public/evals');
+const result: Result = JSON.parse(fs.readFileSync(path.join(receiptsDirectory, 'latest.json'), 'utf8'));
+if (result.schema_version !== 1 || !/^[a-zA-Z0-9_-]+$/.test(result.run_id) ||
+    result.models.length < 5 || result.corpus.dictation_clip_count < 1) {
+  throw new Error('Speech results require an observed five-model real-dictation run.');
+}
+const mean = (values: number[]) => values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
+const dictationWer = (id: string) => mean(result.calls.filter(c => c.model === id && c.category === 'dictation').map(c => c.wer));
+const models = [...result.models].sort((a, b) =>
+  a.failed_calls - b.failed_calls || (dictationWer(a.id) ?? Infinity) - (dictationWer(b.id) ?? Infinity));
+const percent = (value: number | null) => value === null ? 'Not reported' : `${(value * 100).toFixed(1)}%`;
+const seconds = (value: number | null) => value === null ? 'Not reported' : `${(value / 1000).toFixed(2)} s`;
+const dollars = (value: number | null) => value === null ? 'Unknown' : `$${value.toFixed(5)}`;
+const date = new Date(result.started_at_unix_ms).toISOString();
+const receipt = `/evals/runs/${result.run_id}`;
+const completed = result.calls.filter(c => c.status === 'ok').length;
+const dictationSeconds = result.calls.filter(c => c.model === result.models[0].id && c.category === 'dictation').reduce((n, c) => n + c.audio_secs, 0);
+const history: Result[] = fs.readdirSync(path.join(receiptsDirectory, 'runs'))
+  .filter(name => /^[a-zA-Z0-9_-]+\.json$/.test(name))
+  .map((name): Result => JSON.parse(fs.readFileSync(path.join(receiptsDirectory, 'runs', name), 'utf8')))
+  .filter(run => run.run_id !== result.run_id)
+  .sort((a, b) => b.started_at_unix_ms - a.started_at_unix_ms);
+---
+<SiteLayout title="Speech evals | Cantrip" description="Real dictation, measured speech recognition, and cited public benchmarks. Cantrip's model choices come with receipts." section="evals">
+  <article class="shell eval-page">
+    <header class="eval-heading">
+      <p class="breadcrumb"><a href="/">Cantrip</a> / Speech evals</p>
+      <h1>Pick speech models<br />from our own evidence.</h1>
+      <p class="lede">Real dictation first. Accuracy, waiting time, and cost together.</p>
+      <p>These are measurements, not a universal leaderboard. Running this evaluation does not change your configured Cantrip model; the results inform a deliberate choice.</p>
+      <nav class="text-links" aria-label="Evaluation sections">
+        <a href="#our-results">Our results</a><a href="#method">Method & limits</a><a href="#public-benchmarks">Public benchmarks</a><a href="#receipts">Run receipts</a>
+      </nav>
+    </header>
+
+    <section id="our-results" aria-labelledby="results-heading">
+      <div class="section-top">
+        <h2 id="results-heading">Our latest run</h2>
+        <p>Started <time datetime={date}>{date.replace('T', ' ').replace(/\.\d+Z$/, ' UTC')}</time></p>
+      </div>
+      <p class="sample-note"><strong>{result.corpus.dictation_clip_count} real dictation takes</strong> ({dictationSeconds.toFixed(1)} seconds), plus {result.corpus.clip_count - result.corpus.dictation_clip_count} public speech clips. {result.models.length} models, {completed} of {result.calls.length} calls completed.</p>
+      {completed < result.calls.length && <p class="caution"><strong>Incomplete run.</strong> Service errors and empty responses are deletion penalties, not measurements of recognition quality. Inspect the error classes and earlier receipts before choosing a model.</p>}
+      <p>Dictation error is the main comparison. All-clip error includes the public regression set. Lower word error and waiting time are better. Costs are the provider's reported charges for this run, not estimates of a subscription bill.</p>
+      <div class="table-scroll" role="region" aria-label="Model comparison, scroll horizontally on small screens" tabindex="0">
+        <table class="comparison">
+          <caption>Measured recognition on the same reviewed audio; no cleanup model</caption>
+          <thead><tr><th scope="col">Model</th><th scope="col">Dictation word error</th><th scope="col">All-clip word error</th><th scope="col">Median wait</th><th scope="col">95th percentile wait</th><th scope="col">Completed calls</th><th scope="col">Run cost</th></tr></thead>
+          <tbody>{models.map(model => <tr class:list={{ 'has-error': model.failed_calls > 0 }}>
+            <th scope="row"><span>{model.name}</span><small>{model.backend === 'local' ? 'Installed local baseline' : 'Cloud via OpenRouter'}</small></th>
+            <td>{percent(dictationWer(model.id))}</td><td>{percent(model.wer)}</td>
+            <td>{seconds(model.median_latency_ms)}</td><td>{seconds(model.p95_latency_ms)}</td>
+            <td>{model.successful_calls}/{model.successful_calls + model.failed_calls}{model.failed_calls > 0 && <small>{model.failed_calls} failed or empty</small>}</td>
+            <td>{dollars(model.cost_usd)}<small>{model.cost_status === 'local-zero' ? 'No API charge' : model.cost_status === 'reported' ? 'Provider-reported' : 'Not fully reported'}</small></td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <p class="caution">A small, one-speaker sample cannot establish a reliable overall winner. Fillers, numbers, contractions, and spelling affect this scorer. Fish's speaker and vocal-event labels, when present, also count as word tokens; this is raw output, not a label-stripped accuracy comparison. Failed or empty responses are counted as full deletions, not silently removed.</p>
+      <details class="clip-details">
+        <summary>Inspect every clip and model</summary>
+        <p>Opaque dictation IDs protect private take identities. These receipts contain scores, never audio or transcript text.</p>
+        <div class="table-scroll" role="region" aria-label="Per-clip measurements" tabindex="0">
+          <table><caption>All submitted or recorded model calls</caption><thead><tr><th scope="col">Model</th><th scope="col">Clip</th><th scope="col">Kind</th><th scope="col">Result</th><th scope="col">Word error</th><th scope="col">Character error</th><th scope="col">Wait</th></tr></thead>
+            <tbody>{result.calls.map(call => <tr><th scope="row">{result.models.find(m => m.id === call.model)?.name ?? call.model}</th><td>{call.clip}</td><td>{call.category}</td><td>{call.status}{call.error_class && <small>{call.error_class}</small>}</td><td>{percent(call.wer)}</td><td>{percent(call.cer)}</td><td>{seconds(call.latency_ms)}</td></tr>)}</tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+
+    <section id="method" class="method-grid" aria-labelledby="method-heading">
+      <div><h2 id="method-heading">What we measured</h2><p>{result.corpus.description}</p></div>
+      <div class="method-copy">
+        <h3>Reviewed references, raw recognition</h3>
+        <p>These real dictation takes and their verbatim references were explicitly reviewed before cloud processing. Only the approved audio is submitted to the selected providers; references are not sent, and neither audio nor transcript text is published here. The additional public regression clips are JFK, LibriSpeech, and Common Voice; their <a href="https://github.com/misty-step/cantrip/blob/master/samples/eval/manifest.json">sources and licenses</a> are versioned.</p>
+        <p>{result.scorer.description} {result.scorer.aggregation}. Word error is edit distance divided by reference words; character error uses the corresponding character sequence. Neither score measures punctuation quality or whether a dictated request was answered instead of transcribed.</p>
+        <h3>End-to-end waiting time</h3>
+        <p>Cloud time includes upload, network, and provider response. Local time is inference on the run host, with model-load conditions recorded in the run. These are one-pass measurements, not a stable tail-latency estimate. Hardware, warm state, network, and short clips limit comparisons.</p>
+        <h3>Bounded spending</h3>
+        <p>Paid calls reserve a conservative charge before submission. Failed or uncertain calls retain that reservation. This commission stops at ${result.budget.commission_cap_usd.toFixed(2)}, below its $5 ceiling. Observed charges this run: {dollars(result.budget.reported_usd)}. Accounted liability this run: {dollars(result.budget.reserved_usd)}. Calls without a known charge: {result.budget.unknown_cost_calls}.</p>
+        <h3>Weekly evidence, reviewed publication</h3>
+        <p>The <a href="https://github.com/misty-step/cantrip/blob/master/contrib/cantrip-speech-eval.timer">local weekly timer</a> keeps original dictation, references, and the durable ledger on the workstation. The scheduler proposes metrics-only review PRs for complete or partial result files; the site updates through normal review, merge, and deployment. The timestamp above proves the age of this published snapshot, not that the timer is currently active. Public benchmark snapshots are dated separately.</p>
+        <h3>Limits of this run</h3>
+        <ul>{result.limitations.map(item => <li>{item}</li>)}</ul>
+        <details><summary>Exact model versions</summary><ul>{result.models.map(model => <li><strong>{model.name}</strong><br /><code>{model.model_version}</code></li>)}</ul></details>
+      </div>
+    </section>
+
+    <section id="public-benchmarks" aria-labelledby="public-heading">
+      <h2 id="public-heading">What other people measured</h2>
+      <p>Public evidence checked <time datetime={external.checked_at}>{external.checked_at.slice(0, 10)} UTC</time>. Separate corpora, separate scoring. Do not compare these percentages directly with our dictation scores.</p>
+      {external.benchmarks.map(benchmark => <section class="benchmark" aria-labelledby={`benchmark-${benchmark.id}`}>
+        <h3 id={`benchmark-${benchmark.id}`}><a href={benchmark.url}>{benchmark.title}</a></h3>
+        <p class="source-kind">{benchmark.kind === 'independent' ? 'Independent benchmark' : 'Vendor-reported benchmark'}</p>
+        <p>{benchmark.description}</p>
+        <div class="table-scroll" role="region" aria-label={`${benchmark.title} comparison`} tabindex="0">
+          <table><caption>Published source snapshot, not a Cantrip result</caption><thead><tr><th scope="col">Model</th><th scope="col">Word error</th><th scope="col">Speed factor</th><th scope="col">USD / 1,000 minutes</th><th scope="col">Source context</th></tr></thead><tbody>{benchmark.rows.map(row => <tr><th scope="row">{row.model}</th><td>{percent(row.wer)}</td><td>{row.speed_factor === null ? 'Not reported' : `${row.speed_factor.toFixed(1)}×`}</td><td>{row.price_per_1000_minutes_usd === null ? 'Not included' : `$${row.price_per_1000_minutes_usd.toFixed(2)}`}</td><td>{row.note}</td></tr>)}</tbody></table>
+        </div>
+        <p class="caution">{benchmark.limitations}</p>
+        <p class="text-links"><a href={benchmark.url}>Original results</a>{benchmark.methodology_url && <a href={benchmark.methodology_url}>Benchmark methodology</a>}</p>
+      </section>)}
+      <p>Fish Transcribe 1 Pro is measured in our run. <a href="https://openrouter.ai/fish-audio/transcribe-1-pro">Its model card</a> describes speaker and vocal-event labels; those features are not an independent accuracy benchmark.</p>
+    </section>
+
+    <section id="receipts" class="receipts" aria-labelledby="receipts-heading">
+      <h2 id="receipts-heading">The receipts</h2>
+      <p>Run <code>{result.run_id}</code>. Corpus version <code>{result.corpus.version}</code>. Results are immutable per run; the latest download is the current published snapshot.</p>
+      <div class="text-links"><a href="/evals/latest.json" download>Latest results JSON</a><a href={`${receipt}.json`} download>This run's results JSON</a><a href={`${receipt}.log`} download>This run's log</a><a href="https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md">Reproduce & schedule</a></div>
+      <dl><dt>Source revision</dt><dd><code>{result.source_revision}</code></dd><dt>Corpus SHA-256</dt><dd><code>{result.corpus.sha256}</code></dd><dt>Scorer</dt><dd><code>{result.scorer.id}</code></dd></dl>
+      <h3>Earlier attempts remain evidence</h3>
+      <p>Initial HTTP 402 reservations and GPT Transcribe's HTTP 401 responses are retained. Neither failure is a recognition-quality measurement. Unknown charges retain their conservative reservation; zero reported charges do not mean a known zero bill.</p>
+      <ul>{history.map(run => <li><a href={`/evals/runs/${run.run_id}.json`}>{run.run_id}</a> · {run.calls.filter(call => call.status === 'ok').length}/{run.calls.length} completed · reported {dollars(run.budget.reported_usd)} · {run.budget.unknown_cost_calls} unknown charges · <a href={`/evals/runs/${run.run_id}.log`}>log</a></li>)}</ul>
+    </section>
+  </article>
+</SiteLayout>
+<style>
+  .eval-page { padding-block: 3.5rem 4.5rem; }
+  .eval-heading { max-width: 76ch; margin-bottom: 3.5rem; }
+  .eval-heading h1 { max-width: 26ch; }
+  .eval-heading > p:not(.lede):not(.breadcrumb) { color: var(--muted); }
+  .eval-heading nav { margin-top: 1.75rem; font-size: .9375rem; }
+  .eval-page > section { border-top: 1px solid var(--line); padding-block: 2.5rem; }
+  .section-top { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: .25rem 1.5rem; }
+  .section-top p, .source-kind { font-size: .875rem; color: var(--muted); }
+  .sample-note { border-left: 3px solid var(--accent); padding-left: 1rem; }
+  .table-scroll { width: 100%; overflow-x: auto; margin-block: 1.5rem; scrollbar-width: thin; }
+  table { border-collapse: collapse; width: 100%; text-align: left; font-size: .9375rem; }
+  caption { text-align: left; color: var(--muted); font-size: .8125rem; padding-bottom: .8rem; }
+  th, td { padding: .95rem 1rem; vertical-align: top; border-bottom: 1px solid var(--line); }
+  thead th { background: var(--surface); font-weight: 500; }
+  tbody th { font-weight: 500; min-width: 12rem; }
+  td { min-width: 7rem; font-variant-numeric: tabular-nums; }
+  .comparison { min-width: 920px; }
+  .comparison td:nth-child(2) { color: var(--foreground); font-weight: 600; }
+  small { display: block; margin-top: .3rem; font-size: .75rem; color: var(--muted); font-weight: 400; }
+  .has-error th span { color: var(--attention); }
+  .caution { max-width: 90ch; color: var(--muted); font-size: .9375rem; }
+  .clip-details { margin-top: 1.75rem; }
+  .clip-details > p { margin-top: 1rem; color: var(--muted); }
+  .method-grid { display: grid; grid-template-columns: minmax(12rem, .65fr) minmax(0, 1.5fr); gap: 3rem; }
+  .method-grid > div:first-child p { color: var(--muted); font-size: .9375rem; }
+  .method-copy { max-width: 75ch; }
+  .method-copy h3:not(:first-child) { margin-top: 2rem; }
+  .method-copy li + li { margin-top: .6rem; }
+  .method-copy details { margin-top: 1.5rem; }
+  .benchmark { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); }
+  .benchmark > p { max-width: 88ch; }
+  .source-kind { margin-bottom: 1rem; }
+  .receipts p { max-width: 85ch; }
+  .receipts dl { margin-top: 1.75rem; }
+  .receipts dt { color: var(--muted); font-size: .8125rem; margin-top: 1rem; }
+  .receipts dd { margin: .25rem 0 0; overflow-wrap: anywhere; }
+  @media (max-width: 700px) {
+    .eval-page { padding-top: 2.5rem; }
+    .method-grid { grid-template-columns: 1fr; gap: 1rem; }
+    .eval-heading h1 { font-size: 2rem; }
+  }
+</style>

@@ -18,6 +18,7 @@
     "@astrojs/markdown-satteri": "0.4.0",
     "@fontsource/ibm-plex-mono": "5.3.0",
     "@fontsource/ibm-plex-sans": "5.3.0",
+    "@types/node": "24.19.1",
     "astro": "7.3.1",
     "typescript": "6.0.3",
     "wrangler": "4.129.1"

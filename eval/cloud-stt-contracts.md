@@ -110,3 +110,135 @@ state is for this machine through the Mint broker at delivery time.
 - Sources: `https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe`,
   `https://techcommunity.microsoft.com/blog/azure-ai-foundry-blog/new-mai-models-in-microsoft-foundry-across-text-image-voice-and-speech/4524632`,
   `https://azure.microsoft.com/en-us/pricing/details/speech/`.
+
+## Living speech runner — OpenRouter transcription route
+
+The existing `eval` example includes a separate `living-speech` command. It
+does not change Cantrip's selected/default model, read transcript history,
+download models, or use the application's credential store. It reads only the
+configured corpus and installed baseline directory, and uses an injected
+`OPENROUTER_API_KEY` for explicitly authorized paid invocations.
+
+```sh
+cargo run --release --example eval -- living-speech \
+  --config /private/eval/config.json --out /private/eval/preflight-unique \
+  --run-id preflight-unique --source-revision FULL_GIT_SHA --dry-run
+
+cargo run --release --example eval -- living-speech \
+  --config /private/eval/config.json --out /private/eval/run-unique \
+  --run-id run-unique --source-revision FULL_GIT_SHA --allow-paid
+```
+
+`--out` must not exist; its parent must already exist. Each invocation writes
+owner-only receipts to a fresh directory. `--run-id` is a fresh public-safe
+identifier; the durable commission ledger rejects reuse of a spent run ID.
+`--source-revision` is a 7–64-character hexadecimal Git revision supplied by
+the operator. Dry-run validates the corpus, current public transcription
+catalog, installed local model, and commission budget without checking
+credentials or making paid calls. It writes/prints `preflight.json` with
+request count, audio seconds, conservative reservations and cumulative
+remaining budget; it never generates measured `results.json`.
+
+Configuration is JSON with `schema_version: 1` and these fields; unknown fields
+are rejected:
+
+| Object | Required fields |
+| --- | --- |
+| Root | `corpus`, `models`, `budget`; optional `local_parakeet` |
+| `corpus` | `id`, `version`, `description`, `clips` |
+| Each clip | `id`, `file`, `ref`, `category`, `source`, `license`, `reference_reviewed` |
+| Each cloud model | `id`, `name`, `ceiling_usd_per_audio_hour`, `pricing_source` |
+| Optional `local_parakeet` | `id`, `name`, `model_version`, `dir`, `quant` |
+| `budget` | `commission_id`, `ledger_path`, `commission_cap_usd`, `per_run_cap_usd` |
+
+- Corpus and clip IDs, local model IDs, commission IDs and run IDs start with
+  an ASCII alphanumeric and contain only ASCII alphanumerics, `-` or `_`
+  (maximum 80 characters). Clip IDs must be opaque public labels, never
+  original personal take IDs. Human-readable public metadata is explicitly
+  configured; do not put private material in corpus descriptions or names.
+- `file`, local `dir` and `ledger_path` are absolute paths or paths relative to
+  the configuration file. Paths are not globbed or discovered. Each selected
+  WAV must contain nonempty 16 kHz mono signed PCM16 audio and fit the
+  transcription endpoint's 25 MB multipart limit. Bytes are read/validated
+  once and the same reviewed bytes are sent to every model.
+- `ref` is the exact approved reference text. Every clip needs nonempty
+  `source` and `license`, `reference_reviewed: true`, and a reference that
+  remains nonempty under the existing ASCII scorer. `category` is exactly
+  `dictation` or `public-speech`; at least one real, reviewed dictation clip
+  is required. References and provenance fields never enter public receipts.
+- `models` contains distinct, explicitly chosen `provider/model` IDs present
+  in the current OpenRouter transcription catalog. There must be at least
+  five total models, counting at most one optional installed local Parakeet
+  baseline. Its `quant` is `int8`, `int4`, `fp16` or `fp32`; missing or
+  unloadable selected local assets fail preflight, never trigger a download.
+- Every paid lane requires a positive finite reviewed ceiling in **USD per
+  audio hour** and its HTTPS `pricing_source`. The catalog records canonical
+  versions, but its `pricing.prompt` is deliberately not used for billing:
+  duration-price units differ, including MAI's per-hour rate. Reservations
+  round each clip up to a whole second and each amount up to a nanodollar.
+- `commission_cap_usd` must be exactly `4.5`; `per_run_cap_usd` is positive and
+  at most `4.5`. The stable `ledger_path` must be outside public output, in an
+  existing owner-only directory. Existing ledgers must be owner-only regular
+  files with no additional hard links. Do not delete, reset or replace a
+  commission ledger between runs. An exclusive nonblocking lock prevents
+  concurrent spending, and fsynced append-only reservations survive crashes.
+  Missing usage, errors, timeouts and empty output retain the full reservation;
+  successful responses may settle to authoritative `usage.cost`. Any observed
+  cost above its ceiling permanently halts further paid commission calls.
+  A partial/corrupt journal fails closed and requires operator reconciliation,
+  not an automatic reset.
+  Only exclusive creation of a new journal permits initialization. An existing
+  empty file is corrupt, never a new allowance; metadata and replay are checked
+  after the lock is acquired. Impossible over-cap/halted reservations and
+  overflowing accounting also fail closed.
+
+The paid route is direct
+`POST https://openrouter.ai/api/v1/audio/transcriptions`, Bearer authentication,
+multipart WAV with an anonymous `audio.wav` filename, `language=en` and
+`response_format=json`. The response's `text` is scored in memory and discarded;
+valid numeric `usage.cost` is authoritative independently of HTTP status or
+recognition text validity. Failed recognition retains max(reservation, reported cost);
+absent/invalid usage is
+unknown, never zero. No paid retries or redirect following are performed.
+Provider-key limits and any authorization for recurring paid calls are
+separate operator responsibilities; `--allow-paid` authorizes only this
+invocation, not a schedule.
+
+Observed runs write sanitized `results.json`, append-only JSON-line `run.log`
+and immutable, create-new per-call receipts under `calls/`. The log is synced
+before a reserved request and after its outcome, so interrupted runs preserve
+receipts without pretending they completed. Validated plans live separately
+in `preflight.json`. The runner never writes audio, references, transcripts,
+private paths, original take IDs, provider error bodies or credentials to
+these files. The corpus SHA-256 includes ordered, length-prefixed corpus
+identity, opaque clip IDs, categories, exact references, source/license and
+WAV bytes, but not filesystem paths.
+
+JSON receipts are streamed into a private create-new temporary file, fsynced,
+and atomically linked to the final name without clobbering prior evidence;
+the parent directory is synced. An incomplete JSON write has no final filename
+and cannot be proposed as a public receipt.
+
+Every configured model/clip pair is accounted for after execution begins:
+errors, empty output and budget-blocked pairs are full deletion (WER/CER 1.0),
+not omitted from macro means. Latency median/p95 use successful calls only;
+local model loading is excluded and disclosed separately. WER can exceed 1.0.
+Host/load limitations, unknown charges and partial failures are explicit.
+`budget.reserved_usd` is this run's accounted liability after permitted
+settlements, `reported_usd` is the actual reported paid usage sum, and
+`unknown_cost_calls` counts submitted requests without valid cost (not
+unsubmitted blocked pairs). The private ledger applies the cumulative
+commission cap independently of earlier unrelated API-key usage. Any failed
+or empty call, unknown submitted cost, halted spending or receipt failure
+produces a nonzero exit **after** writing available results; operators must not
+mark that run all-successful.
+
+Only reviewed observed `results.json` and its text-free `run.log` should be
+published. Public benchmark corpora/normalization and vendor-reported rankings
+remain separate from Cantrip measurements; these scores do not imply direct
+comparability.
+
+Primary API references:
+- [OpenRouter speech-to-text guide](https://openrouter.ai/docs/guides/overview/multimodal/stt)
+- [Create transcription API](https://openrouter.ai/docs/api/api-reference/stt/create-transcription)
+- [Current transcription model catalog](https://openrouter.ai/api/v1/models?output_modalities=transcription)
