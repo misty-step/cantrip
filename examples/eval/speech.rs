@@ -601,6 +601,10 @@ fn new_file(path: &Path) -> ClassResult<File> {
         .map_err(|_| "receipt_create".into())
 }
 
+pub(super) fn valid_source_revision(revision: &str) -> bool {
+    (7..=64).contains(&revision.len()) && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub(super) fn run(raw_args: &[String]) -> Result<()> {
     let args = match Args::try_parse_from(
         std::iter::once("living-speech").chain(raw_args.iter().map(String::as_str)),
@@ -617,13 +621,7 @@ pub(super) fn run(raw_args: &[String]) -> Result<()> {
             ))
         }
     };
-    if !safe_id(&args.run_id)
-        || !(7..=64).contains(&args.source_revision.len())
-        || !args
-            .source_revision
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    if !safe_id(&args.run_id) || !valid_source_revision(&args.source_revision) {
         return Err(anyhow!("living_speech_run_metadata_invalid"));
     }
     let mut receipts = Receipts::create(&args.out).map_err(|class| anyhow!(class))?;

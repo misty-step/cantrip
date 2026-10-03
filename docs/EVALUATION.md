@@ -162,11 +162,13 @@ Inspect `journalctl --user -u cantrip-speech-eval.service` and the private
 `weekly-runs` receipts after execution. Disable future execution with
 `systemctl --user disable --now cantrip-speech-eval.timer`.
 
-Each paid invocation starts from `origin/master` in its dedicated checkout,
-uses a unique run ID, and proposes only `latest.json` and that run's immutable
-JSON/log files in a `speech-eval/weekly-...` review PR. Partial result files are
-also proposed; publisher failures leave the private receipts intact and fail
-the service. No auto-merge is added: normal review, merge, CI and site deployment
+Each paid invocation requires a clean dedicated publishing checkout before any
+provider request, then starts from `origin/master` and uses a unique run ID.
+It proposes only `latest.json` and that run's immutable JSON/log files in a
+`speech-eval/weekly-...` review PR. Partial result files are also proposed.
+Failed commits restore only that run's three publishing paths; unrelated work
+is never discarded. Publisher failures retain private receipts and fail the
+service. No auto-merge is added: normal review, merge, CI and site deployment
 are the publication boundary. Public benchmark snapshots still need deliberate,
 dated source review.
 

@@ -104,6 +104,47 @@ fn verify_origin(checkout: &Path) -> Result<()> {
     Ok(())
 }
 
+fn ensure_clean_checkout(checkout: &Path) -> Result<()> {
+    let output = git(checkout)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .env_remove("OPENROUTER_API_KEY")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| anyhow!("schedule_status_failed"))?;
+    if !output.status.success() {
+        bail!("schedule_status_failed");
+    }
+    if !output.stdout.is_empty() {
+        bail!("schedule_checkout_dirty");
+    }
+    Ok(())
+}
+
+fn commit_receipts(checkout: &Path, run_id: &str, paths: &[&str]) -> Result<()> {
+    if let Err(error) = quiet(
+        git(checkout)
+            .args([
+                "commit",
+                "--only",
+                "-m",
+                &format!("eval: publish {run_id}"),
+                "--",
+            ])
+            .args(paths),
+        "schedule_commit_failed",
+    ) {
+        quiet(
+            git(checkout)
+                .args(["restore", "--source=HEAD", "--staged", "--worktree", "--"])
+                .args(paths),
+            "schedule_commit_cleanup_failed",
+        )?;
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Install only; never reload, enable, start, reset the ledger, or change a speech key.
 pub(super) fn install(raw_args: &[String]) -> Result<()> {
     let args = InstallArgs::try_parse_from(
@@ -112,11 +153,7 @@ pub(super) fn install(raw_args: &[String]) -> Result<()> {
     if !args.config.is_absolute()
         || !args.out_root.is_absolute()
         || !args.publish_checkout.is_absolute()
-        || args.source_revision.is_empty()
-        || !args
-            .source_revision
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+        || !super::speech::valid_source_revision(&args.source_revision)
     {
         bail!("schedule_install_paths_or_revision_invalid");
     }
@@ -222,6 +259,7 @@ pub(super) fn run(raw_args: &[String]) -> Result<()> {
     let branch = format!("speech-eval/{run_id}");
     if !args.dry_run {
         verify_origin(&schedule.publish_checkout)?;
+        ensure_clean_checkout(&schedule.publish_checkout)?;
         quiet(
             git(&schedule.publish_checkout).args(["fetch", "origin", "master"]),
             "schedule_fetch_failed",
@@ -283,18 +321,10 @@ pub(super) fn run(raw_args: &[String]) -> Result<()> {
             ]),
             "schedule_stage_failed",
         )?;
-        quiet(
-            git(&schedule.publish_checkout).args([
-                "commit",
-                "--only",
-                "-m",
-                &format!("eval: publish {run_id}"),
-                "--",
-                &result_path,
-                &log_path,
-                "site/public/evals/latest.json",
-            ]),
-            "schedule_commit_failed",
+        commit_receipts(
+            &schedule.publish_checkout,
+            &run_id,
+            &[&result_path, &log_path, "site/public/evals/latest.json"],
         )?;
         quiet(
             git(&schedule.publish_checkout).args(["push", "--set-upstream", "origin", &branch]),
@@ -312,4 +342,148 @@ pub(super) fn run(raw_args: &[String]) -> Result<()> {
         bail!("schedule_run_incomplete; retained_receipts");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Checkout(PathBuf);
+
+    impl Checkout {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "cantrip-speech-publish-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            DirBuilder::new().mode(0o700).create(&path).unwrap();
+            quiet(
+                git(&path).args(["init", "--quiet", "--initial-branch=master"]),
+                "fixture_init",
+            )
+            .unwrap();
+            for (key, value) in [
+                ("user.name", "Speech Fixture"),
+                ("user.email", "speech@example.invalid"),
+                ("commit.gpgsign", "false"),
+                ("core.hooksPath", ".git/hooks"),
+            ] {
+                quiet(git(&path).args(["config", key, value]), "fixture_config").unwrap();
+            }
+            fs::create_dir_all(path.join("site/public/evals/runs")).unwrap();
+            fs::write(path.join("site/public/evals/latest.json"), "before\n").unwrap();
+            quiet(git(&path).args(["add", "."]), "fixture_add").unwrap();
+            quiet(
+                git(&path).args(["commit", "-m", "baseline"]),
+                "fixture_commit",
+            )
+            .unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Checkout {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn short_source_revision_is_rejected_before_install_side_effects() {
+        let args = [
+            "--config",
+            "/missing/config.json",
+            "--out-root",
+            "/missing/runs",
+            "--publish-checkout",
+            "/",
+            "--source-revision",
+            "abc",
+        ]
+        .map(String::from);
+        assert_eq!(
+            install(&args).unwrap_err().to_string(),
+            "schedule_install_paths_or_revision_invalid"
+        );
+    }
+
+    #[test]
+    fn publishing_refuses_existing_operator_edits_without_discarding_them() {
+        let checkout = Checkout::new();
+        fs::write(
+            checkout.0.join("site/public/evals/latest.json"),
+            "operator edit\n",
+        )
+        .unwrap();
+        fs::write(checkout.0.join("operator.txt"), "keep my work\n").unwrap();
+        quiet(
+            git(&checkout.0).args(["add", "operator.txt"]),
+            "fixture_operator_stage",
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_clean_checkout(&checkout.0).unwrap_err().to_string(),
+            "schedule_checkout_dirty"
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.0.join("site/public/evals/latest.json")).unwrap(),
+            "operator edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.0.join("operator.txt")).unwrap(),
+            "keep my work\n"
+        );
+    }
+
+    #[test]
+    fn failed_commit_restores_only_this_runs_public_receipts() {
+        let checkout = Checkout::new();
+        let paths = [
+            "site/public/evals/runs/weekly-test.json",
+            "site/public/evals/runs/weekly-test.log",
+            "site/public/evals/latest.json",
+        ];
+        for path in paths {
+            fs::write(checkout.0.join(path), "new receipt\n").unwrap();
+        }
+        quiet(git(&checkout.0).arg("add").args(paths), "fixture_stage").unwrap();
+        fs::write(checkout.0.join("operator.txt"), "keep my work\n").unwrap();
+        quiet(
+            git(&checkout.0).args(["add", "operator.txt"]),
+            "fixture_operator_stage",
+        )
+        .unwrap();
+        let hook = checkout.0.join(".git/hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(
+            commit_receipts(&checkout.0, "weekly-test", &paths)
+                .unwrap_err()
+                .to_string(),
+            "schedule_commit_failed"
+        );
+        assert_eq!(
+            fs::read_to_string(checkout.0.join(paths[2])).unwrap(),
+            "before\n"
+        );
+        assert!(!checkout.0.join(paths[0]).exists());
+        assert!(!checkout.0.join(paths[1]).exists());
+        assert_eq!(
+            fs::read_to_string(checkout.0.join("operator.txt")).unwrap(),
+            "keep my work\n"
+        );
+        let staged = git(&checkout.0)
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
+        assert!(staged.status.success());
+        assert_eq!(staged.stdout, b"operator.txt\n");
+    }
 }
