@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+resolve_branch_ref() {
+    local branch="$1"
+
+    if git rev-parse --verify --quiet "$branch^{commit}" >/dev/null; then
+        printf '%s\n' "$branch"
+        return
+    fi
+    if git rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" >/dev/null; then
+        printf 'refs/remotes/origin/%s\n' "$branch"
+        return
+    fi
+
+    git fetch --no-tags origin \
+        "+refs/heads/$branch:refs/remotes/origin/$branch" >&2
+    printf 'refs/remotes/origin/%s\n' "$branch"
+}
+
+check_subjects() {
+    local base_ref="$1"
+    local head_ref="$2"
+    local merge_base
+    local failed=0
+
+    merge_base="$(git merge-base "$base_ref" "$head_ref")" || {
+        echo "commit-subject check: could not find a merge base for $base_ref and $head_ref" >&2
+        return 2
+    }
+
+    while IFS= read -r commit; do
+        local subject
+        local changed
+
+        changed="$(git diff-tree --no-commit-id --name-only -r "$commit" -- \
+            src/hud.rs integrations/omarchy)"
+        [[ -n "$changed" ]] || continue
+
+        subject="$(git show -s --format=%s "$commit")"
+        if [[ "$subject" =~ ^(feat|fix|perf)(\([^()]+\))?: ]]; then
+            continue
+        fi
+
+        printf 'commit-subject check: %s %s\n' "${commit:0:12}" "$subject" >&2
+        printf '  changes Landmark-visible HUD/bar paths but does not start with feat, fix, or perf\n' >&2
+        failed=1
+    done < <(git rev-list --reverse "$merge_base..$head_ref")
+
+    return "$failed"
+}
+
+make_test_repo() {
+    local directory="$1"
+
+    git init -q -b master "$directory"
+    git -C "$directory" config user.name "Cantrip checker test"
+    git -C "$directory" config user.email "checker@example.invalid"
+    printf 'base\n' >"$directory/README.md"
+    git -C "$directory" add README.md
+    git -C "$directory" commit -q -m "chore: base"
+    git -C "$directory" switch -q -c topic
+}
+
+commit_test_change() {
+    local directory="$1"
+    local path="$2"
+    local subject="$3"
+
+    mkdir -p "$(dirname "$directory/$path")"
+    printf 'change\n' >"$directory/$path"
+    git -C "$directory" add "$path"
+    git -C "$directory" commit -q -m "$subject"
+}
+
+run_self_tests() {
+    local temporary
+    temporary="$(mktemp -d)"
+    trap 'rm -rf "$temporary"' RETURN
+
+    make_test_repo "$temporary/reject-hud"
+    commit_test_change "$temporary/reject-hud" src/hud.rs "hud: redraw status"
+    if (cd "$temporary/reject-hud" && "$script_path") >/dev/null 2>&1; then
+        echo "not ok - rejects hud: for src/hud.rs" >&2
+        return 1
+    fi
+    echo "ok - rejects hud: for src/hud.rs"
+
+    make_test_repo "$temporary/accept-feat"
+    commit_test_change "$temporary/accept-feat" src/hud.rs "feat(hud): redraw status"
+    (cd "$temporary/accept-feat" && "$script_path") >/dev/null
+    echo "ok - accepts feat(hud): for src/hud.rs"
+
+    make_test_repo "$temporary/accept-docs"
+    commit_test_change "$temporary/accept-docs" docs/note.md "docs: explain status"
+    (cd "$temporary/accept-docs" && "$script_path") >/dev/null
+    echo "ok - accepts docs: outside HUD/bar paths"
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+    [[ "$#" -eq 1 ]] || {
+        echo "usage: scripts/check-commit-subjects [--self-test]" >&2
+        exit 2
+    }
+    run_self_tests
+    exit
+fi
+
+[[ "$#" -eq 0 ]] || {
+    echo "usage: scripts/check-commit-subjects [--self-test]" >&2
+    exit 2
+}
+
+cd "$(git rev-parse --show-toplevel)"
+
+base_branch="${GITHUB_BASE_REF:-master}"
+base_ref="$(resolve_branch_ref "$base_branch")"
+head_ref="HEAD"
+
+if [[ -n "${GITHUB_HEAD_REF:-}" ]]; then
+    head_ref="$(resolve_branch_ref "$GITHUB_HEAD_REF")"
+fi
+
+check_subjects "$base_ref" "$head_ref"
