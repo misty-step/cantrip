@@ -6,10 +6,6 @@ script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SO
 resolve_branch_ref() {
     local branch="$1"
 
-    if git rev-parse --verify --quiet "$branch^{commit}" >/dev/null; then
-        printf '%s\n' "$branch"
-        return
-    fi
     if git rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" >/dev/null; then
         printf 'refs/remotes/origin/%s\n' "$branch"
         return
@@ -40,7 +36,7 @@ check_subjects() {
         [[ -n "$changed" ]] || continue
 
         subject="$(git show -s --format=%s "$commit")"
-        if [[ "$subject" =~ ^(feat|fix|perf)(\([^()]+\))?: ]]; then
+        if [[ "$subject" =~ ^(feat|fix|perf)(\([^()]+\))?!?: ]]; then
             continue
         fi
 
@@ -61,6 +57,7 @@ make_test_repo() {
     printf 'base\n' >"$directory/README.md"
     git -C "$directory" add README.md
     git -C "$directory" commit -q -m "chore: base"
+    git -C "$directory" update-ref refs/remotes/origin/master HEAD
     git -C "$directory" switch -q -c topic
 }
 
@@ -70,7 +67,7 @@ commit_test_change() {
     local subject="$3"
 
     mkdir -p "$(dirname "$directory/$path")"
-    printf 'change\n' >"$directory/$path"
+    printf '%s\n' "$subject" >"$directory/$path"
     git -C "$directory" add "$path"
     git -C "$directory" commit -q -m "$subject"
 }
@@ -82,7 +79,11 @@ run_self_tests() {
 
     make_test_repo "$temporary/reject-hud"
     commit_test_change "$temporary/reject-hud" src/hud.rs "hud: redraw status"
-    if (cd "$temporary/reject-hud" && "$script_path") >/dev/null 2>&1; then
+    local status=0
+    (cd "$temporary/reject-hud" &&
+        env -u GITHUB_BASE_REF -u GITHUB_HEAD_REF "$script_path") \
+        >/dev/null 2>&1 || status=$?
+    if [[ "$status" -ne 1 ]]; then
         echo "not ok - rejects hud: for src/hud.rs" >&2
         return 1
     fi
@@ -90,12 +91,16 @@ run_self_tests() {
 
     make_test_repo "$temporary/accept-feat"
     commit_test_change "$temporary/accept-feat" src/hud.rs "feat(hud): redraw status"
-    (cd "$temporary/accept-feat" && "$script_path") >/dev/null
+    commit_test_change "$temporary/accept-feat" src/hud.rs "feat!: redraw status again"
+    (cd "$temporary/accept-feat" &&
+        env -u GITHUB_BASE_REF -u GITHUB_HEAD_REF "$script_path") >/dev/null
     echo "ok - accepts feat(hud): for src/hud.rs"
+    echo "ok - accepts feat!: for src/hud.rs"
 
     make_test_repo "$temporary/accept-docs"
     commit_test_change "$temporary/accept-docs" docs/note.md "docs: explain status"
-    (cd "$temporary/accept-docs" && "$script_path") >/dev/null
+    (cd "$temporary/accept-docs" &&
+        env -u GITHUB_BASE_REF -u GITHUB_HEAD_REF "$script_path") >/dev/null
     echo "ok - accepts docs: outside HUD/bar paths"
 }
 
