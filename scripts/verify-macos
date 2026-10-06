@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Exercise a relocated macOS app using public fixtures; never capture a live input."""
+
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit("verify-macos requires Python 3.11+; invoke it with an existing/private Python 3.11+ interpreter")
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import runpy
+import shutil
+import signal
+import subprocess
+import tempfile
+import time
+
+
+ROOT = Path(__file__).resolve().parent.parent
+PACKAGER = runpy.run_path(str(ROOT / "scripts" / "package-macos"))
+PUBLIC_SAMPLE_SHA256 = "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e"
+INVALID_DEVICE_UID = "cantrip-ci-unsupported-device-0fc1e510"
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def run(command, *, env, cwd, timeout=60, check=True):
+    result = subprocess.run(list(map(str, command)), env=env, cwd=cwd, capture_output=True, timeout=timeout)
+    if check and result.returncode:
+        raise RuntimeError(f"{Path(command[0]).name} smoke command failed ({result.returncode})")
+    return result
+
+
+def native_refusals(executable, root, env, config):
+    # This deliberately invalid CoreAudio UID cannot open a device, even if the
+    # host already authorized microphone access. Native capture checks TCC and
+    # resolves the UID without asking for permission or starting AVAudioEngine.
+    daemon_log = root / "daemon.log"
+    original_config = config.read_bytes()
+    keyboard_refusals = []
+    with daemon_log.open("wb") as log:
+        daemon = subprocess.Popen(
+            [str(executable), "daemon"], cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                require(daemon.poll() is None, "isolated native daemon exited before readiness")
+                if run([executable, "ping"], env=env, cwd=root, timeout=10, check=False).returncode == 0:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("isolated native daemon did not become ready")
+            before = json.loads(run([executable, "status", "--json"], env=env, cwd=root).stdout)
+            require(before.get("state") == "idle", "isolated daemon is not Idle before permission smoke")
+            refused = run([executable, "start", "--postproc", "raw"], env=env, cwd=root, check=False)
+            require(refused.returncode != 0 and b"capture-failed" in refused.stderr, "unsupported/unauthorized native capture was not rejected by the capture guard")
+            after = json.loads(run([executable, "status", "--json"], env=env, cwd=root).stdout)
+            require(after.get("state") == "idle", "rejected native capture left the engine outside Idle")
+            require(not list((root / "run").rglob("*.wav")), "denied/unsupported capture created live microphone audio")
+            require(not list((root / "state").rglob("*.wav")), "denied/unsupported capture retained unexpected microphone audio")
+            for mode in ("auto", "paste", "type"):
+                selected = original_config.replace(b'injection = "clipboard"', f'injection = "{mode}"'.encode(), 1)
+                config.write_bytes(selected)
+                run([executable, "reload"], env=env, cwd=root)
+                run([executable, "last"], env=env, cwd=root)
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    status = json.loads(run([executable, "status", "--json"], env=env, cwd=root).stdout)
+                    outcome = status.get("outcome") or {}
+                    if status.get("state") == "idle" and outcome.get("delivery") is not None:
+                        require(outcome["delivery"] == "deferred", f"explicit {mode} silently sent keys or downgraded to the clipboard")
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError(f"explicit {mode} replay did not reach a terminal deferred outcome")
+                require(config.read_bytes() == selected, f"native reload rewrote explicit {mode} configuration")
+                keyboard_refusals.append({"mode": mode, "terminal_delivery": "deferred"})
+        finally:
+            config.write_bytes(original_config)
+            # Terminate only the process group this invocation owns, including
+            # its own HUD child if the desktop host started one.
+            try:
+                os.killpg(daemon.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                exit_code = daemon.wait(timeout=90)
+            except subprocess.TimeoutExpired:
+                os.killpg(daemon.pid, signal.SIGKILL)
+                daemon.wait()
+                raise RuntimeError("native daemon did not shut down gracefully")
+        require(exit_code == 0, "native daemon returned a failure during graceful shutdown")
+    return {
+        "capture": {"status": "passed", "guard": "denied-or-unsupported-device", "live_audio_created": False},
+        "keyboard": {"status": "passed", "requests": keyboard_refusals, "explicit_clipboard_commands_requested": False},
+    }
+
+
+def verify(args):
+    require(sys.platform == "darwin", "verify-macos requires a native Mac")
+    source_app = args.app.resolve(strict=True)
+    require(source_app.is_dir() and source_app.suffix == ".app", "--app must be a real application bundle")
+    output = args.output.absolute()
+    require(not os.path.lexists(output), "verification output already exists; choose a new directory")
+    sample = ROOT / "samples" / "jfk.wav"
+    require(sha256(sample) == PUBLIC_SAMPLE_SHA256, "only the checked-in public JFK fixture may enter runtime evidence")
+    if args.skip_hud:
+        require(bool(args.hud_unavailable_reason), "--skip-hud requires an explicit --hud-unavailable-reason")
+    else:
+        require(not args.hud_unavailable_reason, "--hud-unavailable-reason requires --skip-hud")
+    with tempfile.TemporaryDirectory(prefix="ct-verify-", dir="/private/tmp") as directory:
+        root = Path(directory).resolve()
+        root.chmod(0o700)
+        environment = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("DYLD_", "ORT_")) and key != "RUST_LOG"
+        }
+        # The runtime app cannot see Homebrew, cargo, rustc, or source-relative
+        # support binaries. User-owned config/history paths are never inputs.
+        environment.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin", HOME=str(root / "home"), RUST_LOG="warn")
+        (root / "home").mkdir(mode=0o700)
+        for variable, name in (
+            ("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"),
+            ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "run"),
+        ):
+            (root / name).mkdir(mode=0o700)
+            environment[variable] = str(root / name)
+        app = root / "Cantrip.app"
+        run(["/usr/bin/ditto", source_app, app], env=environment, cwd=root, timeout=300)
+        run(["/usr/bin/codesign", "--verify", "--deep", "--strict", app], env=environment, cwd=root)
+        info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
+        build = json.loads((app / "Contents" / "Resources" / "build.json").read_text())
+        executable = app / "Contents" / "MacOS" / "cantrip"
+        require(build["target"] == args.target, "relocated bundle has the wrong target")
+        PACKAGER["inspect_native"](executable, PACKAGER["TARGETS"][args.target], info["LSMinimumSystemVersion"], executable=True)
+        reported = run([executable, "--version"], env=environment, cwd=root).stdout.decode().strip()
+        require(reported == f"cantrip {build['version']}", "relocated native executable version differs from the workspace")
+        fixture = root / "public-jfk.wav"
+        fixture.write_bytes(sample.read_bytes())
+        config = root / "config" / "cantrip" / "config.toml"
+        config.parent.mkdir(mode=0o700)
+        config.write_text(
+            f'injection = "clipboard"\nkeep_warm = false\naudio_source = "{INVALID_DEVICE_UID}"\n'
+            '[postproc]\nenabled = false\n[telemetry]\nenabled = false\n'
+        )
+        config.chmod(0o600)
+        original_config = sha256(config)
+        absent = run([executable, "transcribe", "--local", fixture], env=environment, cwd=root, check=False)
+        require(absent.returncode != 0 and b"models pull" in absent.stderr, "missing local model did not refuse with an explicit installation instruction")
+        model_root = root / "data" / "cantrip" / "models"
+        require(not model_root.exists() or not list(model_root.iterdir()), "file transcription implicitly downloaded a model")
+        # This is the one explicit, checksum-verifying public model download.
+        run([executable, "models", "pull"], env=environment, cwd=root, timeout=1200)
+        recognized = run([executable, "transcribe", "--local", fixture], env=environment, cwd=root, timeout=600).stdout.decode()
+        words = " ".join(re.findall(r"[a-z]+", recognized.lower()))
+        require("ask not what your country can do for you" in words, "real foreground local STT missed the public reference phrase")
+        characters = len(recognized)
+        del recognized, words
+        require(sha256(fixture) == PUBLIC_SAMPLE_SHA256, "foreground STT modified the original public WAV")
+        refusals = native_refusals(executable, root, environment, config)
+        screenshots = []
+        staged_output = root / "proof"
+        staged_output.mkdir()
+        if not args.skip_hud:
+            for state in ("recording", "transcribing", "deferred", "delivery-uncertain", "setup-missing"):
+                image = staged_output / f"hud-{state}.png"
+                run([executable, "hud", "--screenshot", image, "--state", state], env=environment, cwd=root, timeout=120)
+                data = image.read_bytes()
+                require(data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 100, "native HUD did not save its committed public-fixture pixels")
+                screenshots.append({"name": image.name, "sha256": sha256(image), "state": state})
+            hud = {"status": "passed", "surface": "native-view-offscreen-pixels", "screenshots": screenshots}
+        else:
+            hud = {"status": "not-run", "reason": args.hud_unavailable_reason}
+        require(sha256(config) == original_config, "native smoke changed the isolated operator configuration")
+        proof = {
+            "schema_version": 1, "status": "passed", "target": args.target,
+            "version": build["version"], "source_revision": build["source_revision"],
+            "signing": build["signing"], "binary_sha256": sha256(executable),
+            "public_fixture_sha256": PUBLIC_SAMPLE_SHA256,
+            "foreground_stt": {"status": "passed", "reference_phrase_matched": True, "transcript_characters": characters, "transcript_uploaded": False},
+            "missing_model": {"status": "passed", "implicit_download": False},
+            "native_capture_refusal": refusals["capture"], "keyboard_delivery_refusal": refusals["keyboard"], "hud": hud,
+            "tcc_permission_grants": "not-tested-no-permissions-modified",
+            "clipboard_delivery": "not-tested-no-clipboard-actions-requested",
+        }
+        (staged_output / "verification.json").write_text(json.dumps(proof, indent=2, sort_keys=True) + "\n")
+        output.mkdir(parents=True, exist_ok=False)
+        try:
+            for path in staged_output.iterdir():
+                with path.open("rb") as source, (output / path.name).open("xb") as destination:
+                    destination.write(source.read())
+        except BaseException:
+            shutil.rmtree(output)
+            raise
+    return output / "verification.json"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--app", type=Path, required=True)
+    parser.add_argument("--target", choices=PACKAGER["TARGETS"], required=True)
+    parser.add_argument("--output", type=Path, required=True, help="new directory for sanitized public-fixture proof and own-panel PNGs")
+    parser.add_argument("--skip-hud", action="store_true", help="explicitly omit HUD only when a logged-in WindowServer session is unavailable")
+    parser.add_argument("--hud-unavailable-reason")
+    args = parser.parse_args()
+    try:
+        proof = verify(args)
+    except (OSError, ValueError, KeyError, RuntimeError, PACKAGER["ReleaseError"], subprocess.TimeoutExpired) as error:
+        parser.exit(1, f"verify-macos: {error}\n")
+    print(proof)
+
+
+if __name__ == "__main__":
+    main()

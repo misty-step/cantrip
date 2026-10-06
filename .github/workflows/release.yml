@@ -70,7 +70,7 @@ jobs:
         with:
           shared-key: release-ubuntu24-cpu
       - name: Build the locked CPU-only target
-        run: cargo build --release --locked --no-default-features --target x86_64-unknown-linux-gnu
+        run: cargo build --release --locked --package cantrip --bin cantrip --no-default-features --target x86_64-unknown-linux-gnu
       - name: Package only committed public files and enforce the ELF baseline
         env:
           RELEASE_VERSION: ${{ needs.plan.outputs.version }}

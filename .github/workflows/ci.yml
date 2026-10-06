@@ -27,7 +27,8 @@ jobs:
       - name: Install the repository-pinned Rust toolchain
         run: rustup install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: ./scripts/check
+      - name: Check the locked workspace and every Linux contract
+        run: ./scripts/check
 
   secret-scan:
     runs-on: ubuntu-latest

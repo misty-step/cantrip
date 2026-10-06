@@ -48,7 +48,7 @@ The evaluation contract is therefore deterministic-first:
 1. Keep `accepted` strings as the strict reviewed oracle.
 2. Add case-local contracts for required spans, forbidden additions,
    speech-act/role, and formatting. A pure grader reports each dimension and
-   a reason code; it does not add policy to `src/postproc.rs`.
+   a reason code; it does not add policy to `crates/engine/src/postproc.rs`.
 3. Add a model judge only as an explicit, additive signal. It returns
    structured pass/fail/uncertain decisions, uses a fixed model distinct from
    the candidate, and is calibrated against human labels. A judge pass never

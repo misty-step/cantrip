@@ -304,19 +304,32 @@ fn publish_model(
     File::open(source)?.sync_all()?;
     check_cancel(cancel)?;
     if fs::symlink_metadata(destination).is_ok() {
-        // renameat2(RENAME_EXCHANGE) atomically exchanges even nonempty
-        // directories. A failed exchange leaves the old model untouched.
-        // The old tree then lives at the owned extraction path for cleanup.
+        // The native exchange API atomically swaps even nonempty directories.
+        // A failed exchange leaves the installed model untouched; after
+        // success its old tree lives at the owned extraction path for cleanup.
         let source = CString::new(source.as_os_str().as_bytes())?;
         let destination = CString::new(destination.as_os_str().as_bytes())?;
         let result = unsafe {
-            libc::renameat2(
-                libc::AT_FDCWD,
-                source.as_ptr(),
-                libc::AT_FDCWD,
-                destination.as_ptr(),
-                libc::RENAME_EXCHANGE,
-            )
+            #[cfg(target_os = "linux")]
+            {
+                libc::renameat2(
+                    libc::AT_FDCWD,
+                    source.as_ptr(),
+                    libc::AT_FDCWD,
+                    destination.as_ptr(),
+                    libc::RENAME_EXCHANGE,
+                )
+            }
+            #[cfg(target_os = "macos")]
+            {
+                libc::renameatx_np(
+                    libc::AT_FDCWD,
+                    source.as_ptr(),
+                    libc::AT_FDCWD,
+                    destination.as_ptr(),
+                    libc::RENAME_SWAP,
+                )
+            }
         };
         if result != 0 {
             return Err(std::io::Error::last_os_error())
@@ -536,6 +549,58 @@ mod tests {
     }
 
     #[test]
+    fn verified_publication_exchanges_nonempty_models_and_preserves_the_old_tree() {
+        let root = test_root();
+        let old = root.join("installed");
+        let next = root.join("candidate");
+        fs::create_dir(&old).unwrap();
+        fs::create_dir(&next).unwrap();
+        fs::write(old.join("encoder.onnx"), b"previous model").unwrap();
+        fs::write(old.join("previous-only"), b"old auxiliary file").unwrap();
+        fs::write(next.join("encoder.onnx"), b"verified replacement").unwrap();
+
+        publish_model(&next, &old, &checksum_test_spec(), None).unwrap();
+        assert_eq!(
+            fs::read(old.join("encoder.onnx")).unwrap(),
+            b"verified replacement"
+        );
+        assert!(!old.join("previous-only").exists());
+        assert_eq!(
+            fs::read(next.join("encoder.onnx")).unwrap(),
+            b"previous model"
+        );
+        assert_eq!(
+            fs::read(next.join("previous-only")).unwrap(),
+            b"old auxiliary file"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejected_native_exchange_keeps_the_installed_model_and_candidate_intact() {
+        let root = test_root();
+        let next = root.join("candidate");
+        let old = next.join("installed");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("encoder.onnx"), b"previous model").unwrap();
+        fs::write(next.join("encoder.onnx"), b"verified replacement").unwrap();
+
+        // Both native APIs reject exchanging a directory with its descendant.
+        // Unlike a missing file/cancellation test, this reaches publication.
+        let error = publish_model(&next, &old, &checksum_test_spec(), None).unwrap_err();
+        assert!(error.to_string().contains("atomically replacing"));
+        assert_eq!(
+            fs::read(old.join("encoder.onnx")).unwrap(),
+            b"previous model"
+        );
+        assert_eq!(
+            fs::read(next.join("encoder.onnx")).unwrap(),
+            b"verified replacement"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cancellation_interrupts_archive_reads_without_consuming_more_bytes() {
         let cancel = AtomicBool::new(true);
         let mut reader = CancellableReader {
@@ -557,7 +622,7 @@ mod tests {
     }
 
     fn test_root() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "cantrip-models-test-{}-{}",
             std::process::id(),
             SystemTime::now()

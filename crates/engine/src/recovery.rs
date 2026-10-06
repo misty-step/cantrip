@@ -24,7 +24,10 @@ pub struct Take {
     pub unresolved: bool,
 }
 
-pub(crate) struct Transcript {
+/// An owned history row, not a handle that can mutate a retained take.
+/// Full text is read explicitly through [`read_text`], never sent over IPC.
+#[derive(Clone, Debug)]
+pub struct Transcript {
     pub take: Take,
     pub preview: String,
 }
@@ -48,7 +51,11 @@ pub fn list() -> Result<Vec<Take>> {
     list_in(&Store::open(&paths::transcript_history_dir()?)?)
 }
 
-pub(crate) fn transcripts() -> Result<Vec<Transcript>> {
+/// Read canonical transcript history without a daemon or a delivery operation.
+/// Includes complete, partial and resolved text, newest first; previews are
+/// whitespace-normalized and bounded to 120 Unicode characters. The retained
+/// full transcript remains unchanged and available through [`read_text`].
+pub fn transcripts() -> Result<Vec<Transcript>> {
     transcripts_in(&Store::open(&paths::transcript_history_dir()?)?)
 }
 
@@ -683,7 +690,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("cantrip-recovery-{}", new_id()));
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("cantrip-recovery-{}", new_id()));
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
             let history = root.join("transcripts");

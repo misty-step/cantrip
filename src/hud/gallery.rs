@@ -19,10 +19,12 @@ use super::{
     NOTICE_HOLD, RESULT_FADE, SURFACE_WIDTH,
 };
 use crate::{
-    ipc::{StateKind, StatusSnapshot},
-    pipeline::Stage,
     settings::{apply_theme, color},
     theme::{self, Palette},
+};
+use cantrip_engine::{
+    ipc::{StateKind, StatusSnapshot},
+    pipeline::Stage,
 };
 
 const SCREENSHOT_DELAY_FRAMES: u32 = 6;
@@ -367,7 +369,7 @@ fn dictation(origin: Instant, reduced_motion: bool, raw: bool) -> Timeline {
         sent.outcome
             .as_mut()
             .expect("success fixture contains an outcome")
-            .cleanup = crate::ipc::Cleanup::Applied;
+            .cleanup = cantrip_engine::ipc::Cleanup::Applied;
     }
     let end = builder.outcome(result_at, sent, "Success");
     builder.finish(
@@ -406,7 +408,7 @@ fn three_chunk_handoff(origin: Instant, reduced_motion: bool) -> Timeline {
     sent.outcome
         .as_mut()
         .expect("success fixture contains an outcome")
-        .cleanup = crate::ipc::Cleanup::Applied;
+        .cleanup = cantrip_engine::ipc::Cleanup::Applied;
     let end = builder.outcome(milliseconds(3040), sent, "Success reported");
     builder.finish(end + milliseconds(960), milliseconds(2400))
 }

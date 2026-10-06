@@ -12,6 +12,16 @@ live gap register or a new cloud run. Current work and selected unresolved
 proposals belong in Linear; this guide does not prescribe the next execution
 slice. [README.md](../README.md#work-and-documentation-ownership) explains ownership.
 
+Current-source map: portable transcription and cleanup live in
+`crates/engine/src/stt.rs` and `crates/engine/src/postproc.rs`; configuration,
+credential lookup, and opt-in telemetry live in `crates/engine/src/config.rs`,
+`crates/engine/src/keys.rs`, and `crates/engine/src/telemetry.rs`.
+The evaluator remains in `examples/eval/main.rs`, with scoring in
+`examples/eval/wer.rs` and `examples/eval/judge.rs`, and publishing in
+`examples/eval/langfuse.rs`. These are current ownership pointers; the dated
+audit's line-number citations below remain historical evidence, not live
+locations or proof that its gaps remain.
+
 ## Run
 
 ```sh
@@ -432,7 +442,7 @@ Each behavior case should gain explicit deterministic fields, for example:
 The strings in this example are a schema example, not a new reviewed case.
 `accepted` remains the strict oracle and every accepted alternative must be
 reviewed. The additional fields make failure reasons observable without
-putting approximate content rules into production `src/postproc.rs`.
+putting approximate content rules into production `crates/engine/src/postproc.rs`.
 
 The fixture contract should identify each case's split and stratum; audio
 metadata also needs duration, SHA-256, and SNR when applicable. Corpus identity,

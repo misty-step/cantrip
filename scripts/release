@@ -29,6 +29,7 @@ LANDMARK_URL = (
 SIGNER = f"{REPOSITORY}/.github/workflows/release.yml"
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 REVISION = re.compile(r"[0-9a-f]{40}")
+OWNED_PACKAGES = {"cantrip", "cantrip-engine"}
 
 
 class ReleaseError(Exception):
@@ -110,9 +111,15 @@ def save_json(path, value):
 
 def version_at(reference=None):
     text = git("show", f"{reference}:Cargo.toml").stdout if reference else (ROOT / "Cargo.toml").read_text()
-    version = tomllib.loads(text)["package"]["version"]
-    if not VERSION.fullmatch(version):
-        raise ReleaseError("automatic releases require a numeric major.minor.patch Cargo version")
+    cargo = tomllib.loads(text)
+    version = cargo.get("workspace", {}).get("package", {}).get("version")
+    if (
+        cargo.get("package", {}).get("name") != "cantrip"
+        or cargo["package"].get("version") != {"workspace": True}
+        or not isinstance(version, str)
+        or not VERSION.fullmatch(version)
+    ):
+        raise ReleaseError("automatic releases require one numeric [workspace.package] version inherited by cantrip")
     return version
 
 
@@ -140,25 +147,48 @@ def release_paths(version):
     return {"notes": f"docs/releases/v{version}.md", "technical": f"docs/releases/v{version}-technical.md"}
 
 
-def set_package_version(path, package, version, *, lock=False):
-    """Edit only the single owned package version; never resolve dependencies."""
+def set_workspace_version(path, version):
+    """Edit the workspace's sole version authority without resolving dependencies."""
     text = path.read_text()
-    sections = re.split(r"(?m)(?=^\[\[package\]\]\s*$)" if lock else r"(?m)(?=^\[[^\n]+\]\s*$)", text)
+    cargo = tomllib.loads(text)
+    if cargo.get("package", {}).get("version") != {"workspace": True}:
+        raise ReleaseError("cantrip must inherit the workspace package version")
+    sections = re.split(r"(?m)(?=^\[[^\n]+\]\s*$)", text)
     matches = 0
     for index, section in enumerate(sections):
-        if not section.startswith("[[package]]" if lock else "[package]"):
-            continue
-        parsed = tomllib.loads(section)["package"]
-        entry = parsed[0] if lock else parsed
-        if entry.get("name") != package:
+        if not section.startswith("[workspace.package]"):
             continue
         updated, count = re.subn(r'(?m)^version = "[^"\n]+"$', f'version = "{version}"', section)
         if count != 1:
-            raise ReleaseError(f"cannot identify the owned package version in {path.name}")
+            raise ReleaseError(f"cannot identify the workspace package version in {path.name}")
         sections[index] = updated
         matches += 1
     if matches != 1:
-        raise ReleaseError(f"expected exactly one {package} package in {path.name}")
+        raise ReleaseError(f"expected exactly one [workspace.package] in {path.name}")
+    path.write_text("".join(sections))
+
+
+def set_locked_versions(path, version):
+    """Update every owned path crate; preserve all third-party lockfile bytes."""
+    text = path.read_text()
+    sections = re.split(r"(?m)(?=^\[\[package\]\]\s*$)", text)
+    found = set()
+    for index, section in enumerate(sections):
+        if not section.startswith("[[package]]"):
+            continue
+        entry = tomllib.loads(section)["package"][0]
+        name = entry.get("name")
+        if name not in OWNED_PACKAGES:
+            continue
+        if name in found or "source" in entry:
+            raise ReleaseError(f"release lockfile has an ambiguous owned package: {name}")
+        updated, count = re.subn(r'(?m)^version = "[^"\n]+"$', f'version = "{version}"', section)
+        if count != 1:
+            raise ReleaseError(f"cannot identify the owned package version in {path.name}: {name}")
+        sections[index] = updated
+        found.add(name)
+    if found != OWNED_PACKAGES:
+        raise ReleaseError(f"release lockfile is missing owned packages: {', '.join(sorted(OWNED_PACKAGES - found))}")
     path.write_text("".join(sections))
 
 
@@ -183,15 +213,16 @@ def validate_plan(plan, revision):
         raise ReleaseError(f"source changed after release preparation: {', '.join(sorted(unexpected))}; refresh the release PR")
     old_cargo = tomllib.loads(git("show", f"{base}:Cargo.toml").stdout)
     new_cargo = tomllib.loads(git("show", f"{revision}:Cargo.toml").stdout)
-    old_cargo["package"]["version"] = version
+    old_cargo["workspace"]["package"]["version"] = version
     if old_cargo != new_cargo:
         raise ReleaseError("Cargo dependencies or build settings changed after release preparation")
     old_lock = tomllib.loads(git("show", f"{base}:Cargo.lock").stdout)
     new_lock = tomllib.loads(git("show", f"{revision}:Cargo.lock").stdout)
-    owned = [entry for entry in old_lock["package"] if entry["name"] == "cantrip"]
-    if len(owned) != 1:
-        raise ReleaseError("release lockfile has an ambiguous root package")
-    owned[0]["version"] = version
+    owned = [entry for entry in old_lock["package"] if entry["name"] in OWNED_PACKAGES]
+    if len(owned) != len(OWNED_PACKAGES) or {entry["name"] for entry in owned} != OWNED_PACKAGES or any("source" in entry for entry in owned):
+        raise ReleaseError("release lockfile has missing or ambiguous owned path packages")
+    for entry in owned:
+        entry["version"] = version
     if old_lock != new_lock:
         raise ReleaseError("locked dependencies changed after release preparation")
     technical = git("show", f"{revision}:{paths['technical']}").stdout
@@ -280,12 +311,12 @@ def prepare(binary, evidence):
         raise ReleaseError("Landmark's rendered release identity disagrees with its version plan")
     if rendered["version_decision"].get("waiver", {}).get("required"):
         raise ReleaseError("this release requires explicit Landmark policy review; automatic preparation stopped")
-    set_package_version(ROOT / "Cargo.toml", "cantrip", version)
-    set_package_version(ROOT / "Cargo.lock", "cantrip", version, lock=True)
+    set_workspace_version(ROOT / "Cargo.toml", version)
+    set_locked_versions(ROOT / "Cargo.lock", version)
     plan = {
         "schema_version": 1, "version": version, "tag": f"v{version}",
         "base_revision": source, "previous_tag": rendered["previous_tag"],
-        "version_origin": "initial Cargo package version" if not rendered["previous_tag"] else "Landmark",
+        "version_origin": "initial Cargo workspace version" if not rendered["previous_tag"] else "Landmark",
         "landmark_version": LANDMARK_VERSION, "landmark_sha256": LANDMARK_SHA256,
         "version_decision": rendered["version_decision"],
         "technical_changelog_sha256": sha256(ROOT / paths["technical"]),

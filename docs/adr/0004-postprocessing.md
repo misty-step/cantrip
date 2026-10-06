@@ -18,7 +18,7 @@ is purely which `endpoint` the user configures:
 - cloud: OpenAI, Groq, OpenRouter, …
 
 No per-provider structs, no SDKs, no async runtime. `endpoint` + `model`
-+ optional keyring key id is the entire abstraction (`src/postproc.rs`).
++ optional keyring key id is the entire abstraction (`crates/engine/src/postproc.rs`).
 
 ## Prompt contract
 

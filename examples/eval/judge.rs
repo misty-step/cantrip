@@ -9,7 +9,7 @@
 //! Fulfills ADR 0012 (additive model judge) and ADR 0026 (System One decisions).
 
 use anyhow::{anyhow, Context, Result};
-use cantrip::typesafe::{Answer, DecisionClient, Question, DEFAULT_JEV_MODEL};
+use cantrip_engine::typesafe::{Answer, DecisionClient, Question, DEFAULT_JEV_MODEL};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
@@ -44,9 +44,9 @@ impl ModelJudge {
 
     /// Try resolving credentials from keyring (`typesafe` or `openrouter`) or environment.
     pub fn try_default() -> Result<Self> {
-        let (api_key, model, endpoint) = if let Ok(key) = cantrip::keys::get("typesafe") {
+        let (api_key, model, endpoint) = if let Ok(key) = cantrip_engine::keys::get("typesafe") {
             (Some(key), "jev-latest", None)
-        } else if let Ok(key) = cantrip::keys::get("openrouter") {
+        } else if let Ok(key) = cantrip_engine::keys::get("openrouter") {
             (Some(key), DEFAULT_JEV_MODEL, None)
         } else if let Ok(key) = std::env::var("TYPESAFE_API_KEY") {
             (Some(key), "jev-latest", None)

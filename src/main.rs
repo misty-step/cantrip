@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::{Arc, Mutex};
 
-use cantrip::inject::{self, InjectionMode};
-use cantrip::ipc::{self, Command};
-use cantrip::models::{self, PARAKEET_V3_INT8};
-use cantrip::telemetry;
-use cantrip::{actions, config::Config, daemon, hud, keys, paths, pipeline, recovery, settings};
+use cantrip::inject;
+use cantrip::{actions, daemon, hud, settings};
+use cantrip_engine::delivery::InjectionMode;
+use cantrip_engine::ipc::{self, Command};
+use cantrip_engine::models::{self, PARAKEET_V3_INT8};
+use cantrip_engine::{config::Config, keys, paths, pipeline, recovery, telemetry};
 
 /// Per-dictation post-processing request, overriding [postproc].enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -24,20 +25,23 @@ enum PostprocMode {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "cantrip", version, about = "Local-first Linux dictation")]
+#[command(name = "cantrip", version, about = "Local-first dictation", arg_required_else_help = !cfg!(target_os = "macos"))]
 struct Cli {
     #[command(subcommand)]
-    command: CliCommand,
+    command: Option<CliCommand>,
 }
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Run the native macOS menu-bar application.
+    #[cfg(target_os = "macos")]
+    App,
     /// Run the dictation daemon.
     Daemon {
         #[arg(long)]
         preload: bool,
     },
-    /// Show the layer-shell status HUD.
+    /// Show the passive status HUD.
     Hud {
         /// Render one frame to a PNG at PATH, then exit (visual testing).
         #[arg(long, value_name = "PATH")]
@@ -181,7 +185,10 @@ enum KeyCommand {
 }
 fn main() {
     let cli = Cli::parse();
-    init_tracing(matches!(cli.command, CliCommand::Daemon { .. }));
+    let dual_sink = matches!(cli.command, Some(CliCommand::Daemon { .. }));
+    #[cfg(target_os = "macos")]
+    let dual_sink = dual_sink || matches!(cli.command, None | Some(CliCommand::App));
+    init_tracing(dual_sink);
     if let Err(error) = run(cli) {
         eprintln!("error: {error:#}");
         std::process::exit(1);
@@ -216,13 +223,18 @@ fn init_tracing(dual_sink: bool) {
 fn open_runtime_log() -> Result<fs::File> {
     let _ = paths::ensure_dir(paths::state_dir()?).context("creating state directory")?;
     let path = paths::daemon_log_path()?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true).mode(0o600);
+    #[cfg(target_os = "macos")]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    let file = options
         .open(&path)
         .with_context(|| format!("opening state log {}", path.display()))?;
-    // create(true) honors umask; force owner-only after open.
+    #[cfg(target_os = "macos")]
+    paths::privatize_file(&file).context("privatizing state log")?;
+    // Preserve the Linux log-opening contract; native ACL normalization is
+    // descriptor-based and rejects links/non-regular files before mutation.
+    #[cfg(target_os = "linux")]
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("setting permissions on {}", path.display()))?;
     Ok(file)
@@ -276,7 +288,18 @@ impl Write for TeeHandle {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    match cli.command {
+    let command = match cli.command {
+        Some(command) => command,
+        None => {
+            #[cfg(target_os = "macos")]
+            return cantrip::macos::run();
+            #[cfg(not(target_os = "macos"))]
+            anyhow::bail!("a Cantrip command is required");
+        }
+    };
+    match command {
+        #[cfg(target_os = "macos")]
+        CliCommand::App => cantrip::macos::run(),
         CliCommand::Daemon { preload } => {
             let config = Config::load().context("loading configuration")?;
             daemon::run(config, preload)
@@ -333,9 +356,13 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-const CONFIG_TEMPLATE: &str = r#"injection = "auto"        # auto | paste | type | clipboard
-keep_warm = true
-# audio_source = "…"      # optional PipeWire target
+#[cfg(target_os = "linux")]
+const CONFIG_HEADER: &str = "injection = \"auto\"        # auto | paste | type | clipboard\n";
+#[cfg(target_os = "macos")]
+const CONFIG_HEADER: &str = "injection = \"clipboard\"   # copy locally, then paste manually\n# hotkey = \"Control+Alt+Space\"\n";
+
+const CONFIG_TEMPLATE: &str = r#"keep_warm = true
+# audio_source = "…"      # optional native device ID (PipeWire target on Linux)
 vocabulary = []           # exact-spelling terms for postproc + cloud STT
 
 [hud]
@@ -396,9 +423,18 @@ fn write_config_template(path: &Path, refuse_existing: bool) -> Result<()> {
     let parent = path
         .parent()
         .context("configuration path has no parent directory")?;
-    fs::create_dir_all(parent)
+    paths::ensure_dir(parent.to_path_buf())
         .with_context(|| format!("creating configuration directory {}", parent.display()))?;
-    fs::write(path, CONFIG_TEMPLATE)
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .create_new(refuse_existing)
+        .truncate(!refuse_existing)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening configuration template {}", path.display()))?;
+    file.write_all(CONFIG_HEADER.as_bytes())
+        .and_then(|()| file.write_all(CONFIG_TEMPLATE.as_bytes()))
         .with_context(|| format!("writing configuration template {}", path.display()))?;
     Ok(())
 }
@@ -783,6 +819,7 @@ fn model_status() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy)]
 struct DoctorTools {
     pw_record: bool,
@@ -790,6 +827,7 @@ struct DoctorTools {
     wl_copy: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn doctor() -> Result<()> {
     let tools = DoctorTools {
         pw_record: inject::executable_in_path("pw-record"),
@@ -840,7 +878,52 @@ fn doctor() -> Result<()> {
     Ok(())
 }
 
-fn handoff_diagnosis(name: &str, target: &cantrip::config::HandoffTarget) -> String {
+#[cfg(target_os = "macos")]
+fn doctor() -> Result<()> {
+    let config = Config::load();
+    match &config {
+        Ok(_) if paths::config_file()?.exists() => println!("config: ready"),
+        Ok(_) => println!("config: defaults in use — open Settings to customize"),
+        Err(_) => println!("config: blocked — invalid or unreadable; open Settings to repair"),
+    }
+    let capture = cantrip::capture::diagnosis(
+        config
+            .as_ref()
+            .ok()
+            .and_then(|config| config.audio_source.as_deref()),
+    );
+    println!("capture: {}", capture.detail);
+    if let Ok(config) = &config {
+        println!("{}", stt_diagnosis(config));
+        println!("{}", cleanup_diagnosis(config));
+        println!("{}", telemetry_diagnosis(config));
+        let available = inject::delivery_availability();
+        println!(
+            "injection: mode={}; clipboard={}; automatic={}",
+            injection_mode_name(config.injection),
+            available.clipboard,
+            available.automatic
+        );
+        if let Some(reason) = available.reason {
+            println!("injection: {reason}");
+        }
+        for (name, target) in &config.handoff {
+            println!("{}", handoff_diagnosis(name, target));
+        }
+    } else {
+        println!("stt: blocked — fix config first");
+        println!("cleanup: blocked — fix config first");
+        println!("telemetry: blocked — fix config first");
+    }
+    println!("hud: native passive panel; launch Cantrip.app or cantrip hud");
+    match ipc::status() {
+        Ok(status) => println!("daemon: reachable ({})", status.state_name()),
+        Err(_) => println!("daemon: not running or unreachable — open Cantrip.app"),
+    }
+    Ok(())
+}
+
+fn handoff_diagnosis(name: &str, target: &cantrip_engine::config::HandoffTarget) -> String {
     let executable = &target.command[0];
     let ready = fs::metadata(executable)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
@@ -854,6 +937,7 @@ fn handoff_diagnosis(name: &str, target: &cantrip::config::HandoffTarget) -> Str
     )
 }
 
+#[cfg(target_os = "linux")]
 fn capture_diagnosis(config: Option<&Config>, tools: DoctorTools) -> String {
     let source = match config.and_then(|config| config.audio_source.as_ref()) {
         Some(_) => "configured source",
@@ -925,6 +1009,7 @@ fn cleanup_diagnosis(config: &Config) -> String {
     )
 }
 
+#[cfg(target_os = "linux")]
 fn injection_diagnosis(mode: InjectionMode, tools: DoctorTools) -> String {
     let order = inject::planned_backend_names(mode, tools.virtual_keyboard, tools.wl_copy);
     let available = !order.is_empty();
@@ -1034,7 +1119,7 @@ mod tests {
             key = "hidden",
         );
         let config = Config {
-            stt: cantrip::config::SttConfig {
+            stt: cantrip_engine::config::SttConfig {
                 model: "speech-model".to_owned(),
                 endpoint: Some(endpoint),
                 api_key_id: Some("private-key-name".to_owned()),
@@ -1054,7 +1139,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let executable = root.join("receiver");
         fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
-        let target = cantrip::config::HandoffTarget {
+        let target = cantrip_engine::config::HandoffTarget {
             command: vec![executable.display().to_string()],
             timeout_seconds: 15,
             label: None,

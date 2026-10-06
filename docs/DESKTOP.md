@@ -1,16 +1,21 @@
 # Desktop setup and troubleshooting
 
-Install the [release binary](INSTALLATION.md), then follow
-[first dictation](USAGE.md#first-dictation). A login service and Omarchy badge
-are optional conveniences, not requirements for trying Cantrip. Keep one
-startup owner, and do not replace a personal setup just to follow this guide.
+Install using the [platform installation procedure](INSTALLATION.md), then follow
+[Linux first dictation](USAGE.md#first-dictation) or the
+[Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial).
+A Linux login service and Omarchy badge are optional conveniences, not
+requirements. Keep one startup owner; do not replace a personal setup just to
+follow this guide.
 
-Examples use `"$HOME/.local/bin/cantrip"`. Substitute your actual executable path
-when using another prefix. A shell's `PATH`, a compositor's `PATH`, and the
-systemd user manager's environment are separate; the installer changes none of
-them.
+Linux examples use `"$HOME/.local/bin/cantrip"`. Mac commands use the installed
+app executable, for example `"/Applications/Cantrip.app/Contents/MacOS/cantrip"`.
+Substitute your actual location. Linux shell, compositor, and systemd user
+manager environments are separate; the installer changes none of their `PATH`s.
 
 ## Supported desktops
+
+The following table and Hyprland/service procedures describe **Linux**. Mac
+support is scoped separately below; its presence does not change these criteria.
 
 | Capability | Requirement and boundary |
 |---|---|
@@ -40,9 +45,75 @@ presence does not establish that the microphone or destination works. The
 [attended trial](USAGE.md#4a-dictate-into-an-editor-on-supported-hyprland), not a
 compositor name or a successful diagnostic exit, establishes your actual result.
 
+### macOS supported boundary
+
+The native app requires macOS **13.3+** and a matching-architecture build. It uses
+AVAudioEngine/CoreAudio capture, local CPU Parakeet with explicitly installed
+weights, native NSPasteboard Copy, and a passive nonactivating NSPanel. The app
+owns the menu bar, panel, and editable Control+Option+Space global toggle shortcut.
+`daemon` is engine-only on Mac and does not supply those desktop surfaces.
+
+Manual paste is the supported destination workflow: use Clipboard, wait for a
+complete Copied result, then **Command+V** in the chosen editor and inspect it.
+Automatic keyboard delivery is not supported. Existing Auto/Paste/Type values
+are preserved and defer without keys, clipboard effects, or automatic fallback,
+including partial text. Granting Accessibility is not a workaround. Only an
+explicit microphone grant is needed; no Accessibility, Input Monitoring, or
+Screen Recording permission is needed for the app, hotkey, or owned panel.
+Inspect System Settings → Keyboard → Keyboard Shortcuts → Input Sources for a
+shortcut conflict; change the Cantrip shortcut in Settings to an unused
+combination. A registration failure leaves the previous shortcut active and
+reports why the new one is unavailable.
+
+Native arm64 headless/offscreen verification does not establish attended
+mic-to-editor success, panel positioning, or focus behavior. This guide does not
+claim a published/notarized artifact or exercised Intel hardware. Perform the
+[attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
+before relying on your microphone, shortcut, or destination.
+
+## macOS app ownership, login, and updates
+
+Open **Cantrip.app** from its installed location. No arguments (or `app`) run
+the native menu client; `daemon` runs only the shared engine. Keep one engine
+owner: the app starts one if absent and attaches to an existing engine instead
+of duplicating it. Settings and Recordings and recovery are separate windows;
+closing them does not quit the app or engine. Check Setup, selected-take Copy
+and recovery, dismiss, Start/Stop, and Cancel are available from the menu.
+
+**Open at Login** is an explicit menu choice using macOS `SMAppService`, not a
+launch agent installed silently. It is available when running Cantrip.app.
+If it says approval is needed, review Cantrip under System Settings → General →
+Login Items; selecting the menu action opens that approval page. Registration
+failure is reported, not treated as successful enablement. Do not add another
+login owner alongside an existing personal daemon.
+
+For an update, rollback, or removal:
+
+1. Record the installed bundle location and intended Open at Login state.
+   Finish or cancel the current take and let its outcome settle.
+2. Choose **Quit Cantrip** from its menu. Cocoa graceful termination waits for
+   an app-owned engine to finalize/retain capture and stop before the app exits.
+   Wait for that exit; do not Force Quit, broadly kill processes, delete sockets,
+   or replace a running bundle. `stop` stops a recording, not the engine.
+3. If the app attached to an externally owned `daemon`, quitting leaves it
+   running. Stop that engine through its actual terminal/service owner and wait
+   for clean exit before replacement; do not assume disappearance of the menu
+   mark means the engine has stopped.
+4. Replace only the reviewed app at the intended location using the
+   [installation/update procedure](INSTALLATION.md). Reopen that copy, verify
+   IPC/configuration/model and microphone findings, then repeat the attended
+   clipboard/editor trial. Restore only the intended login setting. Bundle
+   replacement or rollback is not proof of history-schema compatibility.
+
+To remove login startup, explicitly turn off Open at Login and review System
+Settings before removing the bundle. App removal does not delete configuration,
+models, retained audio/text, logs, or Keychain entries. Forget and key removal are
+separate deliberate actions. Linux systemd, PipeWire, Wayland helper, and Omarchy
+setup below do not apply to Mac.
+
 ## Dictation shortcut
 
-Cantrip does not install or change hotkeys. Bind one unused shortcut to the
+On Linux, Cantrip does not install or change hotkeys. Bind one unused shortcut to the
 absolute installed executable path followed by `toggle`. Print the command to
 use from your graphical terminal:
 
@@ -96,6 +167,9 @@ Do not trigger `stop` from a diagnostic terminal while expecting text in another
 window.
 
 ## Keep one startup owner
+
+This section and the following user-service instructions are Linux-specific.
+Mac ownership is described [above](#macos-app-ownership-login-and-updates).
 
 A foreground terminal, a personal/package service, or compositor autostart can
 own the daemon. `cantrip actions` uses an installed `cantrip.service` even when
@@ -289,13 +363,15 @@ For a user service:
 journalctl --user -u cantrip.service -b --no-pager
 ```
 
-For any daemon owner, operational details are also in
-`${XDG_STATE_HOME:-$HOME/.local/state}/cantrip/daemon.log`, without transcript
-text. A take never ends on silence or length; each
+For any daemon owner, operational details are also in the platform's
+[state directory](PRIVACY.md#storage-locations): normally
+`${XDG_STATE_HOME:-$HOME/.local/state}/cantrip/daemon.log` on Linux and
+`~/Library/Application Support/cantrip/state/daemon.log` on Mac, without
+transcript text. A take never ends on silence or length; each
 `[Daemon] state recording -> …` line names the command class that ended it:
 `reason=toggle` (a toggle carrying the take's own handoff target, from any
-client), `reason=stop`, `reason=cancel`, or `reason=shutdown`. The sender is
-the line just before it: every command logs `[Daemon] command=… sender=pid=…
+client), `reason=stop`, `reason=cancel`, or `reason=shutdown`. On Linux, the sender
+is the line just before it: every command logs `[Daemon] command=… sender=pid=…
 exe=… parents=…` with the kernel-reported client process and up to three
 ancestor names (a Hyprland shortcut ends in `Hyprland`), never arguments or
 text. Refused commands log `[Daemon] command rejected class=…`. Check

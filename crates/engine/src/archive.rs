@@ -3,7 +3,7 @@ use anyhow::{ensure, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -313,6 +313,8 @@ impl Store {
         );
         file.set_permissions(fs::Permissions::from_mode(0o700))
             .context("setting history directory permissions")?;
+        #[cfg(target_os = "macos")]
+        clear_inherited_acl(&file).context("privatizing history directory ACL")?;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(std::io::Error::last_os_error()).context("locking transcript history");
         }
@@ -335,16 +337,50 @@ impl Store {
     }
 
     pub(crate) fn names(&self) -> Result<Vec<String>> {
-        let path = format!("/proc/self/fd/{}", self.directory.as_raw_fd());
-        fs::read_dir(path)
-            .context("listing transcript history")?
-            .filter_map(|entry| match entry {
-                Ok(entry) => entry.file_name().into_string().ok().map(Ok),
-                Err(error) => Some(Err(
-                    anyhow::Error::new(error).context("reading history entry")
-                )),
-            })
-            .collect()
+        // A new open-file description gives every listing its own offset.
+        // dup() would share the store's offset, and a pathname-based listing
+        // could be redirected after the locked directory was renamed.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).context("opening history enumeration");
+        }
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            // fdopendir takes ownership only on success.
+            unsafe { libc::close(fd) };
+            return Err(error).context("listing transcript history");
+        }
+        let stream = DirectoryEntries(stream);
+        let mut names = Vec::new();
+        loop {
+            // readdir returns null both at EOF and on error.
+            unsafe { *directory_errno() = 0 };
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                let error = unsafe { *directory_errno() };
+                if error != 0 {
+                    return Err(std::io::Error::from_raw_os_error(error))
+                        .context("reading history entry");
+                }
+                break;
+            }
+            // SAFETY: readdir's name is terminated and valid until the next
+            // call on this privately owned directory stream.
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if let Ok(name) = name.to_str() {
+                if name != "." && name != ".." {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+        Ok(names)
     }
 
     pub(crate) fn open_file(&self, name: &str) -> Result<Option<File>> {
@@ -486,6 +522,8 @@ impl Store {
         let result = (|| {
             file.set_permissions(fs::Permissions::from_mode(0o600))
                 .context("setting artifact permissions")?;
+            #[cfg(target_os = "macos")]
+            clear_inherited_acl(&file).context("privatizing history artifact ACL")?;
             write(&mut file)?;
             file.sync_all().context("syncing history artifact")?;
             if unsafe {
@@ -527,6 +565,69 @@ impl Store {
             .sync_all()
             .context("syncing transcript history")
     }
+}
+
+struct DirectoryEntries(*mut libc::DIR);
+
+impl Drop for DirectoryEntries {
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the successful fdopendir result.
+        unsafe { libc::closedir(self.0) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn directory_errno() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+
+#[cfg(target_os = "macos")]
+fn directory_errno() -> *mut libc::c_int {
+    unsafe { libc::__error() }
+}
+
+// macOS extended ACL grants are not restricted by Unix mode bits. Remove
+// inherited entries on owned private directories and new artifacts by fd,
+// never through a pathname. These are public Darwin libc interfaces; libc's
+// Rust crate does not currently declare the filesec API.
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn filesec_init() -> *mut libc::c_void;
+    fn filesec_free(security: *mut libc::c_void);
+    fn filesec_set_property(
+        security: *mut libc::c_void,
+        property: libc::c_int,
+        value: *const libc::c_void,
+    ) -> libc::c_int;
+    fn fchmodx_np(fd: libc::c_int, security: *mut libc::c_void) -> libc::c_int;
+}
+
+#[cfg(target_os = "macos")]
+struct NativeFileSecurity(*mut libc::c_void);
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeFileSecurity {
+    fn drop(&mut self) {
+        unsafe { filesec_free(self.0) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_inherited_acl(file: &File) -> std::io::Result<()> {
+    let security = unsafe { filesec_init() };
+    if security.is_null() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let security = NativeFileSecurity(security);
+    // Public <sys/fcntl.h>: FILESEC_ACL = 5, _FILESEC_REMOVE_ACL = (void *)1.
+    // The sentinel is recognized by filesec_set_property, not dereferenced.
+    if unsafe { filesec_set_property(security.0, 5, std::ptr::without_provenance(1)) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { fchmodx_np(file.as_raw_fd(), security.0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn checksum(file: &mut File) -> Result<sha2::digest::Output<Sha256>> {
@@ -599,7 +700,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     fn test_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
+        std::env::temp_dir().canonicalize().unwrap().join(format!(
             "cantrip-archive-{name}-{}-{}",
             std::process::id(),
             SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -669,6 +770,46 @@ mod tests {
             .ends_with(".tmp")));
 
         fs::remove_dir_all(directory.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn enumeration_and_publication_stay_anchored_after_the_directory_is_replaced() {
+        let root = test_root("anchored");
+        let directory = root.join("transcripts");
+        let relocated = root.join("relocated");
+        let store = Store::open(&directory).unwrap();
+        store
+            .write_record(
+                "first",
+                &json!({ "session_id": "first", "raw_transcript": "retained" }),
+            )
+            .unwrap();
+        fs::rename(&directory, &relocated).unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("unrelated.json"), b"not in the locked store").unwrap();
+        store
+            .write_record(
+                "second",
+                &json!({ "session_id": "second", "raw_transcript": "anchored" }),
+            )
+            .unwrap();
+
+        for _ in 0..2 {
+            let mut names = store.names().unwrap();
+            names.sort();
+            assert_eq!(names, ["first.json", "second.json"]);
+        }
+        assert_eq!(
+            final_text(&store.read_record("second").unwrap().unwrap()),
+            Some("anchored")
+        );
+        assert!(relocated.join("second.json").is_file());
+        assert!(!directory.join("second.json").exists());
+        store.remove("first.json").unwrap();
+        assert!(!relocated.join("first.json").exists());
+        assert!(directory.join("unrelated.json").is_file());
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -809,6 +950,77 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn private_history_removes_inherited_acl_grants_without_changing_its_parent() {
+        unsafe extern "C" {
+            fn acl_from_text(text: *const libc::c_char) -> *mut libc::c_void;
+            fn acl_set_fd(fd: libc::c_int, acl: *mut libc::c_void) -> libc::c_int;
+            fn acl_get_fd(fd: libc::c_int) -> *mut libc::c_void;
+            fn acl_get_entry(
+                acl: *mut libc::c_void,
+                entry_id: libc::c_int,
+                entry: *mut *mut libc::c_void,
+            ) -> libc::c_int;
+            fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+        }
+
+        fn has_acl_entries(file: &File) -> bool {
+            let acl = unsafe { acl_get_fd(file.as_raw_fd()) };
+            if acl.is_null() {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ENOENT)
+                );
+                return false;
+            }
+            let mut entry = std::ptr::null_mut();
+            let result = unsafe { acl_get_entry(acl, 0, &mut entry) };
+            let error = std::io::Error::last_os_error();
+            unsafe { acl_free(acl) };
+            if result == 0 {
+                return true;
+            }
+            assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+            false
+        }
+
+        let root = test_root("darwin-acl");
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let parent = File::open(&root).unwrap();
+        let acl = unsafe {
+            acl_from_text(
+                c"!#acl 1\ngroup:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:::allow,file_inherit,directory_inherit:read,execute\n"
+                    .as_ptr(),
+            )
+        };
+        assert!(!acl.is_null());
+        let result = unsafe { acl_set_fd(parent.as_raw_fd(), acl) };
+        unsafe { acl_free(acl) };
+        assert_eq!(result, 0);
+
+        let directory = root.join("transcripts");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        assert!(has_acl_entries(&File::open(&directory).unwrap()));
+        let store = Store::open(&directory).unwrap();
+        assert!(!has_acl_entries(&store.directory));
+        store
+            .write_record(
+                "take",
+                &json!({ "session_id": "take", "raw_transcript": "public fixture" }),
+            )
+            .unwrap();
+        assert!(!has_acl_entries(
+            &store.open_file("take.json").unwrap().unwrap()
+        ));
+        assert!(has_acl_entries(&parent));
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 }

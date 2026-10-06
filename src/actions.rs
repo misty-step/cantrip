@@ -1,18 +1,21 @@
 //! Deliberately opened, metadata-only recovery and setup window.
 
-use crate::config::Config;
-use crate::ipc::{self, Command, StateKind, StatusSnapshot};
-use crate::recovery::{self, Take};
 use crate::settings::{apply_theme, color};
-use crate::{inject, keys, models, theme};
+use crate::theme;
 use anyhow::{anyhow, Context, Result};
+use cantrip_engine::config::Config;
+use cantrip_engine::ipc::{self, Command, StateKind, StatusSnapshot};
+use cantrip_engine::recovery::{self, Take};
+use cantrip_engine::{keys, models};
 use eframe::egui;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_secs(2);
@@ -138,9 +141,9 @@ fn perform(action: Action) -> Result<ActionResult> {
                 return Err(error).context("Installing the local model");
             }
             if ipc::command(Command::Reload).is_ok_and(|reply| reply.ok) {
-                "Local model installed; daemon reloaded.".to_owned()
+                "Local model installed and applied.".to_owned()
             } else {
-                "Local model installed. Reload the daemon after the current operation, or start it below.".to_owned()
+                "Local model installed. Reload configuration after the current take, or start Cantrip below.".to_owned()
             }
         }
         Action::Doctor => {
@@ -159,7 +162,7 @@ fn perform(action: Action) -> Result<ActionResult> {
             // Do not echo provider errors or the supplied value, even to the GUI.
             let result = keys::set(id.trim(), &secret);
             secret.clear();
-            result.map_err(|_| anyhow!("Key was not saved. Unlock the desktop keyring and use a nonempty key without whitespace."))?;
+            result.map_err(|_| anyhow!("Key was not saved. Unlock the OS keyring and use a nonempty key without whitespace."))?;
             "API key saved in the OS keyring. Use this key ID in Settings; the key is not stored in configuration.".to_owned()
         }
         Action::StartDaemon => start_daemon()?,
@@ -251,6 +254,7 @@ fn bounded_output(
     Ok((result?, stdout, stderr))
 }
 
+#[cfg(target_os = "linux")]
 fn unit_properties() -> Result<String> {
     let (status, stdout, stderr) = bounded_output(
         ProcessCommand::new("systemctl").args([
@@ -270,6 +274,7 @@ fn unit_properties() -> Result<String> {
     Ok(stdout)
 }
 
+#[cfg(target_os = "linux")]
 fn property<'a>(properties: &'a str, key: &str) -> Option<&'a str> {
     properties.lines().find_map(|line| {
         line.split_once('=')
@@ -278,11 +283,13 @@ fn property<'a>(properties: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// Linux: the systemd user service owns startup when it is installed.
+#[cfg(target_os = "linux")]
 fn start_daemon() -> Result<String> {
     if ipc::status().is_ok() {
         return Ok("Cantrip is already connected.".to_owned());
     }
-    if inject::executable_in_path("systemctl") {
+    if crate::inject::executable_in_path("systemctl") {
         let properties = unit_properties()?;
         match property(&properties, "LoadState") {
             Some("not-found") => {}
@@ -312,6 +319,30 @@ fn start_daemon() -> Result<String> {
     start_direct_daemon()
 }
 
+/// macOS: the menu-bar app is the one startup owner. LaunchServices opens it,
+/// or hands the running app a reopen that restarts its stopped engine.
+#[cfg(target_os = "macos")]
+fn start_daemon() -> Result<String> {
+    if ipc::status().is_ok() {
+        return Ok("Cantrip is already connected.".to_owned());
+    }
+    crate::macos::open_app()?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if ipc::status().is_ok() {
+            return Ok(
+                "Cantrip is connected. It keeps running in the menu bar after this window closes."
+                    .to_owned(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    anyhow::bail!(
+        "Cantrip opened, but dictation is not available yet. Open the Cantrip menu in the menu bar to see why."
+    )
+}
+
+#[cfg(target_os = "linux")]
 fn start_direct_daemon() -> Result<String> {
     let mut child = ProcessCommand::new(std::env::current_exe()?)
         .arg("daemon")

@@ -5,14 +5,17 @@ Cantrip finishes transcription before delivering one result. Automatic keyboard
 delivery is guarded; when the destination cannot be verified, use deliberate
 copy and manual paste instead.
 
-Start with [installation](INSTALLATION.md). The examples below use the default
-installed binary, `"$HOME/.local/bin/cantrip"`; replace that path everywhere if
-you selected another prefix. In command descriptions, `cantrip` is shorthand
-for that executable, not an assumption that installation changed your `PATH`.
+Start with [installation](INSTALLATION.md). Linux shell examples below use
+`"$HOME/.local/bin/cantrip"`; replace that path everywhere if you selected
+another prefix. For macOS, use the executable inside your installed app, for
+example `"/Applications/Cantrip.app/Contents/MacOS/cantrip"`; substitute the
+actual bundle location. `cantrip` in command descriptions is shorthand for the
+platform's executable, not an assumption that installation changed your `PATH`.
 
 ## First dictation
 
-Use an attended, unlocked Wayland session and a harmless sentence. **Stopped
+This section is the Linux procedure; the [Mac attended trial](#first-dictation-macos-attended-clipboard-trial)
+is separate. Use an attended, unlocked Wayland session and a harmless sentence. **Stopped
 audio and plaintext transcript history are retained**, including successful and
 cancelled takes. Read [privacy and Forget](PRIVACY.md) before speaking sensitive
 material. No cloud account or cleanup service is needed for this first local
@@ -167,6 +170,81 @@ You can later bind the same `toggle` command to an unused compositor shortcut
 while keeping clipboard mode. The shortcut changes recording control, not the
 delivery policy. Automatic typing is not required to use Cantrip.
 
+## First dictation (macOS, attended clipboard trial)
+
+This is a procedure to perform on your own unlocked Mac, not a claim that live
+microphone capture or paste into an editor has already been verified. The
+native baseline is macOS **13.3 or newer**, with a matching-architecture
+Cantrip.app. No published/notarized release or Intel hardware proof is claimed
+here. See [installation](INSTALLATION.md) for the available build/package path.
+Stopped audio and plaintext history are retained on Mac too; read
+[privacy and Forget](PRIVACY.md) before this harmless trial.
+
+1. Set the exact executable path for the installed app in a terminal:
+
+   ```sh
+   CANTRIP="/Applications/Cantrip.app/Contents/MacOS/cantrip"
+   "$CANTRIP" config path
+   ```
+
+   On a first installation only, run `"$CANTRIP" config init`. Otherwise inspect
+   the existing configuration; do not replace it. Keep default local Parakeet,
+   no STT endpoint, cleanup disabled, and telemetry disabled for this trial.
+   New Mac configuration defaults to `injection = "clipboard"`; Linux defaults
+   to `auto`. An existing Mac `auto`, `paste`, or `type` is preserved but
+   unsupported: it defers without touching the clipboard or sending keys,
+   including partial-result delivery, and never falls back to Copy. Deliberately
+   select Clipboard in Settings or edit/save/reload before this trial.
+2. Install the model deliberately:
+
+   ```sh
+   "$CANTRIP" doctor
+   "$CANTRIP" models pull
+   "$CANTRIP" models status
+   ```
+
+   Pull is the explicit network/download step. A missing model must be fixed
+   before capture; no implicit download or provider switch is a setup remedy.
+3. Open the installed **Cantrip.app** in Finder. The app owns the menu-bar mark,
+   passive panel, global shortcut, and ordinarily the engine. Do not also run
+   `daemon`: on Mac that command is engine-only, with no menu or panel. If an
+   engine already exists, the app attaches without duplicating it and will not
+   terminate that external owner when quitting. Check that owner rather than
+   launching competitors when IPC is unavailable.
+4. Open **Settings** from the Cantrip menu. Choose the microphone deliberately:
+   System default follows the OS default; choosing a device saves its stable
+   CoreAudio input UID in `audio_source`. A missing selected UID refuses capture,
+   never silently records another microphone. Choose **Allow microphone access**
+   in Settings or **Allow Microphone Access…** in the menu and answer the macOS
+   prompt deliberately. If denied, use Privacy & Security → Microphone to review
+   Cantrip's grant; restricted access needs policy resolution. Neither `doctor`
+   nor an attempted recording grants permission. Do not grant Accessibility,
+   Input Monitoring, or Screen Recording: this workflow needs none of them.
+5. Check **Dictation shortcut** in Settings. Its default is
+   **Control+Option+Space** (`Control+Alt+Space` in configuration); it is editable.
+   Inspect System Settings → Keyboard → Keyboard Shortcuts → Input Sources for
+   a conflict, and choose an unused combination rather than changing unrelated
+   bindings. Save and read any registration notice: if replacing a shortcut
+   fails, the old one remains active. Confirm IPC with `"$CANTRIP" ping` and
+   `"$CANTRIP" status --json`, and address `"$CANTRIP" doctor` findings.
+6. Open a safe editor and an empty scratch document. Press and release the
+   configured shortcut to start, speak one harmless sentence, then press and
+   release it again to stop. The menu's Start/Stop controls are an alternative.
+   Observe actual microphone levels; recording does not stop on silence.
+7. Wait for a settled **complete** outcome and **Copied** (`delivery: copied`).
+   Focus the editor and deliberately use **Command+V** or its Paste command.
+   Inspect the actual sentence and paragraph breaks in the editor. A panel
+   acknowledgement proves a pasteboard write, not editor receipt. Do not paste
+   blindly after failed, deferred, uncertain, or partial outcomes: old clipboard
+   content may remain. Use selected-take Copy/recovery if needed.
+
+Only a complete result plus the expected text in the intended editor establishes
+this attended trial. The menu also opens Settings, Recordings and recovery,
+Check Setup, and selected-outcome Copy/recovery/dismiss. Closing those windows
+does not stop the engine; Cancel prevents delivery without deleting retained
+audio. [Open at Login and graceful updates](DESKTOP.md#macos-app-ownership-login-and-updates)
+are deliberate choices after a successful trial, not prerequisites.
+
 ## Everyday controls
 
 - `toggle` starts recording when idle and stops the current recording.
@@ -179,6 +257,8 @@ delivery policy. Automatic typing is not required to use Cantrip.
 - `stop` ends a recording, **not the daemon**. For a foreground daemon, finish
   or cancel the take, let processing settle, then use Ctrl+C in Terminal A.
   Services and other owners have [their own stop procedure](DESKTOP.md#stop-update-and-remove).
+  On Mac, use **Quit Cantrip** and wait for the app-owned engine to exit;
+  an externally owned daemon must be stopped through its own owner.
 
 `toggle` and `start` accept `--postproc clean|raw`. The mode chosen at capture
 start overrides `[postproc].enabled` for that take; using a different flag to
@@ -200,7 +280,7 @@ operation finished.
 |---|---|
 | `completeness: complete` and `delivery: pasted` or `typed` | Inspect the intended application. Mechanism acknowledgement is not application receipt. |
 | `delivery: copied` | Text is on the clipboard; paste manually. No keyboard delivery occurred. |
-| `delivery: deferred` | Focus or session safety could not be established. Select the take and explicitly copy it rather than bypassing the guard. |
+| `delivery: deferred` | Focus/session safety could not be established, or the configured keyboard mode is unsupported on Mac. Select the take and explicitly copy it rather than bypassing the guard. |
 | `delivery: uncertain` | The clipboard or some keys may already have changed. Inspect the destination before retrying to avoid duplicates; Cantrip does not automatically retry an uncertain handoff. |
 | `completeness: partial` | Available text is incomplete. Keep the audio and recover the whole recording; a partial transcript is not a successful retry. |
 | `completeness: empty`, `failed`, or `cancelled` | No complete dictation was delivered. Read the notice and use the matching recording's available artifacts. |
@@ -302,8 +382,9 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 
 | Command | Purpose |
 |---|---|
-| `cantrip daemon [--preload]` | Run the dictation daemon |
-| `cantrip hud [--screenshot PATH]` | Show the passive layer-shell HUD; the daemon normally spawns and watches it |
+| `cantrip app` (Mac only; also no arguments) | Run the native menu/panel/shortcut client, owning or attaching to one engine |
+| `cantrip daemon [--preload]` | Run the dictation daemon; Mac engine-only, without menu/panel/shortcut |
+| `cantrip hud [--screenshot PATH]` | Linux passive layer-shell HUD (daemon normally spawns/watches it); Mac native panel/offscreen rendering (app normally owns the live panel) |
 | `cantrip settings [--screenshot PATH]` | Open configuration editing and reload |
 | `cantrip actions [--doctor] [--screenshot PATH]` | Open recording recovery and setup |
 | `cantrip toggle` / `start` / `stop` / `cancel` | Recording and processing transitions |

@@ -1,6 +1,6 @@
 //! Typed command acknowledgements and identity-aware daemon snapshots.
 
-pub use crate::capture::AUDIO_WAVEFORM_BINS;
+pub use crate::audio::AUDIO_WAVEFORM_BINS;
 use crate::config::HudConfig;
 use crate::paths;
 use crate::pipeline::Stage;
@@ -8,7 +8,7 @@ use crate::recovery::Take;
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
 use std::io::{Read, Write};
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -216,14 +216,39 @@ fn serialize_rgb<S: Serializer>(
     [r, g, b]: &[u8; 3],
     serializer: S,
 ) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(&format!("#{r:02x}{g:02x}{b:02x}"))
+    serializer.collect_str(&format_args!("#{r:02x}{g:02x}{b:02x}"))
 }
 
 fn deserialize_rgb<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<[u8; 3], D::Error> {
-    let text = String::deserialize(deserializer)?;
-    crate::theme::hex_rgb(&text).ok_or_else(|| serde::de::Error::custom("expected #rrggbb"))
+    struct RgbVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for RgbVisitor {
+        type Value = [u8; 3];
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("#rrggbb")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> std::result::Result<Self::Value, E> {
+            parse_rgb(text).ok_or_else(|| E::custom("expected #rrggbb"))
+        }
+    }
+
+    deserializer.deserialize_str(RgbVisitor)
+}
+
+fn parse_rgb(text: &str) -> Option<[u8; 3]> {
+    let digits = text.strip_prefix('#')?;
+    if digits.len() != 6 || !digits.is_ascii() {
+        return None;
+    }
+    Some([
+        u8::from_str_radix(&digits[0..2], 16).ok()?,
+        u8::from_str_radix(&digits[2..4], 16).ok()?,
+        u8::from_str_radix(&digits[4..6], 16).ok()?,
+    ])
 }
 
 impl TerminalOutcome {
@@ -423,7 +448,9 @@ fn exchange<T: DeserializeOwned>(request: &str) -> Result<T> {
 }
 
 /// A full Unix listen backlog must not hang a command before its read deadline.
-fn connect(path: &Path) -> Result<UnixStream> {
+pub(crate) fn connect(path: &Path) -> Result<UnixStream> {
+    #[cfg(target_os = "macos")]
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let bytes = path.as_os_str().as_bytes();
     anyhow::ensure!(
@@ -434,31 +461,122 @@ fn connect(path: &Path) -> Result<UnixStream> {
     for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
         *slot = *byte as libc::c_char;
     }
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-            0,
-        )
+    #[cfg(target_os = "linux")]
+    let address_length = std::mem::size_of::<libc::sockaddr_un>();
+    #[cfg(target_os = "macos")]
+    let address_length = {
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+        address.sun_len = length as u8;
+        length
     };
+    #[cfg(target_os = "linux")]
+    let socket_type = libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK;
+    #[cfg(target_os = "macos")]
+    let socket_type = libc::SOCK_STREAM;
+    let fd = unsafe { libc::socket(libc::AF_UNIX, socket_type, 0) };
     if fd < 0 {
         return Err(std::io::Error::last_os_error()).context("creating daemon connection");
     }
+    // SAFETY: socket returned a new descriptor, now owned by the stream even
+    // when subsequent Darwin descriptor/socket configuration fails.
     let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    #[cfg(target_os = "macos")]
+    {
+        // Darwin does not accept Linux's socket creation flags. Set both
+        // before connecting, and suppress SIGPIPE just as native std sockets do.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error()).context("privatizing daemon connection");
+        }
+        stream
+            .set_nonblocking(true)
+            .context("configuring non-blocking daemon connection")?;
+        let enabled: libc::c_int = 1;
+        if unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                (&enabled as *const libc::c_int).cast(),
+                std::mem::size_of_val(&enabled) as libc::socklen_t,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error())
+                .context("configuring daemon socket writes");
+        }
+    }
     let result = unsafe {
         libc::connect(
-            fd,
+            stream.as_raw_fd(),
             (&address as *const libc::sockaddr_un).cast(),
-            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            address_length as libc::socklen_t,
         )
     };
     if result != 0 {
-        return Err(std::io::Error::last_os_error()).context("connecting to daemon socket");
+        let error = std::io::Error::last_os_error();
+        #[cfg(target_os = "linux")]
+        return Err(error).context("connecting to daemon socket");
+        #[cfg(target_os = "macos")]
+        {
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR)
+            ) {
+                complete_connect(stream.as_raw_fd(), deadline)?;
+            } else {
+                return Err(error).context("connecting to daemon socket");
+            }
+        }
     }
     stream
         .set_nonblocking(false)
         .context("configuring daemon connection")?;
     Ok(stream)
+}
+
+#[cfg(target_os = "macos")]
+fn complete_connect(fd: libc::c_int, deadline: Instant) -> Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(!remaining.is_zero(), "daemon connection timed out");
+        let milliseconds =
+            remaining.as_millis().max(1).min(libc::c_int::MAX as u128) as libc::c_int;
+        let result = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("waiting for daemon connection");
+        }
+        if result == 0 {
+            continue;
+        }
+        let mut error: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&error) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&mut error as *mut libc::c_int).cast(),
+                &mut length,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("checking daemon connection");
+        }
+        if error != 0 {
+            return Err(std::io::Error::from_raw_os_error(error))
+                .context("connecting to daemon socket");
+        }
+        return Ok(());
+    }
 }
 
 fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
@@ -494,6 +612,43 @@ fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SOCKET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct SocketDirectory(PathBuf);
+
+    impl SocketDirectory {
+        fn new() -> Self {
+            #[cfg(target_os = "macos")]
+            let base = PathBuf::from("/private/tmp");
+            #[cfg(target_os = "linux")]
+            let base = std::env::temp_dir().canonicalize().unwrap();
+            let path = base.join(format!(
+                "ct-ipc-{}-{}",
+                std::process::id(),
+                SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            Self(path)
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.0.join("socket")
+        }
+    }
+
+    impl Drop for SocketDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn outcome(completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
         TerminalOutcome {
@@ -636,6 +791,98 @@ mod tests {
     }
 
     #[test]
+    fn native_connection_is_close_on_exec_and_supports_bounded_request_io() {
+        let directory = SocketDirectory::new();
+        let socket = directory.socket();
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = connect(&socket).unwrap();
+        let descriptor_flags = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFD) };
+        assert!(descriptor_flags >= 0);
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+        let status_flags = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFL) };
+        assert!(status_flags >= 0);
+        assert_eq!(status_flags & libc::O_NONBLOCK, 0);
+        #[cfg(target_os = "macos")]
+        {
+            let mut enabled: libc::c_int = 0;
+            let mut length = std::mem::size_of_val(&enabled) as libc::socklen_t;
+            assert_eq!(
+                unsafe {
+                    libc::getsockopt(
+                        client.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_NOSIGPIPE,
+                        (&mut enabled as *mut libc::c_int).cast(),
+                        &mut length,
+                    )
+                },
+                0
+            );
+            assert_eq!(enabled, 1);
+        }
+        client
+            .set_write_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client.write_all(b"status\n").unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut request = [0; 7];
+        server.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"status\n");
+        server.write_all(b"{\"state\":\"idle\"}\n").unwrap();
+        assert_eq!(
+            read_reply(&mut client, Instant::now() + Duration::from_secs(1)).unwrap(),
+            b"{\"state\":\"idle\"}"
+        );
+    }
+
+    #[test]
+    fn a_full_listen_backlog_cannot_block_connection_without_a_deadline() {
+        let directory = SocketDirectory::new();
+        let socket = directory.socket();
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let started = Instant::now();
+        let mut queued = Vec::new();
+        let mut full = false;
+        for _ in 0..64 {
+            match connect(&socket) {
+                Ok(stream) => queued.push(stream),
+                Err(_) => {
+                    full = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            !queued.is_empty(),
+            "the real socket must first accept a connection"
+        );
+        assert!(full, "the reduced backlog must reach capacity");
+        assert!(started.elapsed() < REQUEST_TIMEOUT + Duration::from_secs(2));
+        let (_accepted, _) = listener.accept().unwrap();
+        let _next = connect(&socket).unwrap();
+    }
+
+    #[test]
+    fn socket_address_capacity_and_nul_are_rejected_before_connect() {
+        let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        let too_long = PathBuf::from("a".repeat(address.sun_path.len()));
+        assert!(connect(&too_long)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid daemon socket path"));
+        assert!(connect(Path::new("cantrip\0socket"))
+            .unwrap_err()
+            .to_string()
+            .contains("invalid daemon socket path"));
+    }
+
+    #[test]
     fn handoff_travels_as_a_hex_color_and_its_absence_is_the_default_flow() {
         let mut value = outcome(Completeness::Complete, Delivery::HandedOff);
         value.handoff = Some(Handoff {
@@ -655,6 +902,24 @@ mod tests {
         let mut bad = json;
         bad["handoff"]["color"] = "magenta".into();
         assert!(serde_json::from_value::<TerminalOutcome>(bad).is_err());
+    }
+
+    #[test]
+    fn rgb_wire_parser_accepts_mixed_case_hex_and_rejects_non_ascii_without_panicking() {
+        let mut wire = serde_json::json!({
+            "name": "handoff",
+            "label": "Handoff",
+            "color": "#AbCdEf",
+        });
+        let handoff: Handoff = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(handoff.color, [0xab, 0xcd, 0xef]);
+        assert_eq!(serde_json::to_value(handoff).unwrap()["color"], "#abcdef");
+        for invalid in [
+            "#éffff", "#f🦀f", "#12345", "#1234567", "#12gg00", "123456", " #123456",
+        ] {
+            wire["color"] = invalid.into();
+            assert!(serde_json::from_value::<Handoff>(wire.clone()).is_err());
+        }
     }
 
     #[test]

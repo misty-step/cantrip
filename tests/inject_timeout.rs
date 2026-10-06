@@ -1,7 +1,10 @@
 //! Exercise the public delivery deadline without a desktop or real clipboard.
 //! This binary has one test, so its PATH override cannot affect another test.
+#![cfg(target_os = "linux")]
 
-use cantrip::inject::{self, DeliveryGuard, InjectionFailureKind, InjectionMode};
+use cantrip::inject::DeliveryGuard;
+use cantrip_engine::delivery::{InjectionFailureKind, InjectionMode};
+use cantrip_engine::ports::DeliveryPermit;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -37,10 +40,9 @@ fn nonreading_clipboard_helper_is_bounded_and_reaped() {
     // Exceed pipe capacity: the deadline must cover writing, not only child exit.
     let payload = "synthetic-private-dictation".repeat(65_536);
     let started = Instant::now();
-    let result = inject::inject(
+    let result = DeliveryGuard::capture().deliver(
         &payload,
         InjectionMode::Clipboard,
-        &DeliveryGuard::capture(),
         &AtomicBool::new(false),
     );
     let elapsed = started.elapsed();

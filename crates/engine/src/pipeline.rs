@@ -544,7 +544,10 @@ mod tests {
 
     impl Recording {
         fn new(frames: usize) -> Self {
-            let root = std::env::temp_dir().join(format!("cantrip-pipeline-{}", archive::new_id()));
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("cantrip-pipeline-{}", archive::new_id()));
             std::fs::create_dir(&root).unwrap();
             let wav = root.join("take.wav");
             let mut writer = hound::WavWriter::create(

@@ -17,7 +17,7 @@ Criteria:
 
 No-gos: no automatic downloading of models without explicit operator action.
 
-Evidence: `src/pipeline.rs`, `src/stt.rs`, `src/capture.rs`
+Evidence: `crates/engine/src/pipeline.rs`, `crates/engine/src/stt.rs`, `src/capture/linux.rs`
 
 ## US-002 Observe dictation and processing state via the HUD
 
@@ -33,7 +33,7 @@ Criteria:
 
 No-gos: no interactive notification popups or chatty notification daemon alerts.
 
-Evidence: `src/hud.rs`, `src/daemon.rs`
+Evidence: `src/hud/wayland.rs`, `crates/engine/src/engine.rs`
 
 ## US-012 See Cantrip's state in the Omarchy bar at a glance
 
@@ -63,7 +63,7 @@ Criteria:
 
 No-gos: no blind keyboard retries into uncertain window targets.
 
-Evidence: `src/desktop.rs`, `src/inject.rs`
+Evidence: `src/desktop/linux.rs`, `src/inject/linux.rs`
 
 ## US-004 Select between clipboard paste and virtual keyboard injection
 
@@ -76,7 +76,7 @@ Criteria:
 
 No-gos: no clipboard read-and-restore hacks.
 
-Evidence: `src/inject.rs`, `tests/inject_timeout.rs`
+Evidence: `src/inject/linux.rs`, `tests/inject_timeout.rs`
 
 ## Capability: Recording History and Durability
 
@@ -93,7 +93,7 @@ Criteria:
 
 No-gos: no automatic cloud syncing of local history files.
 
-Evidence: `src/archive.rs`, `src/recovery.rs`, `src/settings.rs`, `scripts/verify-settings-history.py`
+Evidence: `crates/engine/src/archive.rs`, `crates/engine/src/recovery.rs`, `src/settings.rs`, `scripts/verify-settings-history.py`
 
 ## US-006 Forget retained take audio on explicit confirmation
 
@@ -105,7 +105,7 @@ Criteria:
 
 No-gos: no automatic expiration or background purge of unconfirmed takes.
 
-Evidence: `src/recovery.rs`, `src/archive.rs`
+Evidence: `crates/engine/src/recovery.rs`, `crates/engine/src/archive.rs`
 
 ## Capability: Transcript Post-Processing and Triage
 
@@ -120,7 +120,7 @@ Criteria:
 
 No-gos: no automatic enabling of cloud cleanup without explicit configuration.
 
-Evidence: `src/postproc.rs`, `tests/http_clients.rs`
+Evidence: `crates/engine/src/postproc.rs`, `tests/http_clients.rs`
 
 ## US-008 Bypass generative cleanup on clean takes via decision triage
 
@@ -133,7 +133,7 @@ Criteria:
 
 No-gos: no blocking the user's dictation on decision endpoint errors.
 
-Evidence: `src/postproc.rs`, `src/typesafe.rs`, `tests/http_clients.rs`
+Evidence: `crates/engine/src/postproc.rs`, `crates/engine/src/typesafe.rs`, `tests/http_clients.rs`
 
 ## US-009 Reject conversational hallucinations via decision watchdog
 
@@ -146,7 +146,7 @@ Criteria:
 
 No-gos: no silent adoption of answered questions or distorted text.
 
-Evidence: `src/postproc.rs`, `src/typesafe.rs`, `tests/http_clients.rs`
+Evidence: `crates/engine/src/postproc.rs`, `crates/engine/src/typesafe.rs`, `tests/http_clients.rs`
 
 ## Capability: Evaluation and Model Grading
 
@@ -185,4 +185,33 @@ Criteria:
 
 No-gos: no transcript or child output in logs or telemetry; no desktop fallback; no destination indicator on default takes.
 
-Evidence: `src/daemon.rs`, `src/config.rs`, `src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/adr/0027-named-handoff-targets.md`, `docs/adr/0028-handoff-destination-tint.md`, `docs/adr/0030-local-only-handoff-targets.md`
+Evidence: `crates/engine/src/engine.rs`, `crates/engine/src/config.rs`, `crates/engine/src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/adr/0027-named-handoff-targets.md`, `docs/adr/0028-handoff-destination-tint.md`, `docs/adr/0030-local-only-handoff-targets.md`
+
+## Capability: Native macOS Clipboard Dictation
+
+## US-013 Dictate on Mac and deliberately paste into my editor
+
+Statement: When I use Cantrip on my Mac, I want a native menu-bar client to
+control local dictation and copy my finished words for manual paste, so I can
+choose their destination without keyboard injection or broad desktop permissions.
+
+Criteria:
+1. WHERE I use a matching-architecture Cantrip.app on macOS 13.3 or newer, THE SYSTEM SHALL provide a native menu-bar client and passive nonactivating panel without stealing editor keyboard focus or accepting pointer input in the panel.
+2. WHEN I open the app with no engine running, THE SYSTEM SHALL start one shared engine; WHEN an engine already runs, THE SYSTEM SHALL attach without starting a duplicate.
+3. WHERE I invoke `daemon` on Mac, THE SYSTEM SHALL run only the engine without owning a menu, panel, or app shortcut.
+4. WHEN I deliberately allow microphone access in Settings or the app menu, THE SYSTEM SHALL request the supported macOS microphone grant; IF access is denied, restricted, or not yet granted, THEN THE SYSTEM SHALL refuse capture with actionable feedback without requesting Accessibility, Input Monitoring, or Screen Recording.
+5. WHEN I choose a microphone, THE SYSTEM SHALL persist its stable CoreAudio input UID; IF that selected UID is unavailable, THEN THE SYSTEM SHALL refuse capture without falling back to another input.
+6. WHEN I press and release the configured global shortcut, THE SYSTEM SHALL toggle capture using editable Control+Option+Space by default; IF a replacement cannot register, THEN THE SYSTEM SHALL retain the previous shortcut and report the conflict or failure.
+7. THE SYSTEM SHALL expose Start/Stop, Cancel, Settings, Check Setup, selected-outcome Copy/recovery/dismiss, and recording-history controls from the native app without a second dictation workflow.
+8. WHERE I create new Mac configuration, THE SYSTEM SHALL default to Clipboard while preserving the Linux Auto default; WHERE existing Mac Auto/Paste/Type is configured, THE SYSTEM SHALL preserve and expose that value with an unsupported warning and defer complete and partial delivery without clipboard effects, keys, or automatic clipboard fallback.
+9. WHEN explicit Clipboard delivery succeeds, THE SYSTEM SHALL copy the composed Unicode transcript and paragraph breaks through native NSPasteboard using CurrentHostOnly without reading or restoring prior contents; THE SYSTEM SHALL leave Command+V and inspection of the actual editor text to me.
+10. IF the installed local model is missing, THEN THE SYSTEM SHALL report its absence without implicitly downloading models or switching providers; WHERE I choose the local trial, THE SYSTEM SHALL keep cleanup and telemetry opt-in.
+11. WHEN capture stops or graceful owned shutdown occurs, THE SYSTEM SHALL retain available audio under its take identity before transcription or runtime removal and preserve the shared recovery, cancellation, Forget, logging, and cloud-content contracts.
+12. WHERE no XDG override is set, THE SYSTEM SHALL use native Application Support configuration/models and durable state/history, a short owner-private runtime path, and native login Keychain credentials; WHERE an absolute XDG override is set, THE SYSTEM SHALL honor the validated override without silently changing storage roots.
+13. THE SYSTEM SHALL normalize private application-owned directories to 0700 and durable files it publishes or normalizes to 0600 without inherited ACL grants, and SHALL NOT describe these plaintext permissions or temporary runtime storage as encryption or reboot-durable retention.
+14. WHEN I choose Open at Login, THE SYSTEM SHALL explicitly register or unregister its own SMAppService login item and report required approval or failure without silently enabling startup.
+15. WHEN I choose Quit Cantrip, THE SYSTEM SHALL wait for its owned engine to finalize and exit; WHERE the app attached to an externally owned daemon, THE SYSTEM SHALL leave that daemon running for its actual owner to stop.
+
+No-gos: no automatic Mac typing/paste fallback, clipboard read/restore, implicit model downloads, broad desktop permission grants, duplicate engine or durable ledger; no weakening of the existing Linux story criteria. Clipboard managers may retain copies. Offscreen/headless proof is not attended mic-to-editor, panel-focus, Intel hardware, or published/notarized-release proof.
+
+Evidence: `src/macos.rs`, `src/macos/shortcut.rs`, `src/capture/macos.rs`, `src/desktop/macos.rs`, `src/inject/macos.rs`, `src/hud/macos.rs`, `src/settings.rs`, `crates/engine/src/engine.rs`, `crates/engine/src/paths.rs`, `crates/engine/src/keys.rs`, `crates/engine/tests/capture_start.rs`, `scripts/verify-macos`, `scripts/package-macos`, `tests/test_release_macos.py`, `docs/USAGE.md`, `docs/DESKTOP.md`, `docs/PRIVACY.md`
