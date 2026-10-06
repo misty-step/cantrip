@@ -893,6 +893,8 @@ mod tests {
                         Err(error) => panic!("accepting fixture request: {error}"),
                     }
                 };
+                // Darwin inherits the listener's nonblocking flag on accept.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();
