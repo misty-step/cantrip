@@ -107,30 +107,20 @@ fn render_offscreen(
     let mut instrument = Instrument::preview(state, handoff, now)?;
     // The focused screen's geometry and scale, like the live panel; a session
     // without a screen renders at the Retina scale every current Mac uses.
-    let placement = Placement::focused(mtm);
-    let scale = placement.map_or(2, |placement| placement.scale);
-    let width = surface_width(placement.map_or(f64::from(SURFACE_WIDTH), |placement| {
-        placement.visible.size.width
-    }));
-    let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
-    let height = instrument.height(container_width);
-    let presentation = instrument
-        .prepare(now, 1.0, (width, height), scale, container_width, true)
-        .context("composing the HUD screenshot")?;
-    let (pixel_width, pixel_height) = (width * scale, height * scale);
-    let view = HudView::new(
-        mtm,
-        NSRect::new(
+    let placement = Placement::focused(mtm).unwrap_or(Placement {
+        visible: NSRect::new(
             NSPoint::ZERO,
-            NSSize::new(f64::from(width), f64::from(height)),
+            NSSize::new(f64::from(SURFACE_WIDTH), f64::from(SURFACE_HEIGHT)),
         ),
-    );
-    view.paint(pixel_width, pixel_height, |bytes| {
-        instrument.paint(&presentation, bytes, pixel_width, pixel_height, scale)
+        scale: 2,
     });
-    instrument.presented(presentation);
+    let view = HudView::new(mtm, NSRect::ZERO);
+    let (width, height, _) = paint_frame(&view, &mut instrument, placement, now, 1.0, true)
+        .context("composing the HUD screenshot")?;
+    view.setFrameSize(NSSize::new(f64::from(width), f64::from(height)));
+    let (pixel_width, pixel_height) = (width * placement.scale, height * placement.scale);
     let bytes = view.render_offscreen(pixel_width, pixel_height)?;
-    eprintln!("rendered the HUD view offscreen at {scale}x");
+    eprintln!("rendered the HUD view offscreen at {}x", placement.scale);
     save_screenshot(path, &bytes, pixel_width, pixel_height)
 }
 
@@ -153,6 +143,32 @@ fn acquire_lock() -> Option<fs::File> {
 /// Usable logical width on an output `available` points wide.
 fn surface_width(available: f64) -> u32 {
     (available.max(1.0) as u32).clamp(80, SURFACE_WIDTH)
+}
+
+/// Size the instrument for `placement` and paint its next frame into `view`,
+/// unless the presented pixels already match. Returns the frame's logical
+/// width and height and whether it shows the instrument.
+fn paint_frame(
+    view: &HudView,
+    instrument: &mut Instrument,
+    placement: Placement,
+    now: Instant,
+    alpha: f32,
+    force: bool,
+) -> Option<(u32, u32, bool)> {
+    let width = surface_width(placement.visible.size.width);
+    let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
+    let height = instrument.height(container_width);
+    let scale = placement.scale;
+    let presentation =
+        instrument.prepare(now, alpha, (width, height), scale, container_width, force)?;
+    let (pixel_width, pixel_height) = (width * scale, height * scale);
+    view.paint(pixel_width, pixel_height, |bytes| {
+        instrument.paint(&presentation, bytes, pixel_width, pixel_height, scale)
+    });
+    let shown = presentation.shown;
+    instrument.presented(presentation);
+    Some((width, height, shown))
 }
 
 /// The live HUD on the AppKit main thread: the shared instrument fed by one
@@ -258,7 +274,6 @@ struct Panel {
     window: Retained<NSPanel>,
     view: Retained<HudView>,
     placement: Option<Placement>,
-    ordered: bool,
 }
 
 impl Panel {
@@ -297,57 +312,36 @@ impl Panel {
             window,
             view,
             placement: None,
-            ordered: false,
         }
     }
 
     fn present(&mut self, instrument: &mut Instrument, mtm: MainThreadMarker, now: Instant) {
         // Follow keyboard focus whenever the instrument appears; once shown it
         // stays put unless its screen goes away.
-        if !self.ordered || self.window.screen().is_none() {
+        let ordered = self.window.isVisible();
+        if !ordered || self.window.screen().is_none() {
             self.placement = Placement::focused(mtm);
         }
         let Some(placement) = self.placement else {
             return;
         };
-        let width = surface_width(placement.visible.size.width);
-        let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
-        let height = instrument.height(container_width);
         let alpha = instrument.alpha(now);
-        let Some(presentation) = instrument.prepare(
-            now,
-            alpha,
-            (width, height),
-            placement.scale,
-            container_width,
-            false,
-        ) else {
+        let Some((width, height, shown)) =
+            paint_frame(&self.view, instrument, placement, now, alpha, false)
+        else {
             return;
         };
-        let (pixel_width, pixel_height) = (width * placement.scale, height * placement.scale);
-        self.view.paint(pixel_width, pixel_height, |bytes| {
-            instrument.paint(
-                &presentation,
-                bytes,
-                pixel_width,
-                pixel_height,
-                placement.scale,
-            )
-        });
         let frame = placement.frame(width, height);
         if self.window.frame() != frame {
             self.window.setFrame_display(frame, false);
         }
         self.view.setNeedsDisplay(true);
-        if presentation.shown && !self.ordered {
+        if shown && !ordered {
             // Shown without activating Cantrip or taking keyboard focus.
             self.window.orderFrontRegardless();
-            self.ordered = true;
-        } else if !presentation.shown && self.ordered {
+        } else if !shown && ordered {
             self.window.orderOut(None);
-            self.ordered = false;
         }
-        instrument.presented(presentation);
     }
 }
 

@@ -266,12 +266,11 @@ The native app baseline is **macOS 13.3+**, with separate Apple Silicon
 its matching native Mac with a matching native Python process, not through
 Rosetta or cross-compilation. Both packaging and runtime preparation check the
 calling process's architecture and translation state before building. This is
-a source-build route, not a promise of a downloadable Mac release or an exercised
-Intel build.
+a source-build route, not a promise of a downloadable Mac release.
 
 ### Build prerequisites
 
-- A source checkout, Git, rustup, and the exact Rust **1.98.1** pinned in
+- A source checkout, Git, rustup, and the exact Rust toolchain pinned in
   [`rust-toolchain.toml`](../rust-toolchain.toml). Run `rustup install` from the
   repository root; Cargo reads that pin automatically. Keep `Cargo.lock` and
   use `--locked`; do not downgrade shared inference dependencies for Intel.
@@ -296,9 +295,15 @@ Apple Silicon normally uses `ort-sys`' checksum-pinned CPU runtime. Its locked
 ONNX Runtime **1.24.2** from immutable commit
 `058787ceead760166e3c50a0a4cba8a833a6f53f`. Packaging invokes this automatically
 for Intel, with two build jobs and a project-local
-`target/native-runtime/<target>/1.24.2` cache. It verifies cached source and
-archive identity before reuse; no system ORT install or version downgrade is
-needed. `--source-runtime` explicitly selects the same source build on arm64.
+`target/native-runtime/<target>/1.24.2` cache. It explicitly builds the complete
+CPU dependency closure and combines its static archives into `libonnxruntime.a`,
+avoiding `ort-sys`' incomplete decomposed dependency list. Source revision and
+every archive are checked before cache reuse; no system ORT install or downgrade
+is needed. `--source-runtime` selects the same source build on arm64.
+
+Cache schema 2 rejects older/incomplete caches. For standalone preparation,
+choose a fresh `--output`; packaging uses its default project-local cache, so
+remove only your own obsolete cache deliberately before rebuilding there.
 
 ### Obtain a development app
 
@@ -436,11 +441,9 @@ sanitized `verification.json` and own-view PNGs, not private transcripts.
 A logged-in WindowServer session is needed for NSView rendering. An explicit
 `--skip-hud --hud-unavailable-reason 'REASON'` records an omission, not a pass.
 
-The native arm64 development app passed that relocated helper, workspace
-clippy/tests, offline evaluation, and six real Mach-O relocation/signing tests.
-The corresponding Intel CI definition is not evidence of an Intel run. Offscreen
-views do not prove live panel positioning/focus. Attended microphone permission
-and capture, shortcut/menu actions, Open At Login, general clipboard/manual
-destination paste, Intel runtime execution, and production signing/notarization
-remain unexercised. A file-STT smoke is not an attended microphone-to-editor
-trial.
+Record exact-head platform results in the PR. Offscreen views do not prove live
+panel positioning/focus, and file STT is not a microphone-to-editor trial. Use
+the [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial) for microphone,
+shortcut/menu, login, and general-clipboard/manual-paste behavior. Intel runtime
+execution and production signing/notarization each require their own proof,
+not inference from an arm64 development app.

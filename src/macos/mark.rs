@@ -1,4 +1,4 @@
-//! Cantrip's pixel C in the menu bar, as template images AppKit draws in the
+//! Cantrip's pixel C in the menu bar, as a template image AppKit draws in the
 //! menu bar's own ink. States follow the Omarchy bar mark (ADR 0029): one quiet
 //! fixed-width mark, never a count or text.
 
@@ -23,8 +23,6 @@ const CELLS: [(f64, f64); 8] = [
 const CELL: f64 = 3.0;
 /// Processing moves three lit cells around the C at this cadence.
 pub(super) const CHASE_STEP: Duration = Duration::from_millis(140);
-/// Rest and unknown tones, then solid, then one image per chase position.
-const IMAGES: usize = 3 + CELLS.len();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tone {
@@ -41,60 +39,26 @@ pub(super) enum Tone {
 }
 
 impl Tone {
-    fn image_slot(self) -> usize {
-        match self {
-            Self::Unknown => 0,
-            Self::Rest => 1,
-            Self::Recording(_) | Self::Attention(_) => 2,
-            Self::Processing(_, chase) => 3 + chase % CELLS.len(),
-        }
-    }
-
-    fn alphas(self) -> [f64; CELLS.len()] {
-        match self {
-            Self::Unknown => [0.3; CELLS.len()],
-            Self::Rest => [0.55; CELLS.len()],
-            Self::Recording(_) | Self::Attention(_) => [1.0; CELLS.len()],
-            Self::Processing(_, chase) => std::array::from_fn(|index| {
-                if (index + CELLS.len() - chase % CELLS.len()) % CELLS.len() > 2 {
-                    0.35
-                } else {
-                    1.0
-                }
-            }),
-        }
-    }
-
-    fn tint(self) -> Option<[u8; 3]> {
-        match self {
-            Self::Recording(color) | Self::Processing(color, _) | Self::Attention(color) => {
-                Some(color)
-            }
-            Self::Unknown | Self::Rest => None,
-        }
-    }
-}
-
-pub(super) struct Mark {
-    images: [Option<Retained<NSImage>>; IMAGES],
-    shown: Option<Tone>,
-}
-
-impl Mark {
-    pub(super) fn new() -> Self {
-        Self {
-            images: std::array::from_fn(|_| None),
-            shown: None,
-        }
-    }
-
-    pub(super) fn show(&mut self, button: &NSStatusBarButton, tone: Tone) {
-        if self.shown == Some(tone) {
-            return;
-        }
-        let image = self.images[tone.image_slot()].get_or_insert_with(|| draw_mark(tone.alphas()));
-        button.setImage(Some(&**image));
-        let tint = tone.tint().map(|[red, green, blue]| {
+    /// Draw this tone on the status item: dimmed menu-bar ink at rest, or the
+    /// tone's color while dictation runs or needs the operator.
+    pub(super) fn show(self, button: &NSStatusBarButton) {
+        let (alphas, tint) = match self {
+            Self::Unknown => ([0.3; CELLS.len()], None),
+            Self::Rest => ([0.55; CELLS.len()], None),
+            Self::Recording(color) | Self::Attention(color) => ([1.0; CELLS.len()], Some(color)),
+            Self::Processing(color, chase) => (
+                std::array::from_fn(|index| {
+                    if (index + CELLS.len() - chase % CELLS.len()) % CELLS.len() > 2 {
+                        0.35
+                    } else {
+                        1.0
+                    }
+                }),
+                Some(color),
+            ),
+        };
+        button.setImage(Some(&draw_mark(alphas)));
+        let tint = tint.map(|[red, green, blue]| {
             NSColor::colorWithSRGBRed_green_blue_alpha(
                 f64::from(red) / 255.0,
                 f64::from(green) / 255.0,
@@ -103,7 +67,6 @@ impl Mark {
             )
         });
         button.setContentTintColor(tint.as_deref());
-        self.shown = Some(tone);
     }
 }
 

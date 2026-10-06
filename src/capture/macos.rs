@@ -385,7 +385,6 @@ struct Packet {
 struct Transport {
     free: ArrayQueue<Packet>,
     ready: ArrayQueue<Packet>,
-    capacity: usize,
 }
 
 impl Transport {
@@ -396,7 +395,6 @@ impl Transport {
         let transport = Self {
             free: ArrayQueue::new(capacity),
             ready: ArrayQueue::new(capacity),
-            capacity,
         };
         for _ in 0..capacity {
             let packet = Packet {
@@ -675,30 +673,20 @@ impl NativeCapture {
             unsafe { self.engine.stop() };
             Ok(())
         });
-        let untapped = if self.tap_installed {
-            let result = audio_call(|| {
+        let untapped = audio_call(|| {
+            if self.tap_installed {
                 unsafe { self.input.removeTapOnBus(0) };
-                Ok(())
-            });
-            if result.is_ok() {
                 self.tap_installed = false;
             }
-            result
-        } else {
             Ok(())
-        };
-        let unobserved = if let Some(observer) = &self.observer {
-            let result = audio_call(|| {
+        });
+        let unobserved = audio_call(|| {
+            if let Some(observer) = &self.observer {
                 unsafe { self.center.removeObserver(observer.as_ref()) };
-                Ok(())
-            });
-            if result.is_ok() {
                 self.observer = None;
             }
-            result
-        } else {
             Ok(())
-        };
+        });
         let result = stopped.and(untapped).and(unobserved);
         self.stopped = result.is_ok();
         result
@@ -721,7 +709,7 @@ fn drain_packets(
     control: &Control,
 ) -> Result<bool> {
     let mut wrote = false;
-    for _ in 0..transport.capacity {
+    for _ in 0..transport.ready.capacity() {
         let Some(packet) = transport.ready.pop() else {
             break;
         };
@@ -1090,13 +1078,13 @@ mod tests {
             mDataByteSize: (samples.len() * 2) as u32,
             mData: samples.as_mut_ptr().cast(),
         };
-        for _ in 0..transport.capacity {
+        for _ in 0..transport.ready.capacity() {
             unsafe { transport.copy_buffers(&[buffer], PACKET_FRAMES, format, &control) };
         }
         assert!(control.capture_failure().is_ok());
         unsafe { transport.copy_buffers(&[buffer], PACKET_FRAMES, format, &control) };
         assert_eq!(control.failure.load(Ordering::Acquire), FAILURE_OVERRUN);
-        assert_eq!(transport.ready.len(), transport.capacity);
+        assert_eq!(transport.ready.len(), transport.ready.capacity());
         while let Some(packet) = transport.ready.pop() {
             assert_eq!(packet.frames, PACKET_FRAMES);
             assert!(packet

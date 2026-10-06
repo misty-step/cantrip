@@ -267,6 +267,24 @@ def ensure_release_pr(version, revision):
     print(f"Release PR: {url}")
 
 
+def release_branch_merged(revision, source):
+    if git("merge-base", "--is-ancestor", revision, source, check=False).returncode == 0:
+        return True
+    # Squash/rebase merges do not preserve the reviewed head's ancestry. The
+    # exact-head PR receipt must identify a merge present in this master source.
+    owner = REPOSITORY.split("/")[0]
+    query = urllib.parse.quote(f"{owner}:{BRANCH}", safe="")
+    for pr in github(f"pulls?state=closed&base=master&head={query}&per_page=100"):
+        merged = pr["merge_commit_sha"]
+        if (
+            pr["merged_at"] and pr["head"]["sha"] == revision
+            and merged and REVISION.fullmatch(merged)
+            and git("merge-base", "--is-ancestor", merged, source, check=False).returncode == 0
+        ):
+            return True
+    return False
+
+
 def prepare(binary, evidence):
     source = head()
     version = version_at() if not evidence["previous_tag"] else evidence["version"]
@@ -281,15 +299,15 @@ def prepare(binary, evidence):
     old_revision = remote["sha"] if remote else ""
     if remote:
         git("fetch", "origin", BRANCH)
-        old_plan = json.loads(git("show", f"{old_revision}:{PLAN}").stdout)
-        validate_plan(old_plan, old_revision)
-        if old_plan["base_revision"] == source and old_plan["version"] == version:
-            ensure_release_pr(version, old_revision)
-            emit(mode="prepared", version=version)
-            return
-        merged = git("merge-base", "--is-ancestor", old_revision, source, check=False).returncode == 0
-        if not merged and (remote.get("author") or {}).get("login") != "github-actions[bot]":
-            raise ReleaseError("release branch contains unmerged human work; refresh it deliberately instead of overwriting it")
+        if not release_branch_merged(old_revision, source):
+            old_plan = json.loads(git("show", f"{old_revision}:{PLAN}").stdout)
+            validate_plan(old_plan, old_revision)
+            if old_plan["base_revision"] == source and old_plan["version"] == version:
+                ensure_release_pr(version, old_revision)
+                emit(mode="prepared", version=version)
+                return
+            if (remote.get("author") or {}).get("login") != "github-actions[bot]":
+                raise ReleaseError("release branch contains unmerged human work; refresh it deliberately instead of overwriting it")
     if git("status", "--porcelain").stdout:
         raise ReleaseError("release preparation requires a clean disposable checkout")
     paths = release_paths(version)

@@ -52,28 +52,24 @@ def run(command, *, cwd=None, timeout=60, check=True, env=None):
     return result
 
 
-def signing_options(args):
+def native_prerequisites(target, args):
     if args.ad_hoc:
         if args.sign_identity or args.team_id or args.notary_profile:
             raise ReleaseError("--ad-hoc cannot be combined with production signing/notarization inputs")
-        return "-"
-    missing = [
-        option for option, value in (
-            ("--sign-identity", args.sign_identity), ("--team-id", args.team_id),
-            ("--notary-profile", args.notary_profile),
-        ) if not value
-    ]
-    if missing:
-        raise ReleaseError(
-            "production packaging requires " + ", ".join(missing)
-            + "; use --ad-hoc explicitly for a DEVELOPMENT build, never a production release"
-        )
-    if not re.fullmatch(r"[A-Z0-9]{10}", args.team_id):
-        raise ReleaseError("--team-id must be the ten-character Apple Developer Team ID")
-    return args.sign_identity
-
-
-def native_prerequisites(target, args):
+    else:
+        missing = [
+            option for option, value in (
+                ("--sign-identity", args.sign_identity), ("--team-id", args.team_id),
+                ("--notary-profile", args.notary_profile),
+            ) if not value
+        ]
+        if missing:
+            raise ReleaseError(
+                "production packaging requires " + ", ".join(missing)
+                + "; use --ad-hoc explicitly for a DEVELOPMENT build, never a production release"
+            )
+        if not re.fullmatch(r"[A-Z0-9]{10}", args.team_id):
+            raise ReleaseError("--team-id must be the ten-character Apple Developer Team ID")
     RUNTIME["require_native"](target)
     for tool in ("cargo", "git", "lipo", "otool", "install_name_tool", "codesign", "ditto", "xcrun"):
         if not shutil.which(tool):
@@ -356,7 +352,6 @@ def publish(output, app, assets):
 
 
 def package(args):
-    signing_options(args)
     identity = native_prerequisites(args.target, args)
     output = (args.output or Path("dist") / "macos" / args.target).absolute()
     if os.path.lexists(output):

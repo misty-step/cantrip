@@ -215,8 +215,8 @@ including the Intel source-runtime preparation before Cargo gates.
   verified Linux release.
 - **Native macOS CI** ([`.github/workflows/macos.yml`](.github/workflows/macos.yml)):
   matching arm64/Intel workspace gates, explicit development packaging, and
-  relocated public-fixture verification. This workflow was not dispatched as
-  part of the native smoke; its definition is not a claim of an Intel pass.
+  relocated public-fixture verification. Check the actual run results; the
+  workflow definition alone does not establish a platform pass.
 - **Website and documentation source:** [`site/`](site/). The five user guides
   below are canonical Markdown, rendered by the site rather than copied into
   a second web manual. Website release data comes from published release assets,
@@ -293,15 +293,11 @@ NSView pixels**, plus a sanitized `verification.json`. A logged-in WindowServer
 session is needed for those pixels; `--skip-hud` requires an explicit
 `--hud-unavailable-reason` and records the omission rather than a pass.
 
-The native arm64 development-app smoke completed this helper, workspace
-clippy/tests, offline evaluation, and real Mach-O relocation/signing tests.
-Linux `scripts/check` and the isolated Settings full-text/stale-copy journey
-also passed. These are distinct proofs: offscreen NSView images do **not**
-prove panel placement/focus or attended microphone-to-editor success.
-Live microphone permission/capture, global shortcut/menu actions, Open At Login,
-general macOS clipboard/manual destination paste, Intel execution, and production
-signing/notarization were not exercised. No operator permissions or live
-microphone/general clipboard were touched by the helper.
+Offscreen pixels prove rendering, not live panel focus or microphone-to-editor
+delivery. Validate those with the [attended Mac trial](docs/USAGE.md#first-dictation-macos-attended-clipboard-trial).
+The helper does not grant permissions, capture live microphone audio, or touch
+the general clipboard. Record actual platform/signing results in the PR; do not
+infer Intel or production signing success from an arm64 development smoke.
 
 ## Work and documentation ownership
 

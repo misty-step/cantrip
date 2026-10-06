@@ -78,14 +78,6 @@ def prepare(target, *, output=None, jobs=2):
     versions = [entry["version"] for entry in locked if entry["name"] == "ort-sys"]
     if versions != [ORT_SYS_VERSION]:
         raise RuntimeError("the locked ort-sys changed; refresh the pinned native runtime version/revision before building")
-    for tool in ("git", "cmake", "xcrun", "make", "lipo"):
-        if not shutil.which(tool):
-            raise RuntimeError(f"native source runtime preparation needs {tool}; provide it privately/on PATH, no global install is performed")
-    cmake = run(["cmake", "--version"]).decode()
-    version = re.search(r"cmake version ([0-9]+)\.([0-9]+)", cmake)
-    if not version or (int(version[1]), int(version[2])) < (3, 28):
-        raise RuntimeError("native ONNX Runtime source preparation needs CMake 3.28+")
-    run(["xcrun", "--find", "clang"])
     cache = (output or ROOT / "target" / "native-runtime" / target / ORT_VERSION).absolute()
     if cache.is_symlink():
         raise RuntimeError("native runtime output must not be a symbolic link")
@@ -96,7 +88,7 @@ def prepare(target, *, output=None, jobs=2):
     libraries = build / "Release"
     marker = cache / "runtime.json"
     identity = {
-        "schema_version": 1, "ort_sys_version": ORT_SYS_VERSION, "onnxruntime_version": ORT_VERSION,
+        "schema_version": 2, "ort_sys_version": ORT_SYS_VERSION, "onnxruntime_version": ORT_VERSION,
         "source_revision": ORT_REVISION, "target": target, "minimum_macos": MINIMUM_MACOS,
         "linkage": "static-cpu",
     }
@@ -113,6 +105,15 @@ def prepare(target, *, output=None, jobs=2):
         if archive_inventory(build) != previous.get("archives"):
             raise RuntimeError("cached native runtime archives changed; no modified binaries will be reused")
         return libraries, identity
+    for tool in ("git", "cmake", "xcrun", "make", "lipo"):
+        if not shutil.which(tool):
+            raise RuntimeError(f"native source runtime preparation needs {tool}; provide it privately/on PATH, no global install is performed")
+    cmake = run(["cmake", "--version"]).decode()
+    version = re.search(r"cmake version ([0-9]+)\.([0-9]+)", cmake)
+    if not version or (int(version[1]), int(version[2])) < (3, 28):
+        raise RuntimeError("native ONNX Runtime source preparation needs CMake 3.28+")
+    run(["xcrun", "--find", "clang"])
+    run(["xcrun", "--find", "libtool"])
     cache.mkdir(mode=0o700)
     source.mkdir(mode=0o700)
     # Fetch a full, immutable public commit, not a moving release tag. CMake's
@@ -130,15 +131,36 @@ def prepare(target, *, output=None, jobs=2):
         "--build_dir", build, "--config", "Release", "--update", "--build", "--skip_tests",
         "--parallel", str(jobs), "--osx_arch", TARGETS[target], "--compile_no_warning_as_error",
         "--cmake_extra_defines", f"CMAKE_OSX_DEPLOYMENT_TARGET={MINIMUM_MACOS}",
-        "onnxruntime_BUILD_UNIT_TESTS=OFF",
+        "onnxruntime_BUILD_UNIT_TESTS=OFF", "BUILD_SHARED_LIBS=OFF",
+        "FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER",
     ], cwd=source, timeout=7200)
-    required = [libraries / f"libonnxruntime_{name}.a" for name in ("common", "framework", "graph", "mlas", "session", "providers")]
-    if not all(path.is_file() and not path.is_symlink() for path in required):
-        raise RuntimeError("native runtime source build did not produce the required static CPU libraries")
-    for library in required:
-        architectures = run(["lipo", "-archs", library]).decode().split()
-        if TARGETS[target] not in architectures:
+    # Static ORT consumes some external targets (notably RE2) only for headers,
+    # so `all` can omit their archives. Build every CPU dependency root; CMake
+    # supplies its complete transitive Abseil closure.
+    run([
+        "cmake", "--build", libraries, "--config", "Release",
+        "--parallel", str(jobs), "--target",
+        "re2", "cpuinfo", "onnx", "onnx_proto", "libprotobuf-lite", "flatbuffers",
+    ], timeout=1800)
+    archives = sorted(libraries.rglob("*.a"))
+    required = {
+        f"libonnxruntime_{name}.a" for name in (
+            "common", "flatbuffers", "framework", "graph", "lora", "mlas",
+            "optimizer", "providers", "session", "util",
+        )
+    } | {"libonnx.a", "libonnx_proto.a", "libprotobuf-lite.a", "libre2.a", "libcpuinfo.a", "libflatbuffers.a"}
+    missing = required.difference(path.name for path in archives)
+    if missing:
+        raise RuntimeError(f"native runtime static dependency closure is incomplete: {', '.join(sorted(missing))}")
+    for library in archives:
+        if not library.is_file() or library.is_symlink():
+            raise RuntimeError(f"native runtime archive must be a regular file: {library}")
+        if run(["lipo", "-archs", library]).decode().split() != [TARGETS[target]]:
             raise RuntimeError(f"native runtime archive has the wrong architecture: {library.name}")
+    # rc.12's decomposed linker list omits transitive Abseil libraries. Its
+    # supported single-archive path contains the entire pinned CPU closure and
+    # needs neither duplicated dependency names nor checkout-relative -L flags.
+    run(["xcrun", "libtool", "-static", "-o", libraries / "libonnxruntime.a", *archives], timeout=300)
     if run(["git", "-C", source, "status", "--porcelain=v1", "--untracked-files=no"]):
         raise RuntimeError("native runtime source was modified during its build")
     marker.write_text(json.dumps({**identity, "archives": archive_inventory(build)}, indent=2, sort_keys=True) + "\n")
@@ -161,13 +183,13 @@ def main():
         parser.error("--jobs must be positive")
     try:
         libraries, _ = prepare(args.target, output=args.output, jobs=args.jobs)
+        environment = f"ORT_LIB_PATH={libraries}\nORT_PREFER_DYNAMIC_LINK=0\n"
         if args.github_env:
             with args.github_env.open("a") as output:
-                output.write(f"ORT_LIB_PATH={libraries}\nORT_PREFER_DYNAMIC_LINK=0\n")
+                output.write(environment)
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         parser.exit(1, f"prepare-macos-runtime: {error}\n")
-    print(f"ORT_LIB_PATH={libraries}")
-    print("ORT_PREFER_DYNAMIC_LINK=0")
+    print(environment, end="")
 
 
 if __name__ == "__main__":

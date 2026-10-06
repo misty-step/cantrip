@@ -306,9 +306,9 @@ impl PcmFormat {
 pub struct Pcm16Converter {
     format: PcmFormat,
     resampler: Option<SincFixedIn<f32>>,
-    input: [Vec<f32>; 1],
+    input: [f32; CONVERSION_FRAMES],
     input_used: usize,
-    output: [Vec<f32>; 1],
+    output: Vec<f32>,
     pcm: Vec<i16>,
     delay_remaining: usize,
     input_frames: u64,
@@ -319,10 +319,8 @@ pub struct Pcm16Converter {
 impl Pcm16Converter {
     pub fn new(format: PcmFormat) -> Result<Self> {
         format.validate()?;
-        let resampler = if format.sample_rate == f64::from(PCM_SAMPLE_RATE) {
-            None
-        } else {
-            Some(
+        let resampler = (format.sample_rate != f64::from(PCM_SAMPLE_RATE))
+            .then(|| {
                 SincFixedIn::<f32>::new(
                     f64::from(PCM_SAMPLE_RATE) / format.sample_rate,
                     1.0,
@@ -336,22 +334,23 @@ impl Pcm16Converter {
                     CONVERSION_FRAMES,
                     1,
                 )
-                .context("preparing microphone sample rate conversion")?,
-            )
-        };
-        let output_capacity = resampler
-            .as_ref()
-            .map_or(CONVERSION_FRAMES, |resampler| resampler.output_frames_max());
-        let delay_remaining = resampler
-            .as_ref()
-            .map_or(0, |resampler| resampler.output_delay());
+            })
+            .transpose()
+            .context("preparing microphone sample rate conversion")?;
+        let (output_capacity, pcm_capacity, delay_remaining) =
+            resampler
+                .as_ref()
+                .map_or((0, CONVERSION_FRAMES, 0), |resampler| {
+                    let frames = resampler.output_frames_max();
+                    (frames, frames, resampler.output_delay())
+                });
         Ok(Self {
             format,
             resampler,
-            input: [vec![0.0; CONVERSION_FRAMES]],
+            input: [0.0; CONVERSION_FRAMES],
             input_used: 0,
-            output: [vec![0.0; output_capacity]],
-            pcm: vec![0; output_capacity],
+            output: vec![0.0; output_capacity],
+            pcm: vec![0; pcm_capacity],
             delay_remaining,
             input_frames: 0,
             output_frames: 0,
@@ -394,7 +393,7 @@ impl Pcm16Converter {
             if !mono.is_finite() {
                 bail!("microphone PCM is outside the supported range");
             }
-            self.input[0][self.input_used] = mono;
+            self.input[self.input_used] = mono;
             self.input_used += 1;
             self.input_frames += 1;
             if self.input_used == CONVERSION_FRAMES {
@@ -410,25 +409,24 @@ impl Pcm16Converter {
     }
 
     fn process_chunk<W: Write + Seek>(&mut self, writer: &mut Pcm16WavWriter<W>) -> Result<()> {
-        let frames = if let Some(resampler) = &mut self.resampler {
-            let (_, frames) = resampler
-                .process_into_buffer(&self.input, &mut self.output, None)
-                .context("converting microphone sample rate")?;
-            frames
-        } else {
-            self.output[0][..self.input_used].copy_from_slice(&self.input[0][..self.input_used]);
-            self.input_used
-        };
-        self.input_used = 0;
-        let skip = self.delay_remaining.min(frames);
-        self.delay_remaining -= skip;
         let remaining = self
             .desired_output_frames()
             .saturating_sub(self.output_frames);
-        let count = (frames - skip).min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        let output = if let Some(resampler) = &mut self.resampler {
+            let (_, frames) = resampler
+                .process_into_buffer(&[&self.input], &mut [&mut self.output], None)
+                .context("converting microphone sample rate")?;
+            &self.output[..frames]
+        } else {
+            &self.input[..self.input_used]
+        };
+        self.input_used = 0;
+        let skip = self.delay_remaining.min(output.len());
+        self.delay_remaining -= skip;
+        let count = (output.len() - skip).min(usize::try_from(remaining).unwrap_or(usize::MAX));
         for (sample, value) in self.pcm[..count]
             .iter_mut()
-            .zip(&self.output[0][skip..skip + count])
+            .zip(&output[skip..skip + count])
         {
             if !value.is_finite() {
                 bail!("microphone conversion produced non-finite PCM");
@@ -458,7 +456,7 @@ impl Pcm16Converter {
                 if self.output_frames == desired {
                     break;
                 }
-                self.input[0][self.input_used..].fill(0.0);
+                self.input[self.input_used..].fill(0.0);
                 self.process_chunk(writer)?;
             }
             if self.output_frames != desired {

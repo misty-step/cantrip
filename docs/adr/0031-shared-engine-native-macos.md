@@ -12,13 +12,13 @@ The operator explicitly chose clipboard/manual paste for macOS. Frontmost-app sn
 
 ### One workflow and store, native mechanisms behind ports
 
-Use two Rust workspace crates with one version authority in `workspace.package.version`:
+Use two Rust workspace crates, with one version in `workspace.package.version`:
 
-- `cantrip-engine` owns the workflow in `crates/engine/src/engine.rs`, cancellation, per-take identities, durable archive/recovery, configuration, IPC, model management, STT, cleanup, and telemetry. Platform-specific filesystem/Keychain details remain target-gated where needed; the shared engine is not a claim of support for arbitrary operating systems.
-- The root `cantrip` crate owns the CLI, desktop composition root, capture, delivery/session adapters, HUD, Settings/Actions, and native application lifecycle. `src/daemon.rs` is a thin host for the same engine on both platforms.
-- `crates/engine/src/ports.rs` defines `Platform`, `Recorder`, and `DeliveryPermit`. `Platform` supplies capture creation, delivery preparation/permits, local handoff color, and content-free peer identity. `Recorder` owns live input signals and stop/finalization. `DeliveryPermit` supplies stop-time session/destination history and an effect-aware native delivery mechanism. The engine owns policy and durable transitions; adapters do not introduce another state machine.
+- `cantrip-engine` owns workflow, configuration, IPC, durable recovery, inference, cleanup, and telemetry.
+- Root `cantrip` owns CLI and desktop composition. `src/daemon.rs` hosts that same engine on both platforms; UI consumes its IPC/status contract.
+- `Platform`, `Recorder`, and `DeliveryPermit` in `crates/engine/src/ports.rs` hide native capture, identity, session history, and effect-aware delivery. The engine owns policy and durable transitions, not the adapters.
 
-Keep std threads and mpsc coordination. No new async runtime, alternate archive, compatibility aliases, or per-OS durable work ledger is introduced. UI hosts consume the shared IPC/status contract rather than maintaining parallel dictation state.
+Keep std threads and mpsc. No async runtime, alternate archive, compatibility aliases, or per-OS durable work ledger.
 
 Native capture failure is also part of the port contract: quiesce producers and finalize any accepted WAV prefix before returning an error. Only conclusively empty, unaccepted startup headers can be removed. The shared engine must durably retain a surviving prefix before consuming runtime originals, just as it retains stopped/cancelled/gracefully interrupted takes before STT. Storage uncertainty preserves the original and surfaces the failure.
 
@@ -54,7 +54,7 @@ The Mac baseline is 13.3+, with separate matching-native arm64/Intel builds, not
 
 Packaging and runtime preparation share one native-target gate. It queries the calling Python process using Apple's documented [`sysctl.proc_translated`](https://developer.apple.com/videos/play/wwdc2020/10686/?time=871), not a child `sysctl` executable that might launch natively under a translated parent. Translated or unverifiable callers are refused; native Intel's documented ENOENT result is accepted.
 
-Rust is pinned to 1.98.1; scripts require Python 3.11+ and selected Xcode command-line tools. Intel automatically builds CPU ONNX Runtime 1.24.2 from immutable commit `058787ceead760166e3c50a0a4cba8a833a6f53f` because locked `ort-sys 2.0.0-rc.12` has no Intel Mac prebuilt. That bootstrap needs CMake 3.28+, defaults to two jobs, and uses a project-local verified cache. It does not downgrade shared dependencies or install a global runtime. Arm64 uses checksum-pinned prebuilts unless `--source-runtime` is explicitly selected.
+Build pins live in `rust-toolchain.toml` and `scripts/prepare-macos-runtime`. Intel needs a source CPU runtime because the locked `ort-sys` inventory has no Intel Mac prebuilt. The bootstrap builds the complete static dependency closure into one archive, verifies its project-local cache, and neither downgrades shared dependencies nor installs globally. Arm64 uses checksum-pinned prebuilts unless `--source-runtime` is selected.
 
 `--ad-hoc` is explicitly DEVELOPMENT ONLY: not hardened, not Developer ID signed, and not notarized. Without a Team ID, hardened library validation would reject the contained third-party dylibs; the development manifest must not claim otherwise.
 
@@ -62,17 +62,9 @@ Production mode requires a clean committed checkout, a valid Developer ID Applic
 
 ## Verification and limits
 
-The completed native arm64 development-app smoke exercised strict workspace clippy, workspace tests including the consumer startup-audio retention regression, offline evaluation, and six real Mach-O relocation/signing tests. `scripts/verify-macos` passed against the relocated real app with disposable HOME/XDG directories and a system-only runtime PATH:
+Run the [native workspace and relocated-app checks](../INSTALLATION.md#macos-development-and-verification) and Linux `scripts/check`. Record exact-head results in the PR, rather than preserving transient pass claims here.
 
-- Real default local Parakeet STT on the checked public JFK WAV after an explicit model download; missing-model refusal did not implicitly download anything.
-- Denied/invalid-UID native capture refusal with no live WAV, explicit Auto/Paste/Type replay to terminal Deferred without config migration, and graceful daemon termination.
-- Five production HUD states rendered as offscreen native NSView PNGs, with sanitized `verification.json`; no private transcript output entered the proof.
-
-The final native-log smoke removed an existing owned log's ACL grant and refused symlinks, hardlinks, and a nonregular log without mutating unrelated targets or blocking startup. Native named-pasteboard tests exercised Unicode/paragraph fidelity and deadline refusal using process/case-isolated boards, not the general clipboard. Final warning text and the attention edge measured 4.55:1 on the rendered white surface; dark appearance is covered by contrast arithmetic, not a rendered dark-mode claim.
-
-Linux `scripts/check` passed. The isolated headless Sway Settings journey exercised exact full 351-byte transcript copy, unchanged archive, stale-row copy refusal preserving prior clipboard, and refresh to empty history. This is Linux clipboard evidence, not evidence of Mac clipboard behavior.
-
-Offscreen NSView pixels establish native rendering, not live NSPanel placement, focus behavior, or attended microphone-to-editor success. The native helper did not touch the operator's live display, grant TCC permissions, capture a microphone, or request general Mac clipboard/shortcut/login actions. Attended microphone permission/capture, real shortcut/menu actions, Open At Login, general clipboard/manual destination paste, Intel runtime execution, and production signing/notarization remain unexercised. The matching arm64/Intel CI workflow exists but was not dispatched for this smoke; its definition is not an Intel pass. No Apple certificate, permission grant, notarization ticket, or published Mac asset is inferred from the development proof.
+The native helper uses public file audio and disposable HOME/XDG paths. Its offscreen NSView images prove rendering, not live NSPanel placement/focus or microphone-to-editor delivery. It grants no TCC permissions and does not touch the general clipboard or login setting. An arm64 development pass is not Intel execution, production signing/notarization, or an attended platform trial; each needs its own observed result.
 
 ## Consequences
 

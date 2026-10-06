@@ -14,45 +14,44 @@ pub(crate) mod shortcut;
 
 use crate::capture::{self, MicrophonePermission};
 use crate::hud::macos::{runtime_dir, LiveHud};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{
     config::Config,
+    engine::{request_shutdown, shutdown_requested},
     ipc::{self, Command, Completeness, StateKind},
-    paths,
 };
-use mark::{Mark, Tone, CHASE_STEP};
+use mark::{Tone, CHASE_STEP};
 use objc2::{
     define_class, msg_send,
     rc::{autoreleasepool, Retained},
-    runtime::{AnyObject, ProtocolObject, Sel},
+    runtime::{AnyObject, ProtocolObject},
     sel, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSApplicationTerminateReply, NSBeep, NSControlStateValueOff,
-    NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem, NSRunningApplication, NSStatusBar,
-    NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
-    NSWorkspaceOpenConfiguration,
+    NSApplicationDelegate, NSApplicationTerminateReply, NSBeep, NSControlStateValueOn, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSRunningApplication, NSStatusBar, NSStatusBarButton, NSStatusItem,
+    NSVariableStatusItemLength, NSWorkspace, NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{
     ns_string, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSRunLoop,
     NSRunLoopCommonModes, NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
-use shortcut::{Registration, Shortcut};
+use shortcut::Registration;
 use std::{
     cell::RefCell,
     fs,
     process::{Child, Command as Process, Stdio},
     sync::mpsc,
     thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 /// A just-started engine binds its socket within this window.
 const STARTUP_GRACE: Duration = Duration::from_secs(15);
-/// Configuration, microphone access and the login item are re-read this often.
-const SETTINGS_INTERVAL: Duration = Duration::from_secs(2);
+/// The configured shortcut and microphone access are re-read this often.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// Menu lines stay readable at the menu's default width.
 const LINE_LIMIT: usize = 72;
 const MICROPHONE_SETTINGS: &str =
@@ -123,50 +122,30 @@ fn app_bundle() -> Option<Retained<NSURL>> {
         .then(|| bundle.bundleURL())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Origin {
-    Shortcut,
-    Menu,
+/// How Cantrip answered one command.
+enum Reply {
+    Accepted,
+    /// The engine's own sentence; a reply's `error` is a log class, not words.
+    Refused(String),
+    Unreachable,
 }
 
-struct Request {
-    command: Command,
-    origin: Origin,
-}
-
-struct Reply {
-    origin: Origin,
-    /// None when Cantrip accepted the request.
-    problem: Option<String>,
-    reachable: bool,
-}
-
-/// One worker submits requests in order, so the AppKit thread never waits on IPC.
-fn spawn_commands() -> Result<(mpsc::Sender<Request>, mpsc::Receiver<Reply>)> {
-    let (requests, incoming) = mpsc::channel::<Request>();
+/// One worker submits commands in order, so the AppKit thread never waits on IPC.
+fn spawn_commands() -> Result<(mpsc::Sender<Command>, mpsc::Receiver<Reply>)> {
+    let (commands, incoming) = mpsc::channel::<Command>();
     let (replies, results) = mpsc::channel();
     thread::Builder::new()
         .name("cantrip-commands".to_owned())
         .spawn(move || {
-            for Request { command, origin } in incoming {
-                let (problem, reachable) =
-                    match ipc::command(command) {
-                        Ok(reply) if reply.ok => (None, true),
-                        Ok(reply) => (
-                            Some(reply.error.or(reply.message).unwrap_or_else(|| {
-                                "Cantrip did not accept this action.".to_owned()
-                            })),
-                            true,
-                        ),
-                        Err(_) => (
-                            Some("Cantrip is not running. Choose Start Cantrip.".to_owned()),
-                            false,
-                        ),
-                    };
-                let reply = Reply {
-                    origin,
-                    problem,
-                    reachable,
+            for command in incoming {
+                let reply = match ipc::command(command) {
+                    Ok(reply) if reply.ok => Reply::Accepted,
+                    Ok(reply) => Reply::Refused(
+                        reply
+                            .message
+                            .unwrap_or_else(|| "Cantrip did not accept this action.".to_owned()),
+                    ),
+                    Err(_) => Reply::Unreachable,
                 };
                 if replies.send(reply).is_err() {
                     break;
@@ -174,7 +153,7 @@ fn spawn_commands() -> Result<(mpsc::Sender<Request>, mpsc::Receiver<Reply>)> {
             }
         })
         .context("starting the command worker")?;
-    Ok((requests, results))
+    Ok((commands, results))
 }
 
 enum EngineExit {
@@ -194,250 +173,127 @@ enum Engine {
     Stopped(Option<String>),
 }
 
-#[derive(Clone, Copy)]
-enum Window {
+/// What a menu item does, bound as the menu opens: an action never retargets
+/// a later take or outcome.
+#[derive(Clone)]
+enum Choice {
+    Send(Command),
     Settings,
     Recordings,
     CheckSetup,
+    Microphone,
+    StartEngine,
+    Login,
+    Quit,
 }
 
-impl Window {
-    fn arguments(self) -> &'static [&'static str] {
-        match self {
-            Self::Settings => &["settings"],
-            Self::Recordings => &["actions"],
-            Self::CheckSetup => &["actions", "--doctor"],
-        }
-    }
+/// The menu being filled as it opens; each enabled item's tag indexes its choice.
+struct Items<'a> {
+    menu: &'a NSMenu,
+    target: &'a AnyObject,
+    choices: Vec<Choice>,
 }
 
-/// The shared Settings and Actions windows, one process each.
-#[derive(Default)]
-struct Windows {
-    settings: Option<Child>,
-    actions: Option<Child>,
-}
-
-impl Windows {
-    /// Bring an open window forward, or open it.
-    fn open(&mut self, window: Window) -> Result<()> {
-        let slot = match window {
-            Window::Settings => &mut self.settings,
-            Window::Recordings | Window::CheckSetup => &mut self.actions,
+impl Items<'_> {
+    /// An item that performs `choice`, or a disabled one without a choice.
+    fn add(&mut self, title: &str, choice: Option<Choice>) -> Retained<NSMenuItem> {
+        // SAFETY: `choose:` is a method `AppDelegate` defines below.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(self.menu.mtm()),
+                &NSString::from_str(title),
+                choice.is_some().then_some(sel!(choose:)),
+                ns_string!(""),
+            )
         };
-        if let Some(child) = slot.as_mut() {
-            if matches!(child.try_wait(), Ok(None)) {
-                if let Some(app) =
-                    NSRunningApplication::runningApplicationWithProcessIdentifier(child.id() as _)
-                {
-                    app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
-                }
-                return Ok(());
-            }
-        }
-        *slot = Some(
-            Process::new(std::env::current_exe()?)
-                .args(window.arguments())
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .spawn()
-                .context("Opening the window")?,
-        );
-        Ok(())
-    }
-
-    /// Reap closed windows; dictation continues regardless.
-    fn reap(&mut self) {
-        for slot in [&mut self.settings, &mut self.actions] {
-            if slot
-                .as_mut()
-                .is_some_and(|child| !matches!(child.try_wait(), Ok(None)))
-            {
-                *slot = None;
-            }
-        }
-    }
-}
-
-/// The global toggle and why the configured one is not active, if it is not.
-struct Shortcuts {
-    registration: Option<Registration>,
-    active: Option<Shortcut>,
-    problem: Option<String>,
-    /// The configuration file's modification time when last applied.
-    seen: Option<Option<SystemTime>>,
-}
-
-impl Shortcuts {
-    /// Register the configured shortcut when the configuration file changed.
-    fn refresh(&mut self) {
-        let path = paths::config_file().ok();
-        let stamp = path
-            .and_then(|path| fs::metadata(path).ok())
-            .and_then(|metadata| metadata.modified().ok());
-        if self.seen == Some(stamp) {
-            return;
-        }
-        self.seen = Some(stamp);
-        let Some(registration) = self.registration.as_mut() else {
-            return;
-        };
-        let configured = match Config::load() {
-            Ok(config) => Shortcut::configured(config.hotkey.as_deref()),
-            Err(_) => {
-                Err("The configuration needs repair before the shortcut can change.".to_owned())
-            }
-        };
-        self.problem = match configured {
-            Ok(shortcut) => match registration.register(&shortcut) {
-                Ok(()) => {
-                    self.active = Some(shortcut);
-                    None
-                }
-                Err(problem) => Some(problem),
-            },
-            Err(problem) => Some(problem),
-        };
-    }
-
-    fn title(&self) -> String {
-        match (&self.active, &self.problem) {
-            (Some(active), None) => format!("Dictation shortcut: {}", active.label()),
-            (Some(active), Some(_)) => {
-                format!("Shortcut {} kept; new one refused…", active.label())
-            }
-            (None, _) => "Shortcut unavailable; open Settings…".to_owned(),
-        }
-    }
-}
-
-/// The take and outcome the open menu describes; actions never retarget a later take.
-#[derive(Default)]
-struct Targets {
-    take: Option<String>,
-    event: Option<u64>,
-}
-
-struct Menu {
-    menu: Retained<NSMenu>,
-    state: Retained<NSMenuItem>,
-    detail: Retained<NSMenuItem>,
-    outcome: Retained<NSMenuItem>,
-    problem: Retained<NSMenuItem>,
-    start: Retained<NSMenuItem>,
-    stop: Retained<NSMenuItem>,
-    cancel: Retained<NSMenuItem>,
-    shortcut: Retained<NSMenuItem>,
-    copy: Retained<NSMenuItem>,
-    recover_local: Retained<NSMenuItem>,
-    recover_provider: Retained<NSMenuItem>,
-    install_model: Retained<NSMenuItem>,
-    dismiss: Retained<NSMenuItem>,
-    microphone: Retained<NSMenuItem>,
-    start_engine: Retained<NSMenuItem>,
-    login: Retained<NSMenuItem>,
-}
-
-impl Menu {
-    fn new(
-        mtm: MainThreadMarker,
-        target: &AnyObject,
-        delegate: &ProtocolObject<dyn NSMenuDelegate>,
-    ) -> Self {
-        let menu = NSMenu::new(mtm);
-        menu.setAutoenablesItems(false);
-        menu.setDelegate(Some(delegate));
-        let add = |title: &str, action: Option<Sel>, key: &str| {
-            // SAFETY: every action names a method `AppDelegate` defines below.
-            let item = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &NSString::from_str(title),
-                    action,
-                    &NSString::from_str(key),
-                )
-            };
-            if action.is_some() {
+        match choice {
+            Some(choice) => {
+                item.setTag(self.choices.len() as isize);
+                self.choices.push(choice);
                 // SAFETY: the delegate outlives the menu for the process lifetime.
-                unsafe { item.setTarget(Some(target)) };
-            } else {
-                item.setEnabled(false);
+                unsafe { item.setTarget(Some(self.target)) };
             }
-            menu.addItem(&item);
-            item
-        };
-        let separator = || menu.addItem(&NSMenuItem::separatorItem(mtm));
-        let state = add("Starting Cantrip…", None, "");
-        let detail = add("", None, "");
-        let outcome = add("", None, "");
-        let problem = add("", None, "");
-        separator();
-        let start = add("Start Dictation", Some(sel!(startDictation:)), "");
-        let stop = add("Stop Recording", Some(sel!(stopRecording:)), "");
-        let cancel = add("Cancel Without Delivery", Some(sel!(cancelTake:)), "");
-        let shortcut = add("", Some(sel!(openSettings:)), "");
-        separator();
-        let copy = add("Copy This Transcript", Some(sel!(copyTranscript:)), "");
-        let recover_local = add(
-            "Recover Locally to Clipboard",
-            Some(sel!(recoverLocally:)),
-            "",
-        );
-        let recover_provider = add(
-            "Recover with Configured Provider to Clipboard",
-            Some(sel!(recoverWithProvider:)),
-            "",
-        );
-        let install_model = add("Install Local Model…", Some(sel!(checkSetup:)), "");
-        let dismiss = add("Dismiss Outcome", Some(sel!(dismissOutcome:)), "");
-        add("Recordings and Recovery…", Some(sel!(openRecordings:)), "");
-        add("Check Setup…", Some(sel!(checkSetup:)), "");
-        add("Settings…", Some(sel!(openSettings:)), ",");
-        separator();
-        let microphone = add("", Some(sel!(microphoneAccess:)), "");
-        let start_engine = add("Start Cantrip", Some(sel!(startEngine:)), "");
-        let login = add("Open at Login", Some(sel!(toggleLogin:)), "");
-        separator();
-        add("Quit Cantrip", Some(sel!(quit:)), "q");
-        Self {
-            menu,
-            state,
-            detail,
-            outcome,
-            problem,
-            start,
-            stop,
-            cancel,
-            shortcut,
-            copy,
-            recover_local,
-            recover_provider,
-            install_model,
-            dismiss,
-            microphone,
-            start_engine,
-            login,
+            None => item.setEnabled(false),
         }
+        self.menu.addItem(&item);
+        item
+    }
+
+    fn item(&mut self, title: &str, choice: Choice) -> Retained<NSMenuItem> {
+        self.add(title, Some(choice))
+    }
+
+    fn send(&mut self, title: &str, command: Command) {
+        self.add(title, Some(Choice::Send(command)));
+    }
+
+    /// An informational line: absent when empty, shortened to the menu's width
+    /// with the full text in its tooltip.
+    fn line(&mut self, text: Option<&str>) {
+        let Some(text) = text.filter(|text| !text.is_empty()) else {
+            return;
+        };
+        if text.chars().count() <= LINE_LIMIT {
+            self.add(text, None);
+        } else {
+            let short: String = text.chars().take(LINE_LIMIT - 1).chain(['…']).collect();
+            self.add(&short, None)
+                .setToolTip(Some(&NSString::from_str(text)));
+        }
+    }
+
+    fn separator(&self) {
+        self.menu
+            .addItem(&NSMenuItem::separatorItem(self.menu.mtm()));
     }
 }
 
-/// An informational line: hidden when empty, shortened to the menu's width
-/// with the full text in its tooltip.
-fn line(item: &NSMenuItem, text: Option<&str>) {
-    let text = text.filter(|text| !text.is_empty());
-    item.setHidden(text.is_none());
-    let Some(text) = text else {
-        return;
-    };
-    let short = if text.chars().count() > LINE_LIMIT {
-        let mut short: String = text.chars().take(LINE_LIMIT - 1).collect();
-        short.push('…');
-        short
-    } else {
-        text.to_owned()
-    };
-    item.setTitle(&NSString::from_str(&short));
-    item.setToolTip((short != text).then(|| NSString::from_str(text)).as_deref());
+/// Bring a shared window forward, or open it as its own process, so closing it
+/// never stops dictation.
+fn open_window(window: &mut Option<Child>, arguments: &[&str]) -> Result<()> {
+    if let Some(child) = window.as_mut() {
+        if matches!(child.try_wait(), Ok(None)) {
+            if let Some(app) =
+                NSRunningApplication::runningApplicationWithProcessIdentifier(child.id() as _)
+            {
+                app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+            }
+            return Ok(());
+        }
+    }
+    let child = Process::new(std::env::current_exe()?)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .context("Opening the window")?;
+    *window = Some(child);
+    Ok(())
+}
+
+/// Register or unregister Cantrip.app's own login item, or open its approval
+/// page in System Settings.
+fn toggle_login() -> Result<()> {
+    autoreleasepool(|_| {
+        // SAFETY: the main app registers and unregisters only its own login item.
+        let changed = unsafe {
+            let service = SMAppService::mainAppService();
+            match service.status() {
+                SMAppServiceStatus::Enabled => service.unregisterAndReturnError(),
+                SMAppServiceStatus::RequiresApproval => {
+                    SMAppService::openSystemSettingsLoginItems();
+                    Ok(())
+                }
+                _ => service.registerAndReturnError(),
+            }
+        };
+        changed.map_err(|error| {
+            anyhow!(
+                "Open at Login was not changed: {}",
+                error.localizedDescription()
+            )
+        })
+    })
 }
 
 fn sentence(text: &str) -> String {
@@ -455,27 +311,32 @@ struct Host {
     quitting: bool,
     _item: Retained<NSStatusItem>,
     button: Retained<NSStatusBarButton>,
-    menu: Menu,
-    mark: Mark,
+    /// The mark shown, redrawn only when its tone changes.
+    tone: Option<Tone>,
     tooltip: String,
-    shortcuts: Shortcuts,
-    commands: mpsc::Sender<Request>,
+    shortcut: Registration,
+    commands: mpsc::Sender<Command>,
     replies: mpsc::Receiver<Reply>,
     microphone: MicrophonePermission,
-    microphone_request: Option<mpsc::Receiver<Result<MicrophonePermission, String>>>,
+    microphone_request: Option<JoinHandle<Result<MicrophonePermission>>>,
     /// The latest failed action, shown until a later action succeeds.
     problem: Option<String>,
-    targets: Targets,
-    windows: Windows,
+    /// What the open menu's items do, by tag.
+    choices: Vec<Choice>,
+    /// The shared Settings and Actions windows, one process each.
+    settings: Option<Child>,
+    actions: Option<Child>,
     timer: Option<(Retained<NSTimer>, Duration)>,
-    settings_at: Option<Instant>,
-    processing_since: Option<Instant>,
+    /// When the shortcut and microphone access were last re-read.
+    refreshed: Instant,
+    /// The processing chase's clock.
+    launched: Instant,
 }
 
 /// What the AppKit thread does once no host state is borrowed.
 enum After {
     Continue,
-    /// A termination signal stopped the engine: quit the app as well.
+    /// A termination signal reached Cantrip: quit the app as well.
     Quit,
     /// Quit was waiting for the engine, which has now finished.
     FinishQuit,
@@ -485,68 +346,62 @@ impl Host {
     fn start(delegate: &AppDelegate) -> Result<Self> {
         let mtm = delegate.mtm();
         let target: &AnyObject = delegate;
-        let menu = Menu::new(mtm, target, ProtocolObject::from_ref(delegate));
+        let menu = NSMenu::new(mtm);
+        menu.setAutoenablesItems(false);
+        menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-        item.setMenu(Some(&menu.menu));
+        item.setMenu(Some(&menu));
         let button = item
             .button(mtm)
             .context("the menu bar did not provide a status item button")?;
         button.setAccessibilityLabel(Some(ns_string!("Cantrip")));
         let (commands, replies) = spawn_commands()?;
-        let shortcut_requests = commands.clone();
-        let (registration, problem) = match Registration::new(move || {
-            let _ = shortcut_requests.send(Request {
-                command: Command::Toggle {
-                    postproc: None,
-                    handoff: None,
-                },
-                origin: Origin::Shortcut,
-            });
-        }) {
-            Ok(registration) => (Some(registration), None),
-            Err(problem) => (None, Some(problem)),
-        };
+        let toggles = commands.clone();
+        let now = Instant::now();
         let mut host = Self {
             hud: LiveHud::start(mtm)?,
             engine: Engine::Stopped(None),
             quitting: false,
             _item: item,
             button,
-            menu,
-            mark: Mark::new(),
+            tone: None,
             tooltip: String::new(),
-            shortcuts: Shortcuts {
-                registration,
-                active: None,
-                problem,
-                seen: None,
-            },
+            shortcut: Registration::new(move || {
+                let _ = toggles.send(Command::Toggle {
+                    postproc: None,
+                    handoff: None,
+                });
+            }),
             commands,
             replies,
             microphone: capture::microphone_permission(),
             microphone_request: None,
             problem: None,
-            targets: Targets::default(),
-            windows: Windows::default(),
+            choices: Vec::new(),
+            settings: None,
+            actions: None,
             timer: None,
-            settings_at: None,
-            processing_since: None,
+            refreshed: now,
+            launched: now,
         };
+        host.shortcut.refresh();
         host.start_engine();
+        host.fill(&menu, target);
         Ok(host)
     }
 
+    /// Start one engine while nothing serves dictation. A Cantrip process that
+    /// already answers is attached instead, never duplicated.
     fn start_engine(&mut self) {
-        if self.quitting
-            || cantrip_engine::engine::shutdown_requested()
+        if self.hud.status().is_some()
             || matches!(self.engine, Engine::Owned { .. })
+            || shutdown_requested()
         {
             return;
         }
         let thread = thread::Builder::new()
             .name("cantrip-engine".to_owned())
             .spawn(|| {
-                // A Cantrip process that already answers owns dictation.
                 if ipc::status().is_ok() {
                     return Ok(EngineExit::External);
                 }
@@ -554,34 +409,28 @@ impl Host {
                 crate::daemon::run(config, false).map(|()| EngineExit::Stopped)
             });
         self.engine = match thread {
-            Ok(thread) => Engine::Owned {
-                thread,
-                started: Instant::now(),
-            },
+            Ok(thread) => {
+                tracing::info!("[Daemon] app host starting the engine");
+                Engine::Owned {
+                    thread,
+                    started: Instant::now(),
+                }
+            }
             Err(error) => {
                 Engine::Stopped(Some(format!("The engine thread did not start: {error}")))
             }
         };
-        tracing::info!("[Daemon] app host starting the engine");
     }
 
-    /// Start dictation again when nothing serves it, as Start Cantrip does.
-    fn start_if_stopped(&mut self) {
-        if self.hud.status().is_none() && !matches!(self.engine, Engine::Owned { .. }) {
-            self.start_engine();
-        }
-    }
-
-    /// Join a finished engine thread. True for a clean stop this app did not
-    /// request: a termination signal reached the engine.
-    fn reap_engine(&mut self) -> bool {
+    /// Join a finished engine thread, keeping why it ended.
+    fn reap_engine(&mut self) {
         if !matches!(&self.engine, Engine::Owned { thread, .. } if thread.is_finished()) {
-            return false;
+            return;
         }
         let Engine::Owned { thread, .. } =
             std::mem::replace(&mut self.engine, Engine::Stopped(None))
         else {
-            return false;
+            return;
         };
         self.engine = match thread.join() {
             Ok(Ok(EngineExit::External)) => Engine::External,
@@ -595,70 +444,54 @@ impl Host {
                 Engine::Stopped(Some("The engine stopped unexpectedly.".to_owned()))
             }
         };
-        matches!(self.engine, Engine::Stopped(None)) && !self.quitting
     }
 
-    fn send(&mut self, command: Command, origin: Origin) {
-        if self.commands.send(Request { command, origin }).is_err() {
-            self.problem = Some("The command worker stopped; quit and reopen Cantrip.".to_owned());
-        }
+    fn send(&self, command: Command) -> Result<()> {
+        self.commands
+            .send(command)
+            .map_err(|_| anyhow!("The command worker stopped; quit and reopen Cantrip."))
     }
 
     fn tick(&mut self, target: &AnyObject) -> After {
-        let mtm = self.button.mtm();
         let now = Instant::now();
-        let interval = self.hud.tick(mtm, now);
-        let signalled =
-            self.reap_engine() || (!self.quitting && cantrip_engine::engine::shutdown_requested());
+        let interval = self.hud.tick(self.button.mtm(), now);
+        self.reap_engine();
         while let Ok(reply) = self.replies.try_recv() {
-            if reply.origin == Origin::Shortcut && !reply.reachable {
-                NSBeep();
-            }
-            // Busy and similar refusals already reach the HUD as notices.
-            if reply.origin == Origin::Menu || !reply.reachable {
-                self.problem = reply.problem;
-            } else if reply.problem.is_none() {
-                self.problem = None;
-            }
-        }
-        let decided = match self
-            .microphone_request
-            .as_ref()
-            .map(mpsc::Receiver::try_recv)
-        {
-            Some(Ok(result)) => Some(result),
-            Some(Err(mpsc::TryRecvError::Disconnected)) => Some(Err(
-                "The microphone request stopped unexpectedly.".to_owned(),
-            )),
-            Some(Err(mpsc::TryRecvError::Empty)) | None => None,
-        };
-        if let Some(result) = decided {
-            self.microphone_request = None;
-            match result {
-                Ok(permission) => {
-                    self.microphone = permission;
-                    self.problem = (permission != MicrophonePermission::Authorized).then(|| {
-                        "Microphone access was not allowed. Change it in System Settings."
-                            .to_owned()
-                    });
+            self.problem = match reply {
+                Reply::Accepted => None,
+                Reply::Refused(message) => Some(message),
+                Reply::Unreachable => {
+                    NSBeep();
+                    Some("Cantrip did not answer this action.".to_owned())
                 }
-                Err(problem) => self.problem = Some(problem),
-            }
+            };
         }
-        self.windows.reap();
-        if self
-            .settings_at
-            .is_none_or(|at| now.duration_since(at) >= SETTINGS_INTERVAL)
+        match self
+            .microphone_request
+            .take_if(|request| request.is_finished())
+            .map(JoinHandle::join)
         {
-            self.settings_at = Some(now);
+            Some(Ok(Ok(permission))) => self.microphone = permission,
+            Some(Ok(Err(error))) => self.problem = Some(format!("{error:#}")),
+            Some(Err(_)) => {
+                self.problem = Some("The microphone request stopped unexpectedly.".to_owned());
+            }
+            None => {}
+        }
+        if now.duration_since(self.refreshed) >= REFRESH_INTERVAL {
+            self.refreshed = now;
             self.microphone = capture::microphone_permission();
-            self.shortcuts.refresh();
+            self.shortcut.refresh();
+            // Reap closed windows; dictation continues regardless.
+            for window in [&mut self.settings, &mut self.actions] {
+                window.take_if(|child| !matches!(child.try_wait(), Ok(None)));
+            }
         }
         self.show_mark(now);
         self.schedule(interval, target);
         if self.quitting && !matches!(self.engine, Engine::Owned { .. }) {
             After::FinishQuit
-        } else if signalled {
+        } else if !self.quitting && shutdown_requested() {
             After::Quit
         } else {
             After::Continue
@@ -699,31 +532,24 @@ impl Host {
         let route = status
             .and_then(|status| status.handoff.as_ref())
             .map_or(palette.accent, |handoff| handoff.color);
-        let processing = status.is_some_and(|status| status.state == StateKind::Processing);
-        let since = if processing {
-            *self.processing_since.get_or_insert(now)
-        } else {
-            self.processing_since = None;
-            now
-        };
         let needs_operator = status.is_some_and(|status| status.attention)
             || self.microphone != MicrophonePermission::Authorized
-            || self.shortcuts.active.is_none();
+            || self.shortcut.active().is_none();
         let tone = match status.map(|status| &status.state) {
             None | Some(StateKind::Unknown(_)) => Tone::Unknown,
             Some(StateKind::Recording) => Tone::Recording(route),
+            Some(StateKind::Processing) if self.hud.reduced_motion() => Tone::Processing(route, 0),
             Some(StateKind::Processing) => Tone::Processing(
                 route,
-                if self.hud.reduced_motion() {
-                    0
-                } else {
-                    (now.duration_since(since).as_millis() / CHASE_STEP.as_millis()) as usize
-                },
+                (now.duration_since(self.launched).as_millis() / CHASE_STEP.as_millis()) as usize,
             ),
             Some(StateKind::Idle) if needs_operator => Tone::Attention(palette.attention),
             Some(StateKind::Idle) => Tone::Rest,
         };
-        self.mark.show(&self.button, tone);
+        if self.tone != Some(tone) {
+            tone.show(&self.button);
+            self.tone = Some(tone);
+        }
         let tooltip = format!("Cantrip — {}", self.describe(now).0);
         if tooltip != self.tooltip {
             self.button.setToolTip(Some(&NSString::from_str(&tooltip)));
@@ -732,65 +558,69 @@ impl Host {
     }
 
     /// The menu's first line and its explanation, from live status only.
-    fn describe(&self, now: Instant) -> (String, Option<String>) {
+    fn describe(&self, now: Instant) -> (String, Option<&str>) {
         if self.quitting {
-            return (
-                "Quitting…".to_owned(),
-                Some("Finishing the current take before Cantrip exits.".to_owned()),
-            );
+            let detail = "Finishing the current take before Cantrip exits.";
+            return ("Quitting…".to_owned(), Some(detail));
         }
-        if let Some(status) = self.hud.status() {
-            let mut state = match &status.state {
-                StateKind::Idle => "Ready".to_owned(),
-                StateKind::Recording if status.signal.is_none() => {
-                    "Starting microphone…".to_owned()
+        let Some(status) = self.hud.status() else {
+            return match &self.engine {
+                Engine::Owned { started, .. } if now.duration_since(*started) < STARTUP_GRACE => {
+                    ("Starting Cantrip…".to_owned(), None)
                 }
-                StateKind::Recording => {
-                    format!("Recording · {}", crate::hud::format_elapsed(status.elapsed))
-                }
-                StateKind::Processing => status.stage.as_ref().map_or_else(
-                    || "Working…".to_owned(),
-                    |stage| sentence(&stage.to_string()),
+                Engine::Owned { .. } | Engine::External => (
+                    "Cantrip is not responding".to_owned(),
+                    Some("Recording and saved-audio status unknown."),
                 ),
-                StateKind::Unknown(_) => "Cantrip status unavailable".to_owned(),
+                Engine::Stopped(Some(reason)) => {
+                    ("Cantrip stopped".to_owned(), Some(reason.as_str()))
+                }
+                Engine::Stopped(None) => ("Cantrip is not running".to_owned(), None),
             };
-            if let Some(handoff) = &status.handoff {
-                state.push_str(" · to ");
-                state.push_str(&handoff.label);
+        };
+        let mut state = match &status.state {
+            StateKind::Idle => "Ready".to_owned(),
+            StateKind::Recording if status.signal.is_none() => "Starting microphone…".to_owned(),
+            StateKind::Recording => {
+                format!("Recording · {}", crate::hud::format_elapsed(status.elapsed))
             }
-            let detail = matches!(self.engine, Engine::External).then(|| {
-                "Dictation runs in a Cantrip process started outside this app.".to_owned()
-            });
-            return (state, detail);
-        }
-        match &self.engine {
-            Engine::Owned { started, .. } if now.duration_since(*started) < STARTUP_GRACE => {
-                ("Starting Cantrip…".to_owned(), None)
-            }
-            Engine::Owned { .. } | Engine::External => (
-                "Cantrip is not responding".to_owned(),
-                Some("Recording and saved-audio status unknown.".to_owned()),
+            StateKind::Processing => status.stage.as_ref().map_or_else(
+                || "Working…".to_owned(),
+                |stage| sentence(&stage.to_string()),
             ),
-            Engine::Stopped(Some(reason)) => ("Cantrip stopped".to_owned(), Some(reason.clone())),
-            Engine::Stopped(None) => ("Cantrip is not running".to_owned(), None),
+            StateKind::Unknown(_) => "Cantrip status unavailable".to_owned(),
+        };
+        if let Some(handoff) = &status.handoff {
+            state.push_str(" · to ");
+            state.push_str(&handoff.label);
         }
+        let detail = matches!(self.engine, Engine::External)
+            .then_some("Dictation runs in a Cantrip process started outside this app.");
+        (state, detail)
     }
 
-    /// Rebuild every item from live status as the menu opens.
-    fn update_menu(&mut self) {
-        let now = Instant::now();
+    /// Rebuild the menu from live status as it opens.
+    fn fill(&mut self, menu: &NSMenu, target: &AnyObject) {
         self.microphone = capture::microphone_permission();
-        let (state, detail) = self.describe(now);
-        let status = self.hud.status().cloned();
-        let menu = &self.menu;
-        line(&menu.state, Some(&state));
-        line(&menu.detail, detail.as_deref());
+        let (state, detail) = self.describe(Instant::now());
+        let status = self.hud.status();
+        let capabilities = status.map(|status| status.capabilities).unwrap_or_default();
+        let idle = status.is_some_and(|status| status.state == StateKind::Idle);
         let outcome = status
-            .as_ref()
             .and_then(|status| status.outcome.as_ref())
             .filter(|outcome| !outcome.dismissed);
-        line(
-            &menu.outcome,
+        let notice = status
+            .and_then(|status| status.notice.as_ref())
+            .map(|notice| notice.message.as_str());
+        menu.removeAllItems();
+        let mut items = Items {
+            menu,
+            target,
+            choices: Vec::new(),
+        };
+        items.line(Some(&state));
+        items.line(detail);
+        items.line(
             outcome
                 .map(|outcome| match &outcome.handoff {
                     Some(handoff) => format!("{} · to {}", outcome.message, handoff.label),
@@ -798,175 +628,178 @@ impl Host {
                 })
                 .as_deref(),
         );
-        let notice = status
-            .as_ref()
-            .and_then(|status| status.notice.as_ref())
-            .map(|notice| notice.message.as_str());
-        line(&menu.problem, self.problem.as_deref().or(notice));
-
-        let capabilities = status
-            .as_ref()
-            .map(|status| status.capabilities)
-            .unwrap_or_default();
-        let idle = status
-            .as_ref()
-            .is_some_and(|status| status.state == StateKind::Idle);
-        menu.start.setHidden(!idle && status.is_some());
-        menu.start.setEnabled(idle);
-        menu.stop.setHidden(!capabilities.stop);
-        menu.cancel.setHidden(!capabilities.cancel);
-        menu.shortcut
-            .setTitle(&NSString::from_str(&self.shortcuts.title()));
-        menu.shortcut.setToolTip(
-            self.shortcuts
-                .problem
-                .as_deref()
-                .map(NSString::from_str)
-                .as_deref(),
-        );
-        menu.shortcut
-            .setEnabled(self.shortcuts.problem.is_some() || self.shortcuts.active.is_none());
-
-        // Deliberate actions for the outcome shown, bound to its own take.
-        self.targets = Targets {
-            take: outcome.and_then(|outcome| outcome.artifacts.take_id.clone()),
-            event: outcome.map(|outcome| outcome.event_id),
-        };
-        let take = outcome.filter(|outcome| outcome.artifacts.take_id.is_some());
-        let copy = take.is_some_and(|outcome| outcome.artifacts.text && capabilities.copy);
-        let failed_audio =
-            take.is_some_and(|outcome| !outcome.is_success() && outcome.artifacts.audio);
-        let recover = failed_audio && capabilities.recover;
-        menu.copy.setHidden(!copy);
-        menu.copy.setTitle(
-            if take.is_some_and(|outcome| outcome.completeness == Completeness::Partial) {
-                ns_string!("Copy Partial Transcript")
-            } else {
-                ns_string!("Copy This Transcript")
-            },
-        );
-        menu.recover_local
-            .setHidden(!(recover && capabilities.local_model));
-        menu.recover_provider
-            .setHidden(!(recover && capabilities.remote_configured));
-        // The HUD names this item for saved audio while local recovery lacks its model.
-        menu.install_model
-            .setHidden(!failed_audio || capabilities.local_model);
-        menu.dismiss.setHidden(
-            !(capabilities.dismiss && outcome.is_some_and(|outcome| outcome.needs_attention())),
-        );
-
-        let (title, enabled) = match self.microphone {
-            MicrophonePermission::Authorized => ("", false),
-            MicrophonePermission::NotDetermined if self.microphone_request.is_some() => {
-                ("Waiting for your microphone decision…", false)
+        items.line(self.problem.as_deref().or(notice));
+        items.separator();
+        if idle {
+            let start = Command::Start {
+                postproc: None,
+                handoff: None,
+            };
+            items.send("Start Dictation", start);
+        } else if status.is_none() {
+            items.add("Start Dictation", None);
+        }
+        if capabilities.stop {
+            items.send("Stop Recording", Command::Stop);
+        }
+        if capabilities.cancel {
+            items.send("Cancel Without Delivery", Command::Cancel);
+        }
+        let shortcut = self.shortcut.active();
+        let shortcut_problem = self.shortcut.problem();
+        let title = match (shortcut, shortcut_problem) {
+            (Some(shortcut), None) => format!("Dictation shortcut: {}", shortcut.label()),
+            (Some(shortcut), Some(_)) => {
+                format!("Shortcut {} kept; new one refused…", shortcut.label())
             }
-            MicrophonePermission::NotDetermined => ("Allow Microphone Access…", true),
+            (None, _) => "Shortcut unavailable; open Settings…".to_owned(),
+        };
+        let repair = shortcut_problem.is_some() || shortcut.is_none();
+        items
+            .add(&title, repair.then_some(Choice::Settings))
+            .setToolTip(shortcut_problem.map(NSString::from_str).as_deref());
+        items.separator();
+        if let Some(outcome) = outcome {
+            // Deliberate actions for the outcome shown, bound to its own take.
+            if let Some(id) = &outcome.artifacts.take_id {
+                let failed_audio = !outcome.is_success() && outcome.artifacts.audio;
+                let recover = |local| Command::Recover {
+                    id: Some(id.clone()),
+                    local,
+                    clipboard: true,
+                };
+                if outcome.artifacts.text && capabilities.copy {
+                    let copy = Command::Copy { id: id.clone() };
+                    if outcome.completeness == Completeness::Partial {
+                        items.send("Copy Partial Transcript", copy);
+                    } else {
+                        items.send("Copy This Transcript", copy);
+                    }
+                }
+                if failed_audio && capabilities.recover && capabilities.local_model {
+                    items.send("Recover Locally to Clipboard", recover(true));
+                }
+                if failed_audio && capabilities.recover && capabilities.remote_configured {
+                    items.send(
+                        "Recover with Configured Provider to Clipboard",
+                        recover(false),
+                    );
+                }
+                // The HUD names this item for saved audio while local recovery lacks its model.
+                if failed_audio && !capabilities.local_model {
+                    items.item("Install Local Model…", Choice::CheckSetup);
+                }
+            }
+            if capabilities.dismiss && outcome.needs_attention() {
+                let dismiss = Command::Dismiss {
+                    event_id: Some(outcome.event_id),
+                };
+                items.send("Dismiss Outcome", dismiss);
+            }
+        }
+        items.item("Recordings and Recovery…", Choice::Recordings);
+        items.item("Check Setup…", Choice::CheckSetup);
+        items
+            .item("Settings…", Choice::Settings)
+            .setKeyEquivalent(ns_string!(","));
+        items.separator();
+        match self.microphone {
+            MicrophonePermission::Authorized => {}
+            MicrophonePermission::NotDetermined if self.microphone_request.is_some() => {
+                items.add("Waiting for your microphone decision…", None);
+            }
+            MicrophonePermission::NotDetermined => {
+                items.item("Allow Microphone Access…", Choice::Microphone);
+            }
             MicrophonePermission::Denied => {
-                ("Microphone Access Denied — Open Privacy Settings…", true)
+                items.item(
+                    "Microphone Access Denied — Open Privacy Settings…",
+                    Choice::Microphone,
+                );
             }
             MicrophonePermission::Restricted => {
-                ("Microphone access is restricted on this Mac", false)
+                items.add("Microphone access is restricted on this Mac", None);
             }
-        };
-        line(&menu.microphone, Some(title));
-        menu.microphone.setEnabled(enabled);
-        menu.start_engine.setHidden(
-            status.is_some() || matches!(self.engine, Engine::Owned { .. }) || self.quitting,
-        );
-        self.update_login_item();
-    }
-
-    fn update_login_item(&self) {
-        let item = &self.menu.login;
+        }
+        if status.is_none() && !self.quitting && !matches!(self.engine, Engine::Owned { .. }) {
+            items.item("Start Cantrip", Choice::StartEngine);
+        }
         if autoreleasepool(|_| app_bundle()).is_none() {
-            item.setTitle(ns_string!("Open at Login"));
-            item.setState(NSControlStateValueOff);
-            item.setEnabled(false);
-            item.setToolTip(Some(ns_string!(
+            let login = items.add("Open at Login", None);
+            login.setToolTip(Some(ns_string!(
                 "Available when Cantrip runs from Cantrip.app."
             )));
-            return;
-        }
-        // SAFETY: querying the main app's own login item has no preconditions.
-        let status = unsafe { SMAppService::mainAppService().status() };
-        let (title, on, enabled) = match status {
-            SMAppServiceStatus::Enabled => (ns_string!("Open at Login"), true, true),
-            SMAppServiceStatus::RequiresApproval => (
-                ns_string!("Open at Login — Approve in System Settings…"),
-                false,
-                true,
-            ),
-            SMAppServiceStatus::NotRegistered => (ns_string!("Open at Login"), false, true),
-            _ => (
-                ns_string!("Open at Login (unavailable for this copy)"),
-                false,
-                false,
-            ),
-        };
-        item.setTitle(title);
-        item.setState(if on {
-            NSControlStateValueOn
         } else {
-            NSControlStateValueOff
-        });
-        item.setEnabled(enabled);
-        item.setToolTip(None);
-    }
-
-    fn toggle_login(&mut self) {
-        let result = autoreleasepool(|_| {
-            // SAFETY: the main app registers and unregisters only its own login item.
-            let changed = unsafe {
-                let service = SMAppService::mainAppService();
-                match service.status() {
-                    SMAppServiceStatus::Enabled => service.unregisterAndReturnError(),
-                    SMAppServiceStatus::RequiresApproval => {
-                        SMAppService::openSystemSettingsLoginItems();
-                        Ok(())
-                    }
-                    _ => service.registerAndReturnError(),
-                }
+            // SAFETY: querying the main app's own login item has no preconditions.
+            let (title, on, choice) = match unsafe { SMAppService::mainAppService().status() } {
+                SMAppServiceStatus::Enabled => ("Open at Login", true, Some(Choice::Login)),
+                SMAppServiceStatus::RequiresApproval => (
+                    "Open at Login — Approve in System Settings…",
+                    false,
+                    Some(Choice::Login),
+                ),
+                SMAppServiceStatus::NotRegistered => ("Open at Login", false, Some(Choice::Login)),
+                _ => ("Open at Login (unavailable for this copy)", false, None),
             };
-            changed.map_err(|error| error.localizedDescription().to_string())
-        });
-        self.problem = result
-            .err()
-            .map(|reason| format!("Open at Login was not changed: {reason}"));
+            let login = items.add(title, choice);
+            if on {
+                login.setState(NSControlStateValueOn);
+            }
+        }
+        items.separator();
+        items
+            .item("Quit Cantrip", Choice::Quit)
+            .setKeyEquivalent(ns_string!("q"));
+        self.choices = items.choices;
     }
 
-    fn microphone_access(&mut self) {
+    /// Perform a menu item's choice. True for Quit, which AppKit performs once
+    /// no host state is borrowed.
+    fn choose(&mut self, tag: isize) -> bool {
+        let Some(choice) = usize::try_from(tag)
+            .ok()
+            .and_then(|index| self.choices.get(index))
+            .cloned()
+        else {
+            return false;
+        };
+        // The problem line now reports this choice, or the reply to its command.
+        self.problem = None;
+        let done = match choice {
+            Choice::Send(command) => self.send(command),
+            Choice::Settings => open_window(&mut self.settings, &["settings"]),
+            Choice::Recordings => open_window(&mut self.actions, &["actions"]),
+            Choice::CheckSetup => open_window(&mut self.actions, &["actions", "--doctor"]),
+            Choice::Microphone => self.microphone_access(),
+            Choice::StartEngine => {
+                self.start_engine();
+                Ok(())
+            }
+            Choice::Login => toggle_login(),
+            Choice::Quit => return true,
+        };
+        if let Err(error) = done {
+            self.problem = Some(format!("{error:#}"));
+        }
+        false
+    }
+
+    /// Ask for microphone access when it was never requested, or open Privacy
+    /// & Security when it was denied. Only the operator's answer grants it.
+    fn microphone_access(&mut self) -> Result<()> {
         match capture::microphone_permission() {
             MicrophonePermission::NotDetermined if self.microphone_request.is_none() => {
                 // The system prompt answers this explicit choice. The request
                 // blocks until the operator decides, so it waits off this thread.
-                let (sender, receiver) = mpsc::channel();
-                let spawned = thread::Builder::new()
+                let request = thread::Builder::new()
                     .name("cantrip-microphone".to_owned())
-                    .spawn(move || {
-                        let result = autoreleasepool(|_| capture::request_microphone_permission())
-                            .map_err(|error| format!("{error:#}"));
-                        let _ = sender.send(result);
-                    });
-                match spawned {
-                    Ok(_) => self.microphone_request = Some(receiver),
-                    Err(error) => {
-                        self.problem = Some(format!("Microphone access was not requested: {error}"))
-                    }
-                }
+                    .spawn(|| autoreleasepool(|_| capture::request_microphone_permission()))
+                    .context("Microphone access was not requested")?;
+                self.microphone_request = Some(request);
+                Ok(())
             }
-            MicrophonePermission::Denied => {
-                if let Err(error) = open_microphone_settings() {
-                    self.problem = Some(format!("{error:#}"));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn open(&mut self, window: Window) {
-        if let Err(error) = self.windows.open(window) {
-            self.problem = Some(format!("{error:#}"));
+            MicrophonePermission::Denied => open_microphone_settings(),
+            _ => Ok(()),
         }
     }
 }
@@ -1014,7 +847,7 @@ define_class!(
             }
             // Finish capture and settle cancellation first; recordings stay retained.
             host.quitting = true;
-            cantrip_engine::engine::request_shutdown();
+            request_shutdown();
             tracing::info!("[Daemon] quit requested; waiting for the engine");
             NSApplicationTerminateReply::TerminateLater
         }
@@ -1028,7 +861,7 @@ define_class!(
         #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
         fn should_handle_reopen(&self, _sender: &NSApplication, _visible: bool) -> bool {
             if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-                host.start_if_stopped();
+                host.start_engine();
             }
             false
         }
@@ -1037,115 +870,30 @@ define_class!(
     // SAFETY: the signature matches NSMenuDelegate.
     unsafe impl NSMenuDelegate for AppDelegate {
         #[unsafe(method(menuNeedsUpdate:))]
-        fn menu_needs_update(&self, _menu: &NSMenu) {
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            let target: &AnyObject = self;
             if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-                host.update_menu();
+                host.fill(menu, target);
             }
         }
     }
 
-    // SAFETY: each action takes the sender and returns nothing, as menu items expect.
+    // SAFETY: `tick:` takes its timer and `choose:` its menu item; both return nothing.
     impl AppDelegate {
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: &NSTimer) {
             self.tick_now();
         }
 
-        #[unsafe(method(startDictation:))]
-        fn start_dictation(&self, _sender: Option<&AnyObject>) {
-            self.send(Command::Start {
-                postproc: None,
-                handoff: None,
-            });
-        }
-
-        #[unsafe(method(stopRecording:))]
-        fn stop_recording(&self, _sender: Option<&AnyObject>) {
-            self.send(Command::Stop);
-        }
-
-        #[unsafe(method(cancelTake:))]
-        fn cancel_take(&self, _sender: Option<&AnyObject>) {
-            self.send(Command::Cancel);
-        }
-
-        #[unsafe(method(copyTranscript:))]
-        fn copy_transcript(&self, _sender: Option<&AnyObject>) {
-            self.with_take(|id| Command::Copy { id });
-        }
-
-        #[unsafe(method(recoverLocally:))]
-        fn recover_locally(&self, _sender: Option<&AnyObject>) {
-            self.with_take(|id| Command::Recover {
-                id: Some(id),
-                local: true,
-                clipboard: true,
-            });
-        }
-
-        #[unsafe(method(recoverWithProvider:))]
-        fn recover_with_provider(&self, _sender: Option<&AnyObject>) {
-            self.with_take(|id| Command::Recover {
-                id: Some(id),
-                local: false,
-                clipboard: true,
-            });
-        }
-
-        #[unsafe(method(dismissOutcome:))]
-        fn dismiss_outcome(&self, _sender: Option<&AnyObject>) {
-            let mut host = self.ivars().host.borrow_mut();
-            if let Some(host) = host.as_mut() {
-                if let Some(event_id) = host.targets.event {
-                    host.send(
-                        Command::Dismiss {
-                            event_id: Some(event_id),
-                        },
-                        Origin::Menu,
-                    );
-                }
+        #[unsafe(method(choose:))]
+        fn choose(&self, item: Option<&NSMenuItem>) {
+            let quit = match (self.ivars().host.borrow_mut().as_mut(), item) {
+                (Some(host), Some(item)) => host.choose(item.tag()),
+                _ => false,
+            };
+            if quit {
+                NSApplication::sharedApplication(self.mtm()).terminate(None);
             }
-        }
-
-        #[unsafe(method(openRecordings:))]
-        fn open_recordings(&self, _sender: Option<&AnyObject>) {
-            self.open(Window::Recordings);
-        }
-
-        #[unsafe(method(checkSetup:))]
-        fn check_setup(&self, _sender: Option<&AnyObject>) {
-            self.open(Window::CheckSetup);
-        }
-
-        #[unsafe(method(openSettings:))]
-        fn open_settings(&self, _sender: Option<&AnyObject>) {
-            self.open(Window::Settings);
-        }
-
-        #[unsafe(method(microphoneAccess:))]
-        fn microphone_access(&self, _sender: Option<&AnyObject>) {
-            if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-                host.microphone_access();
-            }
-        }
-
-        #[unsafe(method(startEngine:))]
-        fn start_engine(&self, _sender: Option<&AnyObject>) {
-            if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-                host.start_if_stopped();
-            }
-        }
-
-        #[unsafe(method(toggleLogin:))]
-        fn toggle_login(&self, _sender: Option<&AnyObject>) {
-            if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-                host.toggle_login();
-            }
-        }
-
-        #[unsafe(method(quit:))]
-        fn quit(&self, _sender: Option<&AnyObject>) {
-            NSApplication::sharedApplication(self.mtm()).terminate(None);
         }
     }
 );
@@ -1172,26 +920,6 @@ impl AppDelegate {
             After::Continue => {}
             After::Quit => app.terminate(None),
             After::FinishQuit => app.replyToApplicationShouldTerminate(true),
-        }
-    }
-
-    fn send(&self, command: Command) {
-        if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-            host.send(command, Origin::Menu);
-        }
-    }
-
-    fn with_take(&self, command: impl FnOnce(String) -> Command) {
-        if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-            if let Some(id) = host.targets.take.clone() {
-                host.send(command(id), Origin::Menu);
-            }
-        }
-    }
-
-    fn open(&self, window: Window) {
-        if let Some(host) = self.ivars().host.borrow_mut().as_mut() {
-            host.open(window);
         }
     }
 }

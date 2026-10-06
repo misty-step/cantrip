@@ -62,8 +62,8 @@ explicit microphone grant is needed; no Accessibility, Input Monitoring, or
 Screen Recording permission is needed for the app, hotkey, or owned panel.
 Inspect System Settings → Keyboard → Keyboard Shortcuts → Input Sources for a
 shortcut conflict; change the Cantrip shortcut in Settings to an unused
-combination. A registration failure leaves the previous shortcut active and
-reports why the new one is unavailable.
+combination. A refused replacement keeps the previous shortcut. While none is
+registered, Cantrip retries every two seconds so a released conflict can recover.
 
 Native arm64 headless/offscreen verification does not establish attended
 mic-to-editor success, panel positioning, or focus behavior. This guide does not

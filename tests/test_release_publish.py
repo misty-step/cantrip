@@ -3,9 +3,11 @@
 import json
 from pathlib import Path
 import runpy
+import subprocess
 import tomllib
 import tempfile
 import unittest
+from unittest import mock
 
 
 ADAPTER = Path(__file__).resolve().parents[1] / "scripts" / "release"
@@ -61,6 +63,46 @@ class ReleaseAdapterContracts(unittest.TestCase):
                     with self.assertRaises(RELEASE["ReleaseError"]):
                         RELEASE["set_locked_versions"](lock, "0.1.1")
                     self.assertEqual(lock.read_text(), root + extra)
+
+    def test_only_an_exact_merged_head_present_in_master_releases_human_work(self):
+        with tempfile.TemporaryDirectory(prefix="cantrip-release-merge-") as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                     "-c", "user.name=Release Fixture", "-c", "user.email=release@example.invalid",
+                     *args], cwd=root, check=True, capture_output=True, text=True,
+                ).stdout.strip()
+
+            git("init", "--quiet")
+            git("commit", "--quiet", "--allow-empty", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            git("switch", "--quiet", "-c", "reviewed")
+            git("commit", "--quiet", "--allow-empty", "-m", "reviewed notes")
+            reviewed = git("rev-parse", "HEAD")
+            git("commit", "--quiet", "--allow-empty", "-m", "unmerged human edits")
+            unmerged = git("rev-parse", "HEAD")
+            git("switch", "--quiet", "--detach", base)
+            git("commit", "--quiet", "--allow-empty", "-m", "squash merge")
+            source = git("rev-parse", "HEAD")
+            predicate = RELEASE["release_branch_merged"]
+            receipt = {"merged_at": "2026-10-01T18:31:40Z",
+                       "head": {"sha": reviewed}, "merge_commit_sha": source}
+            cases = [
+                (receipt, source, True),
+                ({**receipt, "merged_at": None}, source, False),
+                ({**receipt, "head": {"sha": unmerged}}, source, False),
+                ({**receipt, "merge_commit_sha": unmerged}, source, False),
+                (receipt, base, False),
+            ]
+            with mock.patch.dict(predicate.__globals__, ROOT=root):
+                for response, master, expected in cases:
+                    with self.subTest(response=response, master=master):
+                        with mock.patch.dict(predicate.__globals__, github=lambda _: [response]):
+                            self.assertEqual(predicate(reviewed, master), expected)
+                with mock.patch.dict(predicate.__globals__, github=lambda _: []):
+                    self.assertTrue(predicate(base, source))
 
     def test_attested_checksums_exclude_the_provenance_bundle(self):
         with tempfile.TemporaryDirectory(prefix="cantrip-release-sums-") as directory:
