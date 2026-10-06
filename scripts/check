@@ -4,9 +4,9 @@
 # Runs the same gates CI enforces, in order, and stops at the first red
 # gate:
 #   1. Landmark-visible commit subjects
-#   2. cargo fmt --check
-#   3. cargo clippy --locked --all-targets -- -D warnings
-#   4. cargo test --locked
+#   2. cargo fmt --all --check
+#   3. cargo clippy --workspace --locked --all-targets -- -D warnings
+#   4. cargo test --workspace --locked
 #   5. Offline evaluation example tests
 #   6. Installer and release safety tests
 set -euo pipefail
@@ -16,17 +16,17 @@ echo "── check: Landmark-visible commit subjects"
 ./scripts/check-commit-subjects --self-test
 ./scripts/check-commit-subjects
 
-echo "── check: cargo fmt --check"
-cargo fmt --check
+echo "── check: cargo fmt --all --check"
+cargo fmt --all --check
 
-echo "── check: cargo clippy --locked --all-targets -- -D warnings"
-cargo clippy --locked --all-targets -- -D warnings
+echo "── check: cargo clippy --workspace --locked --all-targets -- -D warnings"
+cargo clippy --workspace --locked --all-targets -- -D warnings
 
-echo "── check: cargo test --locked"
-cargo test --locked
+echo "── check: cargo test --workspace --locked"
+cargo test --workspace --locked
 
 echo "── check: offline evaluation example"
-cargo test --locked --example eval
+cargo test --locked --package cantrip --example eval
 
 echo "── check: Omarchy installer"
 python3 -m unittest discover -s integrations/omarchy -p 'test_*.py'

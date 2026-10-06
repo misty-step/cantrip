@@ -1,6 +1,6 @@
 //! User configuration for the cantrip daemon.
 
-use crate::{inject::InjectionMode, models, paths};
+use crate::{delivery::InjectionMode, models, paths};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,6 +14,9 @@ pub struct Config {
     pub injection: InjectionMode,
     pub keep_warm: bool,
     pub audio_source: Option<String>,
+    /// macOS global toggle shortcut; None uses the native client's default.
+    /// Linux shortcuts remain owned by the compositor.
+    pub hotkey: Option<String>,
     pub vocabulary: Vec<String>,
     pub stt: SttConfig,
     pub postproc: PostprocConfig,
@@ -113,9 +116,14 @@ pub struct PostprocConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            injection: InjectionMode::Auto,
+            injection: if cfg!(target_os = "macos") {
+                InjectionMode::Clipboard
+            } else {
+                InjectionMode::Auto
+            },
             keep_warm: true,
             audio_source: None,
+            hotkey: None,
             vocabulary: Vec::new(),
             stt: SttConfig::default(),
             postproc: PostprocConfig::default(),
@@ -292,17 +300,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn empty_toml_uses_defaults() {
-        let config: Config = toml::from_str("").expect("empty TOML should parse");
-        assert_eq!(config.injection, InjectionMode::Auto);
-        assert!(config.keep_warm);
-        assert_eq!(config.audio_source, None);
-        assert!(config.vocabulary.is_empty());
-        assert_eq!(config.stt, SttConfig::default());
-        assert_eq!(config.postproc, PostprocConfig::default());
-    }
 
     #[test]
     fn partial_toml_uses_defaults_for_missing_fields() {

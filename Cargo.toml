@@ -1,47 +1,71 @@
 [package]
 name = "cantrip"
-version = "0.1.3"
+version.workspace = true
 edition = "2021"
-description = "Local-first dictation for Linux: hold a key, speak, get text."
+description = "Local-first dictation for Linux and macOS."
 license = "MIT"
 repository = "https://github.com/misty-step/cantrip"
 homepage = "https://cantrip.mistystep.io"
 readme = "README.md"
 
+[workspace]
+members = ["crates/engine"]
+default-members = [".", "crates/engine"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.3"
+
 [dependencies]
 anyhow = "1"
-base64 = "0.22.1"
+cantrip-engine = { path = "crates/engine" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 dirs = "5"
 transcribe-rs = { version = "0.3", features = ["onnx"] }
-keyring = { version = "3", default-features = false, features = ["async-secret-service", "async-io", "crypto-rust"] }
 ureq = "2"
-tar = "0.4"
-flate2 = "1"
-sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
-dbus = "0.9.12"
-parking_lot = "0.12"
-smithay-client-toolkit = { version = "0.21.1", default-features = false }
-wayland-client = "0.31.14"
-wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
 eframe = "0.29"
 ab_glyph = "0.2"
 epaint_default_fonts = "0.29"
 toml_edit = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = "0.9.12"
+parking_lot = "0.12"
+smithay-client-toolkit = { version = "0.21.1", default-features = false }
+wayland-client = "0.31.14"
+wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", features = ["exception"] }
+block2 = "0.6"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSArray", "NSBundle", "NSDate", "NSError", "NSGeometry", "NSNotification", "NSObjCRuntime", "NSObject", "NSOperation", "NSRunLoop", "NSString", "NSTimer", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "objc2-core-graphics", "NSAccessibility", "NSAccessibilityProtocols", "NSAppearance", "NSApplication", "NSBitmapImageRep", "NSButton", "NSCell", "NSColor", "NSColorSpace", "NSControl", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSMenu", "NSMenuItem", "NSPanel", "NSPasteboard", "NSResponder", "NSRunningApplication", "NSScreen", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioEngine", "AVAudioNode", "AVAudioIONode", "AVAudioFormat", "AVAudioBuffer", "AVAudioTime", "AVAudioTypes", "block2", "objc2-audio-toolbox", "objc2-core-audio-types"] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware"] }
+objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioUnitProperties"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFString"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-foundation", "SMAppService"] }
+global-hotkey = "0.8"
+crossbeam-queue = "0.3"
+
 [features]
 default = []
-cuda = ["transcribe-rs/ort-cuda"]
+cuda = ["cantrip-engine/cuda", "transcribe-rs/ort-cuda"]
 
 [dev-dependencies]
 hound = "3.5"
+base64 = "0.22.1"
+sha2 = "0.10"
 
 [profile.release]
 lto = "thin"

@@ -1,11 +1,11 @@
 # Cantrip
 
-Local-first dictation for Linux. Press a shortcut, speak, press it again.
-Cantrip transcribes on your CPU and delivers the finished text when the
-destination can be verified; explicit clipboard delivery is available elsewhere.
+Local-first dictation for Linux and macOS. Press a shortcut, speak, press it again.
+Cantrip transcribes on your CPU. Linux can deliver to a verified destination;
+macOS uses explicit clipboard delivery and manual paste, never automatic keys.
 
 [Website](https://cantrip.mistystep.io) ·
-[Download a release](https://github.com/misty-step/cantrip/releases/latest) ·
+[Download a Linux release](https://github.com/misty-step/cantrip/releases/latest) ·
 [Install](docs/INSTALLATION.md) ·
 [First dictation](docs/USAGE.md#first-dictation)
 
@@ -17,9 +17,10 @@ destination can be verified; explicit clipboard delivery is available elsewhere.
 - **Quiet native feedback.** A passive pixel HUD shows microphone activity and
   processing without taking focus or inventing progress. Native Settings and
   Actions handle configuration and selected-recording recovery.
-- **Guarded delivery.** Automatic paste/typing requires supported Hyprland/logind
-  focus and session history. Other desktops can use clipboard/manual paste.
-  An uncertain handoff is not automatically retried.
+- **Guarded delivery.** Linux automatic paste/typing requires supported
+  Hyprland/logind focus and session history. Other Linux desktops and macOS use
+  clipboard/manual paste. An uncertain handoff is not automatically retried;
+  existing macOS Auto/Paste/Type choices defer without clipboard or key effects.
 - **Explicit choices.** Cleanup and cloud providers are optional; cleanup and
   telemetry are off by default. Stopped audio and plaintext transcript history
   are retained locally until deliberately removed.
@@ -35,7 +36,7 @@ then [first attended dictation](docs/USAGE.md#first-dictation). Models, shortcut
 and any startup service are separate explicit setup steps; the installer changes
 only the executable.
 
-### Build from source
+### Build Linux from source
 
 Source development is separate from release installation. With rustup and a C
 linker/toolchain installed, use the exact Rust version pinned in
@@ -78,16 +79,31 @@ changes. For published archives, use the installer's
 [update and rollback operations](docs/INSTALLATION.md#update-and-roll-back)
 instead of this source-build procedure.
 
+### Build a native macOS app
+
+macOS 13.3+ has a native menu-bar app, microphone capture, passive HUD, and
+login Keychain integration. There is **no published macOS release**. Build on a
+matching native Apple Silicon or Intel Mac using the
+[macOS source-build procedure](docs/INSTALLATION.md#macos-native-app-from-source).
+It produces a self-contained `Cantrip.app`; Rust, Python, and Xcode are build
+tools, not runtime requirements. An explicit ad-hoc **development** build is
+neither hardened nor notarized. Production packaging requires Developer ID
+signing, accepted notarization, stapling, and a passing Gatekeeper assessment;
+missing prerequisites fail closed.
+
 ## Requirements
 
 See [binary runtime prerequisites](docs/INSTALLATION.md#runtime-prerequisites-and-support)
-and [desktop capabilities](docs/DESKTOP.md#supported-desktops). A working
-PipeWire session with `pw-record` is needed for capture; clipboard/paste needs
-`wl-copy`. Automatic keys and the passive HUD have separate compositor
-requirements. `doctor` and an idle daemon are not proof of a successful
-microphone-to-editor dictation.
+and [desktop capabilities](docs/DESKTOP.md#supported-desktops). On Linux, a
+working PipeWire session with `pw-record` is needed for capture;
+clipboard/paste needs `wl-copy`. Automatic keys and the passive HUD have
+separate compositor requirements. On macOS, capture uses AVAudioEngine with
+explicit microphone permission; delivery is clipboard/manual paste. `doctor`
+and an idle daemon are not proof of a microphone-to-editor dictation.
 
 ## User service (graphical session)
+
+This section is the Linux service route; macOS startup belongs to the native app.
 
 The optional [user-service procedure](docs/DESKTOP.md#user-service-graphical-session)
 owns service installation, one-owner checks, session environment, and readiness.
@@ -149,20 +165,47 @@ $4.50 commission spending cap. [Published speech results](https://cantrip.mistys
 keep our measurements separate from cited independent and vendor benchmarks.
 Reproduction, privacy, and scheduling procedures: [evaluation guide](docs/EVALUATION.md).
 
+## Architecture
+
+The Rust workspace has two crates and one version authority in
+`workspace.package.version`:
+
+- [`cantrip-engine`](crates/engine/) owns the dictation workflow, cancellation,
+  durable per-take archive/recovery, configuration, IPC, models, STT, cleanup,
+  and telemetry. There is one workflow and one history store, not one per OS.
+- The root `cantrip` crate is the CLI/native host. Its
+  [`Platform`, `Recorder`, and `DeliveryPermit` ports](crates/engine/src/ports.rs)
+  supply capture, stop-time session/destination history, and native delivery
+  mechanisms; policy and durable transitions remain in the engine.
+- Linux retains PipeWire capture, Hyprland/logind guarded keys, and its
+  supervised Wayland HUD process. The macOS accessory app owns AppKit on the
+  main thread and the shared engine on a std thread, or attaches to an existing
+  engine without taking ownership. Its `daemon` command is engine-only, with
+  no menu bar or HUD.
+
+Both hosts keep the std-thread + mpsc model; neither introduces an async
+runtime or another durable work ledger. See
+[ADR 0031](docs/adr/0031-shared-engine-native-macos.md) for boundaries, manual-paste
+policy, packaging, and verification limits.
+
 ## Development
 
-After installing the pinned toolchain as above:
+For Linux development, after installing the pinned toolchain as above:
 
 ```sh
 cargo build --locked
 ./scripts/check
 ```
 
-`scripts/check` is the clone-to-green command: it runs `cargo fmt --check`,
-`cargo clippy --locked --all-targets -- -D warnings`, `cargo test --locked`,
-the offline `cargo test --locked --example eval` suite, and installer/release
-safety tests (Python 3.11+), stopping at the first red gate. The example tests
-do not contact providers.
+`scripts/check` is the Linux clone-to-green command: it runs
+`cargo fmt --all --check`,
+`cargo clippy --workspace --locked --all-targets -- -D warnings`,
+`cargo test --workspace --locked`, the offline
+`cargo test --locked --package cantrip --example eval` suite, and
+installer/release safety tests (Python 3.11+), stopping at the first red gate.
+The example tests do not contact providers. On macOS, use the native
+[development and verification procedures](docs/INSTALLATION.md#macos-development-and-verification),
+including the Intel source-runtime preparation before Cargo gates.
 
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`
@@ -170,6 +213,10 @@ do not contact providers.
 - **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): fmt, clippy
   `-D warnings`, tests, secret scan, and on `master` the Landmark-prepared
   verified Linux release.
+- **Native macOS CI** ([`.github/workflows/macos.yml`](.github/workflows/macos.yml)):
+  matching arm64/Intel workspace gates, explicit development packaging, and
+  relocated public-fixture verification. Check the actual run results; the
+  workflow definition alone does not establish a platform pass.
 - **Website and documentation source:** [`site/`](site/). The five user guides
   below are canonical Markdown, rendered by the site rather than copied into
   a second web manual. Website release data comes from published release assets,
@@ -198,7 +245,7 @@ read-only; the runner copies it into disposable history. Review its opening word
 before sharing the recording or screenshots. Private transcripts are not fixtures
 to commit or upload automatically.
 
-### Review the native HUD
+### Review the Linux native HUD
 
 Open the local developer gallery without starting dictation:
 
@@ -224,18 +271,46 @@ native window, not a public website route or a separate development server.
 The existing `hud --screenshot PATH --state NAME` command still captures the
 actual layer-shell surface for compositor-specific verification.
 
+### Verify the relocated macOS app
+
+After building on the matching native Mac:
+
+```sh
+python3 scripts/verify-macos \
+  --app dist/mac-arm64-dev/Cantrip.app \
+  --target aarch64-apple-darwin \
+  --output /path/to/new/evidence-directory
+```
+
+The helper relocates the real bundle, verifies its signature/Mach-O identity,
+and runs with disposable HOME/XDG directories and a system-only runtime PATH.
+It explicitly downloads the public local model and transcribes the checked JFK
+WAV, checks missing-model refusal without implicit downloads, tests denied or
+invalid-device capture without live audio, and replays explicit Auto/Paste/Type
+to terminal Deferred without rewriting config. It also checks graceful daemon
+termination and saves five states of the production macOS HUD as **offscreen
+NSView pixels**, plus a sanitized `verification.json`. A logged-in WindowServer
+session is needed for those pixels; `--skip-hud` requires an explicit
+`--hud-unavailable-reason` and records the omission rather than a pass.
+
+Offscreen pixels prove rendering, not live panel focus or microphone-to-editor
+delivery. Validate those with the [attended Mac trial](docs/USAGE.md#first-dictation-macos-attended-clipboard-trial).
+The helper does not grant permissions, capture live microphone audio, or touch
+the general clipboard. Record actual platform/signing results in the PR; do not
+infer Intel or production signing success from an arm64 development smoke.
+
 ## Work and documentation ownership
 
 Work starts from the user's current request, checked against live code and
-overlapping work. Linear owns current work, prioritization, and selected unresolved
-opportunities; neither an old issue nor a document authorizes automatic intake.
+overlapping work. Follow the existing work record when available; neither an old
+issue nor a document authorizes automatic intake.
 Powder is retired. [ADR 0017](docs/adr/0017-powder-board-of-record.md) preserves
 the earlier migration and its rejection of duplicate boards, not live routing.
 GitHub issue history remains context rather than a second backlog.
 
 The repository owns version-bound product/system contracts, accepted technical
 decisions, portable procedures, and curated public/synthetic eval inputs and
-baselines. Linear holds safe work summaries and links to proof; raw, large, or
+baselines. Work records hold safe summaries and links to proof; raw, large, or
 sensitive run output belongs in approved retained artifact storage, subject to
 the existing privacy boundary. Owner-private recording history stays local and
 never becomes a repository fixture or work attachment automatically.
@@ -255,7 +330,7 @@ predecessor whose pipeline architecture and privacy rules carry over.
 
 ## Docs
 
-- [Install](docs/INSTALLATION.md) — verified releases and binary lifecycle.
+- [Install](docs/INSTALLATION.md) — verified Linux releases, native Mac builds, and lifecycle.
 - [Use](docs/USAGE.md) — first dictation, controls, outcomes, recovery, and CLI.
 - [Configure](docs/CONFIGURATION.md) — settings and explicit provider choices.
 - [Desktop](docs/DESKTOP.md) — support, shortcuts, startup owners, and diagnostics.
@@ -271,3 +346,5 @@ predecessor whose pipeline architecture and privacy rules carry over.
     painted as a [persistent pixel field](docs/adr/0023-persistent-pixel-field.md).
   - [Private history and fixture promotion](docs/adr/0013-local-transcript-history.md)
     and [eval-driven post-processing](docs/adr/0012-eval-driven-postprocessing.md).
+  - [Shared engine and native macOS](docs/adr/0031-shared-engine-native-macos.md) —
+    platform ports, explicit manual paste, packaging, and proof boundaries.

@@ -1,11 +1,15 @@
 # Configuration guide
 
-Cantrip reads one TOML file. Examples use `"$HOME/.local/bin/cantrip"`; substitute
-your installed path if different. In command descriptions, `cantrip` is shorthand
-for that executable, not an assumption that installation changed `PATH`.
+Cantrip reads one TOML file. Linux shell examples use
+`"$HOME/.local/bin/cantrip"`; on Mac substitute the installed app executable,
+for example `"/Applications/Cantrip.app/Contents/MacOS/cantrip"`. Substitute
+your actual location if different. `cantrip` in command descriptions is shorthand
+for that platform executable, not an assumption that installation changed `PATH`.
 
 `cantrip config path` prints the file's location (normally
-`~/.config/cantrip/config.toml`). `config show` loads the file, applies defaults,
+`~/.config/cantrip/config.toml` on Linux or
+`~/Library/Application Support/cantrip/config.toml` on Mac).
+`config show` loads the file, applies defaults,
 validates it, and serializes the resulting effective configuration; it does
 **not** print the original file/comments or query the running daemon's current
 snapshot. `config init` creates the annotated defaults only when the file does
@@ -26,7 +30,7 @@ jobs keep their STT, cleanup, and delivery snapshot; reload affects subsequent
 operations, not in-flight inference. `audio_source` applies to the next capture.
 `keep_warm` governs model preload at startup and needs a daemon restart.
 
-This example keeps the local-first defaults: Parakeet is selected but its
+This Linux example keeps the local-first defaults: Parakeet is selected but its
 weights must be [downloaded deliberately](USAGE.md#2-download-the-local-model-deliberately);
 cleanup remains disabled with no cleanup model selected. Do not replace an
 existing file wholesale with the example. Enable cleanup only after the
@@ -58,14 +62,33 @@ instructions = ""         # optional extra style guidance
 labels = false             # true = continuous accessibility stage labels
 # reduced_motion = true    # true/false override; omit to follow desktop preference
 ```
+On Mac the same local-first policy applies, but new configuration uses
+`injection = "clipboard"`. The top-level optional `hotkey = "Control+Alt+Space"`
+sets the native app's toggle shortcut (Option is the Mac name for Alt); omission
+uses that default. Settings can edit it. Linux ignores this field for shortcut
+ownership and keeps compositor bindings. Inspect Mac input-source shortcuts for
+conflicts before registering a replacement; a failed re-registration leaves the
+old shortcut active with a notice. Media keys are not supported: no Input
+Monitoring grant is needed or requested.
+
 
 ## Capture and model preload
 
-Omit `audio_source` to use the default PipeWire input. Set it to a specific
-PipeWire node only when you intend to select that microphone; it applies on the
-next capture. A `doctor` report that finds `pw-record` is not proof that the
-selected input records sound. Make an [attended trial](USAGE.md#first-dictation)
+On Linux, omit `audio_source` to use the default PipeWire input. Set it to a
+specific PipeWire node only when you intend to select that microphone; it applies
+on the next capture. A `doctor` report that finds `pw-record` is not proof that
+the selected input records sound. Make an [attended trial](USAGE.md#first-dictation)
 after changing it.
+
+On Mac, `audio_source` stores the stable **CoreAudio input UID**, not its
+display name or a transient numeric device index. Settings lists microphones
+and preserves an unavailable selection visibly. Omission chooses System default;
+an explicitly selected UID that disappears or changes refuses capture rather
+than falling back to another microphone. Microphone permission is requested only
+by a deliberate Settings/menu action in Cantrip.app. Capture and `doctor` do not
+prompt or broaden permissions. Follow the
+[Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
+after selecting a device or granting access.
 
 `keep_warm` controls local-model preload when the daemon starts. Changing it
 requires a restart through the [existing startup owner](DESKTOP.md#keep-one-startup-owner),
@@ -94,10 +117,12 @@ Also set `model` and `api_key_id`. Store the credential id ahead of time:
 "$HOME/.local/bin/cantrip" key set openai   # prompts for the key; stored in the OS keyring
 ```
 
-An unlocked Secret Service keyring and the same user-session D-Bus connection
-must be available when the daemon uses that id. A configured id is not proof
-that a key exists or the provider accepts it. Cloud recognition sends audio to
-the chosen endpoint; review the [network/content boundary](PRIVACY.md#what-leaves-the-machine)
+On Linux, an unlocked Secret Service keyring and the same user-session D-Bus
+connection must be available when the daemon uses that id. On Mac, credentials
+use the native login Keychain; do not transplant Linux D-Bus setup or put keys in
+the TOML file. A configured id is not proof that a key exists or the provider
+accepts it. Cloud recognition sends audio to the chosen endpoint; review the
+[network/content boundary](PRIVACY.md#what-leaves-the-machine)
 before opting in. Evaluated provider comparisons live in the
 [evaluation guide](https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md),
 not in the default configuration.
@@ -295,6 +320,8 @@ you dictate often.
 
 ## `injection`
 
+**Linux delivery modes (unchanged):**
+
 - `auto` – paste first with `wl-copy` and a native Wayland `Ctrl+Shift+V` chord.
   If the keyboard backend is unavailable before any input, copy-only is possible
   after a fresh safety check. If clipboard setup fails before handoff, native
@@ -317,6 +344,21 @@ breaks and uses `Ctrl+Shift+V` for terminal compatibility. Compositor/helper
 acknowledgement does not prove the destination application accepted the text.
 An uncertain outcome may have changed the clipboard or sent some keys; inspect
 the destination before retrying. Cantrip never retries an uncertain handoff.
+
+**macOS delivery:** new configuration defaults to `clipboard`, using native
+NSPasteboard for manual **Command+V**. Unicode and paragraph breaks are preserved.
+The write uses `CurrentHostOnly` to avoid Universal Clipboard publication;
+Cantrip never reads or restores the previous clipboard. Clipboard managers and
+other software running as you can still retain it.
+
+Mac `auto`, `paste`, and `type` are unsupported, not alternative permissions to
+enable. Existing configured values remain visible and preserved in Settings
+with a warning; new selections offer Clipboard only. Unsupported modes defer
+before opening the pasteboard or sending keys, for complete and partial text,
+with **no automatic clipboard fallback**. Explicit Copy or
+`recover --clipboard` is a separate operator action. Accessibility permission
+cannot make these modes supported; neither Input Monitoring nor Screen
+Recording is required for the native app, shortcut, or panel.
 
 ## `[hud]` — passive status
 

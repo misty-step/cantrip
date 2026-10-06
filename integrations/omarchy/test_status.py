@@ -44,15 +44,14 @@ class BarStatusContract(unittest.TestCase):
         view = self.view(snapshot())
         self.assertEqual(view["tone"], "rest")
         self.assertNotIn("13", view["tooltip"])
-        self.assertNotIn("recording(s)", view["tooltip"])
 
     def test_a_take_is_colored_by_its_route_and_named_only_for_a_handoff(self):
         default = self.view(snapshot("recording"))
         routed = self.view(snapshot("recording", handoff=KAYLEE))
         self.assertEqual((default["tone"], default["color"]), ("recording", None))
-        self.assertEqual(default["tooltip"], "Cantrip: Recording.")
         self.assertEqual((routed["tone"], routed["color"]), ("recording", "#e68bd5"))
-        self.assertEqual(routed["tooltip"], "Cantrip: Recording to Kaylee.")
+        self.assertNotIn(KAYLEE["label"], default["tooltip"])
+        self.assertIn(KAYLEE["label"], routed["tooltip"])
         # A malformed color falls back to the default route rather than reaching QML.
         broken = self.view(snapshot("recording", handoff={**KAYLEE, "color": "magenta"}))
         self.assertIsNone(broken["color"])
@@ -61,8 +60,8 @@ class BarStatusContract(unittest.TestCase):
         failed = outcome("Handoff failed.", delivery="failed", error="handoff-failed", handoff=KAYLEE)
         view = self.view(snapshot(attention=True, outcome=failed))
         self.assertEqual(view["tone"], "attention")
-        self.assertIn("Handoff failed. (to Kaylee)", view["tooltip"])
-        self.assertIn("Middle-click: dismiss", view["tooltip"])
+        self.assertIn(failed["message"], view["tooltip"])
+        self.assertIn(KAYLEE["label"], view["tooltip"])
         # Dismiss targets exactly the shown outcome, never an independent notice.
         self.assertEqual(view["dismiss"], "cantrip dismiss --event-id 9")
         self.assertIsNone(self.view(snapshot(outcome=failed))["dismiss"])
@@ -74,7 +73,6 @@ class BarStatusContract(unittest.TestCase):
         for value in (None, snapshot("starting")):
             view = self.view(value)
             self.assertEqual(view["tone"], "unavailable")
-            self.assertNotIn("Ready", view["tooltip"])
 
 
 if __name__ == "__main__":

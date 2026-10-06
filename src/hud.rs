@@ -1,33 +1,26 @@
-//! Passive, bottom-anchored Wayland status instrument.
+//! Passive, bottom-anchored status instrument shared by every desktop.
 //!
 //! A signed pixel instrument, fluid work states, and words for actionable exceptions.
-//! The daemon owns operations, outcomes and acknowledgement. The HUD never sends
+//! The engine owns operations, outcomes and acknowledgement. The HUD never sends
 //! mutations, takes focus, handles pointer input, or invents audio/progress.
+//! The model and software painter live here; `wayland` and `macos` only size,
+//! place and present its pixels on their native surfaces.
 
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use anyhow::{Context, Result};
-use clap::ValueEnum;
-use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
-    delegate_registry,
-    output::{OutputHandler, OutputState},
-    registry::{ProvidesRegistryState, RegistryState},
-    shell::{
-        wlr_layer::{
-            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-            LayerSurfaceConfigure,
-        },
-        WaylandSurface,
+use cantrip_engine::{
+    ipc::{
+        self, AudioSignal, AudioWaveform, Cleanup, Completeness, Delivery, StateKind,
+        StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
     },
-    shm::{slot::SlotPool, Shm, ShmHandler},
+    pipeline::Stage,
 };
+use clap::ValueEnum;
 use std::{
     borrow::Cow,
     fs,
-    io::Read,
     os::fd::AsRawFd,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
@@ -35,22 +28,39 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use wayland_client::{
-    globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
-    Connection, EventQueue, QueueHandle,
-};
 
-use crate::{
-    ipc::{
-        self, AudioSignal, AudioWaveform, Cleanup, Completeness, Delivery, StateKind,
-        StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
-    },
-    pipeline::Stage,
-    theme::{self, Palette},
-};
+use crate::theme::{self, Palette};
 
 pub mod gallery;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
+#[cfg(target_os = "linux")]
+mod wayland;
+
+#[cfg(target_os = "macos")]
+use macos as surface;
+#[cfg(target_os = "linux")]
+use wayland as surface;
+
+/// Where captions send the operator for a deliberate action: the Linux Actions
+/// window, or the macOS menu-bar menu whose items carry the same names.
+#[cfg(target_os = "macos")]
+macro_rules! deliberately {
+    ($action:literal) => {
+        concat!("Cantrip menu → ", $action)
+    };
+}
+#[cfg(not(target_os = "macos"))]
+macro_rules! deliberately {
+    ($action:literal) => {
+        concat!("Cantrip actions → ", $action)
+    };
+}
+
+#[cfg(target_os = "macos")]
+const RECORDINGS_ACTION: &str = "Cantrip menu → Recordings and recovery";
+#[cfg(not(target_os = "macos"))]
+const RECORDINGS_ACTION: &str = "Cantrip → Recordings and recovery";
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -161,16 +171,17 @@ const SCREENSHOT_WAVEFORM: AudioWaveform = [
 
 /// Shared with the daemon's HUD-presence check. Keep the file alive while running.
 pub(crate) fn acquire_instance_lock() -> Result<Option<fs::File>> {
-    acquire_lock_on(&crate::paths::hud_lock_path()?)
+    acquire_lock_on(&cantrip_engine::paths::hud_lock_path()?)
 }
 
-fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
+/// One process per lock file; `None` while another process holds it.
+pub(crate) fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
     let file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
         .open(path)
-        .with_context(|| format!("opening HUD lock {}", path.display()))?;
+        .with_context(|| format!("opening instance lock {}", path.display()))?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(Some(file));
     }
@@ -178,7 +189,7 @@ fn acquire_lock_on(path: &Path) -> Result<Option<fs::File>> {
     if error.kind() == std::io::ErrorKind::WouldBlock {
         return Ok(None);
     }
-    Err(error).with_context(|| format!("locking HUD instance file {}", path.display()))
+    Err(error).with_context(|| format!("locking instance file {}", path.display()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,7 +525,7 @@ impl Model {
                         }
                         .to_owned();
                         if result.caption.action.is_empty() {
-                            result.caption.action = "Cantrip actions → Settings".to_owned();
+                            result.caption.action = deliberately!("Settings").to_owned();
                         }
                     }
                     self.result = Some(result);
@@ -562,7 +573,7 @@ impl Model {
                     } else {
                         "The previous take's result is unknown.".to_owned()
                     },
-                    action: "Cantrip → Recordings and recovery".to_owned(),
+                    action: RECORDINGS_ACTION.to_owned(),
                 },
                 visibility: Visibility::Until(now + NOTICE_HOLD),
                 dwell: NOTICE_HOLD,
@@ -688,7 +699,7 @@ impl Model {
                     Caption {
                         title: "Cantrip connection lost".to_owned(),
                         detail: "Recording and saved-audio status unknown.".to_owned(),
-                        action: "Cantrip actions → Check setup".to_owned(),
+                        action: deliberately!("Check setup").to_owned(),
                     },
                     None,
                     None,
@@ -724,7 +735,7 @@ impl Model {
                             Caption {
                                 title: "Input status unavailable".to_owned(),
                                 detail: "Capture is not confirmed by the input monitor.".to_owned(),
-                                action: "Cantrip actions → Settings".to_owned(),
+                                action: deliberately!("Settings").to_owned(),
                             }
                         } else if status.hud.labels {
                             Caption::title("Starting microphone…")
@@ -805,7 +816,7 @@ impl Model {
                     Caption {
                         title: "Cantrip status unavailable".to_owned(),
                         detail: "Recording and delivery status unknown.".to_owned(),
-                        action: "Cantrip actions → Check setup".to_owned(),
+                        action: deliberately!("Check setup").to_owned(),
                     },
                     None,
                     None,
@@ -1147,9 +1158,20 @@ fn present_outcome(
         }
         Completeness::Failed => caption.title = outcome.message.clone(),
         Completeness::Complete => match outcome.delivery {
-            Delivery::Uncertain => caption.title = "Delivery uncertain. Check the app.".to_owned(),
+            Delivery::Uncertain => {
+                caption.title = if cfg!(target_os = "macos") && outcome.handoff.is_none() {
+                    "Copy uncertain. Check clipboard before pasting."
+                } else {
+                    "Delivery uncertain. Check the app."
+                }
+                .to_owned();
+            }
             Delivery::Deferred => {
-                caption.title = "Delivery paused. Text was not inserted.".to_owned()
+                caption.title = if cfg!(target_os = "macos") && outcome.handoff.is_none() {
+                    "Keyboard delivery unavailable. Choose Clipboard in Settings.".to_owned()
+                } else {
+                    "Delivery paused. Text was not inserted.".to_owned()
+                };
             }
             Delivery::Failed => caption.title = "Delivery failed.".to_owned(),
             Delivery::Cancelled => caption.title = "Cancelled".to_owned(),
@@ -1201,18 +1223,18 @@ fn present_outcome(
     if !delivered && !(copied && outcome.completeness == Completeness::Complete) {
         caption.action =
             if text && status.capabilities.copy && outcome.completeness == Completeness::Complete {
-                "Cantrip actions → Copy this transcript"
+                deliberately!("Copy this transcript")
             } else if audio && status.capabilities.recover && status.capabilities.local_model {
-                "Cantrip actions → Recover locally to clipboard"
+                deliberately!("Recover locally to clipboard")
             } else if audio && status.capabilities.recover && status.capabilities.remote_configured
             {
-                "Cantrip actions → Recover with configured provider to clipboard"
+                deliberately!("Recover with configured provider to clipboard")
             } else if audio && !status.capabilities.local_model {
-                "Cantrip actions → Install local model"
+                deliberately!("Install local model")
             } else if text && status.capabilities.copy {
-                "Cantrip actions → Copy this transcript"
+                deliberately!("Copy this transcript")
             } else if attention {
-                "Cantrip actions → Check setup"
+                deliberately!("Check setup")
             } else {
                 ""
             }
@@ -1579,7 +1601,7 @@ fn pixel_noise(cell: usize, tick: u32) -> f32 {
     (value >> 8) as f32 / 0x00ff_ffff as f32
 }
 
-fn format_elapsed(seconds: u64) -> String {
+pub(crate) fn format_elapsed(seconds: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
@@ -1603,13 +1625,13 @@ impl Poller {
             .name("cantrip-hud-status".to_owned())
             .spawn(move || {
                 let mut palette = theme::load();
-                let mut reduced_motion = desktop_reduced_motion();
+                let mut reduced_motion = surface::desktop_reduced_motion();
                 let mut preference_at = Instant::now();
                 while !stopped.load(Ordering::Relaxed) {
                     let started = Instant::now();
                     if started.duration_since(preference_at) >= PREFERENCE_INTERVAL {
                         palette = theme::load();
-                        reduced_motion = desktop_reduced_motion();
+                        reduced_motion = surface::desktop_reduced_motion();
                         preference_at = Instant::now();
                     }
                     let update = PollUpdate {
@@ -1622,7 +1644,7 @@ impl Poller {
                         Err(mpsc::TrySendError::Disconnected(_)) => break,
                     }
                     // A blocked IPC request or desktop preference provider never
-                    // stalls Wayland dispatch or waveform settling.
+                    // stalls the native surface or waveform settling.
                     thread::sleep(POLL_INTERVAL.saturating_sub(started.elapsed()));
                 }
             })
@@ -1637,83 +1659,15 @@ impl Drop for Poller {
     }
 }
 
-/// Query the preference belonging to the running desktop, not an unrelated
-/// installed settings service. Unknown desktops can use the explicit config.
-fn desktop_reduced_motion() -> Option<bool> {
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    if desktop.split(':').any(|name| name == "hyprland") {
-        let output = preference_output("hyprctl", &["-j", "getoption", "animations:enabled"])?;
-        let value: serde_json::Value = serde_json::from_str(&output).ok()?;
-        value
-            .get("bool")
-            .and_then(serde_json::Value::as_bool)
-            .or_else(|| {
-                value
-                    .get("int")
-                    .and_then(serde_json::Value::as_i64)
-                    .map(|value| value != 0)
-            })
-            .map(|enabled| !enabled)
-    } else if desktop.split(':').any(|name| name == "gnome") {
-        match preference_output(
-            "gsettings",
-            &["get", "org.gnome.desktop.interface", "enable-animations"],
-        )?
-        .trim()
-        {
-            "false" => Some(true),
-            "true" => Some(false),
-            _ => None,
-        }
-    } else {
-        None
-    }
-}
-
-fn preference_output(program: &str, args: &[&str]) -> Option<String> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_millis(250);
-    let success = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break false;
-            }
-        }
-    };
-    if !success {
-        return None;
-    }
-    let mut text = String::new();
-    child
-        .stdout
-        .take()?
-        .take(4096)
-        .read_to_string(&mut text)
-        .ok()?;
-    Some(text)
-}
-
-/// Run the native layer-shell HUD. Screenshot mode skips IPC and the instance
-/// lock and renders a composed scenario, including deliberately aged transitions.
+/// Run the native HUD surface. Screenshot mode skips IPC and the instance lock
+/// and renders a composed scenario, including deliberately aged transitions.
 pub fn run(
     screenshot: Option<PathBuf>,
     state: Option<ScreenshotState>,
     handoff: Option<String>,
 ) -> Result<()> {
     let visual_proof = screenshot.is_some();
-    let result = run_native(screenshot, state, handoff);
+    let result = surface::run_native(screenshot, state, handoff);
     if visual_proof {
         return result;
     }
@@ -1721,206 +1675,6 @@ pub fn run(
         tracing::warn!("[HUD] unavailable: {error:#}");
     }
     Ok(())
-}
-
-fn run_native(
-    screenshot: Option<PathBuf>,
-    state: Option<ScreenshotState>,
-    handoff: Option<String>,
-) -> Result<()> {
-    let _lock = if screenshot.is_some() {
-        None
-    } else {
-        match acquire_instance_lock()? {
-            Some(file) => Some(file),
-            None => return Ok(()),
-        }
-    };
-    let connection = Connection::connect_to_env().context("connecting HUD to Wayland")?;
-    let (globals, mut queue) =
-        registry_queue_init(&connection).context("reading Wayland globals")?;
-    let qh = queue.handle();
-    let compositor = CompositorState::bind(&globals, &qh).context("binding HUD compositor")?;
-    let layer_shell = LayerShell::bind(&globals, &qh).context("binding HUD layer shell")?;
-    let shm = Shm::bind(&globals, &qh).context("binding HUD shared memory")?;
-    let pool = SlotPool::new((SURFACE_WIDTH * SURFACE_HEIGHT * 8) as usize, &shm)
-        .context("allocating HUD buffer pool")?;
-    let now = Instant::now();
-    let model = if screenshot.is_some() {
-        // A preview handoff is the first target in the live theme, like a real
-        // single configured target.
-        let handoff = handoff.map(|label| ipc::Handoff {
-            name: label.to_lowercase(),
-            color: theme::load().target(0),
-            label,
-        });
-        screenshot_model(
-            state.unwrap_or(ScreenshotState::Recording),
-            now,
-            handoff.as_ref(),
-        )
-    } else {
-        Model::new(now)
-    };
-    let mut hud = HudState {
-        registry_state: RegistryState::new(&globals),
-        output_state: OutputState::new(&globals, &qh),
-        compositor,
-        layer_shell,
-        shm,
-        pool,
-        layer: None,
-        layer_output: None,
-        configured: false,
-        visible: false,
-        frame_pending: false,
-        width: SURFACE_WIDTH,
-        height: SURFACE_HEIGHT,
-        requested_size: (SURFACE_WIDTH, SURFACE_HEIGHT),
-        buffer_scale: 1,
-        font: FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR)
-            .context("loading HUD typeface")?,
-        palette: theme::load(),
-        model,
-        last_render: None,
-        last_refresh: now,
-        last_status: now,
-        screenshot,
-        screenshot_at: now,
-        screenshot_done: false,
-        surface_lifecycle: SurfaceLifecycle::WaitingForOutput,
-    };
-    hud.create_layer(&qh)?;
-    queue
-        .roundtrip(&mut hud)
-        .context("configuring HUD surface")?;
-    let poller = if hud.screenshot.is_none() {
-        Some(Poller::start()?)
-    } else {
-        None
-    };
-    loop {
-        let now = Instant::now();
-        if let Some(poller) = &poller {
-            while let Ok(update) = poller.receiver.try_recv() {
-                hud.palette = update.palette;
-                if let Some(reduced) = update.reduced_motion {
-                    hud.model.desktop_reduced_motion = reduced;
-                }
-                match update.status {
-                    Ok(status) => hud.model.apply(status, now),
-                    Err(()) => hud.model.disconnected(now),
-                }
-                hud.last_refresh = now;
-                hud.last_status = now;
-            }
-            if now.duration_since(hud.last_refresh) >= POLL_INTERVAL {
-                hud.model.refresh_connection(hud.last_status, now);
-                hud.last_refresh = now;
-            }
-        }
-        if hud.layer.is_none()
-            && hud.surface_lifecycle.can_create()
-            && hud.output_state.outputs().next().is_some()
-        {
-            hud.create_layer(&qh)?;
-        }
-        hud.redraw(&qh, now)?;
-        if hud.screenshot_done {
-            return Ok(());
-        }
-        if hud.screenshot.is_some()
-            && now.duration_since(hud.screenshot_at) > Duration::from_secs(5)
-        {
-            anyhow::bail!("compositor did not configure the HUD screenshot surface");
-        }
-        let interval = if !hud.frame_pending && hud.model.animate(now) {
-            FRAME_INTERVAL
-        } else {
-            POLL_INTERVAL
-        };
-        timed_dispatch(&mut queue, &mut hud, interval)?;
-    }
-}
-
-fn timed_dispatch(
-    queue: &mut EventQueue<HudState>,
-    data: &mut HudState,
-    timeout: Duration,
-) -> Result<()> {
-    queue.flush()?;
-    let Some(guard) = queue.prepare_read() else {
-        queue.dispatch_pending(data)?;
-        return Ok(());
-    };
-    let mut pollfd = libc::pollfd {
-        fd: guard.connection_fd().as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ready = unsafe { libc::poll(&mut pollfd, 1, timeout.as_millis() as i32) };
-    if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-        return Err(std::io::Error::last_os_error()).context("polling HUD Wayland socket");
-    }
-    if ready > 0 && pollfd.revents & libc::POLLIN != 0 {
-        guard.read().context("reading HUD Wayland events")?;
-    } else {
-        drop(guard);
-    }
-    queue.dispatch_pending(data)?;
-    Ok(())
-}
-
-struct HudState {
-    registry_state: RegistryState,
-    output_state: OutputState,
-    compositor: CompositorState,
-    layer_shell: LayerShell,
-    shm: Shm,
-    pool: SlotPool,
-    layer: Option<LayerSurface>,
-    layer_output: Option<wl_output::WlOutput>,
-    configured: bool,
-    visible: bool,
-    frame_pending: bool,
-    width: u32,
-    height: u32,
-    requested_size: (u32, u32),
-    buffer_scale: u32,
-    font: FontRef<'static>,
-    palette: Palette,
-    model: Model,
-    last_render: Option<RenderKey>,
-    last_refresh: Instant,
-    last_status: Instant,
-    screenshot: Option<PathBuf>,
-    screenshot_at: Instant,
-    screenshot_done: bool,
-    surface_lifecycle: SurfaceLifecycle,
-}
-
-/// A compositor close is an instruction, not proof that an output vanished.
-/// Only an actual output event can authorize another surface after closure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SurfaceLifecycle {
-    WaitingForOutput,
-    Open,
-    Closed,
-}
-
-impl SurfaceLifecycle {
-    fn can_create(self) -> bool {
-        self == Self::WaitingForOutput
-    }
-    fn opened(&mut self) {
-        *self = Self::Open;
-    }
-    fn closed(&mut self) {
-        *self = Self::Closed;
-    }
-    fn output_changed(&mut self) {
-        *self = Self::WaitingForOutput;
-    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -1935,315 +1689,166 @@ struct RenderKey {
     palette: Palette,
 }
 
-impl HudState {
-    fn create_layer(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
-        let surface = self.compositor.create_surface(qh);
-        let layer = self.layer_shell.create_layer_surface(
-            qh,
-            surface,
-            Layer::Overlay,
-            Some("cantrip-hud"),
-            None,
-        );
-        layer.set_anchor(Anchor::BOTTOM);
-        layer.set_margin(0, 0, 36, 0);
-        layer.set_size(self.requested_size.0, self.requested_size.1);
-        layer.set_exclusive_zone(0);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        let empty = Region::new(&self.compositor).context("creating HUD pass-through region")?;
-        layer.set_input_region(Some(empty.wl_region()));
-        layer.commit();
-        self.layer = Some(layer);
-        self.surface_lifecycle.opened();
-        self.layer_output = None;
-        self.buffer_scale = 1;
-        self.configured = false;
-        self.visible = false;
-        self.frame_pending = false;
-        self.last_render = None;
-        Ok(())
+/// The platform-neutral HUD: one status model, its painter, and the memo of the
+/// last presented frame. Native surfaces only size, place and present its pixels.
+struct Instrument {
+    model: Model,
+    font: FontRef<'static>,
+    palette: Palette,
+    last_render: Option<RenderKey>,
+    /// Whether the last presented frame showed the instrument.
+    visible: bool,
+    last_refresh: Instant,
+    last_status: Instant,
+}
+
+/// The next frame to show: painted with [`Instrument::paint`], then recorded with
+/// [`Instrument::presented`] once the native surface holds those pixels.
+struct Presentation {
+    frame: TrackFrame,
+    key: RenderKey,
+    alpha: f32,
+    shown: bool,
+    container_width: f32,
+}
+
+impl Instrument {
+    fn with_model(model: Model, palette: Palette, now: Instant) -> Result<Self> {
+        Ok(Self {
+            model,
+            font: FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR)
+                .context("loading HUD typeface")?,
+            palette,
+            last_render: None,
+            visible: false,
+            last_refresh: now,
+            last_status: now,
+        })
     }
 
-    fn current_surface(&self, surface: &wl_surface::WlSurface) -> bool {
-        self.layer
-            .as_ref()
-            .is_some_and(|layer| layer.wl_surface() == surface)
+    fn live(now: Instant) -> Result<Self> {
+        Self::with_model(Model::new(now), theme::load(), now)
     }
 
-    fn available_width(&self) -> u32 {
-        self.layer_output
-            .as_ref()
-            .and_then(|output| self.output_state.info(output))
-            .and_then(|info| info.logical_size)
-            .map(|(width, _)| width.max(1) as u32)
-            .unwrap_or(SURFACE_WIDTH)
-            .min(SURFACE_WIDTH)
+    /// A screenshot scenario. A preview handoff is the first target in the live
+    /// theme, like a real single configured target.
+    fn preview(state: ScreenshotState, handoff: Option<String>, now: Instant) -> Result<Self> {
+        let palette = theme::load();
+        let handoff = handoff.map(|label| ipc::Handoff {
+            name: label.to_lowercase(),
+            color: palette.target(0),
+            label,
+        });
+        Self::with_model(screenshot_model(state, now, handoff.as_ref()), palette, now)
     }
 
-    fn redraw(&mut self, qh: &QueueHandle<Self>, now: Instant) -> Result<()> {
-        if !self.configured || self.frame_pending {
-            return Ok(());
+    /// Fold queued status readings and the stale-status clock into the model.
+    fn poll(&mut self, poller: &Poller, now: Instant) {
+        while let Ok(update) = poller.receiver.try_recv() {
+            self.palette = update.palette;
+            if let Some(reduced) = update.reduced_motion {
+                self.model.desktop_reduced_motion = reduced;
+            }
+            match update.status {
+                Ok(status) => self.model.apply(status, now),
+                Err(()) => self.model.disconnected(now),
+            }
+            self.last_refresh = now;
+            self.last_status = now;
         }
-        let Some(layer) = &self.layer else {
-            return Ok(());
-        };
-        let model_now = if self.screenshot.is_some() {
-            self.screenshot_at
-        } else {
-            now
-        };
+        if now.duration_since(self.last_refresh) >= POLL_INTERVAL {
+            self.model.refresh_connection(self.last_status, now);
+            self.last_refresh = now;
+        }
+    }
+
+    /// Logical surface height for a container `container_width` pixels wide.
+    fn height(&self, container_width: f32) -> u32 {
+        layout_height(&self.model, &self.font, container_width)
+    }
+
+    fn alpha(&self, now: Instant) -> f32 {
+        self.model.alpha(now)
+    }
+
+    fn animate(&self, now: Instant) -> bool {
+        self.model.animate(now)
+    }
+
+    /// The next frame for a `size` logical surface at an integral buffer `scale`,
+    /// unless the presented pixels already match. `force` always paints.
+    fn prepare(
+        &self,
+        model_now: Instant,
+        alpha: f32,
+        size: (u32, u32),
+        scale: u32,
+        container_width: f32,
+        force: bool,
+    ) -> Option<Presentation> {
         let shown = self.model.kind.is_some();
-        let logical_width = self.available_width().max(80);
-        let container_width = CONTAINER_WIDTH.min(self.width.min(logical_width) as f32 - 12.0);
-        let target_height = layout_height(&self.model, &self.font, container_width);
-        let desired = (logical_width, target_height);
-        if self.requested_size != desired {
-            self.requested_size = desired;
-            layer.set_size(desired.0, desired.1);
-            layer.commit();
-            self.configured = false;
-            // No old-size frame can become the final screenshot.
-            return Ok(());
+        let frame = self.model.frame(model_now);
+        let key = self
+            .model
+            .render_key(&frame, (size.0, size.1, scale), self.palette, alpha);
+        if !force && self.last_render.as_ref() == Some(&key) && shown == self.visible {
+            return None;
         }
-        let heights = self.model.frame(model_now);
-        let alpha = if self.screenshot.is_some() {
-            1.0
-        } else {
-            self.model.alpha(now)
-        };
-        let key = self.model.render_key(
-            &heights,
-            (self.width, self.height, self.buffer_scale),
-            self.palette,
+        Some(Presentation {
+            frame,
+            key,
             alpha,
-        );
-        if self.last_render.as_ref() == Some(&key)
-            && shown == self.visible
-            && self.screenshot.is_none()
-        {
-            return Ok(());
-        }
-        let width = self
-            .width
-            .checked_mul(self.buffer_scale)
-            .context("HUD buffer width overflow")?;
-        let height = self
-            .height
-            .checked_mul(self.buffer_scale)
-            .context("HUD buffer height overflow")?;
-        let stride = width.checked_mul(4).context("HUD buffer stride overflow")?;
-        let (buffer, bytes) = self
-            .pool
-            .create_buffer(
-                width as i32,
-                height as i32,
-                stride as i32,
-                wl_shm::Format::Argb8888,
-            )
-            .context("creating HUD frame")?;
+            shown,
+            container_width,
+        })
+    }
+
+    /// Paint into a premultiplied BGRA buffer of `width` × `height` whole pixels.
+    fn paint(
+        &self,
+        presentation: &Presentation,
+        bytes: &mut [u8],
+        width: u32,
+        height: u32,
+        scale: u32,
+    ) {
         let mut canvas = Canvas {
-            bytes: &mut *bytes,
+            bytes,
             width,
             height,
-            scale: self.buffer_scale as f32,
+            scale: scale as f32,
             alpha: 1.0,
         };
         canvas.paint_hud(
             &self.model,
             &self.font,
             self.palette,
-            &heights,
-            container_width,
+            &presentation.frame,
+            presentation.container_width,
         );
-        canvas.fade(alpha);
-        let _ = layer.set_buffer_scale(self.buffer_scale);
-        layer
-            .wl_surface()
-            .damage_buffer(0, 0, width as i32, height as i32);
-        buffer
-            .attach_to(layer.wl_surface())
-            .context("attaching HUD frame")?;
-        if self.screenshot.is_none() {
-            // Present at the compositor's cadence, never on buffer-release timing.
-            layer
-                .wl_surface()
-                .frame(qh, FrameCallbackData(layer.wl_surface().clone()));
-            self.frame_pending = true;
-        }
-        layer.commit();
-        self.model.track.presented = heights;
-        self.visible = shown;
-        self.last_render = Some(key);
-        // Keep a transparent mapped frame while idle: remapping requires a
-        // second configure handshake some compositors do not send.
-        if let Some(path) = &self.screenshot {
-            save_screenshot(path, bytes, width, height)?;
-            self.screenshot_done = true;
-        }
-        Ok(())
+        canvas.fade(presentation.alpha);
     }
-}
 
-impl CompositorHandler for HudState {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        factor: i32,
-    ) {
-        if !self.current_surface(surface) {
-            return;
-        }
-        let scale = factor.max(1) as u32;
-        use wayland_client::Proxy;
-        self.buffer_scale = if surface.version() >= 3 { scale } else { 1 };
+    /// The native surface now presents this frame; the next transition starts here.
+    fn presented(&mut self, presentation: Presentation) {
+        self.model.track.presented = presentation.frame;
+        self.visible = presentation.shown;
+        self.last_render = Some(presentation.key);
+    }
+
+    /// Scale, transform or configured size changed: paint the next frame.
+    #[cfg(target_os = "linux")]
+    fn invalidate(&mut self) {
         self.last_render = None;
     }
 
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        _transform: wl_output::Transform,
-    ) {
-        if self.current_surface(surface) {
-            self.last_render = None;
-        }
-    }
-
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        _time: u32,
-    ) {
-        if self.current_surface(surface) {
-            self.frame_pending = false;
-        }
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
-        output: &wl_output::WlOutput,
-    ) {
-        if self.current_surface(surface) {
-            self.layer_output = Some(output.clone());
-            self.last_render = None;
-        }
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-        // Keep the last output identity until it is destroyed or a new enter
-        // arrives; wl_surface.leave often precedes output_destroyed.
-    }
-}
-
-impl LayerShellHandler for HudState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
-        if self.current_surface(layer.wl_surface()) {
-            self.layer = None;
-            self.configured = false;
-            self.last_render = None;
-            self.visible = false;
-            self.surface_lifecycle.closed();
-        }
-    }
-
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
-        _serial: u32,
-    ) {
-        if !self.current_surface(layer.wl_surface()) {
-            return;
-        }
-        self.width = if configure.new_size.0 > 0 {
-            configure.new_size.0
-        } else {
-            self.requested_size.0
-        };
-        self.height = if configure.new_size.1 > 0 {
-            configure.new_size.1
-        } else {
-            self.requested_size.1
-        };
-        self.configured = true;
+    /// The surface is gone; its replacement starts hidden and freshly painted.
+    #[cfg(target_os = "linux")]
+    fn detached(&mut self) {
         self.last_render = None;
+        self.visible = false;
     }
 }
-
-impl OutputHandler for HudState {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-    fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-        if self.layer.is_none() {
-            self.surface_lifecycle.output_changed();
-        }
-    }
-    fn update_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
-    ) {
-        if self.layer_output.as_ref() == Some(&output) {
-            self.last_render = None;
-            if self.layer.is_none() {
-                self.surface_lifecycle.output_changed();
-            }
-        }
-    }
-    fn output_destroyed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        output: wl_output::WlOutput,
-    ) {
-        if self.layer_output.as_ref() == Some(&output) || self.layer.is_none() {
-            self.layer = None;
-            self.layer_output = None;
-            self.configured = false;
-            self.last_render = None;
-            self.visible = false;
-            self.surface_lifecycle.output_changed();
-        }
-    }
-}
-
-impl ShmHandler for HudState {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
-delegate_registry!(HudState);
-impl ProvidesRegistryState for HudState {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    smithay_client_toolkit::registry_handlers![OutputState];
-}
-smithay_client_toolkit::delegate_dispatch2!(HudState);
 
 struct Canvas<'a> {
     bytes: &'a mut [u8],
@@ -2690,7 +2295,7 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
             local_model: true,
             remote_configured: false,
         },
-        hud: crate::config::HudConfig::default(),
+        hud: cantrip_engine::config::HudConfig::default(),
         handoff: None,
     }
 }
@@ -2881,7 +2486,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
     outcome.message = match state {
         ScreenshotState::Copied => "Copied. Paste when ready.",
         ScreenshotState::CopiedInstead => "Copied instead. Paste when ready.",
-        ScreenshotState::SetupMissing => "Local speech model unavailable.",
+        ScreenshotState::SetupMissing => "Local model unavailable — run: cantrip models pull",
         ScreenshotState::StorageFailed => "Transcription failed. Audio could not be saved.",
         _ => "Transcription failed.",
     }
@@ -4323,23 +3928,6 @@ mod tests {
         model.apply(status, now + POLL_INTERVAL * 2);
         assert!(model.interaction.is_none());
         assert_eq!(model.kind, Some(Kind::Recording));
-    }
-
-    #[test]
-    fn compositor_close_waits_for_an_output_event_before_reopening() {
-        let mut lifecycle = SurfaceLifecycle::Open;
-        lifecycle.closed();
-        assert!(
-            !lifecycle.can_create(),
-            "ordinary loop ticks must respect compositor closure"
-        );
-        lifecycle.output_changed();
-        assert!(lifecycle.can_create(), "real hotplug permits a replacement");
-        lifecycle.opened();
-        assert!(
-            !lifecycle.can_create(),
-            "an existing surface must not be duplicated"
-        );
     }
 
     #[test]

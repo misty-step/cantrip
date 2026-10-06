@@ -1,30 +1,20 @@
-//! Cantrip: local-first dictation for Linux.
+//! Native Linux and macOS hosts for the shared Cantrip dictation engine.
 //!
-//! Pipeline: trigger -> capture (pw-record) -> STT (Parakeet via transcribe-rs)
-//! -> optional cleanup -> guarded native Wayland delivery (paste | type | clipboard).
+//! Workflow and private history live in `cantrip-engine`. This crate owns
+//! capture/delivery mechanisms, desktop surfaces and application lifecycle.
 //!
 //! Privacy rule (inherited from Vox): never log transcript content, only
 //! character counts. Log tags use brackets: `[Daemon]`, `[Capture]`, `[STT]`,
 //! `[Postproc]`, `[Inject]`, `[Models]`, `[HUD]`.
 
-mod archive;
-
 pub mod actions;
 pub mod capture;
-pub mod config;
 pub mod daemon;
 pub mod desktop;
 pub mod hud;
 pub mod inject;
-pub mod ipc;
-pub mod keys;
-pub mod models;
-pub mod paths;
-pub mod pipeline;
-pub mod postproc;
-pub mod recovery;
+#[cfg(target_os = "macos")]
+pub mod macos;
+mod platform;
 pub mod settings;
-pub mod stt;
-pub mod telemetry;
 pub mod theme;
-pub mod typesafe;

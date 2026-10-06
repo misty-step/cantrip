@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build THIS tree, then atomically install PREFIX/bin/cantrip.
+# Build THIS Linux tree, then atomically install PREFIX/bin/cantrip.
 #
 # The binary that lands is the one cargo just produced from the current
 # sources and lockfile. A previously compiled target/ artifact is never an
@@ -18,8 +18,15 @@ usage() {
   cat <<'USAGE'
 Usage: ./scripts/install-from-source [--prefix PATH]
 
-From the repository root: cargo build --release --locked, then atomically
-install PREFIX/bin/cantrip (default PREFIX=$HOME/.local).
+On Linux, from the repository root: cargo build --release --locked
+--package cantrip --bin cantrip, then atomically install PREFIX/bin/cantrip
+(default PREFIX=$HOME/.local).
+
+On macOS, build a native application bundle instead:
+  python3 scripts/package-macos --target aarch64-apple-darwin --ad-hoc
+Use x86_64-apple-darwin on an Intel Mac. Ad-hoc bundles are development
+builds, not production-signed or notarized. See package-macos --help for
+the explicit Developer ID and notarization prerequisites.
 
 Refuses a symlink destination, a non-file destination, and a live daemon
 holding the destination or the runtime socket. Does not start, stop, or
@@ -48,6 +55,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -f Cargo.toml && -f rust-toolchain.toml ]] || fail 'Run from the Cantrip repository root (Cargo.toml and rust-toolchain.toml).'
+[[ "$(uname -s)" == Linux ]] || fail 'This binary installer is Linux-only. On macOS use python3 scripts/package-macos --help to build Cantrip.app; it does not alter startup, permissions, or configuration.'
 command -v cargo >/dev/null || fail 'cargo is not on PATH.'
 
 if [[ -z "$prefix" ]]; then
@@ -137,7 +145,7 @@ assert_destination
 assert_stopped
 
 printf 'cantrip install-from-source: building %s\n' "$(revision_line)" >&2
-cargo build --release --locked
+cargo build --release --locked --package cantrip --bin cantrip
 
 built=$(pwd -P)/target/release/cantrip
 [[ ! -L "$built" && -f "$built" && -x "$built" ]] || fail "Build did not produce a regular executable at $built"

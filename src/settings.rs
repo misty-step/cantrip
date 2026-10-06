@@ -1,26 +1,31 @@
 //! `cantrip settings` — a small modifiable configuration window.
 //!
-//! Renders an egui window (eframe/glow on Wayland) that loads
-//! `~/.config/cantrip/config.toml`, lets you edit the common settings, and
-//! writes them back with `toml_edit` so the annotated comments users keep in the
-//! file survive unchanged. Saving sends a `Reload` to the running daemon. The
-//! header also shows the live daemon state (idle / recording / processing /
-//! offline) by polling the socket every second.
+//! Renders an egui window (eframe/glow) that loads the native `config.toml`,
+//! lets you edit the common settings, and writes them back with `toml_edit` so
+//! the annotated comments users keep in the file survive unchanged. Saving asks
+//! the running Cantrip to apply the file. The header also shows the live
+//! dictation state (idle / recording / processing / unreachable) by polling the
+//! socket every second.
 //!
 //! Past transcripts sit above the configuration: saved history read off the UI
 //! thread, newest first, each with a Copy button that reads that transcript
 //! fresh by ID and hands it to the clipboard. History needs neither a valid
-//! config file nor a running daemon.
+//! config file nor a running Cantrip.
+//!
+//! On macOS the window also picks the microphone by device, requests microphone
+//! access only when the operator chooses to, and sets the global dictation
+//! shortcut. Linux keeps PipeWire source names and compositor shortcuts.
 //!
 //! `cantrip settings --screenshot <path>` renders the window, lets the history
 //! list load, and dumps a PNG of one frame, then exits. It exists for visual
 //! testing on machines without a screenshot utility.
 
-use crate::config::{Config, HudConfig, PostprocConfig, SttConfig, TelemetryConfig};
-use crate::inject::{self, DeliveryGuard, InjectionFailureKind, InjectionMode};
-use crate::ipc;
-use crate::{actions, paths, recovery, theme};
+use crate::inject::{self, DeliveryGuard};
+use crate::{actions, theme};
 use anyhow::{anyhow, Context, Result};
+use cantrip_engine::config::{Config, HudConfig, PostprocConfig, SttConfig, TelemetryConfig};
+use cantrip_engine::delivery::{InjectionFailureKind, InjectionMode};
+use cantrip_engine::{ipc, paths, recovery};
 use eframe::egui;
 use std::fs;
 use std::io::ErrorKind;
@@ -47,7 +52,11 @@ const ROW_LINE_GAP: f32 = 2.0;
 struct Editable {
     injection: InjectionMode,
     keep_warm: bool,
+    /// macOS: a CoreAudio device UID. Linux: a PipeWire source name.
     audio_source: String,
+    /// The macOS global shortcut; empty uses the default. Linux shortcuts belong
+    /// to the compositor, so the value is only carried through saves there.
+    hotkey: String,
     vocabulary: String,
     stt_model: String,
     stt_endpoint: String,
@@ -71,7 +80,7 @@ struct Editable {
     telemetry: TelemetryConfig,
     hud: HudConfig,
     /// Local handoff commands are file-only settings; preserve them across GUI saves.
-    handoff: std::collections::BTreeMap<String, crate::config::HandoffTarget>,
+    handoff: std::collections::BTreeMap<String, cantrip_engine::config::HandoffTarget>,
 }
 
 impl Editable {
@@ -80,6 +89,7 @@ impl Editable {
             injection: cfg.injection,
             keep_warm: cfg.keep_warm,
             audio_source: cfg.audio_source.clone().unwrap_or_default(),
+            hotkey: cfg.hotkey.clone().unwrap_or_default(),
             vocabulary: cfg.vocabulary.join(", "),
             stt_model: cfg.stt.model.clone(),
             stt_endpoint: cfg.stt.endpoint.clone().unwrap_or_default(),
@@ -107,6 +117,7 @@ impl Editable {
             injection: self.injection,
             keep_warm: self.keep_warm,
             audio_source: non_empty(self.audio_source.trim()),
+            hotkey: non_empty(self.hotkey.trim()),
             vocabulary: self
                 .vocabulary
                 .split(',')
@@ -507,7 +518,7 @@ fn load_editable_config(path: &Path) -> EditableConfigLoad {
     };
     let warning = config.validate().err().map(|error| StatusMsg {
         text: format!(
-            "Configuration needs repair: {error:#}. Correct the values, then Save & reload daemon"
+            "Configuration needs repair: {error:#}. Correct the values, then choose Save & apply."
         ),
         ok: false,
     });
@@ -540,6 +551,8 @@ struct SettingsApp {
     screenshot: Option<PathBuf>,
     screenshot_requested: bool,
     screenshot_deadline: Option<Instant>,
+    #[cfg(target_os = "macos")]
+    mac: MacInput,
 }
 
 impl SettingsApp {
@@ -586,6 +599,8 @@ impl SettingsApp {
             screenshot,
             screenshot_requested: false,
             screenshot_deadline: None,
+            #[cfg(target_os = "macos")]
+            mac: MacInput::load(),
         }
     }
 
@@ -648,7 +663,11 @@ impl SettingsApp {
         Self::section(
             ui,
             "General",
-            "Injection, warm-up, audio, vocabulary",
+            if cfg!(target_os = "macos") {
+                "Injection, microphone, shortcut, vocabulary"
+            } else {
+                "Injection, warm-up, audio, vocabulary"
+            },
             |ui| {
                 self.general_section(ui);
             },
@@ -657,12 +676,12 @@ impl SettingsApp {
             ui.checkbox(&mut self.edit.hud.labels, "Always show state labels");
             egui::ComboBox::from_id_salt("reduced-motion")
                 .selected_text(match self.edit.hud.reduced_motion {
-                    None => "Motion: follow desktop",
+                    None => "Motion: follow system",
                     Some(true) => "Motion: reduced",
                     Some(false) => "Motion: normal",
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.edit.hud.reduced_motion, None, "Follow desktop");
+                    ui.selectable_value(&mut self.edit.hud.reduced_motion, None, "Follow system");
                     ui.selectable_value(&mut self.edit.hud.reduced_motion, Some(true), "Reduced");
                     ui.selectable_value(&mut self.edit.hud.reduced_motion, Some(false), "Normal");
                 });
@@ -688,7 +707,7 @@ impl SettingsApp {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let save = egui::Button::new(
-                egui::RichText::new("Save & reload daemon")
+                egui::RichText::new("Save & apply")
                     .strong()
                     .color(color(self.palette.background)),
             )
@@ -749,12 +768,12 @@ impl SettingsApp {
         let (ink, text) = if !self.daemon_online {
             (
                 color(self.palette.foreground),
-                "daemon unreachable".to_owned(),
+                "Cantrip unreachable".to_owned(),
             )
         } else {
             match self.daemon_state.as_str() {
-                "idle" => (color(self.palette.foreground), "daemon: idle".to_owned()),
-                other => (color(self.palette.accent), format!("daemon: {other}")),
+                "idle" => (color(self.palette.foreground), "dictation: idle".to_owned()),
+                other => (color(self.palette.accent), format!("dictation: {other}")),
             }
         };
         let text_width = ui.fonts(|fonts| {
@@ -863,6 +882,13 @@ impl SettingsApp {
     }
 
     fn general_section(&mut self, ui: &mut egui::Ui) {
+        let choices = [
+            (InjectionMode::Auto, "Auto"),
+            (InjectionMode::Paste, "Paste"),
+            (InjectionMode::Type, "Type"),
+            (InjectionMode::Clipboard, "Clipboard"),
+        ];
+        let offered = choices.map(|(mode, _)| self.delivers(mode));
         egui::Grid::new("general")
             .num_columns(2)
             .spacing([12.0, 8.0])
@@ -871,18 +897,13 @@ impl SettingsApp {
                 egui::ComboBox::from_id_salt("injection")
                     .selected_text(injection_str(self.edit.injection))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.edit.injection, InjectionMode::Auto, "Auto");
-                        ui.selectable_value(
-                            &mut self.edit.injection,
-                            InjectionMode::Paste,
-                            "Paste",
-                        );
-                        ui.selectable_value(&mut self.edit.injection, InjectionMode::Type, "Type");
-                        ui.selectable_value(
-                            &mut self.edit.injection,
-                            InjectionMode::Clipboard,
-                            "Clipboard",
-                        );
+                        // A configured mode this desktop cannot deliver stays
+                        // visible as the selection but is never offered.
+                        for ((mode, label), offered) in choices.into_iter().zip(offered) {
+                            ui.add_enabled_ui(offered, |ui| {
+                                ui.selectable_value(&mut self.edit.injection, mode, label);
+                            });
+                        }
                     });
                 ui.end_row();
 
@@ -892,13 +913,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label(egui::RichText::new("Audio source (empty = default)").weak());
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.edit.audio_source)
-                        .hint_text("e.g. alsa_input…")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.end_row();
+                self.input_rows(ui);
 
                 ui.label(egui::RichText::new("Vocabulary (comma-separated)").weak());
                 ui.add(
@@ -908,6 +923,59 @@ impl SettingsApp {
                 );
                 ui.end_row();
             });
+        #[cfg(target_os = "macos")]
+        self.delivery_note(ui);
+    }
+
+    /// Linux offers every mode; its guard verifies each take at delivery.
+    #[cfg(not(target_os = "macos"))]
+    fn delivers(&self, _mode: InjectionMode) -> bool {
+        true
+    }
+
+    /// macOS delivers only by explicit clipboard copy and manual paste.
+    #[cfg(target_os = "macos")]
+    fn delivers(&self, mode: InjectionMode) -> bool {
+        let delivery = self.mac.delivery;
+        delivery.automatic || mode == InjectionMode::Clipboard && delivery.clipboard
+    }
+
+    #[cfg(target_os = "macos")]
+    fn delivery_note(&self, ui: &mut egui::Ui) {
+        if self.delivers(self.edit.injection) {
+            ui.label(
+                egui::RichText::new(
+                    "Each finished take is copied; paste it where you want with ⌘V. On macOS Cantrip never types or pastes into other apps.",
+                )
+                .weak()
+                .small(),
+            );
+        } else {
+            ui.colored_label(
+                color(self.palette.attention),
+                format!(
+                    "{} cannot deliver on macOS: takes are saved but not sent. Choose Clipboard to copy each take for pasting.",
+                    injection_str(self.edit.injection)
+                ),
+            );
+        }
+    }
+
+    /// A PipeWire source name; compositor bindings own the shortcut.
+    #[cfg(not(target_os = "macos"))]
+    fn input_rows(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Audio source (empty = default)").weak());
+        ui.add(
+            egui::TextEdit::singleline(&mut self.edit.audio_source)
+                .hint_text("e.g. alsa_input…")
+                .desired_width(f32::INFINITY),
+        );
+        ui.end_row();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn input_rows(&mut self, ui: &mut egui::Ui) {
+        self.mac.rows(ui, &mut self.edit, self.palette);
     }
 
     fn stt_section(&mut self, ui: &mut egui::Ui) {
@@ -1065,6 +1133,15 @@ impl SettingsApp {
             });
             return;
         }
+        #[cfg(target_os = "macos")]
+        if let Err(problem) = crate::macos::shortcut::Shortcut::configured(config.hotkey.as_deref())
+        {
+            self.status = Some(StatusMsg {
+                text: format!("Not saved — {problem}"),
+                ok: false,
+            });
+            return;
+        }
         match save_config_preserving(&self.config_path, &config, &self.loaded_text) {
             Ok(text) => self.loaded_text = text,
             Err(error) => {
@@ -1080,7 +1157,7 @@ impl SettingsApp {
 
     fn reload_daemon(&mut self) {
         self.status = Some(StatusMsg {
-            text: "Saved to disk; applying to the daemon…".to_owned(),
+            text: "Saved; applying…".to_owned(),
             ok: true,
         });
         let (tx, rx) = mpsc::channel();
@@ -1146,6 +1223,172 @@ impl SettingsApp {
     }
 }
 
+/// The macOS microphone device, microphone access and global shortcut rows.
+#[cfg(target_os = "macos")]
+struct MacInput {
+    devices: Result<Vec<crate::capture::InputDevice>, String>,
+    permission: crate::capture::MicrophonePermission,
+    request: Option<Receiver<Result<crate::capture::MicrophonePermission>>>,
+    access_problem: Option<String>,
+    delivery: inject::DeliveryAvailability,
+}
+
+#[cfg(target_os = "macos")]
+impl MacInput {
+    fn load() -> Self {
+        Self {
+            devices: crate::capture::input_devices().map_err(|error| format!("{error:#}")),
+            permission: crate::capture::microphone_permission(),
+            request: None,
+            access_problem: None,
+            delivery: inject::delivery_availability(),
+        }
+    }
+
+    /// Apply a finished access decision; the authorization itself is re-read
+    /// with the dictation status every second.
+    fn poll_request(&mut self) {
+        if let Some(result) = completed_request(self.request.as_ref()) {
+            self.request = None;
+            match result {
+                Ok(permission) => self.permission = permission,
+                Err(error) => self.access_problem = Some(format!("{error:#}")),
+            }
+        }
+    }
+
+    /// The system prompt answers this explicit choice. The request waits for the
+    /// operator's decision, so it runs off the UI thread.
+    fn request_access(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(objc2::rc::autoreleasepool(|_| {
+                crate::capture::request_microphone_permission()
+            }));
+            context.request_repaint();
+        });
+        self.request = Some(rx);
+        self.access_problem = None;
+    }
+
+    fn device_name(&self, uid: &str) -> String {
+        if uid.is_empty() {
+            return "System default".to_owned();
+        }
+        match &self.devices {
+            Ok(devices) => devices.iter().find(|device| device.uid == uid).map_or_else(
+                || "Unavailable microphone".to_owned(),
+                |device| device.name.clone(),
+            ),
+            Err(_) => uid.to_owned(),
+        }
+    }
+
+    fn rows(&mut self, ui: &mut egui::Ui, edit: &mut Editable, palette: theme::Palette) {
+        use crate::capture::MicrophonePermission as Access;
+        use crate::macos::shortcut::{Shortcut, DEFAULT};
+        let attention = color(palette.attention);
+
+        ui.label(egui::RichText::new("Microphone").weak());
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("microphone")
+                .selected_text(self.device_name(&edit.audio_source))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut edit.audio_source, String::new(), "System default");
+                    if let Ok(devices) = &self.devices {
+                        for device in devices {
+                            let name = if device.is_default {
+                                format!("{} (current default)", device.name)
+                            } else {
+                                device.name.clone()
+                            };
+                            ui.selectable_value(&mut edit.audio_source, device.uid.clone(), name);
+                        }
+                    }
+                });
+            if ui.button("Refresh").clicked() {
+                self.devices =
+                    crate::capture::input_devices().map_err(|error| format!("{error:#}"));
+            }
+        });
+        ui.end_row();
+        let missing = !edit.audio_source.is_empty()
+            && self
+                .devices
+                .as_ref()
+                .is_ok_and(|devices| !devices.iter().any(|device| device.uid == edit.audio_source));
+        if let Err(problem) = &self.devices {
+            ui.label("");
+            ui.colored_label(
+                attention,
+                format!("Microphones could not be listed: {problem}"),
+            );
+            ui.end_row();
+        } else if missing {
+            ui.label("");
+            ui.colored_label(
+                attention,
+                "This microphone is not connected. Cantrip records only from it, never another one.",
+            );
+            ui.end_row();
+        }
+
+        ui.label(egui::RichText::new("Microphone access").weak());
+        ui.horizontal(|ui| match self.permission {
+            Access::Authorized => {
+                ui.label("Allowed");
+            }
+            Access::NotDetermined if self.request.is_some() => {
+                ui.label("Waiting for your decision…");
+            }
+            Access::NotDetermined => {
+                ui.label("Not requested yet");
+                if ui.button("Allow microphone access").clicked() {
+                    self.request_access(ui.ctx());
+                }
+            }
+            Access::Denied => {
+                ui.colored_label(attention, "Denied");
+                if ui.button("Open Privacy Settings").clicked() {
+                    self.access_problem = crate::macos::open_microphone_settings()
+                        .err()
+                        .map(|error| format!("{error:#}"));
+                }
+            }
+            Access::Restricted => {
+                ui.colored_label(attention, "Restricted by macOS policy");
+            }
+        });
+        ui.end_row();
+        if let Some(problem) = &self.access_problem {
+            ui.label("");
+            ui.colored_label(attention, problem);
+            ui.end_row();
+        }
+
+        ui.label(egui::RichText::new("Dictation shortcut").weak());
+        ui.vertical(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut edit.hotkey)
+                    .hint_text(DEFAULT)
+                    .desired_width(f32::INFINITY),
+            );
+            let typed = edit.hotkey.trim();
+            match Shortcut::configured(non_empty(typed).as_deref()) {
+                Ok(shortcut) if typed.is_empty() => ui.label(
+                    egui::RichText::new(format!("Default: {}", shortcut.label()))
+                        .weak()
+                        .small(),
+                ),
+                Ok(shortcut) => ui.label(egui::RichText::new(shortcut.label()).weak().small()),
+                Err(problem) => ui.colored_label(attention, problem),
+            };
+        });
+        ui.end_row();
+    }
+}
+
 /// Write the edited config back to disk while preserving comments and ordering
 /// for every key the window did not touch (so the annotated template survives).
 fn save_config_preserving(path: &Path, config: &Config, expected: &str) -> Result<String> {
@@ -1172,6 +1415,8 @@ fn save_config_preserving(path: &Path, config: &Config, expected: &str) -> Resul
     );
     set_preserving_decor(root, "keep_warm", toml_edit::value(config.keep_warm));
     set_or_remove(root, "audio_source", config.audio_source.as_deref());
+    #[cfg(target_os = "macos")]
+    set_or_remove(root, "hotkey", config.hotkey.as_deref());
     let mut vocab = toml_edit::Array::new();
     for term in &config.vocabulary {
         vocab.push(term.as_str());
@@ -1254,7 +1499,7 @@ fn write_config_atomically(path: &Path, text: &str) -> Result<()> {
     let parent = path
         .parent()
         .context("config path has no parent directory")?;
-    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    paths::ensure_dir(parent.to_path_buf())?;
     let tmp = parent.join(format!(
         ".cantrip-config-{}-{}.tmp",
         std::process::id(),
@@ -1408,6 +1653,8 @@ impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
         self.history.poll(ctx);
+        #[cfg(target_os = "macos")]
+        self.mac.poll_request();
         if let Some(result) = completed_request(self.poll_result.as_ref()) {
             match result {
                 Ok(status) => {
@@ -1434,7 +1681,7 @@ impl eframe::App for SettingsApp {
         if let Some(result) = completed_request(self.reload_result.as_ref()) {
             self.status = Some(match result {
                 Ok(reply) if reply.ok => StatusMsg {
-                    text: "Saved and daemon reloaded".to_owned(),
+                    text: "Saved and applied".to_owned(),
                     ok: true,
                 },
                 Ok(reply) => StatusMsg {
@@ -1443,13 +1690,18 @@ impl eframe::App for SettingsApp {
                         reply
                             .error
                             .or(reply.message)
-                            .unwrap_or_else(|| "Daemon did not reload.".to_owned())
+                            .unwrap_or_else(|| "Cantrip did not apply it.".to_owned())
                     ),
                     ok: false,
                 },
+                // Linux recovery lives in Cantrip actions (Start Cantrip, setup).
                 Err(_) => StatusMsg {
-                    text: "Saved to disk; daemon unreachable. Open Cantrip actions for setup."
-                        .to_owned(),
+                    text: if cfg!(target_os = "macos") {
+                        "Saved to disk; Cantrip unreachable. Open the Cantrip menu to check setup."
+                    } else {
+                        "Saved to disk; Cantrip unreachable. Open Cantrip actions for setup."
+                    }
+                    .to_owned(),
                     ok: true,
                 },
             });
@@ -1458,6 +1710,10 @@ impl eframe::App for SettingsApp {
         if self.last_poll.elapsed() >= DAEMON_POLL && self.poll_result.is_none() {
             self.last_poll = Instant::now();
             self.palette = theme::load();
+            #[cfg(target_os = "macos")]
+            {
+                self.mac.permission = crate::capture::microphone_permission();
+            }
             apply_theme(ctx, self.palette);
             let (tx, rx) = mpsc::channel();
             let context = ctx.clone();
@@ -1529,12 +1785,41 @@ impl eframe::App for SettingsApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct ConfigFixture(PathBuf);
+
+    impl ConfigFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .expect("native temporary directory")
+                .join(format!(
+                    "ct-settings-{}",
+                    cantrip_engine::recovery::new_id()
+                ));
+            fs::create_dir(&root).expect("private fixture directory");
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("private fixture");
+            Self(root)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("config.toml")
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn sample_config() -> Config {
         Config {
             injection: InjectionMode::Type,
             keep_warm: false,
             audio_source: Some("alsa_input.pci-0000_00_1f.3".to_owned()),
+            hotkey: None,
             vocabulary: vec!["PipeWire".to_owned(), "Parakeet".to_owned()],
             stt: SttConfig {
                 model: "parakeet-tdt-0.6b-v3-int8".to_owned(),
@@ -1571,6 +1856,7 @@ mod tests {
             injection: InjectionMode::Auto,
             keep_warm: true,
             audio_source: String::new(),
+            hotkey: String::new(),
             vocabulary: String::new(),
             stt_model: "parakeet-tdt-0.6b-v3-int8".to_owned(),
             stt_endpoint: String::new(),
@@ -1611,8 +1897,8 @@ mod tests {
 
     #[test]
     fn save_preserves_comments_and_applies_edits() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("cantrip-settings-test-{}.toml", std::process::id()));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         fs::write(
             &path,
             "# top-level comment\ninjection = \"auto\"  # trailing\n\n[stt]\nmodel = \"parakeet-tdt-0.6b-v3-int8\"\n\n[postproc]\nenabled = false\nmodel = \"\"\n",
@@ -1664,11 +1950,8 @@ mod tests {
 
     #[test]
     fn save_removes_optional_key_when_cleared() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "cantrip-settings-test2-{}.toml",
-            std::process::id()
-        ));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         fs::write(
             &path,
             "[stt]\nmodel = \"parakeet-tdt-0.6b-v3-int8\"\nendpoint = \"https://api.xyz/v1\"\napi_key_id = \"abc\"\n",
@@ -1700,11 +1983,8 @@ mod tests {
 
     #[test]
     fn saver_rejects_an_unparseable_existing_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "cantrip-settings-test3-{}.toml",
-            std::process::id()
-        ));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         fs::write(&path, "this is [ not toml").expect("write fixture");
         assert!(save_config_preserving(&path, &sample_config(), "this is [ not toml").is_err());
         fs::remove_file(&path).ok();
@@ -1712,10 +1992,8 @@ mod tests {
 
     #[test]
     fn parsed_invalid_config_keeps_real_values_editable() {
-        let path = std::env::temp_dir().join(format!(
-            "cantrip-settings-invalid-{}.toml",
-            std::process::id()
-        ));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         let text = "injection = \"type\"\n[stt]\nmodel = \"retired-model\"\n";
         fs::write(&path, text).expect("write fixture");
 
@@ -1738,10 +2016,8 @@ mod tests {
 
     #[test]
     fn malformed_config_is_blocked_without_changing_file() {
-        let path = std::env::temp_dir().join(format!(
-            "cantrip-settings-malformed-{}.toml",
-            std::process::id()
-        ));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         let text = b"injection = [not valid TOML";
         fs::write(&path, text).expect("write fixture");
 
@@ -1758,10 +2034,8 @@ mod tests {
 
     #[test]
     fn corrected_validation_failure_saves_and_reloads() {
-        let path = std::env::temp_dir().join(format!(
-            "cantrip-settings-repair-{}.toml",
-            std::process::id()
-        ));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         fs::write(
             &path,
             "# keep me\ninjection = \"type\"\n[stt]\nmodel = \"retired-model\"\n",
@@ -1804,10 +2078,8 @@ mod tests {
 
     #[test]
     fn following_desktop_removes_motion_override_without_losing_unknown_preferences() {
-        let path = std::env::temp_dir().join(format!(
-            "cantrip-settings-motion-{}.toml",
-            std::process::id()
-        ));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         fs::write(&path, "[hud]\nlabels = true\nreduced_motion = true\n# keep personal preference\npersonal_scale = 2\n").expect("fixture");
         let mut config: Config =
             toml::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
@@ -1826,10 +2098,8 @@ mod tests {
 
     #[test]
     fn saving_refuses_to_adopt_concurrent_disk_edits() {
-        let path = std::env::temp_dir().join(format!(
-            "cantrip-settings-concurrent-{}.toml",
-            std::process::id()
-        ));
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
         let original = "injection = \"auto\"\n";
         let changed = "injection = \"clipboard\"\n# external edit\n";
         fs::write(&path, changed).expect("external edit");

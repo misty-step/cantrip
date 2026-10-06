@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""Build and package a self-contained native Cantrip.app on macOS (Python 3.11+)."""
+
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit("package-macos requires Python 3.11+; invoke it with an existing/private Python 3.11+ interpreter")
+
+import argparse
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import runpy
+import shutil
+import stat
+import subprocess
+import tempfile
+import tomllib
+
+
+ROOT = Path(__file__).resolve().parent.parent
+RELEASE = runpy.run_path(str(ROOT / "scripts" / "package-release"))
+RUNTIME = runpy.run_path(str(ROOT / "scripts" / "prepare-macos-runtime"))
+ReleaseError = RELEASE["ReleaseError"]
+TARGETS = RUNTIME["TARGETS"]
+GUIDES = ("INSTALLATION", "USAGE", "CONFIGURATION", "DESKTOP", "PRIVACY")
+LOAD_COMMANDS = {
+    "LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB",
+}
+
+
+def run(command, *, cwd=None, timeout=60, check=True, env=None):
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(("DYLD_", "ORT_"))
+    }
+    environment.update(LC_ALL="C", GIT_NO_LAZY_FETCH="1")
+    if env:
+        environment.update(env)
+    try:
+        result = subprocess.run(
+            list(map(str, command)), cwd=cwd, env=environment,
+            capture_output=True, timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ReleaseError(f"cannot run {command[0]}: {error}") from error
+    if check and result.returncode:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ReleaseError(f"{command[0]} failed ({result.returncode}): {message}")
+    return result
+
+
+def native_prerequisites(target, args):
+    if args.ad_hoc:
+        if args.sign_identity or args.team_id or args.notary_profile:
+            raise ReleaseError("--ad-hoc cannot be combined with production signing/notarization inputs")
+    else:
+        missing = [
+            option for option, value in (
+                ("--sign-identity", args.sign_identity), ("--team-id", args.team_id),
+                ("--notary-profile", args.notary_profile),
+            ) if not value
+        ]
+        if missing:
+            raise ReleaseError(
+                "production packaging requires " + ", ".join(missing)
+                + "; use --ad-hoc explicitly for a DEVELOPMENT build, never a production release"
+            )
+        if not re.fullmatch(r"[A-Z0-9]{10}", args.team_id):
+            raise ReleaseError("--team-id must be the ten-character Apple Developer Team ID")
+    RUNTIME["require_native"](target)
+    for tool in ("cargo", "git", "lipo", "otool", "install_name_tool", "codesign", "ditto", "xcrun"):
+        if not shutil.which(tool):
+            raise ReleaseError(f"required native build/packaging tool is missing: {tool}")
+    run(["xcrun", "--find", "clang"])
+    if args.ad_hoc:
+        return "-"
+    run(["xcrun", "--find", "notarytool"])
+    run(["xcrun", "--find", "stapler"])
+    identities = run(["security", "find-identity", "-v", "-p", "codesigning"]).stdout.decode()
+    available = re.findall(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"\n]+)"', identities, re.MULTILINE)
+    selected = [
+        (digest, name) for digest, name in available
+        if args.sign_identity in (digest, digest.lower(), name)
+    ]
+    if len(selected) != 1:
+        raise ReleaseError("--sign-identity must select exactly one valid certificate/private-key identity in the Keychain")
+    digest, name = selected[0]
+    if not name.startswith("Developer ID Application: ") or not name.endswith(f"({args.team_id})"):
+        raise ReleaseError("production signing requires a Developer ID Application identity belonging to --team-id")
+    # Fail before the build if the named Keychain profile cannot authenticate.
+    run(["xcrun", "notarytool", "history", "--keychain-profile", args.notary_profile, "--output-format", "json"])
+    return digest
+
+
+def snapshot(source, destination, *, executable=False):
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as contents:
+        before = os.fstat(contents.fileno())
+        if not stat.S_ISREG(before.st_mode) or (executable and not before.st_mode & 0o111):
+            raise ReleaseError(f"native code must be a regular {'executable ' if executable else ''}file: {source}")
+        with destination.open("xb") as target:
+            shutil.copyfileobj(contents, target, 1024 * 1024)
+        after = os.fstat(contents.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_size, after.st_mtime_ns, after.st_ctime_ns
+        ):
+            raise ReleaseError(f"native code changed while taking its package snapshot: {source}")
+    destination.chmod(0o755)
+
+
+def inspect_native(path, architecture, minimum, *, executable=False):
+    architectures = run(["lipo", "-archs", path]).stdout.decode().strip().split()
+    if architecture not in architectures or (executable and architectures != [architecture]):
+        raise ReleaseError(f"wrong Mach-O architecture in {path.name}: {architectures}; expected {architecture}")
+    header = run(["otool", "-arch", architecture, "-hv", path]).stdout.decode()
+    kind = "EXECUTE" if executable else "DYLIB"
+    if not re.search(rf"\b{kind}\b", header):
+        raise ReleaseError(f"{path.name} must be a Mach-O {kind.lower()}, not a script or object file")
+    commands = run(["otool", "-arch", architecture, "-l", path]).stdout.decode()
+    info = {"dependencies": [], "rpaths": [], "id": None, "architectures": architectures}
+    deployments = []
+    for block in re.split(r"(?m)^Load command [0-9]+\s*$", commands)[1:]:
+        match = re.search(r"(?m)^\s*cmd (LC_[A-Z0-9_]+)\s*$", block)
+        if not match:
+            raise ReleaseError(f"cannot inspect a Mach-O load command in {path.name}")
+        command = match[1]
+        if command in LOAD_COMMANDS or command == "LC_ID_DYLIB":
+            name = re.search(r"(?m)^\s*name (.+) \(offset [0-9]+\)\s*$", block)
+            if not name:
+                raise ReleaseError(f"cannot inspect {command} in {path.name}")
+            if command == "LC_ID_DYLIB":
+                info["id"] = name[1]
+            else:
+                info["dependencies"].append(name[1])
+        elif command == "LC_RPATH":
+            name = re.search(r"(?m)^\s*path (.+) \(offset [0-9]+\)\s*$", block)
+            if not name:
+                raise ReleaseError(f"cannot inspect {command} in {path.name}")
+            info["rpaths"].append(name[1])
+        elif command == "LC_BUILD_VERSION":
+            if not re.search(r"^\s*platform (?:1|MACOS)\s*$", block, re.MULTILINE | re.IGNORECASE):
+                raise ReleaseError(f"{path.name} is not a macOS binary")
+            deployment = re.search(r"(?m)^\s*minos ([0-9.]+)\s*$", block)
+            if deployment:
+                deployments.append(deployment[1])
+        elif command == "LC_VERSION_MIN_MACOSX":
+            deployment = re.search(r"(?m)^\s*version ([0-9.]+)\s*$", block)
+            if deployment:
+                deployments.append(deployment[1])
+        elif command in ("LC_DYLD_ENVIRONMENT", "LC_LAZY_LOAD_DYLIB"):
+            raise ReleaseError(f"unsupported runtime loader override in {path.name}: {command}")
+    if not deployments:
+        raise ReleaseError(f"{path.name} has no inspectable macOS deployment version")
+    baseline = tuple(map(int, minimum.split(".")))
+    baseline += (0,) * (3 - len(baseline))
+    for deployment in deployments:
+        required = tuple(map(int, deployment.split(".")))
+        required += (0,) * (3 - len(required))
+        if required > baseline:
+            raise ReleaseError(f"{path.name} requires macOS {deployment}, newer than the app baseline {minimum}")
+    return info
+
+
+def system_library(name):
+    return name.startswith(("/usr/lib/", "/System/Library/")) and ".." not in Path(name).parts
+
+
+def expand_loader_path(name, loader, executable):
+    for prefix, base in (("@loader_path", loader.parent), ("@executable_path", executable.parent)):
+        if name == prefix or name.startswith(prefix + "/"):
+            return base / name[len(prefix):].lstrip("/")
+    if name.startswith("/"):
+        return Path(name)
+    raise ReleaseError(f"unsupported or relative runtime library path: {name}")
+
+
+def resolve_dependency(name, loader, executable, rpaths):
+    if name.startswith("@rpath/"):
+        candidates = [directory / name[len("@rpath/"):] for directory in rpaths]
+    else:
+        candidates = [expand_loader_path(name, loader, executable)]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve(strict=True)
+    raise ReleaseError(f"cannot contain native runtime dependency {name!r} required by {loader.name}")
+
+
+def contain_runtime(binary, app, architecture, minimum):
+    executable = app / "Contents" / "MacOS" / "cantrip"
+    frameworks = app / "Contents" / "Frameworks"
+    frameworks.mkdir()
+    snapshot(binary, executable, executable=True)
+    staged = {binary: executable}
+    pending = [(binary, [])]
+    inspected = {}
+    names = {}
+    system = set()
+    while pending:
+        source, inherited = pending.pop()
+        destination = staged[source]
+        info = inspect_native(destination, architecture, minimum, executable=source == binary)
+        rpaths = [expand_loader_path(name, source, binary) for name in info["rpaths"]] + inherited
+        changes = []
+        for name in info["dependencies"]:
+            if system_library(name):
+                system.add(name)
+                continue
+            dependency = resolve_dependency(name, source, binary, rpaths)
+            if ".framework" in str(dependency) or not dependency.name.endswith(".dylib"):
+                raise ReleaseError(f"non-system frameworks or resource-bearing libraries must be linked statically: {dependency}")
+            if dependency.name in names and names[dependency.name] != dependency:
+                raise ReleaseError(f"different runtime libraries have the same bundle filename: {dependency.name}")
+            names[dependency.name] = dependency
+            if dependency not in staged:
+                staged[dependency] = frameworks / dependency.name
+                snapshot(dependency, staged[dependency])
+                pending.append((dependency, rpaths))
+            prefix = "@executable_path/../Frameworks" if source == binary else "@loader_path"
+            changes.append((name, f"{prefix}/{dependency.name}"))
+        inspected[source] = (info, changes)
+    for source, destination in staged.items():
+        info, changes = inspected[source]
+        if len(info["architectures"]) > 1:
+            thin = destination.with_name(destination.name + ".thin")
+            run(["lipo", destination, "-thin", architecture, "-output", thin])
+            thin.replace(destination)
+            destination.chmod(0o755)
+        arguments = []
+        if info["id"]:
+            arguments += ["-id", f"@loader_path/{destination.name}"]
+        for old, new in changes:
+            arguments += ["-change", old, new]
+        for rpath in dict.fromkeys(info["rpaths"]):
+            arguments += ["-delete_rpath", rpath]
+        if arguments:
+            run(["install_name_tool", *arguments, destination])
+    # No loadable code may rely on Homebrew, the checkout, Cargo, or a user PATH.
+    for source, destination in staged.items():
+        info = inspect_native(destination, architecture, minimum, executable=source == binary)
+        if info["rpaths"]:
+            raise ReleaseError(f"uncontained runtime search path in {destination.name}")
+        for name in info["dependencies"]:
+            if system_library(name):
+                continue
+            resolved = expand_loader_path(name, destination, executable).resolve(strict=True)
+            if not resolved.is_relative_to(frameworks) or resolved not in staged.values():
+                raise ReleaseError(f"runtime dependency escapes Cantrip.app: {name}")
+    return sorted(frameworks.iterdir()), sorted(system)
+
+
+def create_bundle(binary, app, target, version, read_source):
+    info = plistlib.loads(read_source("contrib/macos/Info.plist"))
+    entitlements = plistlib.loads(read_source("contrib/macos/entitlements.plist"))
+    if (
+        info.get("CFBundleIdentifier") != "com.misty-step.cantrip"
+        or info.get("CFBundleExecutable") != "cantrip" or info.get("CFBundlePackageType") != "APPL"
+        or info.get("LSUIElement") is not True or not info.get("NSMicrophoneUsageDescription")
+        or entitlements != {"com.apple.security.device.audio-input": True}
+    ):
+        raise ReleaseError("native bundle metadata must retain its identity, microphone purpose, agent policy, and minimal entitlement")
+    if not re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,2}\.[0-9]{1,2}", version):
+        raise ReleaseError("macOS packaging requires a numeric workspace version compatible with CFBundleVersion")
+    minimum = info["LSMinimumSystemVersion"]
+    info.update(CFBundleShortVersionString=version, CFBundleVersion=version)
+    info["LSArchitecturePriority"] = [TARGETS[target]]
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    resources = app / "Contents" / "Resources"
+    resources.mkdir()
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info, sort_keys=True))
+    (app / "Contents" / "PkgInfo").write_bytes(b"APPL????")
+    (resources / "LICENSE").write_bytes(read_source("LICENSE"))
+    for guide in GUIDES:
+        (resources / f"{guide}.md").write_bytes(read_source(f"docs/{guide}.md"))
+    libraries, system = contain_runtime(binary, app, TARGETS[target], minimum)
+    return info, entitlements, libraries, system
+
+
+def sign_bundle(app, libraries, entitlements, identity, team_id, *, ad_hoc):
+    timestamp = "--timestamp=none" if ad_hoc else "--timestamp"
+    # Ad-hoc code has no Team ID. Hardened library validation therefore refuses
+    # its contained non-platform dylibs; production retains the hardened runtime
+    # and signs every native library with the same Developer ID team.
+    options = "0" if ad_hoc else "runtime"
+    for library in libraries:
+        run(["codesign", "--force", "--sign", identity, "--options", options, timestamp, library])
+    run([
+        "codesign", "--force", "--sign", identity, "--options", options, timestamp,
+        "--entitlements", entitlements, app,
+    ])
+    run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app])
+    signature = run(["codesign", "--display", "--verbose=4", app])
+    details = (signature.stdout + signature.stderr).decode()
+    if "Identifier=com.misty-step.cantrip\n" not in details:
+        raise ReleaseError("app signature does not bind the stable bundle identity")
+    hardened = bool(re.search(r"flags=.*\bruntime\b", details))
+    if hardened != (not ad_hoc):
+        raise ReleaseError("app signature hardened-runtime state differs from the requested signing mode")
+    if ad_hoc:
+        if "Signature=adhoc" not in details:
+            raise ReleaseError("development package does not have the requested ad-hoc signature")
+    elif (
+        f"TeamIdentifier={team_id}\n" not in details
+        or "Authority=Developer ID Application: " not in details or "Timestamp=" not in details
+    ):
+        raise ReleaseError("app signature lacks the requested Developer ID team or secure timestamp")
+    actual = run(["codesign", "--display", "--entitlements", "-", "--xml", app]).stdout
+    if plistlib.loads(actual) != {"com.apple.security.device.audio-input": True}:
+        raise ReleaseError("signed app entitlements differ from the minimal microphone contract")
+
+
+def zip_bundle(app, archive):
+    run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", app, archive], timeout=300)
+
+
+def notarize(app, staging, profile):
+    submission = staging / "notary-submission.zip"
+    zip_bundle(app, submission)
+    result = run([
+        "xcrun", "notarytool", "submit", submission, "--keychain-profile", profile,
+        "--wait", "--timeout", "30m", "--output-format", "json",
+    ], timeout=1900)
+    status = json.loads(result.stdout)
+    if status.get("status") != "Accepted" or not status.get("id"):
+        raise ReleaseError("Apple notarization was not Accepted; no distributable assets were produced")
+    log = json.loads(run(["xcrun", "notarytool", "log", status["id"], "--keychain-profile", profile]).stdout)
+    issues = log.get("issues") or []
+    if log.get("status") != "Accepted" or any(issue.get("severity") == "error" for issue in issues):
+        raise ReleaseError("notarization log contains errors; no distributable assets were produced")
+    run(["xcrun", "stapler", "staple", app], timeout=300)
+    run(["xcrun", "stapler", "validate", app])
+    run(["spctl", "--assess", "--type", "execute", "--verbose=4", app])
+    return {"status": "accepted", "submission_id": status["id"], "stapled": True, "warning_count": len(issues)}
+
+
+def publish(output, app, assets):
+    if os.path.lexists(output):
+        raise ReleaseError(f"refusing to overwrite an existing output: {output}")
+    output.mkdir(parents=True, exist_ok=False)
+    try:
+        # ditto preserves the stapled ticket and sealed bundle metadata.
+        run(["ditto", app, output / app.name], timeout=300)
+        for source in assets:
+            with source.open("rb") as contents, (output / source.name).open("xb") as destination:
+                shutil.copyfileobj(contents, destination, 1024 * 1024)
+            (output / source.name).chmod(0o644)
+    except BaseException:
+        shutil.rmtree(output)
+        raise
+
+
+def package(args):
+    identity = native_prerequisites(args.target, args)
+    output = (args.output or Path("dist") / "macos" / args.target).absolute()
+    if os.path.lexists(output):
+        raise ReleaseError(f"refusing to overwrite an existing output: {output}")
+    output = output.parent.resolve() / output.name
+    revision_result = run(["git", "-C", ROOT, "rev-parse", "HEAD"], check=False)
+    revision = revision_result.stdout.decode().strip() if revision_result.returncode == 0 else None
+    if args.source_revision and args.source_revision != revision:
+        raise ReleaseError("--source-revision does not match checkout HEAD")
+    if args.ad_hoc:
+        read_source = lambda path: (ROOT / path).read_bytes()
+        dirty = bool(run(["git", "-C", ROOT, "status", "--porcelain=v1", "--untracked-files=all"]).stdout) if revision else None
+    else:
+        RELEASE["verify_checkout"](ROOT, revision or "")
+        read_source = lambda path: RELEASE["committed_file"](ROOT, revision, path)
+        dirty = False
+    version = RELEASE["workspace_version"](tomllib.loads(read_source("Cargo.toml").decode()))
+    toolchain = tomllib.loads(read_source("rust-toolchain.toml").decode())["toolchain"]["channel"]
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", toolchain):
+        raise ReleaseError("rust-toolchain.toml must pin an exact Rust release")
+    minimum = plistlib.loads(read_source("contrib/macos/Info.plist"))["LSMinimumSystemVersion"]
+    runtime_environment = {}
+    runtime_identity = {"linkage": "ort-sys-checksum-pinned-prebuilt"}
+    if args.target == "x86_64-apple-darwin" or args.source_runtime:
+        libraries, runtime_identity = RUNTIME["prepare"](args.target)
+        runtime_environment = {"ORT_LIB_PATH": str(libraries), "ORT_PREFER_DYNAMIC_LINK": "0"}
+    run([
+        "cargo", "build", "--release", "--locked", "--package", "cantrip", "--bin", "cantrip",
+        "--no-default-features", "--target", args.target, "--target-dir", ROOT / "target",
+    ], cwd=ROOT, timeout=3600, env={
+        "RUSTFLAGS": "", "CARGO_ENCODED_RUSTFLAGS": "-C\x1flink-arg=-Wl,-headerpad_max_install_names",
+        "MACOSX_DEPLOYMENT_TARGET": minimum, "CARGO_INCREMENTAL": "0", **runtime_environment,
+    })
+    binary = ROOT / "target" / args.target / "release" / "cantrip"
+    with tempfile.TemporaryDirectory(prefix="cantrip-macos-package-") as directory:
+        staging = Path(directory).resolve()
+        app = staging / "Cantrip.app"
+        info, entitlements, libraries, system = create_bundle(binary, app, args.target, version, read_source)
+        build = {
+            "schema_version": 1, "version": version, "target": args.target,
+            "bundle_identifier": info["CFBundleIdentifier"], "minimum_macos": info["LSMinimumSystemVersion"],
+            "source_revision": revision, "source_tree_dirty": dirty, "rust_toolchain": toolchain,
+            "signing": "ad-hoc-development" if args.ad_hoc else "developer-id", "hardened_runtime": not args.ad_hoc,
+            "system_libraries": system, "onnxruntime": runtime_identity,
+        }
+        (app / "Contents" / "Resources" / "build.json").write_bytes(RELEASE["json_bytes"](build))
+        entitlement_file = staging / "entitlements.plist"
+        entitlement_file.write_bytes(plistlib.dumps(entitlements))
+        sign_bundle(app, libraries, entitlement_file, identity, args.team_id, ad_hoc=args.ad_hoc)
+        executable = app / "Contents" / "MacOS" / "cantrip"
+        reported = run([executable, "--version"], cwd=staging).stdout.decode().strip()
+        if reported != f"cantrip {version}":
+            raise ReleaseError(f"bundled binary --version reports {reported!r}, expected 'cantrip {version}'")
+        notarization = {"status": "not-requested-development", "stapled": False} if args.ad_hoc else notarize(app, staging, args.notary_profile)
+        suffix = "-development" if args.ad_hoc else ""
+        archive = staging / f"cantrip-v{version}-{args.target}{suffix}.zip"
+        zip_bundle(app, archive)
+        manifest = staging / "manifest.json"
+        manifest.write_bytes(RELEASE["json_bytes"]({
+            **build, "notarization": notarization,
+            "binary_sha256": RELEASE["sha256"](executable),
+            "runtime_libraries": {library.name: RELEASE["sha256"](library) for library in libraries},
+            "archive": {"name": archive.name, "sha256": RELEASE["sha256"](archive)},
+        }))
+        sums = staging / "SHA256SUMS"
+        sums.write_text("".join(f"{RELEASE['sha256'](asset)}  {asset.name}\n" for asset in (archive, manifest)))
+        if not args.ad_hoc:
+            RELEASE["verify_checkout"](ROOT, revision)
+        publish(output, app, [archive, manifest, sums])
+    return output
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""
+Native development build (repeat on an Intel Mac with x86_64-apple-darwin):
+  python3 scripts/package-macos --target aarch64-apple-darwin --ad-hoc --output dist/mac-arm64-dev
+
+Production build, sign, notarize, staple, and Gatekeeper-assess (no publication):
+  python3 scripts/package-macos --target aarch64-apple-darwin --output dist/mac-arm64 \\
+    --sign-identity 'Developer ID Application: ORGANIZATION (TEAMID)' \\
+    --team-id TEAMID --notary-profile cantrip-notary
+
+Prerequisites: a matching native Mac, the repository-pinned Rust toolchain,
+Python 3.11+, Xcode command-line tools, CMake 3.28+ for the Intel source-runtime
+bootstrap, and (production only) a clean committed checkout, a valid Developer ID
+Application certificate WITH its private key in Keychain, plus an authenticated
+`notarytool store-credentials` Keychain profile. Intel builds automatically build
+the pinned CPU ONNX Runtime from its immutable source commit, without global
+installation; arm64 uses ort-sys' checksum-pinned prebuilt CPU runtime unless
+--source-runtime is explicitly selected.
+Production has no unsigned, unnotarized, or ad-hoc fallback. --ad-hoc is explicitly
+DEVELOPMENT ONLY; its archive/manifest never claim production or notarization.
+
+The ZIP contains Cantrip.app and every non-system native dylib. End users expand
+the ZIP and move Cantrip.app in Finder; no source, Rust, Python, Homebrew, or
+installer is required. Nothing downloads models, changes config, enables startup,
+grants permissions, or launches the application. Existing output is never replaced.
+""")
+    parser.add_argument("--target", required=True, choices=TARGETS)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--source-revision")
+    parser.add_argument("--source-runtime", action="store_true", help="build the pinned CPU ONNX Runtime from source (automatic for Intel; needs CMake 3.28+)")
+    parser.add_argument("--ad-hoc", action="store_true", help="explicit DEVELOPMENT ad-hoc signing, without notarization")
+    parser.add_argument("--sign-identity", help="Developer ID Application certificate name or SHA-1 Keychain identity")
+    parser.add_argument("--team-id", help="Apple Developer Team ID bound to the signing identity")
+    parser.add_argument("--notary-profile", help="existing authenticated notarytool Keychain profile name")
+    args = parser.parse_args()
+    try:
+        output = package(args)
+    except (ReleaseError, OSError, ValueError, KeyError, RuntimeError, plistlib.InvalidFileException) as error:
+        parser.exit(1, f"package-macos: {error}\n")
+    if args.ad_hoc:
+        print("DEVELOPMENT ONLY: ad-hoc signed; NOT hardened, production-signed, or notarized.")
+    else:
+        print("Developer ID signed, Apple notarization Accepted, ticket stapled, Gatekeeper assessment passed.")
+    print(output / "Cantrip.app")
+
+
+if __name__ == "__main__":
+    main()

@@ -260,13 +260,28 @@ def publish_files(output, files):
         raise
 
 
+def workspace_version(cargo):
+    package = cargo.get("package", {})
+    version = cargo.get("workspace", {}).get("package", {}).get("version")
+    if (
+        package.get("name") != "cantrip"
+        or package.get("version") != {"workspace": True}
+        or not isinstance(version, str)
+        or not SEMVER.fullmatch(version)
+    ):
+        raise ReleaseError(
+            "Cargo.toml must have one [workspace.package] version inherited by cantrip"
+        )
+    return version
+
+
 def package_release(root, binary, output, version, revision):
     if not SEMVER.fullmatch(version):
         raise ReleaseError("--version must be a SemVer version without a v prefix")
     verify_checkout(root, revision)
     cargo = tomllib.loads(committed_file(root, revision, "Cargo.toml").decode("utf-8"))
-    if cargo.get("package", {}).get("name") != "cantrip" or cargo["package"].get("version") != version:
-        raise ReleaseError("--version does not match the cantrip package version in Cargo.toml")
+    if workspace_version(cargo) != version:
+        raise ReleaseError("--version does not match the workspace package version in Cargo.toml")
     toolchain = tomllib.loads(committed_file(root, revision, "rust-toolchain.toml").decode("utf-8"))
     rust = toolchain.get("toolchain", {}).get("channel")
     if not isinstance(rust, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", rust):

@@ -1,11 +1,18 @@
-//! Native Cantrip colors, shared by the passive HUD and deliberate actions window.
+//! Native Cantrip colors, shared by the passive HUD and deliberately opened windows.
 //!
-//! Omarchy's current theme moved from the config directory to the state directory.
-//! Read the active colors file, not a theme name or a generated application's skin.
-//! Callers cache this inexpensive snapshot and refresh it off the render hot path.
+//! Linux reads Omarchy's active theme. Omarchy's current theme moved from the
+//! config directory to the state directory; read the active colors file, not a
+//! theme name or a generated application's skin. macOS resolves the system
+//! appearance's semantic colors through AppKit. Callers cache this inexpensive
+//! snapshot and refresh it off the render hot path.
 
+#[cfg(not(target_os = "macos"))]
 use serde::Deserialize;
+#[cfg(not(target_os = "macos"))]
 use std::{fs, path::Path};
+
+#[cfg(target_os = "macos")]
+pub use native::load;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
@@ -92,6 +99,8 @@ impl Palette {
             };
             taken.push(hsl(chosen)[0]);
         }
+        #[cfg(target_os = "macos")]
+        let chosen = legible(chosen, [self.background, self.surface]);
         chosen
     }
 }
@@ -138,8 +147,65 @@ fn hue_distance(a: f32, b: f32) -> f32 {
     difference.min(360.0 - difference)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn luminance(color: [u8; 3]) -> f32 {
+    let [r, g, b] = color.map(|channel| {
+        let value = f32::from(channel) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn contrast(a: f32, b: f32) -> f32 {
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Native semantic accents are not necessarily text colors. Preserve the hue
+/// and saturation, adjusting only lightness to reach 4.5:1 on both native
+/// surfaces. AppKit resolves both surfaces from the same light/dark appearance.
+#[cfg(any(target_os = "macos", test))]
+fn legible(color: [u8; 3], backgrounds: [[u8; 3]; 2]) -> [u8; 3] {
+    let backgrounds = backgrounds.map(luminance);
+    let minimum_contrast = |value: f32| {
+        backgrounds
+            .iter()
+            .map(|&background| contrast(value, background))
+            .fold(f32::INFINITY, f32::min)
+    };
+    let passes = |color| minimum_contrast(luminance(color)) >= 4.5;
+    if passes(color) {
+        return color;
+    }
+    let [hue, saturation, lightness] = hsl(color);
+    let end = if minimum_contrast(0.0) >= minimum_contrast(1.0) {
+        0.0
+    } else {
+        1.0
+    };
+    let mut chosen = rgb(hue, saturation, end);
+    let (mut low, mut high) = (0.0, 1.0);
+    // Eight bisections match the precision of the final eight-bit channels.
+    for _ in 0..8 {
+        let middle = (low + high) / 2.0;
+        let candidate = rgb(hue, saturation, lightness + (end - lightness) * middle);
+        if passes(candidate) {
+            chosen = candidate;
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    chosen
+}
+
 /// Load the installed active theme using XDG directories; otherwise Tokyo Night.
 /// No subprocess, theme mutation, or dependency on a running desktop shell.
+#[cfg(not(target_os = "macos"))]
 pub fn load() -> Palette {
     let candidates = [dirs::state_dir(), dirs::config_dir()];
     candidates
@@ -149,6 +215,7 @@ pub fn load() -> Palette {
         .unwrap_or_default()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn load_file(path: &Path) -> Option<Palette> {
     // Theme files are small. Reject an accidental large/non-file replacement.
     let metadata = fs::metadata(path).ok()?;
@@ -158,6 +225,7 @@ fn load_file(path: &Path) -> Option<Palette> {
     parse(&fs::read_to_string(path).ok()?)
 }
 
+#[cfg(not(target_os = "macos"))]
 #[derive(Deserialize)]
 struct Colors {
     background: String,
@@ -173,6 +241,7 @@ struct Colors {
     dark_background: Option<String>,
 }
 
+#[cfg(not(target_os = "macos"))]
 fn parse(text: &str) -> Option<Palette> {
     let colors: Colors = toml::from_str(text).ok()?;
     let surface = hex_rgb(&colors.background)?;
@@ -208,6 +277,7 @@ fn parse(text: &str) -> Option<Palette> {
 /// Monochrome themes (Omarchy's vantablack and white) define gray "colors", which
 /// cannot tell targets apart. Keep each one's lightness, so it still suits the
 /// theme's background, and give it a distinct hue at moderate saturation.
+#[cfg(not(target_os = "macos"))]
 fn chromatic_targets(targets: [[u8; 3]; 4]) -> [[u8; 3]; 4] {
     const HUES: [f32; 4] = [300.0, 220.0, 120.0, 180.0];
     let saturation = targets.iter().map(|&color| hsl(color)[1]).sum::<f32>() / 4.0;
@@ -217,7 +287,8 @@ fn chromatic_targets(targets: [[u8; 3]; 4]) -> [[u8; 3]; 4] {
     std::array::from_fn(|index| rgb(HUES[index], 0.6, hsl(targets[index])[2].clamp(0.3, 0.7)))
 }
 
-pub(crate) fn hex_rgb(text: &str) -> Option<[u8; 3]> {
+#[cfg(not(target_os = "macos"))]
+fn hex_rgb(text: &str) -> Option<[u8; 3]> {
     let digits = text.strip_prefix('#')?;
     if digits.len() != 6 || !digits.is_ascii() {
         return None;
@@ -229,7 +300,116 @@ pub(crate) fn hex_rgb(text: &str) -> Option<[u8; 3]> {
     ])
 }
 
+/// AppKit's semantic colors for the effective system appearance: light, dark,
+/// increased contrast and the operator's accent color, flattened to opaque sRGB.
+#[cfg(target_os = "macos")]
+mod native {
+    use super::{legible, Palette};
+    use block2::StackBlock;
+    use objc2::{rc::Retained, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSColor, NSColorSpace};
+    use std::{cell::Cell, sync::Mutex};
+
+    /// The latest main-thread resolution, for readers on other threads.
+    static RESOLVED: Mutex<Option<Palette>> = Mutex::new(None);
+
+    /// AppKit resolves the appearance on the main thread. Other threads, such as
+    /// the engine naming a handoff color or the HUD status reader, receive the
+    /// latest main-thread resolution, or Tokyo Night before the first one.
+    pub fn load() -> Palette {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return RESOLVED
+                .lock()
+                .ok()
+                .and_then(|resolved| *resolved)
+                .unwrap_or_default();
+        };
+        let resolved = Cell::new(None);
+        NSApplication::sharedApplication(mtm)
+            .effectiveAppearance()
+            .performAsCurrentDrawingAppearance(&StackBlock::new(|| resolved.set(current())));
+        let palette = resolved.get().unwrap_or_default();
+        if let Ok(mut latest) = RESOLVED.lock() {
+            *latest = Some(palette);
+        }
+        palette
+    }
+
+    /// One palette from one appearance; a color that cannot be expressed in sRGB
+    /// rejects the whole snapshot rather than mixing it with fallback colors.
+    fn current() -> Option<Palette> {
+        let space = NSColorSpace::sRGBColorSpace();
+        let flat = |color: Retained<NSColor>, base: [u8; 3]| -> Option<[u8; 3]> {
+            let color = color.colorUsingColorSpace(&space)?;
+            let alpha = color.alphaComponent().clamp(0.0, 1.0);
+            let channels = [
+                color.redComponent(),
+                color.greenComponent(),
+                color.blueComponent(),
+            ];
+            Some(std::array::from_fn(|index| {
+                let value = channels[index].clamp(0.0, 1.0) * alpha
+                    + f64::from(base[index]) / 255.0 * (1.0 - alpha);
+                (value * 255.0).round() as u8
+            }))
+        };
+        let background = flat(NSColor::windowBackgroundColor(), [0; 3])?;
+        let surface = flat(NSColor::controlBackgroundColor(), background)?;
+        Some(Palette {
+            background,
+            surface,
+            border: flat(NSColor::separatorColor(), surface)?,
+            foreground: flat(NSColor::labelColor(), surface)?,
+            accent: legible(
+                flat(NSColor::controlAccentColor(), surface)?,
+                [background, surface],
+            ),
+            attention: legible(
+                flat(NSColor::systemOrangeColor(), surface)?,
+                [background, surface],
+            ),
+            targets: [
+                flat(NSColor::systemPurpleColor(), surface)?,
+                flat(NSColor::systemBlueColor(), surface)?,
+                flat(NSColor::systemGreenColor(), surface)?,
+                flat(NSColor::systemCyanColor(), surface)?,
+            ],
+        })
+    }
+}
+
 #[cfg(test)]
+mod contrast_tests {
+    use super::{contrast, hsl, hue_distance, legible, luminance};
+
+    #[test]
+    fn native_accents_remain_readable_on_light_and_dark_surfaces() {
+        for backgrounds in [[[255; 3], [236; 3]], [[30; 3], [50; 3]]] {
+            for original in [
+                [255, 141, 40],
+                [191, 90, 242],
+                [0, 122, 255],
+                [52, 199, 89],
+                [50, 173, 230],
+                [255, 214, 10],
+            ] {
+                let adjusted = legible(original, backgrounds);
+                for background in backgrounds {
+                    assert!(contrast(luminance(adjusted), luminance(background)) >= 4.5);
+                }
+                assert!(hue_distance(hsl(original)[0], hsl(adjusted)[0]) < 2.0);
+                if backgrounds
+                    .iter()
+                    .all(|&background| contrast(luminance(original), luminance(background)) >= 4.5)
+                {
+                    assert_eq!(adjusted, original);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
     use super::{hsl, hue_distance, parse, Palette};
 

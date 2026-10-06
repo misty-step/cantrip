@@ -1,9 +1,9 @@
 //! HTTP round-trip contracts for post-processing and remote transcription
 //! against a local mock OpenAI-compatible server.
 
-use cantrip::config::PostprocConfig;
-use cantrip::postproc;
-use cantrip::stt;
+use cantrip_engine::config::PostprocConfig;
+use cantrip_engine::postproc;
+use cantrip_engine::stt;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -822,8 +822,8 @@ fn transcribe_cli_keeps_cloud_partial_when_the_local_fallback_model_is_missing()
     let root = fixture.path.with_extension("xdg");
     let config_dir = root.join("config/cantrip");
     std::fs::create_dir_all(&config_dir).unwrap();
-    let cfg = cantrip::config::Config {
-        stt: cantrip::config::SttConfig {
+    let cfg = cantrip_engine::config::Config {
+        stt: cantrip_engine::config::SttConfig {
             endpoint: Some(endpoint),
             model: "configured-cloud-model".to_owned(),
             api_key_id: None,
@@ -1089,13 +1089,13 @@ fn cancelling_a_blocked_remote_chunk_keeps_its_text_and_stops_later_uploads() {
 fn telemetry_round_trip_sends_metadata_only_otlp() {
     let (base, server) = mock_server(ok_json("{}"));
     let endpoint = format!("{base}/api/public/otel/v1/traces");
-    let config = cantrip::config::TelemetryConfig {
+    let config = cantrip_engine::config::TelemetryConfig {
         enabled: true,
         endpoint,
         public_key: "pk-test".to_owned(),
         api_key_id: None,
     };
-    let job = cantrip::telemetry::JobTelemetry {
+    let job = cantrip_engine::telemetry::JobTelemetry {
         source: "dictation",
         capture_ms: 1_500,
         stt_ms: 250,
@@ -1115,7 +1115,7 @@ fn telemetry_round_trip_sends_metadata_only_otlp() {
         total_ms: 1_910,
     };
 
-    let reporter = cantrip::telemetry::TelemetryReporter::spawn();
+    let reporter = cantrip_engine::telemetry::TelemetryReporter::spawn();
     reporter.report(&config, job);
     // Shutdown drains the queue and joins the worker: the request must have
     // landed by the time this returns.

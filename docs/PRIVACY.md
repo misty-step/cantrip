@@ -39,9 +39,13 @@ traffic. Downloads and software updates are separate network actions.
 
 ## Storage locations
 
-Run all commands as the same ordinary user with the same XDG environment.
-Changing these directories for one terminal or service can make existing data
-appear missing; it does not migrate or delete it.
+Run all commands as the same ordinary user with the same platform/XDG environment.
+Changing directories for one terminal, app, or service can make existing data
+appear missing; it does not migrate or delete it. Linux command examples use
+`"$HOME/.local/bin/cantrip"`; on Mac substitute your installed app executable,
+for example `"/Applications/Cantrip.app/Contents/MacOS/cantrip"`.
+
+### Linux locations (unchanged)
 
 | Data | Default location | Override |
 |---|---|---|
@@ -52,12 +56,35 @@ appear missing; it does not migrate or delete it.
 | Control socket and in-flight audio | `$XDG_RUNTIME_DIR/cantrip/` | Falls back to `/tmp/cantrip-$UID/cantrip/` when the user runtime directory is unavailable |
 | API credentials | OS Secret Service keyring | Referenced by credential id, not stored in the TOML file |
 
-Runtime storage is normally a per-user tmpfs directory. Do not assume the `/tmp`
-fallback or a customized runtime directory is memory-only. The history directory
-is owner-only (`0700`), and retained files are owner-only (`0600`). These are
-access permissions, **not encryption**. Plaintext audio and text may also be
-captured by your backups, snapshots, filesystem, clipboard manager, or other
-software running as you.
+### macOS locations
+
+| Data | Native default location | Absolute XDG override |
+|---|---|---|
+| Configuration | `~/Library/Application Support/cantrip/config.toml` | `$XDG_CONFIG_HOME/cantrip/config.toml` |
+| Downloaded models | `~/Library/Application Support/cantrip/models/` | `$XDG_DATA_HOME/cantrip/models/` |
+| Transcript JSON and retained WAV audio | `~/Library/Application Support/cantrip/state/transcripts/` | `$XDG_STATE_HOME/cantrip/transcripts/` |
+| Operational log | `~/Library/Application Support/cantrip/state/daemon.log` | `$XDG_STATE_HOME/cantrip/daemon.log` |
+| Control socket and in-flight audio | `/private/tmp/cantrip-$UID/cantrip/` | `$XDG_RUNTIME_DIR/cantrip/` |
+| API credentials | Native login Keychain | Credential id only in configuration; no file-based secret fallback |
+
+Mac overrides must be absolute; their roots are canonicalized/validated. Keep
+them identical for the app and CLI clients. The short native runtime path avoids
+Darwin Unix-socket address limits; an overly long override is refused, not
+silently redirected. Finder/login startup does not inherit a terminal's custom
+environment; a one-terminal override does not configure the app.
+
+Linux runtime storage is normally per-user tmpfs. Neither `/tmp` fallback nor
+customized runtime storage is guaranteed memory-only. Mac `/private/tmp` is
+**not promised RAM-backed or reboot-durable**. Runtime leftovers are not a
+durable history substitute on either platform.
+
+History directories are owner-only (`0700`), retained files owner-only (`0600`).
+Mac normalizes private application-owned directories and clears inherited ACL
+grants on files it newly publishes or normalizes, so those modes do not leave
+extra inherited access. This does not remove ACLs from unrelated files or backups.
+These are access permissions, **not encryption**. Plaintext audio/text may still
+be captured by backups, snapshots, filesystem recovery, clipboard managers, or
+other software running as you. Application Support does not imply encryption.
 
 ## Recording lifecycle
 
@@ -114,6 +141,12 @@ jq -s 'map(select(.postproc.status == "applied") |
   {session_id, raw_transcript, postprocessed_transcript, postproc})' \
   "$history"/*.json
 ```
+On Mac with native defaults, use
+`history="$HOME/Library/Application Support/cantrip/state/transcripts"` for the
+same `jq` inspection; with an absolute `XDG_STATE_HOME` override, use
+`history="$XDG_STATE_HOME/cantrip/transcripts"`. The block above is the Linux
+default-path example, not a Mac path discovery command.
+
 
 This command deliberately prints private text into your terminal. Do not paste
 its output into an issue, public log, or repository without reviewing and
@@ -159,11 +192,13 @@ transcript, with diagnostics on stderr. Actions and `recordings` show metadata
 rather than transcript content.
 
 Store credentials interactively with `key set ID`; only the credential id
-belongs in configuration. Cloud features require an unlocked Secret Service
-keyring and the correct user-session D-Bus connection. Do not put keys in unit
-files, command lines, source control, or screenshots. Binary installation,
-update, rollback, and uninstall do not remove keyring entries; `key rm ID` is a
-separate deliberate action.
+belongs in configuration. Linux cloud features require an unlocked Secret
+Service keyring and the correct user-session D-Bus connection; Mac uses the
+native login Keychain. Do not put keys in unit files, command lines, source
+control, screenshots, or TOML files. Binary/app installation, update, rollback,
+and uninstall do not remove keyring entries; `key rm ID` is a separate deliberate
+action. Missing credentials do not authorize a file-secret fallback or provider
+switch.
 
 Langfuse's daemon exporter and evaluation publisher both use standard padded
 Base64 for HTTP Basic authentication. Encoding is not encryption; keep remote
@@ -180,9 +215,20 @@ public corpus, not private dictation history.
 ## Clipboard and destination applications
 
 Paste delivery and explicit clipboard actions replace the clipboard without
-restoring its previous contents; restoration would race other Wayland users of
-the clipboard. Clipboard managers may retain a separate copy. Strict `type`
-mode never reads or writes the clipboard and changes newlines to spaces.
+reading or restoring its previous contents; restoration would race other users
+of that clipboard. Clipboard managers may retain a separate copy. On Linux,
+strict `type` mode never reads or writes the clipboard and changes newlines to
+spaces.
+
+Mac Copy uses native NSPasteboard with `CurrentHostOnly`, so Cantrip does not
+publish dictation via Universal Clipboard. Unicode and paragraph breaks are
+preserved for deliberate Command+V. This is not a promise that clipboard managers,
+destination apps, or software running as you cannot retain or synchronize it.
+Existing Mac Auto/Paste/Type modes defer before opening the pasteboard or sending
+keys, including partial text; there is no automatic clipboard fallback. Explicit
+Copy is a separate consented action. The supported Mac workflow does not require
+Accessibility, Input Monitoring, or Screen Recording grants; microphone access
+is an explicit separate setup action.
 
 Cantrip guards automatic keyboard delivery against changed or unverifiable
 focus/session history. A compositor or helper acknowledgement is not proof that

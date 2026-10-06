@@ -27,7 +27,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use cantrip::postproc;
+use cantrip_engine::postproc;
 
 use transcribe_rs::onnx::canary::{CanaryModel, CanaryParams};
 use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineParams, MoonshineVariant};
@@ -893,7 +893,7 @@ fn filtered_instructions(config: &EvalConfig, lane: &PostprocLane, text: &str) -
 }
 
 fn direct_openrouter_auth(request: ureq::Request) -> Result<ureq::Request> {
-    let key = cantrip::keys::get("openrouter")
+    let key = cantrip_engine::keys::get("openrouter")
         .ok()
         .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
         .ok_or_else(|| {

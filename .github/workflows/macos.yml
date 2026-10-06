@@ -1,0 +1,91 @@
+name: Native macOS
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cantrip-macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  MACOSX_DEPLOYMENT_TARGET: "13.3"
+
+jobs:
+  native:
+    name: macOS ${{ matrix.architecture }} workspace and native app
+    # GitHub documents macos-15 as Apple Silicon and macos-15-intel as Intel:
+    # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+    # Runner images remain mutable patched labels; actions are SHA-pinned.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            architecture: x86_64
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Require the documented native runner architecture
+        env:
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+          xcrun --find clang
+          rustup install
+          rustc --version --verbose
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: macos-${{ matrix.architecture }}-cpu
+      - name: Prepare the pinned CPU runtime omitted by upstream Intel prebuilts
+        if: matrix.architecture == 'x86_64'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 scripts/prepare-macos-runtime --target "$TARGET" --github-env "$GITHUB_ENV"
+      - name: Check every crate and native target against the lockfile
+        run: |
+          cargo fmt --all --check
+          cargo check --workspace --locked --all-targets
+          cargo clippy --workspace --locked --all-targets -- -D warnings
+          cargo test --workspace --locked
+          cargo test --locked --package cantrip --example eval
+          python3 -m unittest discover -s tests -p 'test_release_*.py'
+      - name: Build and package an explicit development app (never a production release)
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 scripts/package-macos --target "$TARGET" --ad-hoc \
+            --source-revision "$GITHUB_SHA" --output "$RUNNER_TEMP/native-app"
+      - name: Exercise relocated app, real public-file STT, capture refusal, and native HUD
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          python3 scripts/verify-macos --app "$RUNNER_TEMP/native-app/Cantrip.app" \
+            --target "$TARGET" --output "$RUNNER_TEMP/native-proof"
+      - name: Upload only sanitized public-fixture verification and own-panel screenshots
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cantrip-macos-${{ matrix.architecture }}-public-fixture-proof
+          path: |
+            ${{ runner.temp }}/native-proof/verification.json
+            ${{ runner.temp }}/native-proof/hud-*.png
+          if-no-files-found: error
+          retention-days: 14

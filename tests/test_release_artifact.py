@@ -132,7 +132,10 @@ class ReleaseArtifactContracts(unittest.TestCase):
             "GIT_AUTHOR_DATE": f"{EPOCH} +0000", "GIT_COMMITTER_DATE": f"{EPOCH} +0000",
         }
         sources = {
-            "Cargo.toml": '[package]\nname = "cantrip"\nversion = "0.1.0"\n',
+            "Cargo.toml": (
+                '[package]\nname = "cantrip"\nversion.workspace = true\n\n'
+                '[workspace.package]\nversion = "0.1.0"\n'
+            ),
             "rust-toolchain.toml": '[toolchain]\nchannel = "1.98.1"\n',
             "src/main.rs": "fn main() {}\n",
             ".gitignore": ".env\nmodels/\ntranscripts/\n",

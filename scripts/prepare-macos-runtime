@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+"""Build the pinned CPU ONNX Runtime for a native Mac, without global installation."""
+
+import sys
+
+if sys.version_info < (3, 11):
+    raise SystemExit("prepare-macos-runtime requires Python 3.11+; invoke it with an existing/private Python 3.11+ interpreter")
+
+import argparse
+import ctypes
+import errno
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tomllib
+
+
+ROOT = Path(__file__).resolve().parent.parent
+TARGETS = {"aarch64-apple-darwin": "arm64", "x86_64-apple-darwin": "x86_64"}
+# ort-sys 2.0.0-rc.12's API-24 build uses ONNX Runtime 1.24.2, but its
+# checksum-pinned prebuilt inventory omits Intel macOS. Do not downgrade the
+# shared Rust dependency or inference version just to add a desktop target.
+ORT_SYS_VERSION = "2.0.0-rc.12"
+ORT_VERSION = "1.24.2"
+ORT_REVISION = "058787ceead760166e3c50a0a4cba8a833a6f53f"
+ORT_REPOSITORY = "https://github.com/microsoft/onnxruntime.git"
+MINIMUM_MACOS = "13.3"
+
+
+def run(command, *, cwd=None, timeout=60):
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("DYLD_")}
+    environment.update(LC_ALL="C", GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", MACOSX_DEPLOYMENT_TARGET=MINIMUM_MACOS)
+    try:
+        result = subprocess.run(list(map(str, command)), cwd=cwd, env=environment, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"cannot run native runtime tool {command[0]}: {error}") from error
+    if result.returncode:
+        raise RuntimeError(f"{command[0]} failed ({result.returncode}): {result.stderr.decode(errors='replace').strip()}")
+    return result.stdout
+
+
+def sha256(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def archive_inventory(build):
+    return {str(path.relative_to(build)): sha256(path) for path in sorted(build.rglob("*.a")) if path.is_file() and not path.is_symlink()}
+
+
+def require_native(target):
+    if sys.platform != "darwin" or platform.machine() != TARGETS[target]:
+        raise RuntimeError(f"{target} requires a native {TARGETS[target]} Mac, not a cross/Rosetta build")
+    # Query this interpreter, not a subprocess that could launch natively while
+    # its parent is translated. Apple documents ENOENT as native Intel:
+    # https://developer.apple.com/videos/play/wwdc2020/10686/?time=871
+    query = ctypes.CDLL(None, use_errno=True).sysctlbyname
+    query.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+    query.restype = ctypes.c_int
+    translated = ctypes.c_int()
+    size = ctypes.c_size_t(ctypes.sizeof(translated))
+    if query(b"sysctl.proc_translated", ctypes.byref(translated), ctypes.byref(size), None, 0) != 0:
+        error = ctypes.get_errno()
+        if error != errno.ENOENT:
+            raise RuntimeError(f"cannot establish native build process (errno={error})")
+    elif size.value != ctypes.sizeof(translated) or translated.value != 0:
+        raise RuntimeError("build process is translated or unverifiable; use matching native hardware and Python")
+
+
+def prepare(target, *, output=None, jobs=2):
+    require_native(target)
+    locked = tomllib.loads((ROOT / "Cargo.lock").read_text())["package"]
+    versions = [entry["version"] for entry in locked if entry["name"] == "ort-sys"]
+    if versions != [ORT_SYS_VERSION]:
+        raise RuntimeError("the locked ort-sys changed; refresh the pinned native runtime version/revision before building")
+    cache = (output or ROOT / "target" / "native-runtime" / target / ORT_VERSION).absolute()
+    if cache.is_symlink():
+        raise RuntimeError("native runtime output must not be a symbolic link")
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache = cache.parent.resolve() / cache.name
+    source = cache / "source"
+    build = cache / "build"
+    libraries = build / "Release"
+    marker = cache / "runtime.json"
+    identity = {
+        "schema_version": 2, "ort_sys_version": ORT_SYS_VERSION, "onnxruntime_version": ORT_VERSION,
+        "source_revision": ORT_REVISION, "target": target, "minimum_macos": MINIMUM_MACOS,
+        "linkage": "static-cpu",
+    }
+    if cache.exists():
+        if not marker.is_file() or marker.is_symlink():
+            raise RuntimeError(f"native runtime output is incomplete/unowned; choose a new --output or remove this invocation's failed output deliberately: {cache}")
+        previous = json.loads(marker.read_text())
+        if any(previous.get(key) != value for key, value in identity.items()):
+            raise RuntimeError("cached native runtime identity differs from the pinned build")
+        if run(["git", "-C", source, "rev-parse", "HEAD"]).decode().strip() != ORT_REVISION:
+            raise RuntimeError("cached native runtime source revision changed")
+        if run(["git", "-C", source, "status", "--porcelain=v1", "--untracked-files=no"]):
+            raise RuntimeError("cached native runtime source has local modifications")
+        if archive_inventory(build) != previous.get("archives"):
+            raise RuntimeError("cached native runtime archives changed; no modified binaries will be reused")
+        return libraries, identity
+    for tool in ("git", "cmake", "xcrun", "make", "lipo"):
+        if not shutil.which(tool):
+            raise RuntimeError(f"native source runtime preparation needs {tool}; provide it privately/on PATH, no global install is performed")
+    cmake = run(["cmake", "--version"]).decode()
+    version = re.search(r"cmake version ([0-9]+)\.([0-9]+)", cmake)
+    if not version or (int(version[1]), int(version[2])) < (3, 28):
+        raise RuntimeError("native ONNX Runtime source preparation needs CMake 3.28+")
+    run(["xcrun", "--find", "clang"])
+    run(["xcrun", "--find", "libtool"])
+    cache.mkdir(mode=0o700)
+    source.mkdir(mode=0o700)
+    # Fetch a full, immutable public commit, not a moving release tag. CMake's
+    # dependency digests and git submodule revisions come from that commit.
+    run(["git", "-C", source, "init", "--quiet"])
+    run([
+        "git", "-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-C", source,
+        "fetch", "--depth=1", ORT_REPOSITORY, ORT_REVISION,
+    ], timeout=600)
+    run(["git", "-c", "core.hooksPath=/dev/null", "-C", source, "checkout", "--quiet", "--detach", ORT_REVISION])
+    if run(["git", "-C", source, "rev-parse", "HEAD"]).decode().strip() != ORT_REVISION:
+        raise RuntimeError("fetched native runtime revision does not match the pinned commit")
+    run([
+        sys.executable, source / "tools" / "ci_build" / "build.py",
+        "--build_dir", build, "--config", "Release", "--update", "--build", "--skip_tests",
+        "--parallel", str(jobs), "--osx_arch", TARGETS[target], "--compile_no_warning_as_error",
+        "--cmake_extra_defines", f"CMAKE_OSX_DEPLOYMENT_TARGET={MINIMUM_MACOS}",
+        "onnxruntime_BUILD_UNIT_TESTS=OFF", "BUILD_SHARED_LIBS=OFF",
+        "FETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER",
+    ], cwd=source, timeout=7200)
+    # Static ORT consumes some external targets (notably RE2) only for headers,
+    # so `all` can omit their archives. Build every CPU dependency root; CMake
+    # supplies its complete transitive Abseil closure.
+    run([
+        "cmake", "--build", libraries, "--config", "Release",
+        "--parallel", str(jobs), "--target",
+        "re2", "cpuinfo", "onnx", "onnx_proto", "libprotobuf-lite", "flatbuffers",
+    ], timeout=1800)
+    archives = sorted(libraries.rglob("*.a"))
+    required = {
+        f"libonnxruntime_{name}.a" for name in (
+            "common", "flatbuffers", "framework", "graph", "lora", "mlas",
+            "optimizer", "providers", "session", "util",
+        )
+    } | {"libonnx.a", "libonnx_proto.a", "libprotobuf-lite.a", "libre2.a", "libcpuinfo.a", "libflatbuffers.a"}
+    missing = required.difference(path.name for path in archives)
+    if missing:
+        raise RuntimeError(f"native runtime static dependency closure is incomplete: {', '.join(sorted(missing))}")
+    for library in archives:
+        if not library.is_file() or library.is_symlink():
+            raise RuntimeError(f"native runtime archive must be a regular file: {library}")
+        if run(["lipo", "-archs", library]).decode().split() != [TARGETS[target]]:
+            raise RuntimeError(f"native runtime archive has the wrong architecture: {library.name}")
+    # rc.12's decomposed linker list omits transitive Abseil libraries. Its
+    # supported single-archive path contains the entire pinned CPU closure and
+    # needs neither duplicated dependency names nor checkout-relative -L flags.
+    run(["xcrun", "libtool", "-static", "-o", libraries / "libonnxruntime.a", *archives], timeout=300)
+    if run(["git", "-C", source, "status", "--porcelain=v1", "--untracked-files=no"]):
+        raise RuntimeError("native runtime source was modified during its build")
+    marker.write_text(json.dumps({**identity, "archives": archive_inventory(build)}, indent=2, sort_keys=True) + "\n")
+    return libraries, identity
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        "Intel macOS has no ort-sys prebuilt runtime: run this before workspace checks. "
+        "Use the printed ORT_LIB_PATH plus ORT_PREFER_DYNAMIC_LINK=0 for cargo check/clippy/test/build. "
+        "package-macos invokes this automatically for Intel; --source-runtime opts in on arm64. "
+        "Only public source/build dependencies are downloaded, never models or user configuration."
+    ))
+    parser.add_argument("--target", choices=TARGETS, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--jobs", type=int, default=2, help="bounded native build parallelism (default: 2)")
+    parser.add_argument("--github-env", type=Path, help="append the native link environment to an explicitly supplied GitHub environment file")
+    args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be positive")
+    try:
+        libraries, _ = prepare(args.target, output=args.output, jobs=args.jobs)
+        environment = f"ORT_LIB_PATH={libraries}\nORT_PREFER_DYNAMIC_LINK=0\n"
+        if args.github_env:
+            with args.github_env.open("a") as output:
+                output.write(environment)
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
+        parser.exit(1, f"prepare-macos-runtime: {error}\n")
+    print(environment, end="")
+
+
+if __name__ == "__main__":
+    main()

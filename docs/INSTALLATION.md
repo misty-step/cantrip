@@ -1,4 +1,4 @@
-# Install a Cantrip release
+# Install Cantrip
 
 Use the [latest published Linux x86-64 release](https://github.com/misty-step/cantrip/releases/latest)
 for a CPU-only executable. No source checkout, Rust installation, GPU, or CUDA
@@ -12,6 +12,12 @@ After installing, continue to [your first attended dictation](USAGE.md#first-dic
 If a retained older bundle lacks a linked companion guide, use the
 [online user documentation](https://cantrip.mistystep.io/docs/install); no
 checkout is required.
+
+The published-release, provenance, installer, service, update, rollback, and
+uninstall procedures below are **Linux-only** and remain the supported binary
+distribution route. For macOS 13.3+, use
+[native source packaging](#macos-native-app-from-source); no public macOS
+release has been published.
 
 ## Runtime prerequisites and support
 
@@ -252,3 +258,192 @@ target to bypass a refusal. A `.cantrip-install.lock` in the destination `bin`
 serializes installers; after an interrupted run, inspect it and confirm that no
 installer is running before removing only that lock and its staged executable.
 Never clear runtime or data directories as an installer repair.
+
+## macOS native app from source
+
+The native app baseline is **macOS 13.3+**, with separate Apple Silicon
+(`aarch64-apple-darwin`) and Intel (`x86_64-apple-darwin`) builds. Build each on
+its matching native Mac with a matching native Python process, not through
+Rosetta or cross-compilation. Both packaging and runtime preparation check the
+calling process's architecture and translation state before building. This is
+a source-build route, not a promise of a downloadable Mac release.
+
+### Build prerequisites
+
+- A source checkout, Git, rustup, and the exact Rust toolchain pinned in
+  [`rust-toolchain.toml`](../rust-toolchain.toml). Run `rustup install` from the
+  repository root; Cargo reads that pin automatically. Keep `Cargo.lock` and
+  use `--locked`; do not downgrade shared inference dependencies for Intel.
+- Selected Xcode command-line tools providing Clang, `lipo`, `otool`,
+  `install_name_tool`, `codesign`, `ditto`, and `xcrun`. Obtain them from Apple
+  if missing; `xcrun --find clang` must resolve the selected toolchain. There is
+  no exact Xcode-version pin in this repository; the scripts verify the
+  selected tools and packaged minimum OS rather than claiming an immutable
+  Xcode image.
+- **Python 3.11+** on `PATH` as `python3`, or invoke the scripts with the full
+  path to an existing/private 3.11+ interpreter. Apple's system Python may be
+  too old. Native CI selects Python 3.12; 3.11 is the scripts' minimum.
+- **CMake 3.28+** and `make` for Intel, or for an explicit arm64
+  `--source-runtime` build. They may be supplied privately on `PATH`; the
+  bootstrap does not install global tools.
+- Network access for Cargo/native build dependencies. Model downloads are
+  separate, explicit actions and are not part of packaging.
+
+Apple Silicon normally uses `ort-sys`' checksum-pinned CPU runtime. Its locked
+`ort-sys 2.0.0-rc.12` inventory has no Intel Mac prebuilt, so
+[`scripts/prepare-macos-runtime`](../scripts/prepare-macos-runtime) builds CPU
+ONNX Runtime **1.24.2** from immutable commit
+`058787ceead760166e3c50a0a4cba8a833a6f53f`. Packaging invokes this automatically
+for Intel, with two build jobs and a project-local
+`target/native-runtime/<target>/1.24.2` cache. It explicitly builds the complete
+CPU dependency closure and combines its static archives into `libonnxruntime.a`,
+avoiding `ort-sys`' incomplete decomposed dependency list. Source revision and
+every archive are checked before cache reuse; no system ORT install or downgrade
+is needed. `--source-runtime` selects the same source build on arm64.
+
+Cache schema 2 rejects older/incomplete caches. For standalone preparation,
+choose a fresh `--output`; packaging uses its default project-local cache, so
+remove only your own obsolete cache deliberately before rebuilding there.
+
+### Obtain a development app
+
+From the repository root, select **one** matching architecture:
+
+```sh
+# On a native Apple Silicon Mac:
+target=aarch64-apple-darwin
+output=dist/mac-arm64-dev
+```
+
+```sh
+# Instead, on a native Intel Mac:
+target=x86_64-apple-darwin
+output=dist/mac-intel-dev
+```
+
+Then build and package this tree into a **new, nonexistent** output directory:
+
+```sh
+rustup install
+python3 scripts/package-macos --target "$target" --ad-hoc --output "$output"
+binary="$PWD/$output/Cantrip.app/Contents/MacOS/cantrip"
+"$binary" --version
+```
+
+The command produces `Cantrip.app`, a `-development.zip`, `manifest.json`, and
+`SHA256SUMS`. It snapshots the executable and every non-system dylib, rewrites
+their load paths inside the bundle, checks Mach-O architecture/minimum OS, and
+verifies the signature and bundled executable version. System Apple libraries
+remain OS dependencies. The stable app identifier is `com.misty-step.cantrip`;
+the bundle contains the microphone purpose string and audio-input entitlement.
+
+**Ad-hoc means DEVELOPMENT ONLY: not hardened, not Developer ID signed, and not
+notarized.** Without a Team ID, hardened library validation would reject the
+contained third-party dylibs, so the development mode deliberately does not
+claim hardened runtime. It is not a production distribution or a guarantee of
+Gatekeeper acceptance. Do not disable Gatekeeper or fabricate signing metadata
+to turn it into one.
+
+The generated app is real and self-contained: build tools and the source
+checkout are not runtime requirements. Open `Cantrip.app` deliberately in
+Finder (or move the whole app, not just its executable, to your chosen app
+location). No arguments, or the explicit `app` command, starts the menu-bar
+host; `daemon` is an engine-only process without menu bar/HUD. Keep one startup
+owner. Packaging does not launch the app, grant microphone access, download
+models, enable Open At Login, or change user config/history/credentials.
+
+The **bundle CLI path** is `Cantrip.app/Contents/MacOS/cantrip`, not a binary
+under `Contents/Resources` and not a Linux installer destination. If deliberately
+moved to `/Applications`, for example:
+
+```sh
+"/Applications/Cantrip.app/Contents/MacOS/cantrip" --version
+```
+
+Use the [usage](USAGE.md), [desktop](DESKTOP.md), and
+[privacy](PRIVACY.md) contracts for explicit setup and attended use. New Mac
+configuration selects clipboard/manual paste. Existing Auto/Paste/Type choices
+are preserved and defer without opening the pasteboard or sending keys, never
+silently downgraded.
+
+### Production prerequisites and fail-closed packaging
+
+Production mode is the default when `--ad-hoc` is absent. It requires all of:
+
+- A clean committed source checkout; the packaged version/toolchain/metadata
+  come from that revision, and the checkout is rechecked before output.
+- A valid **Developer ID Application** signing certificate **with its private
+  key** in the build user's Keychain. `--sign-identity` must select exactly one
+  valid identity by certificate name or SHA-1.
+- Its matching **ten-character Apple Developer Team ID**, passed as `--team-id`.
+- An existing authenticated `notarytool store-credentials` Keychain profile
+  passed as `--notary-profile`, plus Apple network access and the Xcode
+  `notarytool`/`stapler` tools. Profile authentication is checked before building.
+
+After obtaining those real prerequisites, substitute their exact values and
+choose another new output directory:
+
+```sh
+python3 scripts/package-macos --target "$target" --output dist/mac-production \
+  --sign-identity 'Developer ID Application: ORGANIZATION (TEAMID)' \
+  --team-id TEAMID --notary-profile YOUR_EXISTING_PROFILE
+```
+
+`ORGANIZATION`, `TEAMID`, and `YOUR_EXISTING_PROFILE` above are placeholders,
+not supplied certificates or credentials. The script signs nested libraries
+and the app with hardened runtime and secure timestamps, verifies identity and
+minimal entitlements, requires Apple notarization **Accepted** with no error
+issues, staples and validates the ticket, and requires a passing Gatekeeper
+assessment before publishing output locally. It then writes the final ZIP,
+manifest, and checksums. There is **no unsigned, unnotarized, or ad-hoc fallback**;
+missing identity/profile, rejected notarization, invalid stapling, or failed
+assessment prevents distributable output. An existing output is never replaced.
+The script does not publish a GitHub release.
+
+Production signing/notarization has not been exercised here, and no signing
+identity, Apple grant, or public Mac asset is asserted. Unlike Linux releases,
+these locally produced Mac assets do not come with the published Linux
+`release.json`/GitHub attestation contract. Checksums detect corruption, not
+publisher identity. Review the manifest's architecture, source revision, dirty
+state, runtime identity, signing mode, and notarization status honestly.
+
+### macOS development and verification
+
+Before ordinary Intel workspace Cargo commands, prepare the same pinned CPU
+runtime and set its project-local link environment:
+
+```sh
+python3 scripts/prepare-macos-runtime --target x86_64-apple-darwin
+export ORT_LIB_PATH="$PWD/target/native-runtime/x86_64-apple-darwin/1.24.2/build/Release"
+export ORT_PREFER_DYNAMIC_LINK=0
+```
+
+Run from the repository root on the matching native host:
+
+```sh
+cargo fmt --all --check
+cargo check --workspace --locked --all-targets
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo test --locked --package cantrip --example eval
+python3 -m unittest discover -s tests -p 'test_release_*.py'
+python3 scripts/verify-macos --app "$output/Cantrip.app" \
+  --target "$target" --output /path/to/new/evidence-directory
+```
+
+The native helper relocates the real app with a system-only runtime PATH and
+private HOME/XDG directories, explicitly downloads the public local model, and
+transcribes only the checked public JFK WAV. It verifies missing-model refusal
+without implicit downloads, denied/invalid-UID capture without live audio,
+terminal Deferred for explicit Auto/Paste/Type without config migration,
+graceful shutdown, and five offscreen production NSView HUD states. It saves
+sanitized `verification.json` and own-view PNGs, not private transcripts.
+A logged-in WindowServer session is needed for NSView rendering. An explicit
+`--skip-hud --hud-unavailable-reason 'REASON'` records an omission, not a pass.
+
+Record exact-head platform results in the PR. Offscreen views do not prove live
+panel positioning/focus, and file STT is not a microphone-to-editor trial. Use
+the [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial) for microphone,
+shortcut/menu, login, and general-clipboard/manual-paste behavior. Intel runtime
+execution and production signing/notarization each require their own proof,
+not inference from an arm64 development app.

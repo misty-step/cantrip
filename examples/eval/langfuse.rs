@@ -59,7 +59,7 @@ pub fn publish(args: &[String]) -> Result<()> {
     // Langfuse publish is opt-in and reuses the daemon's [telemetry]
     // configuration: the public key lives in config, the secret half lives in
     // the OS keyring under api_key_id. No separate eval credentials exist.
-    let telemetry = cantrip::config::Config::load()?.telemetry;
+    let telemetry = cantrip_engine::config::Config::load()?.telemetry;
     anyhow::ensure!(
         telemetry.enabled,
         "Langfuse eval publishing is disabled; set [telemetry] enabled = true first"
@@ -344,14 +344,14 @@ fn behavior_item_key(case: &str) -> String {
 
 impl Client {
     fn new(
-        telemetry: &cantrip::config::TelemetryConfig,
+        telemetry: &cantrip_engine::config::TelemetryConfig,
         dataset_name: String,
         run_id: String,
         run_start_nanos: u128,
     ) -> Result<Self> {
         let base_url = langfuse_base(&telemetry.endpoint)?;
         let secret = match &telemetry.api_key_id {
-            Some(id) => cantrip::keys::get(id)
+            Some(id) => cantrip_engine::keys::get(id)
                 .with_context(|| format!("reading Langfuse key '{id}' from OS keyring"))?,
             None => String::new(),
         };
@@ -893,6 +893,8 @@ mod tests {
                         Err(error) => panic!("accepting fixture request: {error}"),
                     }
                 };
+                // Darwin inherits the listener's nonblocking flag on accept.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();
@@ -912,7 +914,7 @@ mod tests {
 
     fn client(base: &str) -> Client {
         let mut client = Client::new(
-            &cantrip::config::TelemetryConfig {
+            &cantrip_engine::config::TelemetryConfig {
                 enabled: true,
                 endpoint: format!("{base}/api/public/otel/v1/traces"),
                 public_key: "pk-synthetic".to_owned(),
