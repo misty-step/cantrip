@@ -223,7 +223,10 @@ impl DecisionClient {
 
         let body = serde_json::to_vec(&request).context("serializing decision request")?;
 
-        let agent = ureq::AgentBuilder::new().timeout(self.timeout).build();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(self.timeout)
+            .timeout(self.timeout)
+            .build();
 
         let mut req = agent
             .post(&self.endpoint)

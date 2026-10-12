@@ -2,6 +2,12 @@
 
 Date: 2026-09-07. Status: accepted.
 
+STT policy amended 2026-10-12 for K-20261012-cantrip-falls-back-fast-when-cloud-trans:
+the [current fallback contract](../CONFIGURATION.md#stt--transcription) bounds
+cloud waiting and preserves completed native chunks while recognizing only
+untouched frames locally. This supersedes the whole-take-only choice below;
+the retention/deletion and delivery decisions remain unchanged.
+
 ## Problem
 
 Cloud STT returned HTTP 429 on chunk 2 of a six-chunk, 162-second recording.

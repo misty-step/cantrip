@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One-shot HTTP server: accepts a single request, captures it, sends `response`.
 fn mock_server(response: String) -> (String, thread::JoinHandle<CapturedRequest>) {
@@ -783,6 +783,70 @@ fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_bod
             "operational logs must not expose private content"
         );
     }
+}
+
+#[test]
+fn transcribe_remote_shares_the_take_budget_with_slow_response_body_reads() {
+    let fixture = WavFixture::new(native_spec(), 70 * 16_000);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for index in 1..=3 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(8)))
+                .unwrap();
+            requests.push(read_request(&stream));
+            if index < 3 {
+                thread::sleep(Duration::from_millis(900));
+                stream
+                    .write_all(ok_json(&format!(r#"{{"text":"cloud-{index}"}}"#)).as_bytes())
+                    .unwrap();
+            } else {
+                let body = r#"{"text":"a response body too slow for the remaining take budget"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                for byte in body.bytes() {
+                    thread::sleep(Duration::from_millis(100));
+                    if stream.write_all(&[byte]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        requests
+    });
+    let started = Instant::now();
+    let mut progress = Vec::new();
+    let transcript = stt::transcribe_remote(
+        &fixture.path,
+        &endpoint,
+        "test-stt-model",
+        &[],
+        None,
+        None,
+        |chunk| progress.push(chunk),
+    )
+    .expect("the two completed chunks must survive a slow body");
+    assert!(
+        started.elapsed() < Duration::from_millis(6_300),
+        "each request and body must share the five-second take budget"
+    );
+    assert_eq!(
+        transcript,
+        stt::Transcript::Partial {
+            text: "cloud-1 cloud-2".to_owned(),
+            failed_at: 3,
+            total: 3,
+        }
+    );
+    assert_eq!(progress.last().unwrap().completed, 2);
+    assert_eq!(server.join().unwrap().len(), 3);
 }
 
 #[test]

@@ -142,19 +142,27 @@ Compressed WAV encodings, RF64/RIFX, and multiple data chunks must be converted
 to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
 16 kHz mono PCM16.
 
-**Automatic local fallback.** A cloud error (including unavailable credentials),
-partial transcript, or empty recognition of nonempty audio triggers one whole-take
-attempt with installed default Parakeet. A complete local transcript replaces
-the cloud prefix; alternate passes are never concatenated. If local fallback
-cannot complete, useful cloud text is preserved. Configured cleanup runs once on
-the selected transcript, not on each attempt. Cancellation prevents starting a
-fallback or subsequent cleanup request; already-running requests may finish.
+**Automatic local fallback.** Cloud requests share a five-second budget across
+the take, including connection, upload, headers, and response-body reads. A cloud
+error (including unavailable credentials), exhausted budget, or empty recognition
+of nonempty audio switches to installed default Parakeet without another cloud
+request. For native 16 kHz mono PCM16, completed cloud chunks are kept and only
+the failed/unstarted source-frame ranges are recognized locally. History records
+this combination as `mixed`; overlapping alternate passes are never concatenated.
+Without a usable native prefix/suffix, fallback attempts the whole take once.
+Missing, failing, or empty suffix recognition preserves useful text as incomplete.
+Configured cleanup runs once on the selected transcript, not on each attempt.
+Cancellation prevents starting fallback or subsequent cleanup requests.
 There are no automatic downloads or switches to another cloud provider.
 Install the safety-net model deliberately with `models pull`; `doctor` reports
 whether its installed files are available, not a successful inference. With
 `keep_warm = true`, cloud-configured daemons preload local Parakeet too.
 External files outside Parakeet's native audio format can still fail locally;
 retain or convert the original file.
+
+These are HTTP deadlines, not hard bounds on blocking OS DNS resolution,
+keyring access, model loading, or local inference. Slow-but-working cloud
+recognition also switches to local when its budget expires.
 
 For selected-recording retries and the per-operation `--local` override, see
 [recovery](USAGE.md#recovery). Explicit local recovery/file transcription skips
@@ -203,6 +211,11 @@ contract, so keep it short and avoid redefining the task.
   later round is a focused proofread for residual speech-recognition errors,
   such as a truncated acronym. One pass avoids compounded drift and latency.
   Use 2 only after evaluating it on your own dictation corpus.
+- **`timeout_ms`.** Cleanup shares `min(timeout_ms, 5000)` milliseconds across
+  triage, every generative pass, and the final watchdog, including connections
+  and response bodies. An unfinished chain returns raw STT text. A watchdog
+  timeout after completed passes preserves the candidate under its existing
+  fail-open policy. No subsequent request starts after the budget expires.
 - **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
   many characters (default 40). Short commands skip the cloud round-trip.
   Set `0` to always run cleanup when enabled.

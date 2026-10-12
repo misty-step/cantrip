@@ -40,7 +40,7 @@ New Mac configuration defaults to Clipboard; Linux's Auto default remains unchan
 
 Mac delivery exposes only explicit clipboard/manual paste. Existing Auto/Paste/Type values remain visible, preserved, and unsupported: they reach Deferred before opening/claiming the pasteboard or sending keys. Settings does not silently migrate those values. Shared `ClipboardFallback::ExplicitOnly` encodes that boundary, including incomplete text; Linux retains its existing `OnDeferral` policy. Strict Type never reads or writes a clipboard on either platform. Unknown history defers, and a potentially completed external handoff is Uncertain with no alternate-backend retry.
 
-Dismiss acknowledges feedback, not deletion. Confirmed Forget still removes only the selected take's retained audio and incomplete text; complete archived transcript text stays. Local STT is the default; configured-cloud whole-take fallback, explicit model downloads, opt-in cleanup/telemetry, and content-free operational logging retain their shared contracts.
+Dismiss acknowledges feedback, not deletion. Confirmed Forget still removes only the selected take's retained audio and incomplete text; complete archived transcript text stays. Local STT is the default; [bounded configured-cloud fallback](../CONFIGURATION.md#stt--transcription), explicit model downloads, opt-in cleanup/telemetry, and content-free operational logging retain their shared contracts.
 
 ### Native private paths and credentials
 
