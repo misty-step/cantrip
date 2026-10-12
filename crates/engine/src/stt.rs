@@ -106,14 +106,7 @@ impl NativeSuffix {
             SAMPLE_RATE,
             cancel,
             on_progress,
-            |start, end| {
-                let text = transcribe_chunk(&self.samples[start..end])?;
-                anyhow::ensure!(
-                    !text.trim().is_empty(),
-                    "local suffix transcription returned no text"
-                );
-                Ok(text)
-            },
+            |start, end| transcribe_chunk(&self.samples[start..end]),
         )
     }
 }

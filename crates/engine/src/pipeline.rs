@@ -1129,8 +1129,9 @@ mod tests {
         let recording = Recording::new(70 * 16_000);
         for case in [
             "unavailable",
-            "empty-first",
-            "empty-last",
+            "silent-first",
+            "silent-last",
+            "empty-all",
             "cancel-first",
             "cloud-empty",
         ] {
@@ -1176,7 +1177,10 @@ mod tests {
                     suffix
                         .transcribe(cancel, &mut |_| {}, |_| {
                             local_calls += 1;
-                            if case == "empty-first" || (case == "empty-last" && local_calls == 2) {
+                            if case == "empty-all"
+                                || (case == "silent-first" && local_calls == 1)
+                                || (case == "silent-last" && local_calls == 2)
+                            {
                                 return Ok(String::new());
                             }
                             if case == "cancel-first" {
@@ -1190,12 +1194,14 @@ mod tests {
                 |entry| recording.save(entry),
             );
             let expected = match case {
-                "unavailable" | "empty-first" => "cloud prefix",
+                "unavailable" | "empty-all" => "cloud prefix",
+                "silent-first" => "cloud prefix local-2",
                 "cloud-empty" => "cloud prefix local-1 local-2",
                 _ => "cloud prefix local-1",
             };
             assert_eq!(outcome.text.as_deref(), Ok(expected), "{case}");
-            assert_eq!(outcome.partial, case != "cloud-empty", "{case}");
+            let incomplete = matches!(case, "unavailable" | "empty-all" | "cancel-first");
+            assert_eq!(outcome.partial, incomplete, "{case}");
             assert_eq!(outcome.cancelled, case == "cancel-first", "{case}");
             assert_eq!(outcome.postproc, PostprocStatus::Off);
             let saved = record(&outcome);
@@ -1208,7 +1214,7 @@ mod tests {
                     "mixed"
                 }
             );
-            assert_eq!(saved["recovery"]["retry_incomplete"], case != "cloud-empty");
+            assert_eq!(saved["recovery"]["retry_incomplete"], incomplete);
             assert_eq!(
                 server.join().unwrap().len(),
                 2,

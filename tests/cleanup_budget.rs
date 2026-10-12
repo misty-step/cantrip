@@ -39,8 +39,12 @@ fn assert_budget_outcome(
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        for reply in replies {
+        let mut cleanup_started = None;
+        for (index, reply) in replies.into_iter().enumerate() {
             let (mut stream, _) = listener.accept().unwrap();
+            if index == 1 {
+                cleanup_started = Some(Instant::now());
+            }
             stream
                 .set_read_timeout(Some(Duration::from_secs(8)))
                 .unwrap();
@@ -72,6 +76,7 @@ fn assert_budget_outcome(
                     }
                     // Hold the HTTP boundary open until the client enforces its deadline.
                     assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+                    let elapsed = cleanup_started.unwrap().elapsed();
                     listener.set_nonblocking(true).unwrap();
                     let observe_until = Instant::now() + Duration::from_millis(200);
                     while Instant::now() < observe_until {
@@ -80,9 +85,11 @@ fn assert_budget_outcome(
                         );
                         thread::sleep(Duration::from_millis(5));
                     }
+                    return elapsed;
                 }
             }
         }
+        panic!("cleanup budget fixture must end with a stalled response");
     });
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let root = Fixture(std::env::temp_dir().join(format!(
@@ -131,7 +138,6 @@ fn assert_budget_outcome(
         writer.write_sample(1_i16).unwrap();
     }
     writer.finalize().unwrap();
-    let started = Instant::now();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cantrip"))
         .arg("transcribe")
         .arg(&wav)
@@ -141,8 +147,7 @@ fn assert_budget_outcome(
         .env("RUST_LOG", "warn")
         .output()
         .unwrap();
-    let elapsed = started.elapsed();
-    server.join().unwrap();
+    let elapsed = server.join().unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
     assert!(

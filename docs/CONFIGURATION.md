@@ -150,7 +150,8 @@ request. For native 16 kHz mono PCM16, completed cloud chunks are kept and only
 the failed/unstarted source-frame ranges are recognized locally. History records
 this combination as `mixed`; overlapping alternate passes are never concatenated.
 Without a usable native prefix/suffix, fallback attempts the whole take once.
-Missing, failing, or empty suffix recognition preserves useful text as incomplete.
+Missing, failing, or entirely empty suffix recognition preserves useful text as
+incomplete. Successful silent chunks do not stop recognition of later speech.
 Configured cleanup runs once on the selected transcript, not on each attempt.
 Cancellation prevents starting fallback or subsequent cleanup requests.
 There are no automatic downloads or switches to another cloud provider.
