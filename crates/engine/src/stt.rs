@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
-const REMOTE_TIMEOUT: Duration = Duration::from_secs(60);
+const REMOTE_BUDGET: Duration = Duration::from_secs(5);
 const MULTIPART_BOUNDARY: &str = "cantrip-audio-boundary";
 /// Includes multipart framing and vocabulary, not just the WAV payload.
 const MAX_REMOTE_REQUEST_BYTES: usize = 24_000_000;
@@ -61,6 +61,53 @@ impl Transcript {
 
     pub fn is_partial(&self) -> bool {
         matches!(self, Self::Partial { .. })
+    }
+}
+
+/// A cloud pass can retain its exact native frame plan for a nonoverlapping
+/// local completion. Other input formats still require a whole-take retry.
+pub(crate) struct RemoteAttempt {
+    pub transcript: Transcript,
+    pub suffix: Option<NativeSuffix>,
+}
+
+impl RemoteAttempt {
+    pub(crate) fn whole(transcript: Transcript) -> Self {
+        Self {
+            transcript,
+            suffix: None,
+        }
+    }
+}
+
+pub(crate) struct NativeSuffix {
+    samples: Vec<f32>,
+    ranges: Vec<(usize, usize)>,
+    completed: u32,
+}
+
+impl NativeSuffix {
+    pub(crate) fn completed(&self) -> u32 {
+        self.completed
+    }
+
+    pub(crate) fn total(&self) -> u32 {
+        self.ranges.len() as u32
+    }
+
+    pub(crate) fn transcribe(
+        &self,
+        cancel: Option<&AtomicBool>,
+        on_progress: &mut impl FnMut(ChunkProgress),
+        mut transcribe_chunk: impl FnMut(&[f32]) -> Result<String>,
+    ) -> Result<Transcript> {
+        collect_chunks(
+            &self.ranges[self.completed as usize..],
+            SAMPLE_RATE,
+            cancel,
+            on_progress,
+            |start, end| transcribe_chunk(&self.samples[start..end]),
+        )
     }
 }
 
@@ -145,6 +192,17 @@ impl Transcriber {
             on_progress,
             |start, end| self.transcribe_chunk(&samples[start..end]),
         )
+    }
+
+    pub(crate) fn transcribe_suffix(
+        &mut self,
+        suffix: &NativeSuffix,
+        cancel: Option<&AtomicBool>,
+        mut on_progress: impl FnMut(ChunkProgress),
+    ) -> Result<Transcript> {
+        suffix.transcribe(cancel, &mut on_progress, |samples| {
+            self.transcribe_chunk(samples)
+        })
     }
 
     fn transcribe_chunk(&mut self, samples: &[f32]) -> Result<String> {
@@ -426,6 +484,7 @@ struct RemoteTranscriptionResponse {
 /// PCM and IEEE-float WAVs retain their source frames and format. Native
 /// 16 kHz mono PCM16 uses the local low-energy planner; other formats split on
 /// frame boundaries without decoding. A short bounded file is sent unchanged.
+/// Requests and body reads share one five-second budget across all chunks.
 pub fn transcribe_remote(
     wav: &Path,
     endpoint: &str,
@@ -433,26 +492,85 @@ pub fn transcribe_remote(
     vocabulary: &[String],
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
-    mut on_progress: impl FnMut(ChunkProgress),
+    on_progress: impl FnMut(ChunkProgress),
 ) -> Result<Transcript> {
+    transcribe_remote_attempt(
+        wav,
+        RemoteConfig {
+            endpoint,
+            model,
+            vocabulary,
+            api_key,
+        },
+        cancel,
+        on_progress,
+        false,
+    )
+    .map(|attempt| attempt.transcript)
+}
+
+pub(crate) fn transcribe_cloud(
+    wav: &Path,
+    endpoint: &str,
+    model: &str,
+    vocabulary: &[String],
+    api_key: Option<&str>,
+    cancel: Option<&AtomicBool>,
+    on_progress: impl FnMut(ChunkProgress),
+) -> Result<RemoteAttempt> {
+    transcribe_remote_attempt(
+        wav,
+        RemoteConfig {
+            endpoint,
+            model,
+            vocabulary,
+            api_key,
+        },
+        cancel,
+        on_progress,
+        true,
+    )
+}
+
+struct RemoteConfig<'a> {
+    endpoint: &'a str,
+    model: &'a str,
+    vocabulary: &'a [String],
+    api_key: Option<&'a str>,
+}
+
+fn transcribe_remote_attempt(
+    wav: &Path,
+    remote: RemoteConfig<'_>,
+    cancel: Option<&AtomicBool>,
+    mut on_progress: impl FnMut(ChunkProgress),
+    retain_suffix: bool,
+) -> Result<RemoteAttempt> {
+    let RemoteConfig {
+        endpoint,
+        model,
+        vocabulary,
+        api_key,
+    } = remote;
+    let deadline = Instant::now() + REMOTE_BUDGET;
     if is_cancelled(cancel) {
-        return Ok(Transcript::Cancelled {
+        return Ok(RemoteAttempt::whole(Transcript::Cancelled {
             text: String::new(),
             completed: 0,
             total: 0,
-        });
+        }));
     }
     let mut source =
         RemoteWav::open(wav).with_context(|| format!("reading WAV {}", wav.display()))?;
     if is_cancelled(cancel) {
-        return Ok(Transcript::Cancelled {
+        return Ok(RemoteAttempt::whole(Transcript::Cancelled {
             text: String::new(),
             completed: 0,
             total: 0,
-        });
+        }));
     }
     if source.frames == 0 {
-        return Ok(Transcript::Complete(String::new()));
+        return Ok(RemoteAttempt::whole(Transcript::Complete(String::new())));
     }
     let mut body = build_multipart_prefix(model, vocabulary);
     let prefix_len = body.len();
@@ -471,21 +589,26 @@ pub fn transcribe_remote(
 
     let short_frames = source.sample_rate as usize * LOCAL_CHUNK_SECS as usize;
     let unchanged = source.frames <= short_frames && source.file_len <= wav_budget as u64;
+    let mut native_samples = None;
     let ranges = if unchanged {
         vec![(0, source.frames)]
     } else if source.native_capture {
-        // The installed helper only accepts this exact native format. It is
-        // used for planning, never to re-encode the source samples.
+        // Keep this decode for suffix inference. Cloud uploads still retain
+        // the original PCM frames rather than re-encoding normalized samples.
         let samples = transcribe_rs::audio::read_wav_samples(wav)
             .with_context(|| format!("reading WAV {} for chunk planning", wav.display()))?;
         if is_cancelled(cancel) {
-            return Ok(Transcript::Cancelled {
+            return Ok(RemoteAttempt::whole(Transcript::Cancelled {
                 text: String::new(),
                 completed: 0,
                 total: 0,
-            });
+            }));
         }
-        plan_chunks_with_limit(&samples, max_frames)
+        let ranges = plan_chunks_with_limit(&samples, max_frames);
+        if retain_suffix {
+            native_samples = Some(samples);
+        }
+        ranges
     } else {
         let chunk_frames = short_frames.min(max_frames);
         (0..source.frames)
@@ -507,17 +630,13 @@ pub fn transcribe_remote(
 
     let endpoint = format!("{}/audio/transcriptions", endpoint.trim_end_matches('/'));
     let content_type = format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}");
-    let agent = ureq::AgentBuilder::new().timeout(REMOTE_TIMEOUT).build();
-    let mut request = agent.post(&endpoint).set("Content-Type", &content_type);
-    if let Some(api_key) = api_key {
-        request = request.set("Authorization", &format!("Bearer {api_key}"));
-    }
-    collect_chunks(
+    let transcript = collect_chunks(
         &ranges,
         source.sample_rate as f32,
         cancel,
         &mut on_progress,
         |start, end| {
+            remaining_cloud_budget(deadline)?;
             body.truncate(prefix_len);
             source
                 .append_chunk(&mut body, start, end, unchanged)
@@ -532,8 +651,21 @@ pub fn transcribe_remote(
             );
             anyhow::ensure!(!is_cancelled(cancel), "transcription cancelled");
 
+            let remaining = remaining_cloud_budget(deadline)?;
             let started = Instant::now();
-            let response = match request.clone().send_bytes(&body) {
+            // ureq 2's default 30s connect timeout overrides its overall
+            // request timeout, so both must use the take's remaining budget.
+            let agent = ureq::AgentBuilder::new()
+                .timeout_connect(remaining)
+                .timeout(remaining)
+                .build();
+            let mut request = agent.post(&endpoint).set("Content-Type", &content_type);
+            if let Some(api_key) = api_key {
+                request = request.set("Authorization", &format!("Bearer {api_key}"));
+            }
+            // The overall deadline also remains active on into_reader()
+            // below; a slowly streaming body cannot reset the allowance.
+            let response = match request.send_bytes(&body) {
                 Ok(response) => response,
                 Err(ureq::Error::Status(413, _)) => {
                     anyhow::bail!(
@@ -545,14 +677,19 @@ pub fn transcribe_remote(
                     anyhow::bail!("remote transcription endpoint returned HTTP {code}");
                 }
                 Err(ureq::Error::Transport(transport)) => {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!("remote transcription request timed out");
+                    }
                     // Transport display strings may embed server-controlled
                     // headers or URLs. Keep only the kind and timeout cause.
                     let mut cause = std::error::Error::source(&transport);
                     while let Some(error) = cause {
-                        if error
-                            .downcast_ref::<std::io::Error>()
-                            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
-                        {
+                        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                            matches!(
+                                error.kind(),
+                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                            )
+                        }) {
                             anyhow::bail!("remote transcription request timed out");
                         }
                         cause = error.source();
@@ -564,10 +701,26 @@ pub fn transcribe_remote(
                 }
             };
             let response: RemoteTranscriptionResponse =
-                serde_json::from_reader(response.into_reader()).map_err(|_| {
-                    anyhow::anyhow!("remote transcription returned unexpected response shape")
+                serde_json::from_reader(response.into_reader()).map_err(|error| {
+                    if Instant::now() >= deadline
+                        || error.io_error_kind().is_some_and(|kind| {
+                            matches!(
+                                kind,
+                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                            )
+                        })
+                    {
+                        anyhow::anyhow!("remote transcription request timed out")
+                    } else {
+                        anyhow::anyhow!("remote transcription returned unexpected response shape")
+                    }
                 })?;
+            remaining_cloud_budget(deadline)?;
             let text = response.text.trim().to_owned();
+            anyhow::ensure!(
+                !retain_suffix || !text.is_empty(),
+                "remote transcription returned no text for nonempty audio"
+            );
             tracing::info!(
                 "[STT] remote transcription audio_bytes={} ms={} output_char_count={}",
                 audio_bytes,
@@ -576,7 +729,28 @@ pub fn transcribe_remote(
             );
             Ok(text)
         },
-    )
+    )?;
+    let suffix = if retain_suffix && source.native_capture {
+        if let Transcript::Partial { failed_at, .. } = &transcript {
+            Some(NativeSuffix {
+                samples: native_samples.context("native chunk plan has no decoded samples")?,
+                ranges,
+                completed: failed_at - 1,
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(RemoteAttempt { transcript, suffix })
+}
+
+fn remaining_cloud_budget(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .context("remote transcription request timed out: take budget exhausted")
 }
 
 /// Metadata is small; audio stays in the source file until a bounded request

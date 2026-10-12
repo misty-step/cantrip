@@ -2121,12 +2121,14 @@ fn finish_audio(
             source: source.as_str(),
             capture_ms,
             stt_ms: milliseconds(pipeline.stt_elapsed.as_millis()),
-            stt_model: if pipeline.local_fallback {
+            stt_model: if pipeline.local_fallback
+                && pipeline.stt_backend == pipeline::SttBackend::Local
+            {
                 models::PARAKEET_V3_INT8.dir_name.to_owned()
             } else {
                 context.config.stt.model.clone()
             },
-            stt_remote: context.config.stt.endpoint.is_some() && !pipeline.local_fallback,
+            stt_remote: pipeline.stt_backend != pipeline::SttBackend::Local,
             chars: text.map_or(0, |text| text.chars().count()),
             partial: pipeline.partial,
             cleanup_state: match outcome.cleanup {

@@ -24,11 +24,13 @@ Cloud providers have their own retention and account policies. Cantrip does not
 make those policies local by using an OpenAI-compatible API. Review the endpoint
 and model before [enabling a cloud feature](CONFIGURATION.md).
 
-If configured-cloud transcription fails, returns partial text, or recognizes
-nothing from nonempty audio, Cantrip makes one whole-take attempt with the
-**already installed** default local model. It never silently downloads weights
-or switches to another cloud provider. That fallback cannot undo audio already
-sent to the configured provider, and it keeps your configured cleanup policy.
+If configured-cloud transcription fails, exhausts its five-second HTTP budget,
+or recognizes nothing from nonempty audio, Cantrip uses the **already installed**
+default local model. Completed native cloud chunks are preserved; local inference
+covers only the untouched source-frame suffix. Without a usable native suffix,
+fallback attempts the whole take once. It never silently downloads weights or
+switches providers. Fallback cannot undo audio already sent to the configured
+provider and keeps your configured cleanup policy.
 
 An explicit `recover --local` or `transcribe --local` uses installed Parakeet
 and disables cleanup **for that operation**. It does not change your saved
@@ -118,8 +120,8 @@ results and results from `transcribe` or `recover`. A JSON record links raw and
 post-processed text under one stable take ID. It also records:
 
 - completion time, source, audio duration, and pipeline latency;
-- selected STT model, local/cloud backend, latency, and completeness;
-- the original cloud model in `stt.fallback_from_model` when local fallback wins;
+- selected STT model, local/cloud/mixed backend, latency, and completeness;
+- the original cloud model in `stt.fallback_from_model` when local completion contributes;
 - cleanup model, status, latency, passes, prompt version, custom instructions,
   and available token and provider-reported billing usage.
 

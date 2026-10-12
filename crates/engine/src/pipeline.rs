@@ -111,6 +111,23 @@ impl fmt::Display for Stage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttBackend {
+    Cloud,
+    Local,
+    Mixed,
+}
+
+impl SttBackend {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloud => "cloud",
+            Self::Local => "local",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
 /// Outcome of running one WAV through the backend.
 pub struct Outcome {
     /// Final text: post-processed, raw on cleanup failure, or the STT error.
@@ -125,8 +142,10 @@ pub struct Outcome {
     pub partial: bool,
     /// Cancellation was requested before this job settled; never auto-deliver.
     pub cancelled: bool,
-    /// The selected transcript came from an automatic whole-take local retry.
+    /// Useful local text completed a cloud failure, either as a native suffix
+    /// or as a whole-take retry when no compatible prefix was available.
     pub local_fallback: bool,
+    pub stt_backend: SttBackend,
     pub archive: ArchiveStatus,
 }
 
@@ -147,8 +166,10 @@ pub fn should_run_postproc(cfg: &PostprocConfig, chars: usize) -> bool {
 }
 
 /// Transcribe `wav` with the configured STT backend, then apply the
-/// configured post-processing pass. A failed, partial, or unexpectedly empty
-/// cloud result gets one whole-take retry with the installed default Parakeet.
+/// configured post-processing pass. A stalled, failed, or empty cloud chunk
+/// gets local completion with the installed default Parakeet. Native capture
+/// keeps completed cloud text and retries only its exact remaining frames;
+/// other formats or failures before any useful prefix retry the whole take.
 ///
 /// A post-processing failure never drops the dictation: the raw text is
 /// returned with `PostprocStatus::Failed`. Short transcripts under
@@ -171,7 +192,9 @@ pub fn run(
     }
     .run(
         on_stage,
-        |cfg, cancel, on_stage| transcribe(cache, wav, cfg, vocabulary, cancel, on_stage),
+        |cfg, suffix, cancel, on_stage| {
+            transcribe(cache, wav, cfg, vocabulary, suffix, cancel, on_stage)
+        },
         archive::save,
     )
 }
@@ -190,9 +213,10 @@ impl Pipeline<'_> {
         mut on_stage: impl FnMut(Stage),
         mut transcribe: impl FnMut(
             &SttConfig,
+            Option<&stt::NativeSuffix>,
             Option<&AtomicBool>,
             &mut dyn FnMut(Stage),
-        ) -> Result<stt::Transcript, String>,
+        ) -> Result<stt::RemoteAttempt, String>,
         save: impl FnOnce(archive::Entry<'_>) -> Result<PathBuf>,
     ) -> Outcome {
         let Self {
@@ -211,14 +235,23 @@ impl Pipeline<'_> {
         }
         let audio_duration_ms = audio.as_ref().ok().map(|audio| audio.duration_ms);
         let stt_started = Instant::now();
-        let mut transcription = if stt::is_cancelled(context.cancel) {
-            Ok(stt::Transcript::Cancelled {
+        let attempt = if stt::is_cancelled(context.cancel) {
+            Ok(stt::RemoteAttempt::whole(stt::Transcript::Cancelled {
                 text: String::new(),
                 completed: 0,
                 total: 0,
-            })
+            }))
         } else {
-            transcribe(stt_cfg, context.cancel, &mut on_stage)
+            transcribe(stt_cfg, None, context.cancel, &mut on_stage)
+        };
+        let (mut transcription, suffix) = match attempt {
+            Ok(attempt) => (Ok(attempt.transcript), attempt.suffix),
+            Err(error) => (Err(error), None),
+        };
+        let mut stt_backend = if stt_cfg.endpoint.is_some() {
+            SttBackend::Cloud
+        } else {
+            SttBackend::Local
         };
         let mut local_fallback = false;
         let retry_local = stt_cfg.endpoint.is_some()
@@ -231,22 +264,46 @@ impl Pipeline<'_> {
                 Ok(stt::Transcript::Cancelled { .. }) => false,
             };
         if retry_local {
-            // A fresh pass must not inherit determinate progress from cloud chunks.
+            // A suffix keeps the cloud meter and frame plan. An alternate
+            // whole-take pass must not inherit that measured progress.
             on_stage(Stage::Transcribing {
-                completed: 0,
-                total: 1,
+                completed: suffix.as_ref().map_or(0, stt::NativeSuffix::completed),
+                total: suffix.as_ref().map_or(1, stt::NativeSuffix::total),
             });
             if !stt::is_cancelled(context.cancel) {
-                tracing::info!("[STT] retrying whole recording with installed local Parakeet");
+                tracing::info!(
+                    "[STT] completing cloud failure with installed local Parakeet suffix={}",
+                    suffix.is_some()
+                );
                 let cfg = SttConfig {
                     model: models::PARAKEET_V3_INT8.dir_name.to_owned(),
                     endpoint: None,
                     api_key_id: None,
                 };
-                let local = transcribe(&cfg, context.cancel, &mut on_stage);
-                if prefer_local(&transcription, &local) {
+                let local = transcribe(&cfg, suffix.as_ref(), context.cancel, &mut on_stage)
+                    .map(|attempt| attempt.transcript);
+                if let Some(suffix) = &suffix {
+                    match local {
+                        Ok(local) => {
+                            let useful_local = !local.text().trim().is_empty();
+                            transcription =
+                                transcription.map(|cloud| join_suffix(cloud, local, suffix));
+                            if useful_local {
+                                local_fallback = true;
+                                stt_backend = SttBackend::Mixed;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "[STT] local suffix unavailable class={}",
+                                stt::classify_failure(&error)
+                            );
+                        }
+                    }
+                } else if prefer_local(&transcription, &local) {
                     transcription = local;
                     local_fallback = true;
+                    stt_backend = SttBackend::Local;
                 } else {
                     if let Err(error) = &local {
                         tracing::warn!(
@@ -290,6 +347,7 @@ impl Pipeline<'_> {
                     partial: false,
                     cancelled: stt::is_cancelled(context.cancel),
                     local_fallback,
+                    stt_backend,
                     archive: ArchiveStatus::NotApplicable,
                 };
             }
@@ -333,10 +391,10 @@ impl Pipeline<'_> {
             } else {
                 &stt_cfg.model
             },
-            stt_remote: stt_cfg.endpoint.is_some() && !local_fallback,
+            stt_backend: stt_backend.as_str(),
             stt_fallback_from_model: local_fallback.then_some(stt_cfg.model.as_str()),
             stt_elapsed_ms: duration_ms(stt_elapsed.as_millis()),
-            // A successful local retry does not erase any unknown cloud charges.
+            // Local completion does not erase any unknown cloud charges.
             stt_api_cost_usd: stt_cfg.endpoint.is_none().then_some(0.0),
             partial,
             cancelled,
@@ -382,7 +440,57 @@ impl Pipeline<'_> {
             partial,
             cancelled,
             local_fallback,
+            stt_backend,
             archive,
+        }
+    }
+}
+
+fn join_suffix(
+    cloud: stt::Transcript,
+    local: stt::Transcript,
+    suffix: &stt::NativeSuffix,
+) -> stt::Transcript {
+    if matches!(&local, stt::Transcript::Complete(text) if text.trim().is_empty()) {
+        return cloud;
+    }
+    let stt::Transcript::Partial { mut text, .. } = cloud else {
+        return cloud;
+    };
+    let mut append = |local: &str| {
+        if !local.trim().is_empty() {
+            text.push(' ');
+            text.push_str(local);
+        }
+    };
+    match local {
+        stt::Transcript::Complete(local) => {
+            append(&local);
+            stt::Transcript::Complete(text)
+        }
+        stt::Transcript::Partial {
+            text: local,
+            failed_at,
+            ..
+        } => {
+            append(&local);
+            stt::Transcript::Partial {
+                text,
+                failed_at: suffix.completed() + failed_at,
+                total: suffix.total(),
+            }
+        }
+        stt::Transcript::Cancelled {
+            text: local,
+            completed,
+            ..
+        } => {
+            append(&local);
+            stt::Transcript::Cancelled {
+                text,
+                completed: suffix.completed() + completed,
+                total: suffix.total(),
+            }
         }
     }
 }
@@ -395,9 +503,7 @@ fn prefer_local(
         return false;
     };
     if local.text().trim().is_empty() {
-        // A completed silent local pass is still stronger evidence than a
-        // cloud error. Keep usable cloud text when local recognition is empty.
-        return matches!(local, stt::Transcript::Complete(_)) && cloud.is_err();
+        return false;
     }
     // Complete coverage beats any cloud failure. Two partial passes cannot be
     // compared by character count or chunk fractions: their boundaries may
@@ -468,25 +574,26 @@ fn transcribe(
     wav: &Path,
     stt_cfg: &SttConfig,
     vocabulary: &[String],
+    suffix: Option<&stt::NativeSuffix>,
     cancel: Option<&AtomicBool>,
     on_stage: &mut dyn FnMut(Stage),
-) -> Result<stt::Transcript, String> {
+) -> Result<stt::RemoteAttempt, String> {
     if stt::is_cancelled(cancel) {
-        return Ok(stt::Transcript::Cancelled {
+        return Ok(stt::RemoteAttempt::whole(stt::Transcript::Cancelled {
             text: String::new(),
             completed: 0,
             total: 0,
-        });
+        }));
     }
     let on_progress = |progress: stt::ChunkProgress| {
         on_stage(Stage::Transcribing {
-            completed: progress.completed,
-            total: progress.total,
+            completed: suffix.map_or(0, stt::NativeSuffix::completed) + progress.completed,
+            total: suffix.map_or(progress.total, stt::NativeSuffix::total),
         });
     };
     if let Some(endpoint) = &stt_cfg.endpoint {
         let key = resolve_api_key(stt_cfg.api_key_id.as_deref()).map_err(|e| format!("{e:#}"))?;
-        return stt::transcribe_remote(
+        return stt::transcribe_cloud(
             wav,
             endpoint,
             &stt_cfg.model,
@@ -508,8 +615,13 @@ fn transcribe(
         .as_mut()
         .map(|(_, transcriber)| transcriber)
         .ok_or_else(|| "transcription backend has no model".to_owned())?;
-    transcriber
-        .transcribe_wav(wav, cancel, on_progress)
+    let transcript = if let Some(suffix) = suffix {
+        transcriber.transcribe_suffix(suffix, cancel, on_progress)
+    } else {
+        transcriber.transcribe_wav(wav, cancel, on_progress)
+    };
+    transcript
+        .map(stt::RemoteAttempt::whole)
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -560,8 +672,8 @@ mod tests {
                 },
             )
             .unwrap();
-            for _ in 0..frames {
-                writer.write_sample(0_i16).unwrap();
+            for index in 0..frames {
+                writer.write_sample(recorded_sample(index)).unwrap();
             }
             writer.finalize().unwrap();
             Self { root, wav }
@@ -598,10 +710,11 @@ mod tests {
             let mut attempts = attempts.into_iter();
             self.pipeline(cfg, &PostprocConfig::default(), None).run(
                 |_| {},
-                |_, _, _| {
+                |_, _, _, _| {
                     attempts
                         .next()
                         .expect("unexpected additional inference attempt")
+                        .map(stt::RemoteAttempt::whole)
                 },
                 |entry| self.save(entry),
             )
@@ -612,6 +725,11 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn recorded_sample(index: usize) -> i16 {
+        let value = (index as u32).wrapping_mul(0x9e37_79b9).rotate_left(11);
+        (value as i32 >> 16) as i16
     }
 
     fn cloud_config() -> SttConfig {
@@ -647,6 +765,25 @@ mod tests {
     struct Request {
         line: String,
         body: Vec<u8>,
+    }
+
+    impl Request {
+        fn audio(&self) -> Vec<i16> {
+            let header = b"Content-Type: audio/wav\r\n\r\n";
+            let start = self
+                .body
+                .windows(header.len())
+                .position(|bytes| bytes == header)
+                .unwrap()
+                + header.len();
+            let wav = &self.body[start..];
+            let len = u32::from_le_bytes(wav[4..8].try_into().unwrap()) as usize + 8;
+            hound::WavReader::new(std::io::Cursor::new(&wav[..len]))
+                .unwrap()
+                .samples::<i16>()
+                .map(|sample| sample.unwrap())
+                .collect()
+        }
     }
 
     fn http_server(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<Request>>) {
@@ -700,7 +837,9 @@ mod tests {
             json_response(r#"{"text":"cloud prefix that must not be duplicated"}"#),
             "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 .to_owned(),
-            json_response(r#"{"choices":[{"message":{"content":"Complete local dictation."}}]}"#),
+            json_response(
+                r#"{"choices":[{"message":{"content":"Cloud prefix and local suffix."}}]}"#,
+            ),
         ]);
         let cfg = SttConfig {
             endpoint: Some(endpoint.clone()),
@@ -717,31 +856,73 @@ mod tests {
         };
         let mut stages = Vec::new();
         let mut cache = None;
+        let mut local_audio = Vec::new();
+        let mut local_chunks = Vec::new();
         let outcome = recording.pipeline(&cfg, &postproc_cfg, None).run(
             |stage| stages.push(stage),
-            |cfg, cancel, on_stage| {
+            |cfg, suffix, cancel, on_stage| {
                 if cfg.endpoint.is_some() {
-                    transcribe(&mut cache, &recording.wav, cfg, &[], cancel, on_stage)
+                    transcribe(&mut cache, &recording.wav, cfg, &[], None, cancel, on_stage)
                 } else {
-                    Ok(stt::Transcript::Complete(
-                        "complete local dictation".to_owned(),
-                    ))
+                    let suffix = suffix.expect("native retry must supply an exact suffix");
+                    suffix
+                        .transcribe(
+                            cancel,
+                            &mut |progress| {
+                                on_stage(Stage::Transcribing {
+                                    completed: suffix.completed() + progress.completed,
+                                    total: suffix.total(),
+                                })
+                            },
+                            |samples| {
+                                local_audio.extend_from_slice(samples);
+                                local_chunks.push(samples.len());
+                                Ok(format!("local-{}", local_chunks.len()))
+                            },
+                        )
+                        .map(stt::RemoteAttempt::whole)
+                        .map_err(|error| format!("{error:#}"))
                 }
             },
             |entry| recording.save(entry),
         );
-        assert_eq!(outcome.text.as_deref(), Ok("Complete local dictation."));
+        assert_eq!(
+            outcome.text.as_deref(),
+            Ok("Cloud prefix and local suffix.")
+        );
         assert!(outcome.local_fallback);
         assert!(!outcome.partial);
         assert!(!outcome.cancelled);
         let saved = record(&outcome);
-        assert_eq!(saved["raw_transcript"], "complete local dictation");
-        assert_eq!(saved["stt"]["backend"], "local");
+        assert_eq!(
+            saved["raw_transcript"],
+            "cloud prefix that must not be duplicated local-1 local-2"
+        );
+        assert_eq!(saved["stt"]["backend"], "mixed");
         assert_eq!(saved["stt"]["model"], models::PARAKEET_V3_INT8.dir_name);
         assert_eq!(saved["stt"]["fallback_from_model"], cfg.model);
         assert!(saved["stt"].get("api_cost_usd").is_none());
         assert_eq!(saved["recovery"]["retry_incomplete"], false);
         let requests = server.join().unwrap();
+        let prefix = requests[0].audio();
+        assert_eq!(
+            local_chunks.len(),
+            2,
+            "only failed and unstarted chunks run locally"
+        );
+        assert_eq!(local_chunks[0], requests[1].audio().len());
+        assert_eq!(prefix.len() + local_audio.len(), 70 * 16_000);
+        for (index, sample) in prefix.into_iter().enumerate() {
+            assert_eq!(sample, recorded_sample(index));
+        }
+        let suffix_start = 70 * 16_000 - local_audio.len();
+        for (offset, sample) in local_audio.into_iter().enumerate() {
+            assert_eq!(
+                sample,
+                f32::from(recorded_sample(suffix_start + offset)) / f32::from(i16::MAX),
+                "each remaining native frame must be recognized exactly once"
+            );
+        }
         assert_eq!(
             requests
                 .iter()
@@ -756,7 +937,7 @@ mod tests {
         let cleanup: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
         assert_eq!(
             cleanup["messages"][1]["content"],
-            "Source:\ncomplete local dictation"
+            "Source:\ncloud prefix that must not be duplicated local-1 local-2"
         );
         assert_eq!(
             stages
@@ -768,10 +949,10 @@ mod tests {
         assert_eq!(
             stages[stages.len() - 2],
             Stage::Transcribing {
-                completed: 0,
-                total: 1
+                completed: 3,
+                total: 3
             },
-            "the fresh local pass must reset measured cloud progress"
+            "the suffix completes the original cloud meter without a whole-take reset"
         );
         assert!(recording.wav.is_file());
     }
@@ -852,11 +1033,19 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_at_fallback_boundary_keeps_cloud_text_without_inference_or_cleanup() {
-        let recording = Recording::new(1);
+    fn cancellation_at_suffix_boundary_keeps_cloud_text_without_inference_or_cleanup() {
+        let recording = Recording::new(70 * 16_000);
+        let (endpoint, server) = http_server(vec![
+            json_response(r#"{"text":"preserve cloud words"}"#),
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_owned(),
+        ]);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
-        let cfg = cloud_config();
+        let cfg = SttConfig {
+            endpoint: Some(endpoint),
+            ..cloud_config()
+        };
         let postproc_cfg = PostprocConfig {
             enabled: true,
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
@@ -865,24 +1054,23 @@ mod tests {
             ..Default::default()
         };
         let cancel = AtomicBool::new(false);
+        let mut prefix_events = 0;
+        let mut cache = None;
         let outcome = recording.pipeline(&cfg, &postproc_cfg, Some(&cancel)).run(
             |stage| {
-                if matches!(
-                    stage,
-                    Stage::Transcribing {
-                        completed: 0,
-                        total: 1
+                if matches!(stage, Stage::Transcribing { completed: 1, .. }) {
+                    prefix_events += 1;
+                    if prefix_events == 2 {
+                        cancel.store(true, Ordering::Release);
                     }
-                ) {
-                    cancel.store(true, Ordering::Release);
                 }
             },
-            |cfg, _, _| {
+            |cfg, suffix, cancel, on_stage| {
                 assert!(
-                    cfg.endpoint.is_some(),
+                    cfg.endpoint.is_some() && suffix.is_none(),
                     "cancelled fallback must not start local inference"
                 );
-                Ok(partial("preserve cloud words"))
+                transcribe(&mut cache, &recording.wav, cfg, &[], None, cancel, on_stage)
             },
             |entry| recording.save(entry),
         );
@@ -892,6 +1080,7 @@ mod tests {
         assert!(!outcome.local_fallback);
         assert_eq!(outcome.postproc, PostprocStatus::Off);
         assert_eq!(record(&outcome)["stt"]["cancelled"], true);
+        assert_eq!(server.join().unwrap().len(), 2);
         assert_eq!(
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
@@ -910,16 +1099,16 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let outcome = recording.pipeline(&cfg, &postproc_cfg, Some(&cancel)).run(
             |_| {},
-            |cfg, _, _| {
+            |cfg, _, _, _| {
                 if cfg.endpoint.is_some() {
                     Err("remote transcription endpoint returned HTTP 429".to_owned())
                 } else {
                     cancel.store(true, Ordering::Release);
-                    Ok(stt::Transcript::Cancelled {
+                    Ok(stt::RemoteAttempt::whole(stt::Transcript::Cancelled {
                         text: "locally recovered before cancellation".to_owned(),
                         completed: 1,
                         total: 3,
-                    })
+                    }))
                 }
             },
             |entry| recording.save(entry),
@@ -933,6 +1122,106 @@ mod tests {
         assert!(outcome.local_fallback);
         assert_eq!(outcome.postproc, PostprocStatus::Off);
         assert_eq!(record(&outcome)["recovery"]["retry_incomplete"], true);
+    }
+
+    #[test]
+    fn native_suffix_failure_empty_recognition_and_cancellation_preserve_usable_text() {
+        let recording = Recording::new(70 * 16_000);
+        for case in [
+            "unavailable",
+            "silent-first",
+            "silent-last",
+            "empty-all",
+            "cancel-first",
+            "cloud-empty",
+        ] {
+            let (endpoint, server) = http_server(vec![
+                json_response(r#"{"text":"cloud prefix"}"#),
+                if case == "cloud-empty" {
+                    json_response(r#"{"text":" "}"#)
+                } else {
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_owned()
+                },
+            ]);
+            let cfg = SttConfig {
+                endpoint: Some(endpoint),
+                ..cloud_config()
+            };
+            let cancel = AtomicBool::new(false);
+            let postproc_cfg = PostprocConfig {
+                enabled: case == "cancel-first",
+                min_chars: 0,
+                ..Default::default()
+            };
+            let mut cache = None;
+            let mut local_calls = 0;
+            let outcome = recording.pipeline(&cfg, &postproc_cfg, Some(&cancel)).run(
+                |_| {},
+                |cfg, suffix, cancel, on_stage| {
+                    if cfg.endpoint.is_some() {
+                        return transcribe(
+                            &mut cache,
+                            &recording.wav,
+                            cfg,
+                            &[],
+                            None,
+                            cancel,
+                            on_stage,
+                        );
+                    }
+                    let suffix = suffix.expect("a native prefix needs a suffix, not a whole retry");
+                    if case == "unavailable" {
+                        return Err("model not installed".to_owned());
+                    }
+                    suffix
+                        .transcribe(cancel, &mut |_| {}, |_| {
+                            local_calls += 1;
+                            if case == "empty-all"
+                                || (case == "silent-first" && local_calls == 1)
+                                || (case == "silent-last" && local_calls == 2)
+                            {
+                                return Ok(String::new());
+                            }
+                            if case == "cancel-first" {
+                                cancel.unwrap().store(true, Ordering::Release);
+                            }
+                            Ok(format!("local-{local_calls}"))
+                        })
+                        .map(stt::RemoteAttempt::whole)
+                        .map_err(|error| format!("{error:#}"))
+                },
+                |entry| recording.save(entry),
+            );
+            let expected = match case {
+                "unavailable" | "empty-all" => "cloud prefix",
+                "silent-first" => "cloud prefix local-2",
+                "cloud-empty" => "cloud prefix local-1 local-2",
+                _ => "cloud prefix local-1",
+            };
+            assert_eq!(outcome.text.as_deref(), Ok(expected), "{case}");
+            let incomplete = matches!(case, "unavailable" | "empty-all" | "cancel-first");
+            assert_eq!(outcome.partial, incomplete, "{case}");
+            assert_eq!(outcome.cancelled, case == "cancel-first", "{case}");
+            assert_eq!(outcome.postproc, PostprocStatus::Off);
+            let saved = record(&outcome);
+            assert_eq!(saved["raw_transcript"], expected);
+            assert_eq!(
+                saved["stt"]["backend"],
+                if expected == "cloud prefix" {
+                    "cloud"
+                } else {
+                    "mixed"
+                }
+            );
+            assert_eq!(saved["recovery"]["retry_incomplete"], incomplete);
+            assert_eq!(
+                server.join().unwrap().len(),
+                2,
+                "local switching is one-way"
+            );
+            assert!(recording.wav.is_file());
+        }
     }
 
     #[test]
@@ -990,7 +1279,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_empty_local_retry_replaces_cloud_error_without_resolving_audio() {
+    fn empty_local_retry_never_claims_complete_after_a_cloud_error() {
         let recording = Recording::new(8_000);
         let outcome = recording.recognize(
             &cloud_config(),
@@ -999,10 +1288,10 @@ mod tests {
                 Ok(stt::Transcript::Complete(String::new())),
             ],
         );
-        assert_eq!(outcome.text.as_deref(), Ok(""));
-        assert!(!outcome.partial);
-        assert_eq!(record(&outcome)["stt"]["backend"], "local");
-        assert_eq!(record(&outcome)["recovery"]["retry_incomplete"], true);
+        assert!(outcome.text.unwrap_err().contains("HTTP 429"));
+        assert!(!outcome.local_fallback);
+        assert!(matches!(outcome.archive, ArchiveStatus::NotApplicable));
+        assert!(recording.wav.is_file());
     }
 
     #[test]

@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 /// Increment when the fixed cleanup prompt changes semantically.
 pub(crate) const PROMPT_VERSION: u32 = 2;
 
+/// All optional decision calls and cleanup passes share this HTTP budget.
+const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+
 const BASE_SYSTEM_PROMPT: &str = "You clean speech-to-text transcripts.
 
 The source text is a record of the speaker's words.
@@ -152,8 +155,8 @@ struct ChatRound {
 /// Refine a transcript through an OpenAI-compatible chat completion endpoint.
 /// Runs `cfg.passes` rounds in a chain: each later round re-reads the previous
 /// output and fixes residual speech-recognition errors the earlier round left.
-/// Cancellation leaves the caller's raw transcript intact and prevents any
-/// later round from starting; a blocked request may still finish.
+/// Cancellation or budget exhaustion during generative passes leaves the raw
+/// transcript intact; a timed-out watchdog preserves the completed candidate.
 pub fn refine(
     transcript: &str,
     cfg: &PostprocConfig,
@@ -163,12 +166,14 @@ pub fn refine(
 ) -> Result<Refinement> {
     let passes = cfg.passes.max(1);
     let started = Instant::now();
+    let deadline = started + Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET);
+    remaining_budget(deadline, cancel)?;
 
     // Pre-cleanup triage gatekeeper (ADR 0026):
     // If an opt-in decision model is configured, evaluate whether generative cleanup
     // is required. If the raw transcript is already clean (needs_cleanup < 0.20),
     // bypass generative passes to save latency and token cost.
-    if let Some(client) = get_decision_client(cfg, api_key) {
+    if let Some(mut client) = get_decision_client(cfg, api_key) {
         if !crate::stt::is_cancelled(cancel) {
             let mut questions = std::collections::BTreeMap::new();
             questions.insert(
@@ -179,11 +184,14 @@ pub fn refine(
                     "Already clean, fluent prose or concise command; no rewriting needed",
                 ),
             );
-            match client.evaluate(
+            client.timeout = remaining_budget(deadline, cancel)?;
+            let decision = client.evaluate(
                 &serde_json::Value::String(transcript.to_string()),
                 &questions,
                 cancel,
-            ) {
+            );
+            remaining_budget(deadline, cancel)?;
+            match decision {
                 Ok(resp) => {
                     match resp
                         .answers
@@ -235,7 +243,7 @@ pub fn refine(
         } else {
             build_prompt(VERIFY_SYSTEM_PROMPT, vocabulary, "")
         };
-        let round = chat_round(&current, cfg, api_key, &system, cancel)?;
+        let round = chat_round(&current, cfg, api_key, &system, cancel, deadline)?;
         merge_usage(&mut usage, round.usage);
         current = round.text;
     }
@@ -243,8 +251,8 @@ pub fn refine(
     // Post-cleanup watchdog (ADR 0026 / ADR 0012):
     // Check whether the candidate output answered a question, executed an instruction,
     // or distorted core content instead of transcribing. If tripped, reject and fall back.
-    if let Some(client) = get_decision_client(cfg, api_key) {
-        if !crate::stt::is_cancelled(cancel) {
+    if let Some(mut client) = get_decision_client(cfg, api_key) {
+        if let Ok(timeout) = remaining_budget(deadline, cancel) {
             let state = serde_json::json!({
                 "source": transcript,
                 "candidate": current,
@@ -269,7 +277,9 @@ pub fn refine(
                     ],
                 ),
             );
-            match client.evaluate(&state, &questions, cancel) {
+            client.timeout = timeout;
+            let decision = client.evaluate(&state, &questions, cancel);
+            match decision {
                 Ok(resp) => {
                     let ans_prob = resp
                         .answers
@@ -309,6 +319,11 @@ pub fn refine(
         }
     }
 
+    anyhow::ensure!(
+        !crate::stt::is_cancelled(cancel),
+        "post-processing cancelled"
+    );
+
     tracing::info!(
         "[Postproc] applied chars_in={} chars_out={} ms={} passes={}",
         transcript.chars().count(),
@@ -320,6 +335,17 @@ pub fn refine(
         text: current,
         usage: (usage.responses_with_usage > 0).then_some(usage),
     })
+}
+
+fn remaining_budget(deadline: Instant, cancel: Option<&AtomicBool>) -> Result<Duration> {
+    anyhow::ensure!(
+        !crate::stt::is_cancelled(cancel),
+        "post-processing cancelled"
+    );
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| anyhow!("post-processing budget exhausted"))
 }
 
 fn merge_usage(total: &mut RefinementUsage, round: Option<ChatUsage>) {
@@ -356,6 +382,7 @@ fn chat_round(
     api_key: Option<&str>,
     system: &str,
     cancel: Option<&AtomicBool>,
+    deadline: Instant,
 ) -> Result<ChatRound> {
     let user = build_user_prompt(transcript);
     let request = ChatRequest {
@@ -379,8 +406,10 @@ fn chat_round(
     };
     let body = serde_json::to_string(&request).context("serializing post-processing request")?;
     let endpoint = format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/'));
+    let remaining = remaining_budget(deadline, cancel)?;
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_millis(cfg.timeout_ms))
+        .timeout_connect(remaining)
+        .timeout(remaining)
         .build();
     let mut request = agent
         .post(&endpoint)
@@ -388,10 +417,6 @@ fn chat_round(
     if let Some(api_key) = api_key {
         request = request.set("Authorization", &format!("Bearer {api_key}"));
     }
-    anyhow::ensure!(
-        !crate::stt::is_cancelled(cancel),
-        "post-processing cancelled"
-    );
 
     let response = match request.send_string(&body) {
         Ok(response) => response,
@@ -416,6 +441,7 @@ fn chat_round(
     };
     let response: ChatResponse = serde_json::from_reader(response.into_reader())
         .map_err(|_| anyhow!("post-processing returned unexpected response shape"))?;
+    remaining_budget(deadline, cancel)?;
     let content = response
         .choices
         .first()
@@ -448,7 +474,7 @@ fn get_decision_client(
         })
         .or_else(|| fallback_key.map(str::to_owned));
 
-    let timeout = Duration::from_millis(cfg.timeout_ms.clamp(1_000, 5_000));
+    let timeout = Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET);
     Some(crate::typesafe::DecisionClient::new(
         cfg.decision_endpoint.as_deref(),
         Some(model),

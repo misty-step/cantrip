@@ -756,12 +756,12 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         source: "transcribe",
         capture_ms: 0,
         stt_ms,
-        stt_model: if outcome.local_fallback {
+        stt_model: if outcome.local_fallback && outcome.stt_backend == pipeline::SttBackend::Local {
             PARAKEET_V3_INT8.dir_name.to_owned()
         } else {
             config.stt.model.clone()
         },
-        stt_remote: config.stt.endpoint.is_some() && !outcome.local_fallback,
+        stt_remote: outcome.stt_backend != pipeline::SttBackend::Local,
         chars,
         partial: outcome.partial,
         cleanup_state,
