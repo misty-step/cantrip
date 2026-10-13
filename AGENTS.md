@@ -4,9 +4,10 @@ Cantrip is a local-first Linux/macOS dictation app: the `cantrip` native host
 and `cantrip-engine` shared workflow crate in one Rust workspace, with
 `workspace.package.version` as the version authority. Start with
 [`README.md`](README.md) and the contract relevant to the request. `VISION.md`
-is optional context, not a required first read or product lock. Preserve
-non-obvious architectural decisions in `docs/adr/`; the platform boundary is
-[ADR 0031](docs/adr/0031-shared-engine-native-macos.md).
+is optional context, not a required first read or product lock.
+Open docs/decisions/index.md before proposing a new primitive, surface, or storage home.
+See the [steering list](docs/decisions/index.md); the platform boundary is
+[Decision 0031](docs/decisions/0031-shared-engine-native-macos.md).
 
 
 ## Contracts

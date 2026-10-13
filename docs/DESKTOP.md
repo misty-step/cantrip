@@ -436,7 +436,7 @@ The bar item is one fixed slot holding the Cantrip mark, with no count or text:
 Left-click toggles raw dictation, middle-click dismisses the outcome that needs
 attention (only that outcome, by event id; the recording stays in history), and
 right-click opens Actions, where saved recordings are listed. The tooltip names
-the state, the target and the latest undismissed outcome. See [ADR 0029](adr/0029-quiet-bar-mark.md).
+the state, the target and the latest undismissed outcome. See [ADR 0029](decisions/historical/0029-quiet-bar-mark.md).
 
 The running Omarchy shell keeps drawing an already-loaded widget until its entry
 file path changes, so the installer publishes the widget sources under a

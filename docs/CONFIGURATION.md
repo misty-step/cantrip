@@ -236,7 +236,7 @@ contract, so keep it short and avoid redefining the task.
   watchdog verification. Disabled when unset. When enabled, clean takes
   bypass generative cleanup to reduce latency and token spend; post-cleanup
   watchdog verification rejects "answer-to-question" hallucinations and falls
-  back to the raw transcript ([ADR 0026](adr/0026-typesafe-system-one-decisions.md)).
+  back to the raw transcript ([ADR 0026](decisions/0026-typesafe-system-one-decisions.md)).
   Enabling a decision model sends transcript text to the decision endpoint even
   when generative cleanup is bypassed; review the
   [network/content boundary](PRIVACY.md#what-leaves-the-machine) before opting in.
@@ -271,7 +271,7 @@ prints `handoff:` for the active take and `last-handoff:` for its outcome. Each 
 from the active Omarchy theme's magenta, blue, green and cyan, choosing the hue
 farthest from the theme accent, yellow and earlier targets (targets in name order).
 The default flow is not tinted or labelled. See
-[ADR 0028](adr/0028-handoff-destination-tint.md).
+[ADR 0028](decisions/historical/0028-handoff-destination-tint.md).
 After editing, run `cantrip reload`, then use `cantrip toggle --handoff pepper`
 to begin and the same `cantrip toggle --handoff pepper` to finish. A toggle
 with a different or missing `--handoff` does nothing while that take records:
@@ -296,7 +296,7 @@ does not retry or fall back to desktop delivery; `cantrip status` shows
 `cantrip copy ID` when needed. `cantrip doctor` checks whether each configured
 command exists and is executable; it does not prove the target processes a take.
 Treat the executable as trusted code with access to the transcript. See
-[ADR 0027](adr/0027-named-handoff-targets.md).
+[ADR 0027](decisions/0027-named-handoff-targets.md).
 
 Set `local_only = true` on a target whose takes must never leave this computer:
 
@@ -315,7 +315,7 @@ take before recording (`local-model-unavailable`), and asking such a target for
 desktop keep the configured lanes. Its command runs with `CANTRIP_LOCAL_ONLY=1`
 (other targets never see that variable), so a receiver can refuse any take that
 was not kept local. See
-[ADR 0030](adr/0030-local-only-handoff-targets.md).
+[ADR 0030](decisions/0030-local-only-handoff-targets.md).
 
 ## Transcript history
 
@@ -411,7 +411,7 @@ follow the desktop. Reduced motion freezes indeterminate activity and presents
 measurements directly. Stale or disconnected status stops live animation and
 shows unknown, not Ready. The HUD never takes focus or accepts pointer input.
 HUD, Actions, and Settings use the active Omarchy palette when available.
-See [ADR 0021](https://github.com/misty-step/cantrip/blob/master/docs/adr/0021-signed-pixel-waveform.md)
+See [ADR 0021](https://github.com/misty-step/cantrip/blob/master/docs/decisions/historical/0021-signed-pixel-waveform.md)
 for the rendering contract.
 
 ## Opt-in telemetry (`[telemetry]`)

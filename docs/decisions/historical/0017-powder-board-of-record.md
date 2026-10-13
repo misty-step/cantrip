@@ -5,7 +5,7 @@ accepted as an operator decision on the original date.
 
 Powder is retired. The user's current request remains authority; Linear owns
 current work, prioritization, and selected unresolved opportunities. See
-[README.md](../../README.md#work-and-documentation-ownership). This record does
+[README.md](../../../README.md#work-and-documentation-ownership). This record does
 not instruct agents to poll Powder, revive GitHub intake, run the old factory,
 or re-import historical jobs. The reason for one work ledger rather than
 duplicate boards still applies.
