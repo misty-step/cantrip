@@ -48,7 +48,7 @@ Criteria:
 
 No-gos: no count of unresolved recordings in the bar; no text or width changes in the bar item.
 
-Evidence: `integrations/omarchy/BarWidget.qml`, `integrations/omarchy/Status.js`, `docs/adr/0029-quiet-bar-mark.md`
+Evidence: `integrations/omarchy/BarWidget.qml`, `integrations/omarchy/Status.js`, `docs/decisions/historical/0029-quiet-bar-mark.md`
 
 ## Capability: Guarded Delivery and Session Safety
 
@@ -161,7 +161,7 @@ Criteria:
 
 No-gos: no sending private operator audio or non-synthetic dictations to the evaluation judge.
 
-Evidence: `examples/eval/judge.rs`, `examples/eval/main.rs`, `docs/adr/0026-typesafe-system-one-decisions.md`
+Evidence: `examples/eval/judge.rs`, `examples/eval/main.rs`, `docs/decisions/0026-typesafe-system-one-decisions.md`
 
 ## Capability: Local Agent Handoff
 
@@ -185,7 +185,7 @@ Criteria:
 
 No-gos: no transcript or child output in logs or telemetry; no desktop fallback; no destination indicator on default takes.
 
-Evidence: `crates/engine/src/engine.rs`, `crates/engine/src/config.rs`, `crates/engine/src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/adr/0027-named-handoff-targets.md`, `docs/adr/0028-handoff-destination-tint.md`, `docs/adr/0030-local-only-handoff-targets.md`
+Evidence: `crates/engine/src/engine.rs`, `crates/engine/src/config.rs`, `crates/engine/src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/decisions/0027-named-handoff-targets.md`, `docs/decisions/historical/0028-handoff-destination-tint.md`, `docs/decisions/0030-local-only-handoff-targets.md`
 
 ## Capability: Native macOS Clipboard Dictation
 

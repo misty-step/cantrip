@@ -1,7 +1,7 @@
 # ADR 0010: The HUD is a Warm Minimal capsule (static phases, no fake progress)
 
 Date: 2026-08-05. Status: historical visual composition, superseded by
-[ADR 0019](0019-per-take-recovery-and-verified-delivery.md) and refined by
+[ADR 0019](../0019-per-take-recovery-and-verified-delivery.md) and refined by
 [ADR 0021](0021-signed-pixel-waveform.md).
 
 The rejection of fake progress remains a product constraint. Geometry,

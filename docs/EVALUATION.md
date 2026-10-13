@@ -1,8 +1,8 @@
 # Cantrip evaluation
 
 Status: versioned evaluation procedures, accepted contracts, and retained design
-context. [ADR 0012](adr/0012-eval-driven-postprocessing.md) records the accepted
-deterministic-first evaluation direction; [ADR 0013](adr/0013-local-transcript-history.md)
+context. [ADR 0012](decisions/0012-eval-driven-postprocessing.md) records the accepted
+deterministic-first evaluation direction; [ADR 0013](decisions/historical/0013-local-transcript-history.md)
 owns the private-history-to-reviewed-fixture boundary. Detailed corpus sizes,
 schema examples, and calibration targets below are design proposals, not a claim
 that every target is implemented.

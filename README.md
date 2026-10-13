@@ -59,7 +59,7 @@ To install a source-built binary, one command builds **this tree** and atomicall
 replaces `$HOME/.local/bin/cantrip`. It never copies a previously compiled
 `target/` artifact, so a git change cannot sneak in between build and install.
 It refuses a symlink destination and a live daemon. First install and later
-updates are the same command. See [ADR 0025](docs/adr/0025-source-install-builds-this-tree.md).
+updates are the same command. See [ADR 0025](docs/decisions/0025-source-install-builds-this-tree.md).
 
 ```sh
 # Stop the existing owner first: docs/DESKTOP.md#stop-update-and-remove
@@ -185,7 +185,7 @@ The Rust workspace has two crates and one version authority in
 
 Both hosts keep the std-thread + mpsc model; neither introduces an async
 runtime or another durable work ledger. See
-[ADR 0031](docs/adr/0031-shared-engine-native-macos.md) for boundaries, manual-paste
+[ADR 0031](docs/decisions/0031-shared-engine-native-macos.md) for boundaries, manual-paste
 policy, packaging, and verification limits.
 
 ## Development
@@ -226,7 +226,7 @@ result waits so a missing or incomplete upload fails instead of hanging CI.
   below are canonical Markdown, rendered by the site rather than copied into
   a second web manual. Website release data comes from published release assets,
   not an unreleased Cargo version or local technical changelog.
-- **Architecture decisions:** [`docs/adr/`](docs/adr/). Operational log tags:
+- **Architecture decisions:** [`docs/decisions/index.md`](docs/decisions/index.md). Operational log tags:
   `[Daemon]` `[Capture]` `[STT]` `[Postproc]` `[Inject]` `[Models]` `[HUD]`.
 
 ### Verify Settings transcript copy headlessly
@@ -309,7 +309,7 @@ infer Intel or production signing success from an arm64 development smoke.
 Work starts from the user's current request, checked against live code and
 overlapping work. Follow the existing work record when available; neither an old
 issue nor a document authorizes automatic intake.
-Powder is retired. [ADR 0017](docs/adr/0017-powder-board-of-record.md) preserves
+Powder is retired. [ADR 0017](docs/decisions/historical/0017-powder-board-of-record.md) preserves
 the earlier migration and its rejection of duplicate boards, not live routing.
 GitHub issue history remains context rather than a second backlog.
 
@@ -342,14 +342,13 @@ predecessor whose pipeline architecture and privacy rules carry over.
 - [Privacy](docs/PRIVACY.md) — network boundaries, retained audio/text, and deletion.
 - [Published release notes](https://github.com/misty-step/cantrip/releases).
 - [Evaluation gauntlet](docs/EVALUATION.md).
-- [Architecture decisions](docs/adr/) — chronological rationale, not a flat list
-  of current implementation requirements. Older decisions retain their original
-  evidence and link forward where superseded.
-  - [Per-take recovery and verified delivery](docs/adr/0019-per-take-recovery-and-verified-delivery.md),
-    refined by [local completion and explicit audio deletion](docs/adr/0020-local-completion-and-explicit-audio-deletion.md)
-    and the [signed waveform contract](docs/adr/0021-signed-pixel-waveform.md),
-    painted as a [persistent pixel field](docs/adr/0023-persistent-pixel-field.md).
-  - [Private history and fixture promotion](docs/adr/0013-local-transcript-history.md)
-    and [eval-driven post-processing](docs/adr/0012-eval-driven-postprocessing.md).
-  - [Shared engine and native macOS](docs/adr/0031-shared-engine-native-macos.md) —
+- [Architecture decisions](docs/decisions/index.md) — steering constraints and
+  historical rationale, with separate lists for current choices and earlier records.
+  - [Per-take recovery and verified delivery](docs/decisions/0019-per-take-recovery-and-verified-delivery.md),
+    refined by [local completion and explicit audio deletion](docs/decisions/0020-local-completion-and-explicit-audio-deletion.md)
+    and the [signed waveform contract](docs/decisions/historical/0021-signed-pixel-waveform.md),
+    painted as a [persistent pixel field](docs/decisions/historical/0023-persistent-pixel-field.md).
+  - [Private history and fixture promotion](docs/decisions/historical/0013-local-transcript-history.md)
+    and [eval-driven post-processing](docs/decisions/0012-eval-driven-postprocessing.md).
+  - [Shared engine and native macOS](docs/decisions/0031-shared-engine-native-macos.md) —
     platform ports, explicit manual paste, packaging, and proof boundaries.
