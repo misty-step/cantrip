@@ -18,6 +18,8 @@ interface Props {
 
 const { title, description, section, noindex = false, skipTargetId = 'main' } = Astro.props;
 const canonical = new URL(Astro.url.pathname, Astro.site);
+const image = new URL('/demo/dictation-poster.png', Astro.site);
+const imageAlt = "Cantrip's native dictation HUD in a real Linux writing session";
 ---
 <!doctype html>
 <html lang="en">
@@ -35,8 +37,13 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
-    <meta property="og:image" content={new URL('/demo/dictation-poster.png', Astro.site)} />
-    <meta property="og:image:alt" content="Cantrip's native dictation HUD in a real Linux writing session" />
+    <meta property="og:image" content={image} />
+    <meta property="og:image:alt" content={imageAlt} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={image} />
+    <meta name="twitter:image:alt" content={imageAlt} />
     <title>{title}</title>
   </head>
   <body>

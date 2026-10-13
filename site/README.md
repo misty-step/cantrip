@@ -108,8 +108,9 @@ HUD. Its required interface is:
 The homepage uses native playback controls, no autoplay, `preload="none"`, a
 captions track, a still-image link, and a readable text alternative taken directly
 from `evidence.transcript`. It links the recording provenance beside the video.
-The screenshot is also the social-preview image. Do not substitute generated
-waveforms or placeholder images when recording assets are missing.
+The screenshot is also the Open Graph and X/Twitter large-image card preview;
+both use the shared layout's page title, description, image URL, and image alt.
+Do not substitute generated waveforms or placeholder images when recording assets are missing.
 
 ## Deployment
 
