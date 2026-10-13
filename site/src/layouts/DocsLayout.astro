@@ -14,7 +14,7 @@ const position = docs.findIndex((candidate) => candidate.slug === doc.slug);
 const previous = docs[position - 1];
 const next = docs[position + 1];
 ---
-<SiteLayout title={`${doc.title} — Cantrip documentation`} description={doc.description} section="docs">
+<SiteLayout title={`${doc.title} — Cantrip documentation`} description={doc.description} section="docs" skipTargetId="docs-content">
   <div class="docs-shell shell">
     <aside class="docs-sidebar">
       <nav class="docs-nav" aria-label="Documentation">
@@ -36,7 +36,7 @@ const next = docs[position + 1];
     </aside>
     <div class="docs-main">
       <p class="source-note">Repository documentation <a href={`${repositoryUrl}/blob/master/docs/${doc.file}`}>View Markdown source</a></p>
-      <article class="prose"><slot /></article>
+      <article id="docs-content" class="prose" tabindex="-1"><slot /></article>
       <nav class="docs-pagination" aria-label="Continue reading">
         {previous ? <a href={`/docs/${previous.slug}`}><span>Previous</span>{previous.title}</a> : <span />}
         {next && <a href={`/docs/${next.slug}`}><span>Next</span>{next.title}</a>}
