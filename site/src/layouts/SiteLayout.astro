@@ -13,9 +13,10 @@ interface Props {
   description: string;
   section?: 'home' | 'docs' | 'releases' | 'evals';
   noindex?: boolean;
+  skipTargetId?: string;
 }
 
-const { title, description, section, noindex = false } = Astro.props;
+const { title, description, section, noindex = false, skipTargetId = 'main' } = Astro.props;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 ---
 <!doctype html>
@@ -39,7 +40,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site);
     <title>{title}</title>
   </head>
   <body>
-    <a class="skip-link" href="#main">Skip to content</a>
+    <a class="skip-link" href={`#${skipTargetId}`}>Skip to content</a>
     <header class="site-header shell">
       <a class="brand" href="/" aria-label="Cantrip home" aria-current={section === 'home' ? 'page' : undefined}>
         <img src="/favicon.svg" alt="" width="28" height="28" />
