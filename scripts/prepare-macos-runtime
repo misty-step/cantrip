@@ -78,7 +78,8 @@ def prepare(target, *, output=None, jobs=2):
     versions = [entry["version"] for entry in locked if entry["name"] == "ort-sys"]
     if versions != [ORT_SYS_VERSION]:
         raise RuntimeError("the locked ort-sys changed; refresh the pinned native runtime version/revision before building")
-    cache = (output or ROOT / "target" / "native-runtime" / target / ORT_VERSION).absolute()
+    # Keep both CI callers outside the restored Cargo target cache.
+    cache = (output or Path(os.environ.get("RUNNER_TEMP", ROOT / "target")) / "native-runtime" / target / ORT_VERSION).absolute()
     if cache.is_symlink():
         raise RuntimeError("native runtime output must not be a symbolic link")
     cache.parent.mkdir(parents=True, exist_ok=True)

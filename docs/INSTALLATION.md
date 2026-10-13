@@ -294,15 +294,18 @@ Apple Silicon normally uses `ort-sys`' checksum-pinned CPU runtime. Its locked
 [`scripts/prepare-macos-runtime`](../scripts/prepare-macos-runtime) builds CPU
 ONNX Runtime **1.24.2** from immutable commit
 `058787ceead760166e3c50a0a4cba8a833a6f53f`. Packaging invokes this automatically
-for Intel, with two build jobs and a project-local
-`target/native-runtime/<target>/1.24.2` cache. It explicitly builds the complete
+for Intel, with two build jobs and a default
+`target/native-runtime/<target>/1.24.2` cache outside CI. When `RUNNER_TEMP` is
+set, standalone preparation and packaging instead share
+`$RUNNER_TEMP/native-runtime/<target>/1.24.2`, outside the restored Cargo target
+cache. A supplied `--output` still takes precedence. It explicitly builds the complete
 CPU dependency closure and combines its static archives into `libonnxruntime.a`,
 avoiding `ort-sys`' incomplete decomposed dependency list. Source revision and
 every archive are checked before cache reuse; no system ORT install or downgrade
 is needed. `--source-runtime` selects the same source build on arm64.
 
 Cache schema 2 rejects older/incomplete caches. For standalone preparation,
-choose a fresh `--output`; packaging uses its default project-local cache, so
+choose a fresh `--output`; packaging uses the same default cache, so
 remove only your own obsolete cache deliberately before rebuilding there.
 
 ### Obtain a development app
@@ -413,8 +416,8 @@ Before ordinary Intel workspace Cargo commands, prepare the same pinned CPU
 runtime and set its project-local link environment:
 
 ```sh
-python3 scripts/prepare-macos-runtime --target x86_64-apple-darwin
-export ORT_LIB_PATH="$PWD/target/native-runtime/x86_64-apple-darwin/1.24.2/build/Release"
+runtime_environment="$(python3 scripts/prepare-macos-runtime --target x86_64-apple-darwin)" &&
+export ORT_LIB_PATH="$(printf '%s\n' "$runtime_environment" | sed -n 's/^ORT_LIB_PATH=//p')"
 export ORT_PREFER_DYNAMIC_LINK=0
 ```
 
