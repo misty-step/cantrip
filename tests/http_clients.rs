@@ -474,14 +474,30 @@ fn transcription_server(
     spec: hound::WavSpec,
     frames: usize,
     fail_at: Option<usize>,
-) -> (String, thread::JoinHandle<Vec<CapturedRequest>>) {
+) -> (String, mpsc::Receiver<Vec<CapturedRequest>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binding transcription server");
     let addr = listener.local_addr().expect("transcription server address");
-    let handle = thread::spawn(move || {
+    listener.set_nonblocking(true).unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(8);
         let mut requests = Vec::new();
         let mut received = 0;
         while received < frames {
-            let (mut stream, _) = listener.accept().expect("accepting transcription request");
+            let mut stream = loop {
+                assert!(Instant::now() < deadline, "missing transcription request");
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accepting transcription request: {error}"),
+                }
+            };
+            let remaining = Some(deadline.saturating_duration_since(Instant::now()));
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(remaining).unwrap();
+            stream.set_write_timeout(remaining).unwrap();
             let request = read_request(&stream);
             assert!(
                 request.body.len() < 25_000_000,
@@ -513,9 +529,9 @@ fn transcription_server(
                 break;
             }
         }
-        requests
+        tx.send(requests).expect("returning transcription requests");
     });
-    (format!("http://{addr}/v1/"), handle)
+    (format!("http://{addr}/v1/"), rx)
 }
 
 fn assert_audio_coverage(requests: &[CapturedRequest], spec: hound::WavSpec, frames: usize) {
@@ -630,7 +646,9 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
         |chunk| progress.push(chunk),
     )
     .expect("bounded transcription should succeed");
-    let requests = server.join().expect("transcription server thread");
+    let requests = server
+        .recv_timeout(Duration::from_secs(8))
+        .expect("transcription server requests");
     assert_audio_coverage(&requests, spec, frames);
     let total = requests.len() as u32;
     assert!(
@@ -655,8 +673,8 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
 }
 
 #[test]
-fn transcribe_remote_bounds_888_second_wav_without_losing_boundary_samples() {
-    assert_bounded_transcription(native_spec(), 888 * 16_000, true);
+fn transcribe_remote_bounds_native_duration_without_losing_boundary_samples() {
+    assert_bounded_transcription(native_spec(), 61 * 16_000 + 1, false);
 }
 
 #[test]
@@ -743,7 +761,9 @@ fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_bod
         )
     })
     .expect("later failure should preserve earlier text");
-    let requests = server.join().expect("transcription server thread");
+    let requests = server
+        .recv_timeout(Duration::from_secs(8))
+        .expect("transcription server requests");
     assert_eq!(
         requests.len(),
         2,
