@@ -19,6 +19,8 @@ recovery, with no second database, durable ledger, or async runtime. Automatic
 keyboard delivery requires uninterrupted verified destination/session history;
 unknown history defers, and potentially completed handoffs are uncertain and
 never retried through another backend.
+Use native Wayland virtual-keyboard delivery, not `wtype` or `ydotool` children.
+Auto prefers paste and only changes backend after a proven pre-handoff failure.
 
 ## Consequences
 

@@ -19,6 +19,8 @@ Keep one cantrip-engine workflow and durable archive behind
 native mechanisms in the host, std threads/mpsc, and one workspace version.
 macOS supports explicit clipboard/manual paste only: existing Auto/Paste/Type
 choices defer before clipboard/key effects and are never silently rewritten.
+Do not replace unknown lock/session history with private screen-lock APIs or
+permission-based assumptions.
 
 ## Consequences
 
