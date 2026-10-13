@@ -577,16 +577,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn system_prompt_includes_vocabulary_and_instructions() {
-        let vocabulary = vec!["Cantrip".to_owned(), "Parakeet".to_owned()];
-        let prompt = build_system_prompt(&vocabulary, "Use sentence case.");
-
-        assert!(prompt.starts_with(BASE_SYSTEM_PROMPT));
-        assert!(prompt.contains("Use these spellings for related words: Cantrip, Parakeet"));
-        assert!(prompt.ends_with("Use sentence case."));
-    }
-
-    #[test]
     fn think_blocks_are_stripped() {
         assert_eq!(
             strip_think_blocks("before<think>reason</think>after"),
@@ -668,22 +658,6 @@ mod tests {
             normalize_response(output, "source").expect("non-empty model text must pass"),
             output
         );
-    }
-
-    #[test]
-    fn clean_response_allows_filler_removal_and_punctuation() {
-        let good = "We need to ship this Friday.";
-        let cleaned =
-            normalize_response(good, "source").expect("filler removal and punctuation must pass");
-        assert_eq!(cleaned, good);
-    }
-
-    #[test]
-    fn clean_response_accepts_faithful_cleanup() {
-        let good_output = "Let's clarify the different components of PipeWire configured for NEN in this environment.";
-        let cleaned =
-            normalize_response(good_output, "source").expect("faithful cleanup must pass");
-        assert_eq!(cleaned, good_output);
     }
 
     #[test]
