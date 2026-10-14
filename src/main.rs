@@ -608,11 +608,24 @@ fn print_outcome(outcome: Option<&ipc::TerminalOutcome>) {
     }
     if let Some(id) = &outcome.artifacts.take_id {
         println!("recording: {id}");
-        if outcome.artifacts.text {
-            println!("hint: cantrip copy {id}   # copy this recording's saved text");
-        }
-        if outcome.artifacts.audio {
-            println!("hint: cantrip recover --id {id} --local --clipboard");
+        println!("hint: cantrip recordings   # inspect saved recording metadata");
+        if outcome.delivery == ipc::Delivery::Uncertain {
+            println!("hint: check the destination or clipboard before trying again");
+        } else if matches!(
+            outcome.delivery,
+            ipc::Delivery::None
+                | ipc::Delivery::Deferred
+                | ipc::Delivery::Failed
+                | ipc::Delivery::Cancelled
+        ) || (outcome.completeness == ipc::Completeness::Partial
+            && outcome.delivery == ipc::Delivery::Copied)
+        {
+            if outcome.artifacts.text {
+                println!("hint: cantrip copy {id}   # copy this recording's saved text");
+            }
+            if outcome.artifacts.audio {
+                println!("hint: cantrip recover --id {id} --local --clipboard");
+            }
         }
     }
 }

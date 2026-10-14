@@ -173,6 +173,10 @@ complete delivered recovery needs no replay. File transcription leaves the
 supplied WAV unchanged, rather than promising an additional retained audio copy.
 Existing history keeps its local/cloud/mixed provenance; the immediate Actions
 view shows the current operation's message, not a guessed cause for older takes.
+Status omits copy/recovery commands for complete delivered/copied takes and
+uncertain delivery, while keeping the recording ID and read-only history access.
+For uncertain delivery, check the destination or clipboard before trying again;
+recovery advice waits for a confirmed undelivered or incomplete outcome.
 
 HTTP 402 alone means payment/credits required, not an exhausted provider budget.
 For HTTPS responses from `openrouter.ai`, bounded valid error metadata may narrow

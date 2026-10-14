@@ -2090,28 +2090,7 @@ fn finish_audio(
     if (!report.delivered() || outcome.cloud_failure.is_some()) && !saved.warning {
         describe_artifacts(&mut outcome);
     }
-    if let Some(cause) = outcome
-        .cloud_failure
-        .filter(|_| outcome.completeness != Completeness::Cancelled)
-    {
-        if outcome.completeness == Completeness::Complete
-            && (report.delivered() || outcome.delivery == Delivery::Copied)
-        {
-            outcome.message.push_str(" No retry needed.");
-        } else if outcome.artifacts.audio {
-            outcome
-                .message
-                .push_str(" Open Actions for this recording to choose recovery.");
-        } else if outcome.artifacts.text {
-            outcome
-                .message
-                .push_str(" Open Actions to copy this recording's saved text.");
-        }
-        if outcome.completeness != Completeness::Complete || cause.is_payment_or_budget() {
-            outcome.message.push(' ');
-            outcome.message.push_str(cause.advice());
-        }
-    }
+    describe_cloud_action(&mut outcome);
     if outcome.cleanup == Cleanup::Failed {
         outcome
             .message
@@ -2517,6 +2496,36 @@ fn describe_delivery(
     }
 }
 
+fn describe_cloud_action(outcome: &mut TerminalOutcome) {
+    let Some(cause) = outcome
+        .cloud_failure
+        .filter(|_| outcome.completeness != Completeness::Cancelled)
+    else {
+        return;
+    };
+    if outcome.delivery == Delivery::Uncertain {
+        outcome
+            .message
+            .push_str(" Check the destination or clipboard before trying again.");
+    } else if outcome.is_success() {
+        outcome.message.push_str(" No retry needed.");
+    } else if outcome.artifacts.audio {
+        outcome
+            .message
+            .push_str(" Open Actions for this recording to choose recovery.");
+    } else if outcome.artifacts.text {
+        outcome
+            .message
+            .push_str(" Open Actions to copy this recording's saved text.");
+    }
+    if outcome.delivery != Delivery::Uncertain
+        && (outcome.completeness != Completeness::Complete || cause.is_payment_or_budget())
+    {
+        outcome.message.push(' ');
+        outcome.message.push_str(cause.advice());
+    }
+}
+
 fn describe_artifacts(outcome: &mut TerminalOutcome) {
     match (outcome.artifacts.text, outcome.artifacts.audio) {
         (true, true) => outcome
@@ -2559,6 +2568,37 @@ fn milliseconds(ms: u128) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_cloud_outcomes_require_inspection_not_recovery_advice() {
+        for (completeness, cause) in [
+            (Completeness::Complete, stt::CloudFailure::BudgetExhausted),
+            (Completeness::Partial, stt::CloudFailure::Timeout),
+        ] {
+            let mut outcome = setup_failure(
+                "Synthetic cause and recognition result.",
+                "injection-uncertain",
+            );
+            outcome.completeness = completeness;
+            outcome.delivery = Delivery::Uncertain;
+            outcome.cloud_failure = Some(cause);
+            outcome.artifacts = Artifacts {
+                take_id: Some("synthetic-take".to_owned()),
+                audio: true,
+                text: true,
+            };
+            describe_artifacts(&mut outcome);
+            describe_cloud_action(&mut outcome);
+            assert!(outcome.message.contains("destination or clipboard"));
+            assert!(!outcome.message.contains("choose recovery"));
+            assert!(!outcome.message.contains("copy this"));
+            assert!(!outcome.message.contains("No retry"));
+            assert!(!outcome.message.contains(cause.advice()));
+            assert_eq!(outcome.completeness, completeness);
+            assert_eq!(outcome.cloud_failure, Some(cause));
+            assert!(outcome.artifacts.audio && outcome.artifacts.text);
+        }
+    }
 
     struct TestPlatform;
 
