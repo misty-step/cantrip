@@ -2,7 +2,7 @@
 //! Native capture uses low-energy splits; remote chunks retain source audio
 //! frames and format rather than resampling or quantizing the recording.
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -64,11 +64,173 @@ impl Transcript {
     }
 }
 
+/// Content-free cloud failure evidence; never stores provider messages or URLs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CloudFailure {
+    Timeout,
+    Connection,
+    Transport,
+    Http { status: u16 },
+    BudgetExhausted,
+    BudgetTemporarilyUnavailable,
+    CreditLimitReached,
+    CreditsRequired,
+    InvalidResponse,
+    EmptyResponse,
+    CredentialUnavailable,
+    RecordingUnreadable,
+    Unknown,
+}
+
+impl CloudFailure {
+    /// OpenRouter's documented numeric code + metadata.limit_source contract.
+    /// Other origins, statuses, malformed/oversized bodies and prose remain generic.
+    pub fn from_http(status: u16, response_url: &str, body: &[u8]) -> Self {
+        let generic = Self::Http { status };
+        if !matches!(status, 402 | 403)
+            || !response_url.starts_with("https://openrouter.ai/")
+            || body.len() > 4096
+        {
+            return generic;
+        }
+        #[derive(Deserialize)]
+        struct Metadata<'a> {
+            limit_source: Option<&'a str>,
+        }
+        #[derive(Deserialize)]
+        struct ErrorFields<'a> {
+            code: u16,
+            #[serde(borrow)]
+            metadata: Option<Metadata<'a>>,
+        }
+        #[derive(Deserialize)]
+        struct Envelope<'a> {
+            #[serde(borrow)]
+            error: ErrorFields<'a>,
+        }
+        let Ok(envelope) = serde_json::from_slice::<Envelope<'_>>(body) else {
+            return generic;
+        };
+        if envelope.error.code != status {
+            return generic;
+        }
+        let source = envelope.error.metadata.and_then(|meta| meta.limit_source);
+        match (status, source) {
+            (402, Some("openrouter_in_flight_budget")) => Self::BudgetTemporarilyUnavailable,
+            (402 | 403, Some("openrouter_key_limit")) => Self::CreditLimitReached,
+            (402, Some("openrouter_credits")) => Self::CreditsRequired,
+            (403, Some("openrouter_guardrail_budget" | "openrouter_workspace_budget")) => {
+                Self::BudgetExhausted
+            }
+            _ => generic,
+        }
+    }
+
+    pub fn is_payment_or_budget(self) -> bool {
+        matches!(
+            self,
+            Self::Http { status: 402 }
+                | Self::BudgetExhausted
+                | Self::BudgetTemporarilyUnavailable
+                | Self::CreditLimitReached
+                | Self::CreditsRequired
+        )
+    }
+
+    pub fn class(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Connection => "connection",
+            Self::Transport => "transport",
+            Self::Http { .. } => "http",
+            Self::BudgetExhausted => "provider-budget-exhausted",
+            Self::BudgetTemporarilyUnavailable => "provider-in-flight-budget",
+            Self::CreditLimitReached => "provider-credit-limit",
+            Self::CreditsRequired => "provider-credits-required",
+            Self::InvalidResponse => "invalid-response",
+            Self::EmptyResponse => "empty-response",
+            Self::CredentialUnavailable => "credential-unavailable",
+            Self::RecordingUnreadable => "recording-unreadable",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn advice(self) -> &'static str {
+        match self {
+            Self::BudgetTemporarilyUnavailable => {
+                "Wait for provider requests to settle before choosing cloud recovery."
+            }
+            Self::BudgetExhausted | Self::CreditLimitReached => {
+                "Check the provider's limit or reset window before using cloud again."
+            }
+            Self::Http { status: 402 } | Self::CreditsRequired => {
+                "Check the configured provider's payment or credit limits before using cloud again."
+            }
+            Self::CredentialUnavailable | Self::Http { status: 401 } => {
+                "Check the configured cloud credential in Settings."
+            }
+            Self::Http { status: 403 } => {
+                "Check provider permissions or restrictions before using cloud again."
+            }
+            _ => "Check cloud setup in Settings if this keeps happening.",
+        }
+    }
+
+    pub(crate) fn from_error(error: &anyhow::Error) -> Self {
+        error
+            .downcast_ref::<Self>()
+            .copied()
+            .unwrap_or(Self::Unknown)
+    }
+}
+
+impl std::fmt::Display for CloudFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout => f.write_str("Cloud transcription timed out"),
+            Self::Connection => f.write_str("Could not connect to cloud transcription"),
+            Self::Transport => f.write_str("Cloud transcription connection failed"),
+            Self::Http { status: 402 } => {
+                f.write_str("Cloud transcription requires payment or credits (HTTP 402)")
+            }
+            Self::Http { status: 403 } => {
+                f.write_str("Cloud transcription rejected: permissions or restrictions (HTTP 403)")
+            }
+            Self::Http { status } => write!(f, "Cloud transcription returned HTTP {status}"),
+            Self::BudgetExhausted => f.write_str("Cloud transcription provider budget exhausted"),
+            Self::BudgetTemporarilyUnavailable => {
+                f.write_str("Cloud transcription in-flight spending budget temporarily full")
+            }
+            Self::CreditLimitReached => {
+                f.write_str("Cloud transcription provider credit limit reached")
+            }
+            Self::CreditsRequired => {
+                f.write_str("Cloud transcription needs provider credits or a lower request cost")
+            }
+            Self::InvalidResponse => {
+                f.write_str("Cloud transcription returned an unreadable response")
+            }
+            Self::EmptyResponse => f.write_str("Cloud transcription returned no words"),
+            Self::CredentialUnavailable => {
+                f.write_str("Cloud transcription credential unavailable")
+            }
+            Self::RecordingUnreadable => {
+                f.write_str("Cloud transcription could not read the recording")
+            }
+            Self::Unknown => f.write_str("Cloud transcription failed; cause unavailable"),
+        }
+    }
+}
+
+impl std::error::Error for CloudFailure {}
+
 /// A cloud pass can retain its exact native frame plan for a nonoverlapping
 /// local completion. Other input formats still require a whole-take retry.
 pub(crate) struct RemoteAttempt {
     pub transcript: Transcript,
     pub suffix: Option<NativeSuffix>,
+    pub cloud_failure: Option<CloudFailure>,
 }
 
 impl RemoteAttempt {
@@ -76,6 +238,7 @@ impl RemoteAttempt {
         Self {
             transcript,
             suffix: None,
+            cloud_failure: None,
         }
     }
 }
@@ -561,7 +724,7 @@ fn transcribe_remote_attempt(
         }));
     }
     let mut source =
-        RemoteWav::open(wav).with_context(|| format!("reading WAV {}", wav.display()))?;
+        RemoteWav::open(wav).map_err(|_| anyhow::anyhow!(CloudFailure::RecordingUnreadable))?;
     if is_cancelled(cancel) {
         return Ok(RemoteAttempt::whole(Transcript::Cancelled {
             text: String::new(),
@@ -632,104 +795,106 @@ fn transcribe_remote_attempt(
 
     let endpoint = format!("{}/audio/transcriptions", endpoint.trim_end_matches('/'));
     let content_type = format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}");
+    let mut cloud_failure = None;
     let transcript = collect_chunks(
         &ranges,
         source.sample_rate as f32,
         cancel,
         &mut on_progress,
         |start, end| {
-            remaining_cloud_budget(deadline)?;
-            body.truncate(prefix_len);
-            source
-                .append_chunk(&mut body, start, end, unchanged)
-                .with_context(|| format!("reading WAV {} chunk", wav.display()))?;
-            let audio_bytes = body.len() - prefix_len;
-            body.extend_from_slice(b"\r\n--");
-            body.extend_from_slice(MULTIPART_BOUNDARY.as_bytes());
-            body.extend_from_slice(b"--\r\n");
-            anyhow::ensure!(
-                body.len() <= MAX_REMOTE_REQUEST_BYTES,
-                "remote transcription upload exceeds its size limit"
-            );
-            anyhow::ensure!(!is_cancelled(cancel), "transcription cancelled");
+            (|| {
+                remaining_cloud_budget(deadline)?;
+                body.truncate(prefix_len);
+                source
+                    .append_chunk(&mut body, start, end, unchanged)
+                    .with_context(|| format!("reading WAV {} chunk", wav.display()))?;
+                let audio_bytes = body.len() - prefix_len;
+                body.extend_from_slice(b"\r\n--");
+                body.extend_from_slice(MULTIPART_BOUNDARY.as_bytes());
+                body.extend_from_slice(b"--\r\n");
+                anyhow::ensure!(
+                    body.len() <= MAX_REMOTE_REQUEST_BYTES,
+                    "remote transcription upload exceeds its size limit"
+                );
+                anyhow::ensure!(!is_cancelled(cancel), "transcription cancelled");
 
-            let remaining = remaining_cloud_budget(deadline)?;
-            let started = Instant::now();
-            // ureq 2's default 30s connect timeout overrides its overall
-            // request timeout, so both must use the take's remaining budget.
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(remaining)
-                .timeout(remaining)
-                .build();
-            let mut request = agent.post(&endpoint).set("Content-Type", &content_type);
-            if let Some(api_key) = api_key {
-                request = request.set("Authorization", &format!("Bearer {api_key}"));
-            }
-            // The overall deadline also remains active on into_reader()
-            // below; a slowly streaming body cannot reset the allowance.
-            let response = match request.send_bytes(&body) {
-                Ok(response) => response,
-                Err(ureq::Error::Status(413, _)) => {
-                    anyhow::bail!(
-                        "remote transcription endpoint rejected upload size {} bytes (HTTP 413)",
-                        body.len()
-                    );
+                let remaining = remaining_cloud_budget(deadline)?;
+                let started = Instant::now();
+                // ureq 2's default 30s connect timeout overrides its overall
+                // request timeout, so both must use the take's remaining budget.
+                let agent = ureq::AgentBuilder::new()
+                    .timeout_connect(remaining)
+                    .timeout(remaining)
+                    .build();
+                let mut request = agent.post(&endpoint).set("Content-Type", &content_type);
+                if let Some(api_key) = api_key {
+                    request = request.set("Authorization", &format!("Bearer {api_key}"));
                 }
-                Err(ureq::Error::Status(code, _)) => {
-                    anyhow::bail!("remote transcription endpoint returned HTTP {code}");
-                }
-                Err(ureq::Error::Transport(transport)) => {
-                    if Instant::now() >= deadline {
-                        anyhow::bail!("remote transcription request timed out");
+                // The overall deadline also remains active on into_reader()
+                // below; a slowly streaming body cannot reset the allowance.
+                let response = match request.send_bytes(&body) {
+                    Ok(response) => response,
+                    Err(ureq::Error::Status(413, _)) => {
+                        return Err(anyhow::anyhow!(CloudFailure::Http { status: 413 })
+                            .context(format!("upload rejected: {} bytes", body.len())));
                     }
-                    // Transport display strings may embed server-controlled
-                    // headers or URLs. Keep only the kind and timeout cause.
-                    let mut cause = std::error::Error::source(&transport);
-                    while let Some(error) = cause {
-                        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
-                            matches!(
-                                error.kind(),
-                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                            )
-                        }) {
-                            anyhow::bail!("remote transcription request timed out");
+                    Err(ureq::Error::Status(code, response)) => {
+                        return Err(http_failure(code, response).into());
+                    }
+                    Err(ureq::Error::Transport(transport)) => {
+                        if Instant::now() >= deadline {
+                            anyhow::bail!(CloudFailure::Timeout);
                         }
-                        cause = error.source();
+                        // Transport display strings may embed server-controlled
+                        // headers or URLs. Keep only the kind and timeout cause.
+                        let mut cause = std::error::Error::source(&transport);
+                        while let Some(error) = cause {
+                            if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                                matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                                )
+                            }) {
+                                anyhow::bail!(CloudFailure::Timeout);
+                            }
+                            cause = error.source();
+                        }
+                        anyhow::bail!(if transport.kind() == ureq::ErrorKind::ConnectionFailed {
+                            CloudFailure::Connection
+                        } else {
+                            CloudFailure::Transport
+                        });
                     }
-                    anyhow::bail!(
-                        "remote transcription request failed ({:?})",
-                        transport.kind()
-                    );
+                };
+                let response: RemoteTranscriptionResponse =
+                    serde_json::from_reader(response.into_reader()).map_err(|error| {
+                        if Instant::now() >= deadline
+                            || error.io_error_kind().is_some_and(|kind| {
+                                matches!(
+                                    kind,
+                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                                )
+                            })
+                        {
+                            anyhow::anyhow!(CloudFailure::Timeout)
+                        } else {
+                            anyhow::anyhow!(CloudFailure::InvalidResponse)
+                        }
+                    })?;
+                remaining_cloud_budget(deadline)?;
+                let text = response.text.trim().to_owned();
+                if retain_suffix && text.is_empty() {
+                    anyhow::bail!(CloudFailure::EmptyResponse);
                 }
-            };
-            let response: RemoteTranscriptionResponse =
-                serde_json::from_reader(response.into_reader()).map_err(|error| {
-                    if Instant::now() >= deadline
-                        || error.io_error_kind().is_some_and(|kind| {
-                            matches!(
-                                kind,
-                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                            )
-                        })
-                    {
-                        anyhow::anyhow!("remote transcription request timed out")
-                    } else {
-                        anyhow::anyhow!("remote transcription returned unexpected response shape")
-                    }
-                })?;
-            remaining_cloud_budget(deadline)?;
-            let text = response.text.trim().to_owned();
-            anyhow::ensure!(
-                !retain_suffix || !text.is_empty(),
-                "remote transcription returned no text for nonempty audio"
-            );
-            tracing::info!(
-                "[STT] remote transcription audio_bytes={} ms={} output_char_count={}",
-                audio_bytes,
-                started.elapsed().as_millis(),
-                text.chars().count()
-            );
-            Ok(text)
+                tracing::info!(
+                    "[STT] remote transcription audio_bytes={} ms={} output_char_count={}",
+                    audio_bytes,
+                    started.elapsed().as_millis(),
+                    text.chars().count()
+                );
+                Ok(text)
+            })()
+            .inspect_err(|error| cloud_failure = Some(CloudFailure::from_error(error)))
         },
     )?;
     let suffix = if retain_suffix && source.native_capture {
@@ -745,14 +910,38 @@ fn transcribe_remote_attempt(
     } else {
         None
     };
-    Ok(RemoteAttempt { transcript, suffix })
+    Ok(RemoteAttempt {
+        transcript,
+        suffix,
+        cloud_failure,
+    })
+}
+
+fn http_failure(status: u16, response: ureq::Response) -> CloudFailure {
+    if !matches!(status, 402 | 403) || !response.get_url().starts_with("https://openrouter.ai/") {
+        return CloudFailure::Http { status };
+    }
+    // Fixed-size, deadline-bound read. Never deserialize or display error.message.
+    let mut reader = response.into_reader();
+    let mut bytes = [0_u8; 4096];
+    let mut used = 0;
+    while used < bytes.len() {
+        match reader.read(&mut bytes[used..]) {
+            Ok(0) => {
+                return CloudFailure::from_http(status, "https://openrouter.ai/", &bytes[..used]);
+            }
+            Ok(read) => used += read,
+            Err(_) => break,
+        }
+    }
+    CloudFailure::Http { status }
 }
 
 fn remaining_cloud_budget(deadline: Instant) -> Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|remaining| !remaining.is_zero())
-        .context("remote transcription request timed out: take budget exhausted")
+        .ok_or_else(|| CloudFailure::Timeout.into())
 }
 
 /// Metadata is small; audio stays in the source file until a bounded request
@@ -1006,6 +1195,81 @@ fn append_multipart_field(body: &mut Vec<u8>, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn documented_budget_metadata_requires_origin_status_and_schema() {
+        let origin = "https://openrouter.ai/api/v1/audio/transcriptions";
+        for (status, source, expected) in [
+            (
+                402,
+                "openrouter_in_flight_budget",
+                CloudFailure::BudgetTemporarilyUnavailable,
+            ),
+            (
+                402,
+                "openrouter_key_limit",
+                CloudFailure::CreditLimitReached,
+            ),
+            (402, "openrouter_credits", CloudFailure::CreditsRequired),
+            (
+                403,
+                "openrouter_guardrail_budget",
+                CloudFailure::BudgetExhausted,
+            ),
+            (
+                403,
+                "openrouter_workspace_budget",
+                CloudFailure::BudgetExhausted,
+            ),
+            (
+                403,
+                "openrouter_key_limit",
+                CloudFailure::CreditLimitReached,
+            ),
+        ] {
+            let body = format!(
+                r#"{{"error":{{"code":{status},"metadata":{{"limit_source":"{source}","remedy_hint":"PRIVATE"}},"message":"PRIVATE"}}}}"#
+            );
+            assert_eq!(
+                CloudFailure::from_http(status, origin, body.as_bytes()),
+                expected
+            );
+            for unknown_origin in [
+                "https://openrouter.ai.evil/",
+                "https://openrouter.ai@evil/",
+                "http://openrouter.ai/",
+                "http://127.0.0.1/",
+            ] {
+                assert_eq!(
+                    CloudFailure::from_http(status, unknown_origin, body.as_bytes()),
+                    CloudFailure::Http { status }
+                );
+            }
+            assert_eq!(
+                CloudFailure::from_http(500, origin, body.as_bytes()),
+                CloudFailure::Http { status: 500 }
+            );
+            assert!(!expected.to_string().contains("PRIVATE"));
+        }
+        for body in [
+            r#"{"error":{"code":403,"metadata":{"limit_source":"openrouter_guardrail_budget"}}}"#,
+            r#"{"error":{"code":402,"message":"budget exhausted","metadata":{"remedy_hint":"budget exhausted"}}}"#,
+            r#"{"error":{"code":"insufficient_quota","type":"budget_exceeded"}}"#,
+            r#"{"error":{"code":402,"metadata":{"limit_source":"unknown"}}}"#,
+            r#"{"error":{"code":402,"metadata":{"limit_source":"openrouter_workspace_budget"}}}"#,
+            r#"{"error":{"code":402,"metadata":{"limit_source":"openrouter_in_flight_budget"}}"#,
+        ] {
+            assert_eq!(
+                CloudFailure::from_http(402, origin, body.as_bytes()),
+                CloudFailure::Http { status: 402 }
+            );
+        }
+        let oversized = vec![b' '; 4097];
+        assert_eq!(
+            CloudFailure::from_http(402, origin, &oversized),
+            CloudFailure::Http { status: 402 }
+        );
+    }
 
     #[test]
     fn credential_failures_are_actionable_without_exposing_key_context() {

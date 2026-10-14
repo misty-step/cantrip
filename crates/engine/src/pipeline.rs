@@ -146,7 +146,26 @@ pub struct Outcome {
     /// or as a whole-take retry when no compatible prefix was available.
     pub local_fallback: bool,
     pub stt_backend: SttBackend,
+    pub cloud_failure: Option<stt::CloudFailure>,
     pub archive: ArchiveStatus,
+}
+
+impl Outcome {
+    /// Cause and selected recognition result only; callers supply delivery/retention/actions.
+    pub fn cloud_notice(&self) -> Option<String> {
+        if self.cancelled {
+            return None;
+        }
+        let cause = self.cloud_failure?;
+        let result = if self.partial {
+            "Local recovery did not complete the transcript."
+        } else if self.local_fallback {
+            "Complete transcript recovered locally."
+        } else {
+            "Local recovery did not produce a complete transcript."
+        };
+        Some(format!("{cause}. {result}"))
+    }
 }
 
 /// Cache of the loaded local transcriber, keyed by model name. Keep one
@@ -216,7 +235,7 @@ impl Pipeline<'_> {
             Option<&stt::NativeSuffix>,
             Option<&AtomicBool>,
             &mut dyn FnMut(Stage),
-        ) -> Result<stt::RemoteAttempt, String>,
+        ) -> Result<stt::RemoteAttempt>,
         save: impl FnOnce(archive::Entry<'_>) -> Result<PathBuf>,
     ) -> Outcome {
         let Self {
@@ -244,9 +263,19 @@ impl Pipeline<'_> {
         } else {
             transcribe(stt_cfg, None, context.cancel, &mut on_stage)
         };
-        let (mut transcription, suffix) = match attempt {
-            Ok(attempt) => (Ok(attempt.transcript), attempt.suffix),
-            Err(error) => (Err(error), None),
+        let (mut transcription, suffix, mut cloud_failure) = match attempt {
+            Ok(attempt) => (
+                Ok(attempt.transcript),
+                attempt.suffix,
+                attempt.cloud_failure,
+            ),
+            Err(error) => {
+                let cause = stt_cfg
+                    .endpoint
+                    .is_some()
+                    .then(|| stt::CloudFailure::from_error(&error));
+                (Err(format!("{error:#}")), None, cause)
+            }
         };
         let mut stt_backend = if stt_cfg.endpoint.is_some() {
             SttBackend::Cloud
@@ -264,6 +293,12 @@ impl Pipeline<'_> {
                 Ok(stt::Transcript::Cancelled { .. }) => false,
             };
         if retry_local {
+            if cloud_failure.is_none() {
+                cloud_failure = Some(match &transcription {
+                    Ok(stt::Transcript::Complete(_)) => stt::CloudFailure::EmptyResponse,
+                    _ => stt::CloudFailure::Unknown,
+                });
+            }
             // A suffix keeps the cloud meter and frame plan. An alternate
             // whole-take pass must not inherit that measured progress.
             on_stage(Stage::Transcribing {
@@ -281,7 +316,8 @@ impl Pipeline<'_> {
                     api_key_id: None,
                 };
                 let local = transcribe(&cfg, suffix.as_ref(), context.cancel, &mut on_stage)
-                    .map(|attempt| attempt.transcript);
+                    .map(|attempt| attempt.transcript)
+                    .map_err(|error| format!("{error:#}"));
                 if let Some(suffix) = &suffix {
                     match local {
                         Ok(local) => {
@@ -348,6 +384,7 @@ impl Pipeline<'_> {
                     cancelled: stt::is_cancelled(context.cancel),
                     local_fallback,
                     stt_backend,
+                    cloud_failure,
                     archive: ArchiveStatus::NotApplicable,
                 };
             }
@@ -441,6 +478,7 @@ impl Pipeline<'_> {
             cancelled,
             local_fallback,
             stt_backend,
+            cloud_failure,
             archive,
         }
     }
@@ -577,7 +615,7 @@ fn transcribe(
     suffix: Option<&stt::NativeSuffix>,
     cancel: Option<&AtomicBool>,
     on_stage: &mut dyn FnMut(Stage),
-) -> Result<stt::RemoteAttempt, String> {
+) -> Result<stt::RemoteAttempt> {
     if stt::is_cancelled(cancel) {
         return Ok(stt::RemoteAttempt::whole(stt::Transcript::Cancelled {
             text: String::new(),
@@ -592,7 +630,8 @@ fn transcribe(
         });
     };
     if let Some(endpoint) = &stt_cfg.endpoint {
-        let key = resolve_api_key(stt_cfg.api_key_id.as_deref()).map_err(|e| format!("{e:#}"))?;
+        let key = resolve_api_key(stt_cfg.api_key_id.as_deref())
+            .map_err(|_| anyhow::anyhow!(stt::CloudFailure::CredentialUnavailable))?;
         return stt::transcribe_cloud(
             wav,
             endpoint,
@@ -601,28 +640,25 @@ fn transcribe(
             key.as_deref(),
             cancel,
             on_progress,
-        )
-        .map_err(|e| format!("{e:#}"));
+        );
     }
 
     let reload = cache
         .as_ref()
         .is_none_or(|(name, _)| name != &stt_cfg.model);
     if reload {
-        *cache = Some(load_transcriber(&stt_cfg.model).map_err(|e| format!("{e:#}"))?);
+        *cache = Some(load_transcriber(&stt_cfg.model)?);
     }
     let transcriber = cache
         .as_mut()
         .map(|(_, transcriber)| transcriber)
-        .ok_or_else(|| "transcription backend has no model".to_owned())?;
+        .ok_or_else(|| anyhow::anyhow!("transcription backend has no model"))?;
     let transcript = if let Some(suffix) = suffix {
         transcriber.transcribe_suffix(suffix, cancel, on_progress)
     } else {
         transcriber.transcribe_wav(wav, cancel, on_progress)
     };
-    transcript
-        .map(stt::RemoteAttempt::whole)
-        .map_err(|e| format!("{e:#}"))
+    transcript.map(stt::RemoteAttempt::whole)
 }
 
 /// Load a local model by registry name. The transcriber is cached at the
@@ -732,6 +768,7 @@ mod tests {
                         .next()
                         .expect("unexpected additional inference attempt")
                         .map(stt::RemoteAttempt::whole)
+                        .map_err(anyhow::Error::msg)
                 },
                 |entry| self.save(entry),
             )
@@ -898,7 +935,6 @@ mod tests {
                             },
                         )
                         .map(stt::RemoteAttempt::whole)
-                        .map_err(|error| format!("{error:#}"))
                 }
             },
             |entry| recording.save(entry),
@@ -906,6 +942,10 @@ mod tests {
         assert_eq!(
             outcome.text.as_deref(),
             Ok("Cloud prefix and local suffix.")
+        );
+        assert_eq!(
+            outcome.cloud_failure,
+            Some(stt::CloudFailure::Http { status: 429 })
         );
         assert!(outcome.local_fallback);
         assert!(!outcome.partial);
@@ -1122,7 +1162,7 @@ mod tests {
             |_| {},
             |cfg, _, _, _| {
                 if cfg.endpoint.is_some() {
-                    Err("remote transcription endpoint returned HTTP 429".to_owned())
+                    Err(anyhow::anyhow!(stt::CloudFailure::Http { status: 429 }))
                 } else {
                     cancel.store(true, Ordering::Release);
                     Ok(stt::RemoteAttempt::whole(stt::Transcript::Cancelled {
@@ -1193,7 +1233,7 @@ mod tests {
                     }
                     let suffix = suffix.expect("a native prefix needs a suffix, not a whole retry");
                     if case == "unavailable" {
-                        return Err("model not installed".to_owned());
+                        return Err(anyhow::anyhow!("model not installed"));
                     }
                     suffix
                         .transcribe(cancel, &mut |_| {}, |_| {
@@ -1210,10 +1250,15 @@ mod tests {
                             Ok(format!("local-{local_calls}"))
                         })
                         .map(stt::RemoteAttempt::whole)
-                        .map_err(|error| format!("{error:#}"))
                 },
                 |entry| recording.save(entry),
             );
+            let expected_cause = if case == "cloud-empty" {
+                stt::CloudFailure::EmptyResponse
+            } else {
+                stt::CloudFailure::Http { status: 503 }
+            };
+            assert_eq!(outcome.cloud_failure, Some(expected_cause));
             let expected = match case {
                 "unavailable" | "empty-all" => "cloud prefix",
                 "silent-first" => "cloud prefix local-2",

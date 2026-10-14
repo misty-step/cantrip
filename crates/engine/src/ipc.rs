@@ -7,7 +7,7 @@ use crate::pipeline::Stage;
 use crate::recovery::Take;
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
@@ -194,6 +194,8 @@ pub struct TerminalOutcome {
     pub delivery: Delivery,
     pub cleanup: Cleanup,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_failure: Option<crate::stt::CloudFailure>,
     pub artifacts: Artifacts,
     pub dismissed: bool,
     /// The non-default target this outcome's take was sent toward; None for the default.
@@ -580,18 +582,60 @@ fn complete_connect(fd: libc::c_int, deadline: Instant) -> Result<()> {
 }
 
 fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
+    // Darwin rejects SO_RCVTIMEO after an AF_UNIX peer closes, even when a
+    // complete reply is buffered. Poll the absolute deadline instead, and
+    // receive nonblocking per call without changing the borrowed stream's mode.
+    let mut descriptor = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     let mut line = Vec::new();
     let mut buffer = [0_u8; 8_192];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         anyhow::ensure!(!remaining.is_zero(), "daemon reply timed out");
-        stream
-            .set_read_timeout(Some(remaining))
-            .context("setting daemon reply timeout")?;
-        let bytes = match stream.read(&mut buffer) {
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            result => result.context("reading daemon reply")?,
+        let milliseconds =
+            remaining.as_millis().max(1).min(libc::c_int::MAX as u128) as libc::c_int;
+        let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("waiting for daemon reply");
+        }
+        if ready == 0 {
+            continue;
+        }
+        anyhow::ensure!(Instant::now() < deadline, "daemon reply timed out");
+        anyhow::ensure!(
+            descriptor.revents & libc::POLLNVAL == 0,
+            "daemon reply socket is invalid"
+        );
+        // POLLHUP can accompany readable buffered bytes; let recv distinguish
+        // a complete reply from EOF instead of rejecting the peer closure.
+        // SAFETY: the stream owns the descriptor and buffer is writable for its
+        // full length. MSG_DONTWAIT affects only this receive, not stream flags.
+        let bytes = unsafe {
+            libc::recv(
+                descriptor.fd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                libc::MSG_DONTWAIT,
+            )
         };
+        if bytes < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+            ) {
+                continue;
+            }
+            return Err(error).context("reading daemon reply");
+        }
+        let bytes = bytes as usize;
         anyhow::ensure!(
             bytes != 0,
             "daemon closed the socket before a complete reply"
@@ -612,6 +656,7 @@ fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::fs::DirBuilderExt;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
@@ -659,6 +704,7 @@ mod tests {
             delivery,
             cleanup: Cleanup::Off,
             error: None,
+            cloud_failure: None,
             artifacts: Artifacts::default(),
             dismissed: false,
             handoff: None,
@@ -780,6 +826,72 @@ mod tests {
             });
             assert!(serde_json::from_value::<AudioSignal>(wire).is_err());
         }
+    }
+
+    #[test]
+    fn reply_reader_accepts_complete_buffered_reply_after_peer_close() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        server.write_all(b"{\"state\":\"idle\"}\n").unwrap();
+        drop(server);
+        assert_eq!(
+            read_reply(&mut client, Instant::now() + Duration::from_secs(1)).unwrap(),
+            b"{\"state\":\"idle\"}"
+        );
+    }
+
+    #[test]
+    fn reply_reader_preserves_stream_mode_on_success_and_incomplete_eof() {
+        for nonblocking in [false, true] {
+            for complete in [true, false] {
+                let (mut client, mut server) = UnixStream::pair().unwrap();
+                client.set_nonblocking(nonblocking).unwrap();
+                let before = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFL) };
+                assert!(before >= 0);
+                server
+                    .write_all(if complete { b"ok\n" } else { b"ok" })
+                    .unwrap();
+                drop(server);
+
+                let reply = read_reply(&mut client, Instant::now() + Duration::from_secs(1));
+                let after = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFL) };
+                assert_eq!(reply.is_ok(), complete);
+                assert_eq!(
+                    after, before,
+                    "nonblocking={nonblocking}, complete={complete}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reply_reader_keeps_absolute_deadline_while_peer_drips_bytes() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let (ready, started) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            server.write_all(b"{").unwrap();
+            ready.send(()).unwrap();
+            for _ in 0..50 {
+                if server.write_all(b" ").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            let _ = server.write_all(b"}\n");
+        });
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+        let before = Instant::now();
+        let result = read_reply(&mut client, before + Duration::from_millis(150));
+        let elapsed = before.elapsed();
+        drop(client);
+        producer.join().unwrap();
+        assert!(
+            result.is_err(),
+            "drip-fed reply cannot complete after the deadline"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "byte arrivals reset the deadline: {elapsed:?}"
+        );
     }
 
     #[test]

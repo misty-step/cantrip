@@ -167,6 +167,30 @@ These are HTTP deadlines, not hard bounds on blocking OS DNS resolution,
 keyring access, model loading, or local inference. Slow-but-working cloud
 recognition also switches to local when its budget expires.
 
+**Cloud failure feedback.** A failed cloud chunk keeps a content-free cause even
+when local recognition completes the take. The settled HUD/status and file CLI
+distinguish complete local recovery from partial/no complete transcript and give
+the appropriate next action. Successful delivery is not relabeled as a failure;
+complete delivered recovery needs no replay. File transcription leaves the
+supplied WAV unchanged, rather than promising an additional retained audio copy.
+Existing history keeps its local/cloud/mixed provenance; the immediate Actions
+view shows the current operation's message, not a guessed cause for older takes.
+Status omits copy/recovery commands for complete delivered/copied takes and
+uncertain delivery, while keeping the recording ID and read-only history access.
+For uncertain delivery, check the destination or clipboard before trying again;
+recovery advice waits for a confirmed undelivered or incomplete outcome.
+
+HTTP 402 alone means payment/credits required, not an exhausted provider budget.
+For HTTPS responses from `openrouter.ai`, bounded valid error metadata may narrow
+402/403 using the [documented `limit_source` contract](https://openrouter.ai/docs/api_reference/limits):
+in-flight allowance is temporarily full; a key credit limit is reached; credits
+or request cost are insufficient; or a guardrail/workspace budget is exhausted.
+The numeric error code must match the HTTP status. Unknown metadata/origins,
+malformed/truncated bodies, timeout and connection failures never imply a
+provider budget. Provider message and remedy text are not displayed or stored.
+Cantrip does not change provider limits, accounts or credentials, or retry cloud
+requests automatically in response to this feedback.
+
 For selected-recording retries and the per-operation `--local` override, see
 [recovery](USAGE.md#recovery). Explicit local recovery/file transcription skips
 cleanup without rewriting this file, but does not disable independently opted-in

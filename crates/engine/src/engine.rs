@@ -1424,6 +1424,7 @@ fn setup_failure(message: &str, error: &str) -> TerminalOutcome {
         delivery: Delivery::None,
         cleanup: Cleanup::Off,
         error: Some(error.to_owned()),
+        cloud_failure: None,
         artifacts: Artifacts::default(),
         dismissed: false,
         handoff: None,
@@ -1678,6 +1679,7 @@ impl WorkerContext<'_> {
             delivery,
             cleanup: Cleanup::Off,
             error: None,
+            cloud_failure: None,
             artifacts: facts(self.id()),
             dismissed: false,
             handoff: self.operation.handoff.clone(),
@@ -2047,6 +2049,7 @@ fn finish_audio(
     }
     outcome.delivery = report.delivery;
     outcome.artifacts = saved.artifacts;
+    outcome.cloud_failure = pipeline.cloud_failure;
     outcome.error = report
         .error
         .map(str::to_owned)
@@ -2063,7 +2066,16 @@ fn finish_audio(
             context.config.selected_handoff.as_ref(),
         )
     });
-    if let Err(error) = &pipeline.text {
+    if let Some(notice) = pipeline
+        .cloud_notice()
+        .filter(|_| outcome.completeness != Completeness::Cancelled)
+    {
+        outcome.message = if outcome.completeness == Completeness::Failed {
+            format!("{notice} No text delivered.")
+        } else {
+            format!("{notice} {}", outcome.message)
+        };
+    } else if let Err(error) = &pipeline.text {
         if outcome.completeness != Completeness::Cancelled {
             let notice = stt::classify_failure(error);
             tracing::warn!("[STT] transcription failed notice={notice}");
@@ -2075,14 +2087,10 @@ fn finish_audio(
             .message
             .push_str(" Cancellation arrived after delivery.");
     }
-    if !report.delivered() || outcome.completeness == Completeness::Partial {
+    if (!report.delivered() || outcome.cloud_failure.is_some()) && !saved.warning {
         describe_artifacts(&mut outcome);
     }
-    if pipeline.local_fallback {
-        outcome
-            .message
-            .push_str(" Used local transcription after cloud failure.");
-    }
+    describe_cloud_action(&mut outcome);
     if outcome.cleanup == Cleanup::Failed {
         outcome
             .message
@@ -2488,6 +2496,36 @@ fn describe_delivery(
     }
 }
 
+fn describe_cloud_action(outcome: &mut TerminalOutcome) {
+    let Some(cause) = outcome
+        .cloud_failure
+        .filter(|_| outcome.completeness != Completeness::Cancelled)
+    else {
+        return;
+    };
+    if outcome.delivery == Delivery::Uncertain {
+        outcome
+            .message
+            .push_str(" Check the destination or clipboard before trying again.");
+    } else if outcome.is_success() {
+        outcome.message.push_str(" No retry needed.");
+    } else if outcome.artifacts.audio {
+        outcome
+            .message
+            .push_str(" Open Actions for this recording to choose recovery.");
+    } else if outcome.artifacts.text {
+        outcome
+            .message
+            .push_str(" Open Actions to copy this recording's saved text.");
+    }
+    if outcome.delivery != Delivery::Uncertain
+        && (outcome.completeness != Completeness::Complete || cause.is_payment_or_budget())
+    {
+        outcome.message.push(' ');
+        outcome.message.push_str(cause.advice());
+    }
+}
+
 fn describe_artifacts(outcome: &mut TerminalOutcome) {
     match (outcome.artifacts.text, outcome.artifacts.audio) {
         (true, true) => outcome
@@ -2530,6 +2568,37 @@ fn milliseconds(ms: u128) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uncertain_cloud_outcomes_require_inspection_not_recovery_advice() {
+        for (completeness, cause) in [
+            (Completeness::Complete, stt::CloudFailure::BudgetExhausted),
+            (Completeness::Partial, stt::CloudFailure::Timeout),
+        ] {
+            let mut outcome = setup_failure(
+                "Synthetic cause and recognition result.",
+                "injection-uncertain",
+            );
+            outcome.completeness = completeness;
+            outcome.delivery = Delivery::Uncertain;
+            outcome.cloud_failure = Some(cause);
+            outcome.artifacts = Artifacts {
+                take_id: Some("synthetic-take".to_owned()),
+                audio: true,
+                text: true,
+            };
+            describe_artifacts(&mut outcome);
+            describe_cloud_action(&mut outcome);
+            assert!(outcome.message.contains("destination or clipboard"));
+            assert!(!outcome.message.contains("choose recovery"));
+            assert!(!outcome.message.contains("copy this"));
+            assert!(!outcome.message.contains("No retry"));
+            assert!(!outcome.message.contains(cause.advice()));
+            assert_eq!(outcome.completeness, completeness);
+            assert_eq!(outcome.cloud_failure, Some(cause));
+            assert!(outcome.artifacts.audio && outcome.artifacts.text);
+        }
+    }
 
     struct TestPlatform;
 
@@ -2735,6 +2804,7 @@ mod tests {
                     delivery: Delivery::Pasted,
                     cleanup: Cleanup::Off,
                     error: None,
+                    cloud_failure: None,
                     artifacts: Artifacts::default(),
                     dismissed: false,
                     handoff: None,
@@ -2766,6 +2836,7 @@ mod tests {
             delivery: Delivery::Copied,
             cleanup: Cleanup::Off,
             error: Some("stt-partial".to_owned()),
+            cloud_failure: None,
             artifacts: Artifacts {
                 take_id: Some("keep-me".to_owned()),
                 audio: true,

@@ -608,11 +608,24 @@ fn print_outcome(outcome: Option<&ipc::TerminalOutcome>) {
     }
     if let Some(id) = &outcome.artifacts.take_id {
         println!("recording: {id}");
-        if outcome.artifacts.text {
-            println!("hint: cantrip copy {id}   # copy this recording's saved text");
-        }
-        if outcome.artifacts.audio {
-            println!("hint: cantrip recover --id {id} --local --clipboard");
+        println!("hint: cantrip recordings   # inspect saved recording metadata");
+        if outcome.delivery == ipc::Delivery::Uncertain {
+            println!("hint: check the destination or clipboard before trying again");
+        } else if matches!(
+            outcome.delivery,
+            ipc::Delivery::None
+                | ipc::Delivery::Deferred
+                | ipc::Delivery::Failed
+                | ipc::Delivery::Cancelled
+        ) || (outcome.completeness == ipc::Completeness::Partial
+            && outcome.delivery == ipc::Delivery::Copied)
+        {
+            if outcome.artifacts.text {
+                println!("hint: cantrip copy {id}   # copy this recording's saved text");
+            }
+            if outcome.artifacts.audio {
+                println!("hint: cantrip recover --id {id} --local --clipboard");
+            }
         }
     }
 }
@@ -699,8 +712,18 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
         eprintln!("warning: transcript archive failed: {error}");
     }
     emit_transcribe_telemetry(&config, &outcome);
-    if outcome.local_fallback {
-        eprintln!("cloud transcription unavailable; used local Parakeet");
+    if let Some(notice) = outcome.cloud_notice() {
+        eprintln!("{notice}");
+        if outcome.partial || outcome.text.is_err() {
+            eprintln!("Original WAV is unchanged. Use cantrip transcribe --local <WAV> with an installed local model, or check cloud setup.");
+        } else {
+            eprintln!("Original WAV is unchanged. No retry needed.");
+        }
+        if let Some(cause) = outcome.cloud_failure {
+            if outcome.partial || outcome.text.is_err() || cause.is_payment_or_budget() {
+                eprintln!("{}", cause.advice());
+            }
+        }
     }
     match &outcome.text {
         Ok(text) => {
@@ -714,7 +737,12 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
                 );
             }
         }
-        Err(error) => anyhow::bail!("transcribing {}: {error}", wav.display()),
+        Err(error) => {
+            if outcome.cloud_failure.is_some() {
+                anyhow::bail!("no complete transcript produced; original WAV is unchanged");
+            }
+            anyhow::bail!("transcribing {}: {error}", wav.display());
+        }
     }
     Ok(())
 }

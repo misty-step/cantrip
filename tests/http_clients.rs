@@ -951,6 +951,61 @@ fn transcribe_remote_failure_without_earlier_text_remains_an_error() {
     assert!(!message.contains("PRIVATE-RESPONSE-MARKER"));
     assert!(!message.contains("sk-private-http-test"));
 }
+#[test]
+fn cloud_payment_and_unknown_connection_do_not_invent_budget_evidence() {
+    let fixture = WavFixture::new(native_spec(), 16_000);
+    for (status, body) in [
+        (402, r#"{"error":{"message":"PRIVATE budget exhausted"}} "#),
+        (
+            402,
+            r#"{"error":{"code":402,"metadata":{"limit_source":"openrouter_in_flight_budget"},"message":"PRIVATE"}} "#,
+        ),
+        (
+            403,
+            r#"{"error":{"code":403,"metadata":{"limit_source":"openrouter_guardrail_budget"},"message":"PRIVATE"}} "#,
+        ),
+    ] {
+        let (endpoint, server) = mock_server(format!(
+            "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ));
+        let error = stt::transcribe_remote(
+            &fixture.path,
+            &endpoint,
+            "synthetic",
+            &[],
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<stt::CloudFailure>(),
+            Some(&stt::CloudFailure::Http { status })
+        );
+        assert!(!format!("{error:#}").contains("PRIVATE"));
+        assert!(!format!("{error:#}").contains("budget"));
+        server.join().unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let error = stt::transcribe_remote(
+        &fixture.path,
+        &endpoint,
+        "synthetic",
+        &[],
+        None,
+        None,
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<stt::CloudFailure>(),
+        Some(&stt::CloudFailure::Connection)
+    );
+    assert!(!error.to_string().contains("budget"));
+}
 
 #[test]
 fn transcribe_cli_keeps_cloud_partial_when_the_local_fallback_model_is_missing() {
@@ -993,9 +1048,12 @@ fn transcribe_cli_keeps_cloud_partial_when_the_local_fallback_model_is_missing()
         String::from_utf8(output.stdout).unwrap().trim(),
         "usable cloud prefix"
     );
-    assert!(!String::from_utf8(output.stderr)
-        .unwrap()
-        .contains("usable cloud prefix"));
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(!diagnostic.contains("usable cloud prefix"));
+    assert!(diagnostic.contains("HTTP 429"));
+    assert!(diagnostic.contains("Original WAV is unchanged"));
+    assert!(!diagnostic.contains("Audio saved"));
+    assert!(!diagnostic.contains("budget exhausted"));
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 2, "do not retry failed cloud chunks");
     let records: Vec<_> = std::fs::read_dir(root.join("state/cantrip/transcripts"))
