@@ -644,7 +644,7 @@ fn resolve_api_key(id: Option<&str>) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
     use std::net::TcpListener;
     use std::sync::atomic::Ordering;
     use std::thread;
@@ -677,6 +677,23 @@ mod tests {
             }
             writer.finalize().unwrap();
             Self { root, wav }
+        }
+
+        fn with_oversized_metadata(self) -> Self {
+            const METADATA_BYTES: u32 = 25_000_000;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.wav)
+                .unwrap();
+            let original_len = file.seek(SeekFrom::End(0)).unwrap();
+            file.write_all(b"JUNK").unwrap();
+            file.write_all(&METADATA_BYTES.to_le_bytes()).unwrap();
+            let file_len = original_len + 8 + u64::from(METADATA_BYTES);
+            file.set_len(file_len).unwrap();
+            file.seek(SeekFrom::Start(4)).unwrap();
+            file.write_all(&((file_len - 8) as u32).to_le_bytes())
+                .unwrap();
+            self
         }
 
         fn pipeline<'a>(
@@ -832,7 +849,7 @@ mod tests {
 
     #[test]
     fn cloud_429_on_chunk_two_finishes_locally_before_one_cleanup() {
-        let recording = Recording::new(70 * 16_000);
+        let recording = Recording::new(70 * 16_000).with_oversized_metadata();
         let (endpoint, server) = http_server(vec![
             json_response(r#"{"text":"cloud prefix that must not be duplicated"}"#),
             "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -911,6 +928,10 @@ mod tests {
             "only failed and unstarted chunks run locally"
         );
         assert_eq!(local_chunks[0], requests[1].audio().len());
+        assert!(
+            local_chunks.iter().all(|&frames| frames <= 33 * 16_000),
+            "native suffix inference must never inherit an oversized cloud range"
+        );
         assert_eq!(prefix.len() + local_audio.len(), 70 * 16_000);
         for (index, sample) in prefix.into_iter().enumerate() {
             assert_eq!(sample, recorded_sample(index));
@@ -1034,7 +1055,7 @@ mod tests {
 
     #[test]
     fn cancellation_at_suffix_boundary_keeps_cloud_text_without_inference_or_cleanup() {
-        let recording = Recording::new(70 * 16_000);
+        let recording = Recording::new(70 * 16_000).with_oversized_metadata();
         let (endpoint, server) = http_server(vec![
             json_response(r#"{"text":"preserve cloud words"}"#),
             "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1126,7 +1147,7 @@ mod tests {
 
     #[test]
     fn native_suffix_failure_empty_recognition_and_cancellation_preserve_usable_text() {
-        let recording = Recording::new(70 * 16_000);
+        let recording = Recording::new(70 * 16_000).with_oversized_metadata();
         for case in [
             "unavailable",
             "silent-first",
