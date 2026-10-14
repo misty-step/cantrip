@@ -17,6 +17,35 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
 fn status_recommends_recovery_only_for_confirmed_undelivered_or_incomplete_takes() {
+    #[cfg(target_os = "macos")]
+    {
+        let (mut client, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let whole = client.set_read_timeout(Some(Duration::from_secs(10)));
+        let fractional = client.set_read_timeout(Some(Duration::new(9, 999_999_999)));
+        writeln!(
+            std::io::stderr(),
+            "[IPC native probe] open_whole={whole:?} open_fractional={fractional:?}"
+        )
+        .unwrap();
+        whole.unwrap();
+        fractional.unwrap();
+        peer.write_all(b"{}\n").unwrap();
+        drop(peer);
+        let closed = client.set_read_timeout(Some(Duration::from_secs(10)));
+        writeln!(
+            std::io::stderr(),
+            "[IPC native probe] closed_whole={closed:?}"
+        )
+        .unwrap();
+        let mut buffered = Vec::new();
+        std::io::Read::read_to_end(&mut client, &mut buffered).unwrap();
+        writeln!(
+            std::io::stderr(),
+            "[IPC native probe] buffered_bytes={}",
+            buffered.len()
+        )
+        .unwrap();
+    }
     // Keep the Unix socket short on macOS; all fixture directories are owner-only.
     let root = PathBuf::from("/tmp").join(format!(
         "ct-status-{}-{:x}",
