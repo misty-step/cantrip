@@ -401,3 +401,7 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 | `cantrip dismiss [--event-id ID]` | Acknowledge feedback without deleting recordings |
 | `cantrip forget ID --yes` | Delete retained audio and incomplete text; keep complete archived text |
 | `cantrip reload` | Re-read configuration in the running daemon |
+
+Daemon reply reads have a ten-second absolute deadline; arriving bytes do not
+reset it. A complete newline-framed reply remains readable after the peer closes
+the socket. Unterminated, oversized, or late replies are rejected.

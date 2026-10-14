@@ -582,16 +582,51 @@ fn complete_connect(fd: libc::c_int, deadline: Instant) -> Result<()> {
 }
 
 fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
+    // Darwin rejects SO_RCVTIMEO after an AF_UNIX peer closes, even when a
+    // complete reply is buffered. Poll the absolute deadline instead, and
+    // make the following read nonblocking so readiness cannot extend it.
+    stream
+        .set_nonblocking(true)
+        .context("configuring daemon reply reads")?;
+    let mut descriptor = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     let mut line = Vec::new();
     let mut buffer = [0_u8; 8_192];
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         anyhow::ensure!(!remaining.is_zero(), "daemon reply timed out");
-        stream
-            .set_read_timeout(Some(remaining))
-            .context("setting daemon reply timeout")?;
+        let milliseconds =
+            remaining.as_millis().max(1).min(libc::c_int::MAX as u128) as libc::c_int;
+        let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("waiting for daemon reply");
+        }
+        if ready == 0 {
+            continue;
+        }
+        anyhow::ensure!(Instant::now() < deadline, "daemon reply timed out");
+        anyhow::ensure!(
+            descriptor.revents & libc::POLLNVAL == 0,
+            "daemon reply socket is invalid"
+        );
+        // POLLHUP can accompany readable buffered bytes; let read distinguish
+        // a complete reply from EOF instead of rejecting the peer closure.
         let bytes = match stream.read(&mut buffer) {
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
+            }
             result => result.context("reading daemon reply")?,
         };
         anyhow::ensure!(
@@ -783,6 +818,48 @@ mod tests {
             });
             assert!(serde_json::from_value::<AudioSignal>(wire).is_err());
         }
+    }
+
+    #[test]
+    fn reply_reader_accepts_complete_buffered_reply_after_peer_close() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        server.write_all(b"{\"state\":\"idle\"}\n").unwrap();
+        drop(server);
+        assert_eq!(
+            read_reply(&mut client, Instant::now() + Duration::from_secs(1)).unwrap(),
+            b"{\"state\":\"idle\"}"
+        );
+    }
+
+    #[test]
+    fn reply_reader_keeps_absolute_deadline_while_peer_drips_bytes() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let (ready, started) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            server.write_all(b"{").unwrap();
+            ready.send(()).unwrap();
+            for _ in 0..50 {
+                if server.write_all(b" ").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            let _ = server.write_all(b"}\n");
+        });
+        started.recv_timeout(Duration::from_secs(1)).unwrap();
+        let before = Instant::now();
+        let result = read_reply(&mut client, before + Duration::from_millis(150));
+        let elapsed = before.elapsed();
+        drop(client);
+        producer.join().unwrap();
+        assert!(
+            result.is_err(),
+            "drip-fed reply cannot complete after the deadline"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "byte arrivals reset the deadline: {elapsed:?}"
+        );
     }
 
     #[test]
