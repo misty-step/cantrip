@@ -588,7 +588,9 @@ fn transcribe_remote_attempt(
     );
 
     let short_frames = source.sample_rate as usize * LOCAL_CHUNK_SECS as usize;
-    let unchanged = source.frames <= short_frames && source.file_len <= wav_budget as u64;
+    // The local encoder limit must not multiply cloud HTTP round trips.
+    // Over-cap native uploads retain the bounded plan for local suffix inference.
+    let unchanged = source.file_len <= wav_budget as u64;
     let mut native_samples = None;
     let ranges = if unchanged {
         vec![(0, source.frames)]
@@ -1063,7 +1065,7 @@ mod tests {
         let long = vec![0.1_f32; 160_000]; // 10s < 30s target still one chunk
         assert_eq!(plan_chunks(&long), vec![(0, 160_000)]);
 
-        let very_long = vec![0.1_f32; 960_000]; // 60s -> two ~30s chunks
+        let very_long = vec![0.1_f32; 700 * 16_000];
         let ranges = plan_chunks(&very_long);
         assert!(
             ranges.len() >= 2,
@@ -1071,6 +1073,12 @@ mod tests {
         );
         assert_eq!(ranges.first().map(|r| r.0), Some(0));
         assert_eq!(ranges.last().map(|r| r.1), Some(very_long.len()));
+        assert!(
+            ranges
+                .iter()
+                .all(|&(start, end)| end - start <= 33 * 16_000),
+            "whole-take local fallback must stay below the encoder cliff"
+        );
         // Contiguous coverage with no gaps.
         for window in ranges.windows(2) {
             assert_eq!(window[0].1, window[1].0);
