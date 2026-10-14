@@ -127,12 +127,14 @@ before opting in. Evaluated provider comparisons live in the
 [evaluation guide](https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md),
 not in the default configuration.
 
-**Long recordings.** Remote PCM/IEEE-float WAVs are split before upload, keeping
-sample bytes, rate, channels, and format intact. Native Cantrip capture uses
+**Long recordings.** A WAV whose complete multipart request fits 24,000,000 bytes,
+including headers and vocabulary, is sent unchanged in one cloud request.
+The local Parakeet encoder's 30-second limit does not split a bounded cloud upload.
+Larger PCM/IEEE-float WAVs are split before upload, keeping source sample bytes,
+rate, channels, and format intact. Over-cap native Cantrip capture still uses
 low-energy splits around 30 seconds (up to 33 seconds); other PCM formats split
-on frame boundaries at most 30 seconds apart. Every multipart request, including
-its headers and vocabulary, is capped at 24,000,000 bytes. Short bounded files
-are sent unchanged. Results are joined in order, with one cleanup/delivery step.
+on frame boundaries at most 30 seconds apart. Results are joined in order, with
+one cleanup/delivery step.
 
 This avoids OpenRouter's documented 25 MB multipart cliff without a recording
 cutoff or codec process. Providers can still impose smaller limits or time out.

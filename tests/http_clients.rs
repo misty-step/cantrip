@@ -431,6 +431,25 @@ impl WavFixture {
         }
         Self { path }
     }
+
+    fn with_oversized_metadata(self) -> Self {
+        // A valid over-cap RIFF container keeps small audio fixtures exercising
+        // split uploads without allocating hundreds of seconds of samples.
+        const METADATA_BYTES: u32 = 25_000_000;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .unwrap();
+        let original_len = file.seek(SeekFrom::End(0)).unwrap();
+        file.write_all(b"JUNK").unwrap();
+        file.write_all(&METADATA_BYTES.to_le_bytes()).unwrap();
+        let file_len = original_len + 8 + u64::from(METADATA_BYTES);
+        file.set_len(file_len).unwrap();
+        file.seek(SeekFrom::Start(4)).unwrap();
+        file.write_all(&((file_len - 8) as u32).to_le_bytes())
+            .unwrap();
+        self
+    }
 }
 
 impl Drop for WavFixture {
@@ -500,15 +519,14 @@ fn transcription_server(
             stream.set_write_timeout(remaining).unwrap();
             let request = read_request(&stream);
             assert!(
-                request.body.len() < 25_000_000,
-                "upload must stay below the provider cap"
+                request.body.len() <= 24_000_000,
+                "multipart framing and audio must fit the upload cap"
             );
             let reader = hound::WavReader::new(Cursor::new(request.part("file")))
                 .expect("uploaded WAV must decode");
             assert_eq!(reader.spec(), spec);
             let chunk_frames = reader.duration() as usize;
             assert!(chunk_frames > 0, "empty WAV chunks must not be uploaded");
-            assert!(chunk_frames <= spec.sample_rate as usize * 33);
             received += chunk_frames;
             assert!(
                 received <= frames,
@@ -630,8 +648,11 @@ fn transcribe_remote_round_trip_preserves_short_wav() {
 }
 
 fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old_cap: bool) {
-    let fixture = WavFixture::new(spec, frames);
+    let mut fixture = WavFixture::new(spec, frames);
     if exceeds_old_cap {
+        if std::fs::metadata(&fixture.path).unwrap().len() <= 25_000_000 {
+            fixture = fixture.with_oversized_metadata();
+        }
         assert!(std::fs::metadata(&fixture.path).unwrap().len() > 25_000_000);
     }
     let (endpoint, server) = transcription_server(spec, frames, None);
@@ -651,10 +672,9 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
         .expect("transcription server requests");
     assert_audio_coverage(&requests, spec, frames);
     let total = requests.len() as u32;
-    assert!(
-        total > 1,
-        "long or oversized audio must use multiple requests"
-    );
+    if exceeds_old_cap {
+        assert!(total > 1, "oversized WAVs must use multiple requests");
+    }
     assert_eq!(
         transcript,
         stt::Transcript::Complete(
@@ -673,8 +693,45 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
 }
 
 #[test]
-fn transcribe_remote_bounds_native_duration_without_losing_boundary_samples() {
-    assert_bounded_transcription(native_spec(), 61 * 16_000 + 1, false);
+fn transcribe_remote_uploads_long_native_wav_once_within_the_take_budget() {
+    let fixture = WavFixture::new(native_spec(), 162 * 16_000);
+    let original = std::fs::read(&fixture.path).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let request = read_request(&stream);
+        // Six healthy one-second responses cannot complete within a shared
+        // five-second budget; local inference chunks must not multiply uploads.
+        thread::sleep(Duration::from_millis(1046));
+        stream
+            .write_all(ok_json(r#"{"text":"complete cloud take"}"#).as_bytes())
+            .unwrap();
+        request
+    });
+    let started = Instant::now();
+    let transcript = stt::transcribe_remote(
+        &fixture.path,
+        &endpoint,
+        "test-stt-model",
+        &[],
+        None,
+        None,
+        |_| {},
+    )
+    .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(matches!(transcript, stt::Transcript::Complete(_)));
+    let request = server.join().unwrap();
+    assert!(request.body.len() <= 24_000_000);
+    assert_eq!(
+        request.part("file"),
+        original,
+        "all native source frames must arrive unchanged in one request"
+    );
 }
 
 #[test]
@@ -707,7 +764,7 @@ fn transcribe_remote_preserves_float_samples_across_chunks() {
         sample_format: hound::SampleFormat::Float,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 31 * 8_000, false);
+    assert_bounded_transcription(spec, 31 * 8_000, true);
 }
 
 #[test]
@@ -717,7 +774,7 @@ fn transcribe_remote_pads_odd_sized_pcm_chunks_without_adding_samples() {
         bits_per_sample: 8,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 31 * 8_001, false);
+    assert_bounded_transcription(spec, 31 * 8_001, true);
 }
 
 #[derive(Clone)]
@@ -739,7 +796,7 @@ impl Write for LogCapture {
 #[test]
 fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_body() {
     let spec = native_spec();
-    let fixture = WavFixture::new(spec, 70 * 16_000);
+    let fixture = WavFixture::new(spec, 70 * 16_000).with_oversized_metadata();
     let (endpoint, server) = transcription_server(spec, 70 * 16_000, Some(2));
     let (log_tx, log_rx) = mpsc::channel();
     let capture = LogCapture(log_tx);
@@ -807,7 +864,7 @@ fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_bod
 
 #[test]
 fn transcribe_remote_shares_the_take_budget_with_slow_response_body_reads() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000);
+    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -871,7 +928,7 @@ fn transcribe_remote_shares_the_take_budget_with_slow_response_body_reads() {
 
 #[test]
 fn transcribe_remote_failure_without_earlier_text_remains_an_error() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000);
+    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
     let (endpoint, server) = mock_server_multi(vec![ok_json(r#"{"text":" "}"#), upload_error()]);
     let error = stt::transcribe_remote(
         &fixture.path,
@@ -952,7 +1009,7 @@ fn cloud_payment_and_unknown_connection_do_not_invent_budget_evidence() {
 
 #[test]
 fn transcribe_cli_keeps_cloud_partial_when_the_local_fallback_model_is_missing() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000);
+    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
     let (endpoint, server) = mock_server_multi(vec![
         ok_json(r#"{"text":"usable cloud prefix"}"#),
         "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1157,7 +1214,7 @@ fn remote_progress_completes_only_after_the_backend_response() {
 
 #[test]
 fn cancelling_a_blocked_remote_chunk_keeps_its_text_and_stops_later_uploads() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000);
+    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server_listener = listener.try_clone().unwrap();

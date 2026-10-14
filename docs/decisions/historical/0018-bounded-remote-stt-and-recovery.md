@@ -10,6 +10,13 @@ rejection of automatic local fallback and defines explicit audio deletion.
 Read those decisions for current recovery and retention; the alternatives and
 proof below retain their original scope.
 
+The duration-only cloud splitting policy below is superseded by the current
+[cloud upload contract](../../CONFIGURATION.md#stt--transcription): send the
+original WAV once when its complete multipart fits 24,000,000 bytes, under the
+unchanged five-second take budget. Over-cap files retain the original bounded
+chunk plan and exact native prefix/local-suffix recovery. Local Parakeet
+inference remains duration-chunked, including whole-take fallback.
+
 ## Problem
 
 An 888-second dictation produced a 28.4 MB WAV. The configured OpenRouter
