@@ -1215,6 +1215,38 @@ fn present_outcome(
         }
         .to_owned();
     }
+    if let Some(cause) = outcome
+        .cloud_failure
+        .filter(|_| outcome.completeness != Completeness::Cancelled)
+    {
+        caption.title = cause.to_string();
+        let result = match (outcome.completeness, outcome.delivery) {
+            (Completeness::Complete, Delivery::Uncertain) => {
+                "Local transcript complete; delivery uncertain."
+            }
+            (Completeness::Complete, Delivery::Failed | Delivery::Deferred) => {
+                "Local transcript complete; not delivered."
+            }
+            (Completeness::Complete, _) => "Transcript complete; recovered locally.",
+            (Completeness::Partial, Delivery::Copied) => {
+                "Partial text copied; local recovery incomplete."
+            }
+            (Completeness::Partial, Delivery::Uncertain) => "Partial transcript; copy uncertain.",
+            (Completeness::Partial, _) => "Partial transcript; not delivered.",
+            _ => "Local recovery produced no complete transcript.",
+        };
+        let retained = if outcome.error.as_deref() == Some("storage-failed") {
+            "Storage incomplete; retention unconfirmed."
+        } else {
+            match (outcome.artifacts.audio, outcome.artifacts.text) {
+                (true, true) => "Audio and text saved.",
+                (true, false) => "Audio saved.",
+                (false, true) => "Text saved; no saved audio.",
+                (false, false) => "No saved audio or text.",
+            }
+        };
+        caption.detail = format!("{result} {retained}");
+    }
     // Actions are descriptions of the deliberately opened menu, not fake controls.
     // Require the matching artifact and capability; never retarget a changing last take.
     let named = outcome.artifacts.take_id.is_some();
@@ -1239,6 +1271,28 @@ fn present_outcome(
                 ""
             }
             .to_owned();
+    }
+    if let Some(cause) = outcome
+        .cloud_failure
+        .filter(|_| outcome.completeness != Completeness::Cancelled)
+    {
+        if outcome.completeness == Completeness::Complete && (delivered || copied) {
+            caption.action = if copied {
+                "Copied. Paste when ready; no retry needed."
+            } else {
+                "Sent. No retry needed."
+            }
+            .to_owned();
+        }
+        if outcome.delivery == Delivery::Uncertain {
+            caption.action = "Check the destination before trying again.".to_owned();
+        } else if copied && outcome.completeness == Completeness::Partial {
+            caption.action.insert_str(0, "Review before pasting.\n");
+        }
+        if cause.is_payment_or_budget() {
+            caption.action.push('\n');
+            caption.action.push_str(cause.advice());
+        }
     }
     if attention && status.capabilities.dismiss {
         if !caption.action.is_empty() {
@@ -2248,6 +2302,11 @@ pub enum ScreenshotState {
     StorageFailed,
     Partial,
     PartialSaved,
+    CloudRecovered,
+    CloudPartial,
+    CloudPayment,
+    CloudBudget,
+    CloudConnection,
     DeliveryFailed,
     DeliveryUncertain,
     Deferred,
@@ -2309,6 +2368,7 @@ fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOu
         delivery,
         cleanup: Cleanup::Off,
         error: None,
+        cloud_failure: None,
         artifacts: ipc::Artifacts::default(),
         dismissed: false,
         handoff: None,
@@ -2421,6 +2481,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
         ScreenshotState::ReducedMotion
             | ScreenshotState::ReducedMotionCleaning
             | ScreenshotState::ReducedMotionSent
+            | ScreenshotState::CloudRecovered
     );
     processing.hud.reduced_motion = Some(reduced);
     if state == ScreenshotState::Busy {
@@ -2472,6 +2533,10 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
         | ScreenshotState::Dismissed => (Completeness::Failed, Delivery::None),
         ScreenshotState::Partial => (Completeness::Partial, Delivery::Copied),
         ScreenshotState::PartialSaved => (Completeness::Partial, Delivery::Deferred),
+        ScreenshotState::CloudPartial => (Completeness::Partial, Delivery::Deferred),
+        ScreenshotState::CloudPayment
+        | ScreenshotState::CloudBudget
+        | ScreenshotState::CloudConnection => (Completeness::Failed, Delivery::None),
         ScreenshotState::DeliveryFailed => (Completeness::Complete, Delivery::Failed),
         ScreenshotState::DeliveryUncertain => (Completeness::Complete, Delivery::Uncertain),
         ScreenshotState::Deferred => (Completeness::Complete, Delivery::Deferred),
@@ -2519,6 +2584,23 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
                 | ScreenshotState::Deferred
         ),
     };
+    use cantrip_engine::stt::CloudFailure;
+    outcome.cloud_failure = match state {
+        ScreenshotState::CloudRecovered | ScreenshotState::CloudPartial => {
+            Some(CloudFailure::Timeout)
+        }
+        ScreenshotState::CloudPayment => Some(CloudFailure::Http { status: 402 }),
+        ScreenshotState::CloudBudget => Some(CloudFailure::BudgetExhausted),
+        ScreenshotState::CloudConnection => Some(CloudFailure::Connection),
+        _ => None,
+    };
+    if outcome.cloud_failure.is_some() {
+        outcome.artifacts.audio = true;
+        outcome.artifacts.text = matches!(
+            state,
+            ScreenshotState::CloudRecovered | ScreenshotState::CloudPartial
+        );
+    }
     if state == ScreenshotState::CleanupFallback {
         outcome.cleanup = Cleanup::Failed;
     }
@@ -2589,6 +2671,52 @@ mod tests {
                 [[0; 2]; AUDIO_WAVEFORM_BINS]
             },
         }
+    }
+
+    #[test]
+    fn cloud_recovery_preserves_cause_without_turning_success_into_failure() {
+        let now = Instant::now();
+        let status = preview_snapshot(StateKind::Idle);
+        let mut outcome = preview_outcome(Completeness::Complete, Delivery::Pasted);
+        outcome.cloud_failure = Some(cantrip_engine::stt::CloudFailure::Timeout);
+        outcome.artifacts = ipc::Artifacts {
+            take_id: Some("synthetic-take".to_owned()),
+            audio: true,
+            text: true,
+        };
+        let complete = present_outcome(&outcome, &status, now, true);
+        assert_eq!(complete.kind, Kind::Resolved);
+        assert!(matches!(complete.visibility, Visibility::Until(_)));
+        assert!(complete.caption.title.contains("timed out"));
+        assert!(!complete.caption.title.contains("budget"));
+        assert!(complete.caption.detail.contains("complete"));
+        assert!(complete.caption.action.contains("No retry"));
+        outcome.completeness = Completeness::Partial;
+        outcome.delivery = Delivery::Deferred;
+        let partial = present_outcome(&outcome, &status, now, true);
+        assert_eq!(partial.kind, Kind::Attention);
+        assert!(matches!(partial.visibility, Visibility::Persistent));
+        assert!(partial.caption.title.contains("timed out"));
+        assert!(partial.caption.detail.contains("Partial"));
+        assert!(!partial.caption.action.contains("No retry"));
+        assert!(partial.caption.action.contains("Recover locally"));
+        outcome.delivery = Delivery::Copied;
+        let copied_partial = present_outcome(&outcome, &status, now, true);
+        assert!(copied_partial.caption.detail.contains("copied"));
+        assert!(copied_partial
+            .caption
+            .action
+            .contains("Review before pasting"));
+        outcome.completeness = Completeness::Complete;
+        outcome.delivery = Delivery::Uncertain;
+        let uncertain_delivery = present_outcome(&outcome, &status, now, true);
+        assert!(uncertain_delivery.caption.detail.contains("uncertain"));
+        assert!(!uncertain_delivery.caption.action.contains("Copy this"));
+        assert!(!uncertain_delivery.caption.action.contains("No retry"));
+        outcome.error = Some("storage-failed".to_owned());
+        let uncertain_storage = present_outcome(&outcome, &status, now, true);
+        assert!(uncertain_storage.caption.detail.contains("unconfirmed"));
+        assert!(!uncertain_storage.caption.detail.contains("saved"));
     }
 
     #[test]

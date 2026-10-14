@@ -194,6 +194,8 @@ pub struct TerminalOutcome {
     pub delivery: Delivery,
     pub cleanup: Cleanup,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_failure: Option<crate::stt::CloudFailure>,
     pub artifacts: Artifacts,
     pub dismissed: bool,
     /// The non-default target this outcome's take was sent toward; None for the default.
@@ -659,6 +661,7 @@ mod tests {
             delivery,
             cleanup: Cleanup::Off,
             error: None,
+            cloud_failure: None,
             artifacts: Artifacts::default(),
             dismissed: false,
             handoff: None,

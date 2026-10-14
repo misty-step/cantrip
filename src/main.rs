@@ -699,8 +699,18 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
         eprintln!("warning: transcript archive failed: {error}");
     }
     emit_transcribe_telemetry(&config, &outcome);
-    if outcome.local_fallback {
-        eprintln!("cloud transcription unavailable; used local Parakeet");
+    if let Some(notice) = outcome.cloud_notice() {
+        eprintln!("{notice}");
+        if outcome.partial || outcome.text.is_err() {
+            eprintln!("Original WAV is unchanged. Use cantrip transcribe --local <WAV> with an installed local model, or check cloud setup.");
+        } else {
+            eprintln!("Original WAV is unchanged. No retry needed.");
+        }
+        if let Some(cause) = outcome.cloud_failure {
+            if outcome.partial || outcome.text.is_err() || cause.is_payment_or_budget() {
+                eprintln!("{}", cause.advice());
+            }
+        }
     }
     match &outcome.text {
         Ok(text) => {
@@ -714,7 +724,12 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
                 );
             }
         }
-        Err(error) => anyhow::bail!("transcribing {}: {error}", wav.display()),
+        Err(error) => {
+            if outcome.cloud_failure.is_some() {
+                anyhow::bail!("no complete transcript produced; original WAV is unchanged");
+            }
+            anyhow::bail!("transcribing {}: {error}", wav.display());
+        }
     }
     Ok(())
 }
