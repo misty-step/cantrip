@@ -7,7 +7,7 @@ use crate::pipeline::Stage;
 use crate::recovery::Take;
 use anyhow::{Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
@@ -584,10 +584,7 @@ fn complete_connect(fd: libc::c_int, deadline: Instant) -> Result<()> {
 fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
     // Darwin rejects SO_RCVTIMEO after an AF_UNIX peer closes, even when a
     // complete reply is buffered. Poll the absolute deadline instead, and
-    // make the following read nonblocking so readiness cannot extend it.
-    stream
-        .set_nonblocking(true)
-        .context("configuring daemon reply reads")?;
+    // receive nonblocking per call without changing the borrowed stream's mode.
     let mut descriptor = libc::pollfd {
         fd: stream.as_raw_fd(),
         events: libc::POLLIN,
@@ -616,19 +613,29 @@ fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
             descriptor.revents & libc::POLLNVAL == 0,
             "daemon reply socket is invalid"
         );
-        // POLLHUP can accompany readable buffered bytes; let read distinguish
+        // POLLHUP can accompany readable buffered bytes; let recv distinguish
         // a complete reply from EOF instead of rejecting the peer closure.
-        let bytes = match stream.read(&mut buffer) {
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                continue
-            }
-            result => result.context("reading daemon reply")?,
+        // SAFETY: the stream owns the descriptor and buffer is writable for its
+        // full length. MSG_DONTWAIT affects only this receive, not stream flags.
+        let bytes = unsafe {
+            libc::recv(
+                descriptor.fd,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                libc::MSG_DONTWAIT,
+            )
         };
+        if bytes < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+            ) {
+                continue;
+            }
+            return Err(error).context("reading daemon reply");
+        }
+        let bytes = bytes as usize;
         anyhow::ensure!(
             bytes != 0,
             "daemon closed the socket before a complete reply"
@@ -649,6 +656,7 @@ fn read_reply(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::fs::DirBuilderExt;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
@@ -829,6 +837,30 @@ mod tests {
             read_reply(&mut client, Instant::now() + Duration::from_secs(1)).unwrap(),
             b"{\"state\":\"idle\"}"
         );
+    }
+
+    #[test]
+    fn reply_reader_preserves_stream_mode_on_success_and_incomplete_eof() {
+        for nonblocking in [false, true] {
+            for complete in [true, false] {
+                let (mut client, mut server) = UnixStream::pair().unwrap();
+                client.set_nonblocking(nonblocking).unwrap();
+                let before = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFL) };
+                assert!(before >= 0);
+                server
+                    .write_all(if complete { b"ok\n" } else { b"ok" })
+                    .unwrap();
+                drop(server);
+
+                let reply = read_reply(&mut client, Instant::now() + Duration::from_secs(1));
+                let after = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_GETFL) };
+                assert_eq!(reply.is_ok(), complete);
+                assert_eq!(
+                    after, before,
+                    "nonblocking={nonblocking}, complete={complete}"
+                );
+            }
+        }
     }
 
     #[test]

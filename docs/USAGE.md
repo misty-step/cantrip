@@ -404,4 +404,5 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 
 Daemon reply reads have a ten-second absolute deadline; arriving bytes do not
 reset it. A complete newline-framed reply remains readable after the peer closes
-the socket. Unterminated, oversized, or late replies are rejected.
+the socket without changing the stream's blocking mode. Unterminated, oversized,
+or late replies are rejected.
