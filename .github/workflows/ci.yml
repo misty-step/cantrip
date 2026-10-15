@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
 
 env:
@@ -12,6 +13,16 @@ env:
   TRUFFLEHOG_VERSION: v3.96.0
 
 jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a Conventional Commit title (the squash commit input)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 -c 'import os, re; assert re.fullmatch(r"(?:feat|fix|perf|revert|chore|docs|test|build|ci|refactor|style)(?:\([^()\r\n]+\))?!?: [^\r\n]+", os.environ["PR_TITLE"]), "Use a Conventional Commit PR title"'
+
   check:
     # Runner image stays a mutable label on purpose: GitHub publishes patched
     # images under ubuntu-latest and does not provide per-run SHA-pinned
@@ -19,6 +30,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libssl-dev pkg-config
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

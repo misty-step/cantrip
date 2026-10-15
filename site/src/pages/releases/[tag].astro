@@ -21,7 +21,7 @@ const { Content } = await render(entry);
 <SiteLayout title={`Cantrip ${release.tag} — ${release.title}`} description={`${release.title}. Published release notes, Linux x86-64 download, checksums, and source-bound provenance for Cantrip ${release.tag}.`} section="releases">
   <div class="shell release-page">
     <header class="page-heading">
-      <p class="breadcrumb"><a href="/releases">All releases</a></p>
+      <p class="breadcrumb"><a href="/changelog">All releases</a></p>
       <h1>Cantrip {release.tag}</h1>
       <p class="lede">{release.title}</p>
       <p>Published <time datetime={release.publishedAt}>{releaseDate(release.publishedAt)}</time>. <a href={release.releaseUrl}>View on GitHub</a>.</p>
