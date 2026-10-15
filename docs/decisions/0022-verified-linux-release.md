@@ -32,7 +32,20 @@ adapter adds the verified build identity and Landmark renders its other formats;
 GitHub and the build-time `/changelog` use those same signed Markdown bytes.
 The technical changelog is generator evidence, not a second public notes author.
 Approve the bot's native exact-head PR workflows, never dispatch substitute
-checks. A moved source or failed/skipped runtime proof cannot publish.
+checks. A mismatched artifact source or failed/skipped runtime proof cannot publish.
+
+Port [Overmind PR105](https://github.com/misty-step/overmind/pull/105)'s monotonic
+promotion rule: shipped-source <= tested-source <= current-master by ancestry,
+not branch-tip equality. Native non-cancelling release/site concurrency serializes
+the respective writers. The immutable published tag and version bind the release
+baseline; the active Cloudflare version's original `git:SHA run:ID` annotation
+binds website source, including after rollback. Unknown source fails explicitly.
+The sole legacy website exception is version
+`7737d4a8-38a9-458a-b9fc-2443ef90492f`, proven by successful
+[Website run38524346387](https://github.com/misty-step/cantrip/actions/runs/38524346387)
+to serve `ad4fac9f31ce0acebee1bcdab5117fb45a6d5127`; no other unannotated
+version inherits that identity. An interrupted draft resumes only from its
+original source; a later master neither blocks that source nor rewrites its bytes.
 
 There is no unattended host updater or safe background promotion mechanism.
 The live desktop's startup owner and retained takes make an automatic restart

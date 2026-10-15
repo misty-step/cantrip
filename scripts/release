@@ -86,6 +86,72 @@ def commit_sha(value):
     return github(f"commits/{urllib.parse.quote(value, safe='')}")["sha"]
 
 
+def require_ancestor(older, newer):
+    # Overmind PR105's monotonic rule also works with shallow site checkouts.
+    if not all(isinstance(sha, str) and REVISION.fullmatch(sha) for sha in (older, newer)):
+        raise ReleaseError("promotion ancestry requires exact source SHAs")
+    if older == newer:
+        return
+    comparison = github(f"compare/{older}...{newer}")
+    if (comparison.get("status") != "ahead" or comparison.get("base_commit", {}).get("sha") != older
+            or comparison.get("merge_base_commit", {}).get("sha") != older):
+        raise ReleaseError("promotion source is older than or divergent from the required ancestor")
+
+
+def require_release_source(revision, version, *, publishing=False):
+    require_ancestor(revision, github("git/ref/heads/master")["object"]["sha"])
+    latest = github("releases/latest", missing=True)
+    if not latest or not re.fullmatch(r"v" + VERSION.pattern, latest.get("tag_name", "")):
+        raise ReleaseError("an existing published release baseline is required")
+    require_ancestor(commit_sha(latest["tag_name"]), revision)
+    candidate = tuple(map(int, version.split(".")))
+    published = tuple(map(int, latest["tag_name"][1:].split(".")))
+    if candidate < published or (publishing and candidate == published):
+        raise ReleaseError("candidate cannot replace an equal or newer published version")
+
+
+def check_site_promotion():
+    revision = head()
+    require_ancestor(revision, github("git/ref/heads/master")["object"]["sha"])
+    config = json.loads((ROOT / "site/wrangler.jsonc").read_text())
+    base = (f"https://api.cloudflare.com/client/v4/accounts/{config['account_id']}"
+            f"/workers/scripts/{config['name']}")
+
+    def get(path):
+        request = urllib.request.Request(base + path, headers={
+            "Authorization": "Bearer " + os.environ["CLOUDFLARE_API_TOKEN"].strip(),
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.load(response)
+        except Exception as error:
+            raise ReleaseError(f"Cloudflare promotion read failed: {type(error).__name__}") from None
+        if not data.get("success"):
+            raise ReleaseError("Cloudflare promotion read was refused")
+        return data["result"]
+
+    active = max(get("/deployments")["deployments"], key=lambda row: row["created_on"])
+    versions = active["versions"]
+    if len(versions) != 1 or versions[0]["percentage"] != 100:
+        raise ReleaseError("split website deployment requires explicit recovery")
+    prior = versions[0]["version_id"]
+    deployed = get("/versions/" + prior)
+    if deployed.get("id") != prior:
+        raise ReleaseError("website version identity disagrees with its deployment")
+    annotation = (deployed.get("annotations") or {}).get("workers/message", "")
+    match = re.fullmatch(r"git:([0-9a-f]{40}) run:([1-9][0-9]*)", annotation)
+    if match:
+        source = match[1]
+    elif not annotation and prior == "7737d4a8-38a9-458a-b9fc-2443ef90492f":
+        # One observed legacy version, bound by successful Website run38524346387.
+        # No other unannotated version is permission to guess. See ADR0022.
+        source = "ad4fac9f31ce0acebee1bcdab5117fb45a6d5127"
+    else:
+        raise ReleaseError("website has no trusted source metadata; recover explicitly before promotion")
+    require_ancestor(source, revision)
+    emit(deployed_source=source, candidate_source=revision, prior_version=prior)
+
+
 def release_branch_commit():
     result = run(
         "gh", "api",
@@ -384,11 +450,11 @@ def decide():
     revision = head()
     if os.environ.get("GITHUB_SHA") != revision:
         raise ReleaseError("release checkout differs from the authenticated workflow source")
-    if github("git/ref/heads/master")["object"]["sha"] != revision:
-        emit(mode="none", reason="superseded-master-revision")
-        return
     version = version_at()
+    require_release_source(revision, version)
     release = release_by_tag(f"v{version}")
+    if release and release["draft"] and commit_sha(release["target_commitish"]) != revision:
+        raise ReleaseError("existing draft targets another source; rerun its original workflow to resume safely")
     if (ROOT / PLAN).is_file() and not (release and not release["draft"]):
         plan = json.loads((ROOT / PLAN).read_text())
         try:
@@ -398,6 +464,8 @@ def decide():
         else:
             emit(mode="publish", version=version, source_revision=revision, previous_tag=plan.get("previous_tag") or "")
             return
+    if release and release["draft"]:
+        raise ReleaseError("existing draft requires its original valid release plan; nothing was replaced")
     with landmark() as binary:
         run(binary, "doctor", "--format", "json")
         evidence = json.loads(run(binary, "run", "--provider", "local", "--repository", REPOSITORY, "--dry-run").stdout)
@@ -475,8 +543,7 @@ def publish(directory):
     revision, tag = data["source_revision"], data["tag"]
     if revision != head() or tag != f"v{version_at()}":
         raise ReleaseError("publication identity differs from the checked-out release")
-    if github("git/ref/heads/master")["object"]["sha"] != revision:
-        raise ReleaseError("publication source was superseded; no release was published")
+    require_release_source(revision, version_at(), publishing=True)
     if not (directory / "provenance.json").is_file():
         raise ReleaseError("signed provenance is required before publication")
     checksums(directory)
@@ -502,7 +569,8 @@ def publish(directory):
         if name in uploaded:
             if uploaded[name].get("digest") != f"sha256:{sha256(path)}":
                 raise ReleaseError(f"draft asset differs: {name}; existing data was not overwritten")
-        else:
+    for name, path in sorted(expected.items()):
+        if name not in uploaded:
             run("gh", "release", "upload", tag, str(path), "--repo", REPOSITORY)
     with tempfile.TemporaryDirectory(prefix="cantrip-release-download-") as temporary:
         downloaded = Path(temporary)
@@ -517,8 +585,7 @@ def publish(directory):
                 "--bundle", str(downloaded / "provenance.json"), "--source-digest", revision,
                 "--signer-workflow", SIGNER, "--deny-self-hosted-runners")
     # This is the only public-release mutation, after every check and download.
-    if github("git/ref/heads/master")["object"]["sha"] != revision:
-        raise ReleaseError("publication source moved during verification; draft remains private")
+    require_release_source(revision, version_at(), publishing=True)
     run("gh", "release", "edit", tag, "--repo", REPOSITORY, "--draft=false", "--latest")
     published = release_by_tag(tag)
     if not published or published.get("draft") or not published.get("published_at"):
@@ -530,6 +597,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("decide", help="prepare a reviewable release PR, or select its merged candidate")
+    commands.add_parser("check-site-promotion", help="require deployed-source <= tested-source <= master")
     for name in ("assemble", "finalize", "publish"):
         command = commands.add_parser(name)
         command.add_argument("--directory", type=Path, required=True)
@@ -539,6 +607,8 @@ def main():
     try:
         if args.command == "decide":
             decide()
+        elif args.command == "check-site-promotion":
+            check_site_promotion()
         elif args.command == "assemble":
             assemble(args.directory.resolve())
         elif args.command == "finalize":

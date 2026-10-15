@@ -100,18 +100,6 @@ class ReleaseGates(unittest.TestCase):
                         finalize(directory, proof)
                 self.assertFalse((directory / "verification.json").exists())
 
-    def test_superseded_source_cannot_start_publication(self):
-        publish = RELEASE["publish"]
-        transport = mock.Mock()
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            (directory / "release.json").write_text(json.dumps({"source_revision": "a" * 40, "tag": "v0.1.4"}))
-            with mock.patch.dict(publish.__globals__, head=lambda: "a" * 40, version_at=lambda: "0.1.4",
-                                 github=lambda _: {"object": {"sha": "b" * 40}}, run=transport):
-                with self.assertRaisesRegex(RELEASE["ReleaseError"], "superseded"):
-                    publish(directory)
-            transport.assert_not_called()
-
     def test_release_plan_rejects_code_changes_after_preparation(self):
         validate = RELEASE["validate_plan"]
         with tempfile.TemporaryDirectory() as temporary:

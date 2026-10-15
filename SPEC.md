@@ -25,6 +25,9 @@ exact head; missing, foreign, or moved runs are refused rather than replaced by
 dispatch checks. Failed or skipped verification cannot publish. Repeating
 preparation for an unchanged source reuses the PR, a no-release decision creates
 no new release, and an older source cannot replace a newer website/release.
+A verified descendant of the shipped source can promote after master advances;
+untested later merges do not starve it. A draft interrupted before publication
+resumes from its original source without replacing existing asset bytes.
 
 ## Update and recover without losing accepted takes
 

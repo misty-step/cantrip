@@ -53,9 +53,9 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: b069014f6a46558ea9146fb6c4ff8f6c
         run: |
-          test "$(gh api repos/misty-step/cantrip/git/ref/heads/master --jq .object.sha)" = "$(git rev-parse HEAD)" || { echo 'Superseded source; refusing website promotion.' >&2; exit 1; }
           test -n "$CLOUDFLARE_API_TOKEN" || { echo 'CLOUDFLARE_API_TOKEN is required for production deployment.' >&2; exit 1; }
-          npm run deploy
+          python3 ../scripts/release check-site-promotion
+          npm run deploy -- --message "git:$(git rev-parse HEAD) run:$GITHUB_RUN_ID"
       - name: Verify public routes
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         run: |
