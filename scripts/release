@@ -192,6 +192,13 @@ def set_locked_versions(path, version):
     path.write_text("".join(sections))
 
 
+def validate_baseline(tag, revision):
+    if not isinstance(tag, str) or not tag.startswith("v") or not VERSION.fullmatch(tag[1:]):
+        raise ReleaseError("an existing immutable release baseline is required")
+    if git("merge-base", "--is-ancestor", tag, revision, check=False).returncode:
+        raise ReleaseError("release baseline is missing or is not an ancestor of this source")
+
+
 def validate_plan(plan, revision):
     version = plan.get("version", "")
     base = plan.get("base_revision", "")
@@ -201,6 +208,7 @@ def validate_plan(plan, revision):
         raise ReleaseError("release plan and committed Cargo version disagree")
     if git("merge-base", "--is-ancestor", base, revision, check=False).returncode:
         raise ReleaseError("release preparation source is not an ancestor of the release commit")
+    validate_baseline(plan.get("previous_tag"), base)
     paths = release_paths(version)
     allowed = {"Cargo.toml", "Cargo.lock", PLAN, *paths.values()}
     changed = set(git("diff", "--name-only", "--no-renames", base, revision).stdout.splitlines())
@@ -306,10 +314,11 @@ def release_branch_merged(revision, source):
 
 def prepare(binary, evidence):
     source = head()
-    version = version_at() if not evidence["previous_tag"] else evidence["version"]
+    validate_baseline(evidence.get("previous_tag"), source)
+    version = evidence["version"]
     if not VERSION.fullmatch(version):
         raise ReleaseError("Landmark did not select a supported numeric release version")
-    if evidence["previous_tag"] and evidence["version_decision"]["bump"] == "none":
+    if evidence["version_decision"]["bump"] == "none":
         emit(mode="none", reason="no-releasable-changes")
         return
     if tuple(map(int, version.split("."))) < tuple(map(int, version_at().split("."))):
@@ -353,7 +362,7 @@ def prepare(binary, evidence):
     plan = {
         "schema_version": 1, "version": version, "tag": f"v{version}",
         "base_revision": source, "previous_tag": rendered["previous_tag"],
-        "version_origin": "initial Cargo workspace version" if not rendered["previous_tag"] else "Landmark",
+        "version_origin": "Landmark",
         "landmark_version": LANDMARK_VERSION, "landmark_sha256": LANDMARK_SHA256,
         "version_decision": rendered["version_decision"],
         "technical_changelog_sha256": sha256(ROOT / paths["technical"]),

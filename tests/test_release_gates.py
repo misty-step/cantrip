@@ -127,6 +127,7 @@ class ReleaseGates(unittest.TestCase):
             git("add", ".")
             git("commit", "--quiet", "-m", "chore: base")
             base = git("rev-parse", "HEAD").stdout.strip()
+            git("tag", "v0.1.3")
             (root / "scripts").mkdir()
             (root / "scripts/release").write_text("unexpected code change\n")
             git("add", ".")
@@ -134,7 +135,14 @@ class ReleaseGates(unittest.TestCase):
             revision = git("rev-parse", "HEAD").stdout.strip()
             with mock.patch.dict(validate.__globals__, ROOT=root, git=git):
                 with self.assertRaisesRegex(RELEASE["ReleaseError"], "source changed after release preparation"):
-                    validate({"schema_version": 1, "version": "0.1.4", "tag": "v0.1.4", "base_revision": base}, revision)
+                    validate({"schema_version": 1, "version": "0.1.4", "tag": "v0.1.4", "base_revision": base, "previous_tag": "v0.1.3"}, revision)
+            baseline = RELEASE["validate_baseline"]
+            with mock.patch.dict(baseline.__globals__, git=git):
+                baseline("v0.1.3", revision)
+                for tag in (None, "", "--unsafe", "v0.1.2"):
+                    with self.subTest(tag=tag):
+                        with self.assertRaises(RELEASE["ReleaseError"]):
+                            baseline(tag, revision)
 
 
 if __name__ == "__main__":
