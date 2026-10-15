@@ -72,9 +72,10 @@ jobs:
       - name: Build and package an explicit development app (never a production release)
         env:
           TARGET: ${{ matrix.target }}
+          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           python3 scripts/package-macos --target "$TARGET" --ad-hoc \
-            --source-revision "$GITHUB_SHA" --output "$RUNNER_TEMP/native-app"
+            --source-revision "$SOURCE_REVISION" --output "$RUNNER_TEMP/native-app"
       - name: Exercise relocated app, real public-file STT, capture refusal, and native HUD
         env:
           TARGET: ${{ matrix.target }}
