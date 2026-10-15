@@ -202,12 +202,7 @@ def validate_plan(plan, revision):
     if git("merge-base", "--is-ancestor", base, revision, check=False).returncode:
         raise ReleaseError("release preparation source is not an ancestor of the release commit")
     paths = release_paths(version)
-    allowed = {
-        "Cargo.toml", "Cargo.lock", PLAN, *paths.values(),
-        "scripts/release", "scripts/verify-release", "scripts/package-release",
-        "scripts/release-runtime.Dockerfile", ".github/workflows/release.yml",
-        ".github/workflows/ci.yml",
-    }
+    allowed = {"Cargo.toml", "Cargo.lock", PLAN, *paths.values()}
     changed = set(git("diff", "--name-only", "--no-renames", base, revision).stdout.splitlines())
     if unexpected := changed - allowed:
         raise ReleaseError(f"source changed after release preparation: {', '.join(sorted(unexpected))}; refresh the release PR")
@@ -260,11 +255,35 @@ def ensure_release_pr(version, revision):
             "clean-runtime verification, signed provenance, and guarded publication. No release is public yet.\n"
         )
         url = run("gh", "pr", "create", "--repo", REPOSITORY, "--base", "master", "--head", BRANCH, "--title", f"chore(release): prepare {version}", "--body", body).stdout.strip()
-    # GITHUB_TOKEN pushes do not trigger push/PR workflows. Dispatch is an explicit exception.
-    checks = json.loads(run("gh", "run", "list", "--repo", REPOSITORY, "--workflow", "ci.yml", "--commit", revision, "--limit", "1", "--json", "databaseId").stdout)
-    if not checks:
-        run("gh", "workflow", "run", "ci.yml", "--repo", REPOSITORY, "--ref", BRANCH)
+    approve_release_checks(int(url.rstrip("/").split("/")[-1]), revision)
     print(f"Release PR: {url}")
+
+
+def approve_release_checks(number, revision):
+    """Approve only native bot-PR checks; dispatch checks cannot satisfy protection."""
+    pr = github(f"pulls/{number}")
+    if (
+        pr["state"] != "open" or pr["user"]["login"] != "github-actions[bot]"
+        or pr["base"]["ref"] != "master" or pr["head"]["ref"] != BRANCH
+        or pr["head"]["repo"]["full_name"] != REPOSITORY
+        or pr["head"]["sha"] != revision
+    ):
+        raise ReleaseError("release PR identity moved or is not the same-repository generator PR")
+    for workflow in ("ci.yml", "macos.yml", "site.yml"):
+        runs = github(f"actions/workflows/{workflow}/runs?event=pull_request&head_sha={revision}&per_page=100")["workflow_runs"]
+        if not runs:
+            raise ReleaseError(f"native {workflow} checks are missing for the release PR; retry preparation once GitHub has created them")
+        for check in runs:
+            if (
+                check["event"] != "pull_request" or check["head_sha"] != revision
+                or check["head_repository"]["full_name"] != REPOSITORY
+                or not any(item["number"] == number for item in check["pull_requests"])
+            ):
+                raise ReleaseError("native release check does not belong to the exact generator PR head")
+            if check["status"] == "completed" and check["conclusion"] == "action_required":
+                if github(f"pulls/{number}")["head"]["sha"] != revision:
+                    raise ReleaseError("release PR moved before workflow approval")
+                run("gh", "api", "--method", "POST", f"repos/{REPOSITORY}/actions/runs/{check['id']}/approve")
 
 
 def release_branch_merged(revision, source):
@@ -447,6 +466,8 @@ def publish(directory):
     revision, tag = data["source_revision"], data["tag"]
     if revision != head() or tag != f"v{version_at()}":
         raise ReleaseError("publication identity differs from the checked-out release")
+    if github("git/ref/heads/master")["object"]["sha"] != revision:
+        raise ReleaseError("publication source was superseded; no release was published")
     if not (directory / "provenance.json").is_file():
         raise ReleaseError("signed provenance is required before publication")
     checksums(directory)
@@ -487,6 +508,8 @@ def publish(directory):
                 "--bundle", str(downloaded / "provenance.json"), "--source-digest", revision,
                 "--signer-workflow", SIGNER, "--deny-self-hosted-runners")
     # This is the only public-release mutation, after every check and download.
+    if github("git/ref/heads/master")["object"]["sha"] != revision:
+        raise ReleaseError("publication source moved during verification; draft remains private")
     run("gh", "release", "edit", tag, "--repo", REPOSITORY, "--draft=false", "--latest")
     published = release_by_tag(tag)
     if not published or published.get("draft") or not published.get("published_at"):

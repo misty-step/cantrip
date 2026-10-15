@@ -19,6 +19,30 @@ Ship one CPU-only x86_64-unknown-linux-gnu archive built and verified on Ubuntu
 Use the pinned Landmark CLI with model policy off, not another release service,
 container registry, or LLM credential.
 
+The [shared release convention](https://github.com/misty-step/harness/blob/master/docs/release-convention.md)
+defines the interface. This workspace is one release unit: the native host and
+engine inherit one Cargo version; the static site is a separate deployment,
+not another version generator. Keep Landmark's existing pre-stable policy
+(minor signals become patch releases before 1.0); never reset the immutable
+`v0.1.3` baseline at `895b000d0b04de306b8005bb7fc2d5e676d6c318`.
+Future squash commits use the reviewed Conventional Commit PR title only.
+
+`docs/releases/vVERSION.md` is the canonical public notes source. The release
+adapter adds the verified build identity and Landmark renders its other formats;
+GitHub and the build-time `/changelog` use those same signed Markdown bytes.
+The technical changelog is generator evidence, not a second public notes author.
+Approve the bot's native exact-head PR workflows, never dispatch substitute
+checks. A moved source or failed/skipped runtime proof cannot publish.
+
+There is no unattended host updater or safe background promotion mechanism.
+The live desktop's startup owner and retained takes make an automatic restart
+unsafe. Keep promotion attended through the existing binary-only installer:
+verify the downloaded release, stop the owner after the take is settled, update
+with an explicit private backup, then verify readiness. Never interrupt the
+daemon for release experiments. The prior archive and backup remain rollback
+targets; rollback changes code, not accepted data. macOS development artifacts
+remain unpublished and are never promoted as production releases.
+
 ## Consequences
 
 A reviewable Landmark release PR starts publication only after merge and clean
