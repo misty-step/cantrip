@@ -432,7 +432,7 @@ impl BudgetLedger {
         } else {
             options.open(path)
         };
-        let mut file = match opened {
+        let file = match opened {
             Ok(file) => file,
             Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self {
@@ -442,6 +442,12 @@ impl BudgetLedger {
             }
             Err(_) => return Err("budget_open".into()),
         };
+        // Own the file before locking so failed validation also releases it.
+        let mut ledger = Self {
+            file: Some(file),
+            state: BudgetState::default(),
+        };
+        let file = ledger.file.as_mut().unwrap();
         if file.try_lock().is_err() {
             return Err("budget_locked".into());
         }
@@ -459,7 +465,7 @@ impl BudgetLedger {
                 return Err("budget_journal_invalid".into());
             }
             append_record(
-                &mut file,
+                file,
                 &BudgetRecord::Commission {
                     schema_version: 1,
                     commission_id: commission_id.to_owned(),
@@ -470,7 +476,7 @@ impl BudgetLedger {
                 .and_then(|parent| parent.sync_all())
                 .map_err(|_| "budget_sync")?;
         } else {
-            let mut reader = BufReader::new(&mut file);
+            let mut reader = BufReader::new(&mut *file);
             let mut line = String::new();
             let mut first = true;
             loop {
@@ -500,10 +506,8 @@ impl BudgetLedger {
             }
         }
         file.seek(SeekFrom::End(0)).map_err(|_| "budget_seek")?;
-        Ok(Self {
-            file: Some(file),
-            state,
-        })
+        ledger.state = state;
+        Ok(ledger)
     }
 
     fn reserve(&mut self, key: &CallKey, amount: u64, run_cap: u64) -> ClassResult<()> {
