@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Result of the optional post-processing pass on a transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,11 +582,14 @@ fn cleanup(
         return (PostprocStatus::Off, None, None);
     }
     let started = Instant::now();
-    let key = resolve_api_key(cfg.api_key_id.as_deref());
+    let deadline = postproc::deadline(cfg);
+    let key = resolve_api_key(cfg.api_key_id.as_deref(), deadline, cancel);
     if stt::is_cancelled(cancel) {
         return (PostprocStatus::Off, None, None);
     }
-    match key.and_then(|key| postproc::refine(raw, cfg, vocabulary, key.as_deref(), cancel)) {
+    match key.and_then(|key| {
+        postproc::refine_until(raw, cfg, vocabulary, key.as_deref(), cancel, deadline)
+    }) {
         Ok(refined) => (
             PostprocStatus::Applied {
                 ms: started.elapsed().as_millis(),
@@ -630,8 +633,12 @@ fn transcribe(
         });
     };
     if let Some(endpoint) = &stt_cfg.endpoint {
-        let key = resolve_api_key(stt_cfg.api_key_id.as_deref())
-            .map_err(|_| anyhow::anyhow!(stt::CloudFailure::CredentialUnavailable))?;
+        let key = resolve_api_key(
+            stt_cfg.api_key_id.as_deref(),
+            Instant::now() + crate::keys::LOOKUP_TIMEOUT,
+            cancel,
+        )
+        .map_err(|_| anyhow::anyhow!(stt::CloudFailure::CredentialUnavailable))?;
         return stt::transcribe_cloud(
             wav,
             endpoint,
@@ -672,8 +679,12 @@ pub fn load_transcriber(model: &str) -> Result<(String, Transcriber)> {
     Ok((model.to_owned(), transcriber))
 }
 
-fn resolve_api_key(id: Option<&str>) -> Result<Option<String>> {
-    id.map(|id| crate::keys::get(id).with_context(|| format!("api key '{id}' unavailable")))
+fn resolve_api_key(
+    id: Option<&str>,
+    deadline: Instant,
+    cancel: Option<&AtomicBool>,
+) -> Result<Option<String>> {
+    id.map(|id| crate::keys::get_until(id, deadline, cancel))
         .transpose()
 }
 
@@ -684,6 +695,7 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::Ordering;
     use std::thread;
+    use std::time::Duration;
 
     struct Recording {
         root: PathBuf,
