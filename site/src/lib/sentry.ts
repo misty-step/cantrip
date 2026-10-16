@@ -44,7 +44,7 @@ init({
           colno: frame.colno,
         })),
       },
-    }));
+    })).filter((exception) => exception.stacktrace.frames.length > 0);
     if (!values?.length) return null;
     sent += 1;
     // Allowlist rather than a growing denylist of SDK/browser context fields.

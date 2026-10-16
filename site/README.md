@@ -157,7 +157,8 @@ The bundled Sentry browser SDK captures only unhandled errors/rejections. It
 allowlists error classes and same-origin `/_astro/*.js` locations, replaces error
 messages, and omits user data, page/request context and breadcrumbs. Replay,
 tracing, logs, metrics and client reports are off. Capture stops after three
-events per page load; an unavailable sink does not block navigation. The ingest
+events per page load; unattributed/frame-free errors (including primitive promise
+rejections) are ignored before that limit. An unavailable sink does not block navigation. The ingest
 DSN is public, not an administrative token. Sentry's Cantrip project separately
 scrubs IP/user data, disables source scraping and paid Seer automation, and sends
 new/regressed issues to the existing Kaylee alert intake (team `misty-step`).

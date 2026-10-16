@@ -56,5 +56,6 @@ Unhandled website JavaScript errors reach Sentry with the same source identity
 and deployment environment. Diagnostics contain error classes and bundled-code
 locations, never error text, page content, URL queries, cookies, or user identity.
 Collection is bounded and a blocked or unavailable sink cannot prevent browsing.
+Unattributed errors without bundled-code frames do not consume the event limit.
 New and regressed issues notify the existing approved agent-triage intake.
 Paid native uptime activation remains a separate owner spend decision.
