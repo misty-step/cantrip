@@ -7,9 +7,6 @@ use std::time::{Duration, Instant};
 /// Increment when the fixed cleanup prompt changes semantically.
 pub(crate) const PROMPT_VERSION: u32 = 2;
 
-/// All optional decision calls and cleanup passes share this HTTP budget.
-const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
-
 const BASE_SYSTEM_PROMPT: &str = "You clean speech-to-text transcripts.
 
 The source text is a record of the speaker's words.
@@ -166,7 +163,7 @@ pub fn refine(
 ) -> Result<Refinement> {
     let passes = cfg.passes.max(1);
     let started = Instant::now();
-    let deadline = started + Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET);
+    let deadline = started + Duration::from_millis(cfg.timeout_ms);
     remaining_budget(deadline, cancel)?;
 
     // Pre-cleanup triage gatekeeper (ADR 0026):
@@ -439,8 +436,19 @@ fn chat_round(
             bail!("post-processing request failed ({:?})", transport.kind());
         }
     };
-    let response: ChatResponse = serde_json::from_reader(response.into_reader())
-        .map_err(|_| anyhow!("post-processing returned unexpected response shape"))?;
+    let response: ChatResponse =
+        serde_json::from_reader(response.into_reader()).map_err(|error| {
+            if error.io_error_kind().is_some_and(|kind| {
+                matches!(
+                    kind,
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+            }) {
+                anyhow!("post-processing request timed out")
+            } else {
+                anyhow!("post-processing returned unexpected response shape")
+            }
+        })?;
     remaining_budget(deadline, cancel)?;
     let content = response
         .choices
@@ -474,7 +482,7 @@ fn get_decision_client(
         })
         .or_else(|| fallback_key.map(str::to_owned));
 
-    let timeout = Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET);
+    let timeout = Duration::from_millis(cfg.timeout_ms);
     Some(crate::typesafe::DecisionClient::new(
         cfg.decision_endpoint.as_deref(),
         Some(model),

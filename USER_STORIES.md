@@ -50,6 +50,26 @@ No-gos: no count of unresolved recordings in the bar; no text or width changes i
 
 Evidence: `integrations/omarchy/BarWidget.qml`, `integrations/omarchy/Status.js`, `docs/decisions/historical/0029-quiet-bar-mark.md`
 
+## Capability: Configured Cloud Dictation
+
+## US-014 Wait for configured cloud recognition without inference deadlines
+
+Statement: When I opt into cloud dictation, including a twenty-minute take, I
+want Cantrip to wait for my configured recognizer rather than abandon working
+recognition because it is slow, so I receive its result without losing speech.
+
+Criteria:
+1. WHILE cloud recognition is pending, THE SYSTEM SHALL wait for a response, actual failure, or cancellation without app-imposed total, chunk, request, upload, or response deadlines, fixed or duration-scaled.
+2. WHEN a valid cloud response arrives after five seconds or sixty seconds, THE SYSTEM SHALL select it without latency-driven local fallback or provenance downgrade.
+3. WHEN a twenty-minute take is submitted, THE SYSTEM SHALL retain the existing multipart byte cap and over-cap chunk planning without using take duration or local-model chunk limits as cloud inference deadlines.
+4. IF HTTP/provider/transport failure, unavailable credentials, or empty recognition of nonempty audio occurs, THEN THE SYSTEM SHALL recover using installed default local Parakeet, retaining completed native cloud chunks and recognizing only the untouched source-frame suffix, or attempting the whole take once without a usable native suffix.
+5. IF recovery is incomplete, THEN THE SYSTEM SHALL preserve useful partial text and retained audio and record actual local/cloud/mixed provenance without overlapping alternate text.
+6. WHEN I cancel during a request, THE SYSTEM SHALL check cancellation after it returns and before later chunks, fallback, cleanup, or delivery; an already-running blocking call may finish, but its cancelled result SHALL NOT be delivered.
+
+No-gos: no implicit model downloads or cloud-provider switching; no larger fixed deadline or duration-scaled replacement. Provider-side timeouts and ordinary connection-establishment guards remain real failure boundaries, not app-owned inference budgets.
+
+Evidence: `crates/engine/src/stt.rs`, `crates/engine/src/pipeline.rs`, `tests/http_clients.rs`, `docs/decisions/0032-cloud-stt-without-inference-deadlines.md`
+
 ## Capability: Guarded Delivery and Session Safety
 
 ## US-003 Guard against uncertain delivery destinations
@@ -117,6 +137,8 @@ Criteria:
 1. WHERE postproc is enabled in configuration, THE SYSTEM SHALL refine raw transcripts through the configured OpenAI-compatible endpoint.
 2. THE SYSTEM SHALL instruct the cleanup model to preserve speaker meaning, questions, and commands without answering them.
 3. IF cleanup fails or returns an empty response, THEN THE SYSTEM SHALL fall back to delivering the raw speech-to-text transcript.
+4. WHERE cleanup runs, THE SYSTEM SHALL share explicit `postproc.timeout_ms` across triage, generative passes, and watchdog without a hidden five-second clamp, preserving raw text if the generative chain cannot finish.
+5. IF the take is cancelled, THEN THE SYSTEM SHALL prevent subsequent cleanup requests and delivery.
 
 No-gos: no automatic enabling of cloud cleanup without explicit configuration.
 
@@ -129,7 +151,7 @@ Statement: When I dictate clear, error-free prose, I want a fast System One deci
 Criteria:
 1. WHERE postproc.decision_model is configured, THE SYSTEM SHALL evaluate the raw transcript with a structured decision triage question before generative passes.
 2. WHEN decision triage determines the transcript is already clean with high confidence, THE SYSTEM SHALL bypass the generative model and deliver the raw transcript immediately.
-3. IF the decision triage request fails or times out, THEN THE SYSTEM SHALL fail open and proceed with the standard post-processing pipeline.
+3. IF the decision triage request fails or times out, THEN THE SYSTEM SHALL fail open and proceed with the standard post-processing pipeline within the remaining shared `postproc.timeout_ms`; IF no budget remains, THEN THE SYSTEM SHALL preserve raw STT text.
 
 No-gos: no blocking the user's dictation on decision endpoint errors.
 

@@ -2,8 +2,10 @@
 
 Date: 2026-09-06. Status: accepted.
 
-The bounded remote-request decision remains accepted. The single recovery slot
-and earlier notice presentation below were superseded by
+The remote upload-size decision remains accepted. Elapsed-time advice is
+superseded by [0032](../0032-cloud-stt-without-inference-deadlines.md): cloud STT
+has no app-imposed inference deadline. The single recovery slot and earlier
+notice presentation below were superseded by
 [ADR 0019](../0019-per-take-recovery-and-verified-delivery.md).
 [ADR 0020](../0020-local-completion-and-explicit-audio-deletion.md) supersedes the
 rejection of automatic local fallback and defines explicit audio deletion.
@@ -12,10 +14,11 @@ proof below retain their original scope.
 
 The duration-only cloud splitting policy below is superseded by the current
 [cloud upload contract](../../CONFIGURATION.md#stt--transcription): send the
-original WAV once when its complete multipart fits 24,000,000 bytes, under the
-unchanged five-second take budget. Over-cap files retain the original bounded
-chunk plan and exact native prefix/local-suffix recovery. Local Parakeet
-inference remains duration-chunked, including whole-take fallback.
+original WAV once when its complete multipart fits 24,000,000 bytes. The former
+five-second take budget is superseded by [0032](../0032-cloud-stt-without-inference-deadlines.md).
+Over-cap files retain the original bounded chunk plan and exact native
+prefix/local-suffix recovery. Local Parakeet inference remains duration-chunked,
+including whole-take fallback.
 
 ## Problem
 

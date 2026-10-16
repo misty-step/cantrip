@@ -208,9 +208,11 @@ The example tests do not contact providers. On macOS, use the native
 including the Intel source-runtime preparation before Cargo gates.
 
 Remote HTTP contracts separate native duration/sample-boundary proof (61 seconds
-plus one frame) from oversized byte-cap proof; neither extends the five-second
-application budget. Transcription fixtures bound acceptance, socket I/O, and
-result waits so a missing or incomplete upload fails instead of hanging CI.
+plus one frame) from oversized byte-cap proof. Cloud STT has no app-imposed
+inference deadline; delayed valid responses remain preferred
+([Decision 0032](docs/decisions/0032-cloud-stt-without-inference-deadlines.md)).
+Test-fixture bounds on acceptance, socket I/O, and result waits prevent hung CI;
+they are not production transcription deadlines.
 
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`

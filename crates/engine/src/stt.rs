@@ -7,11 +7,10 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
-const REMOTE_BUDGET: Duration = Duration::from_secs(5);
 const MULTIPART_BOUNDARY: &str = "cantrip-audio-boundary";
 /// Includes multipart framing and vocabulary, not just the WAV payload.
 const MAX_REMOTE_REQUEST_BYTES: usize = 24_000_000;
@@ -647,7 +646,7 @@ struct RemoteTranscriptionResponse {
 /// PCM and IEEE-float WAVs retain their source frames and format. Native
 /// 16 kHz mono PCM16 uses the local low-energy planner; other formats split on
 /// frame boundaries without decoding. A short bounded file is sent unchanged.
-/// Requests and body reads share one five-second budget across all chunks.
+/// Uploads and response reads have no elapsed-time cutoff. See Decision 0032.
 pub fn transcribe_remote(
     wav: &Path,
     endpoint: &str,
@@ -715,7 +714,6 @@ fn transcribe_remote_attempt(
         vocabulary,
         api_key,
     } = remote;
-    let deadline = Instant::now() + REMOTE_BUDGET;
     if is_cancelled(cancel) {
         return Ok(RemoteAttempt::whole(Transcript::Cancelled {
             text: String::new(),
@@ -795,6 +793,9 @@ fn transcribe_remote_attempt(
 
     let endpoint = format!("{}/audio/transcriptions", endpoint.trim_end_matches('/'));
     let content_type = format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}");
+    // Inference latency is not a failure. Keep only the transport's ordinary
+    // connection-establishment guard, without request/read/write deadlines.
+    let agent = ureq::agent();
     let mut cloud_failure = None;
     let transcript = collect_chunks(
         &ranges,
@@ -803,7 +804,6 @@ fn transcribe_remote_attempt(
         &mut on_progress,
         |start, end| {
             (|| {
-                remaining_cloud_budget(deadline)?;
                 body.truncate(prefix_len);
                 source
                     .append_chunk(&mut body, start, end, unchanged)
@@ -818,20 +818,11 @@ fn transcribe_remote_attempt(
                 );
                 anyhow::ensure!(!is_cancelled(cancel), "transcription cancelled");
 
-                let remaining = remaining_cloud_budget(deadline)?;
                 let started = Instant::now();
-                // ureq 2's default 30s connect timeout overrides its overall
-                // request timeout, so both must use the take's remaining budget.
-                let agent = ureq::AgentBuilder::new()
-                    .timeout_connect(remaining)
-                    .timeout(remaining)
-                    .build();
                 let mut request = agent.post(&endpoint).set("Content-Type", &content_type);
                 if let Some(api_key) = api_key {
                     request = request.set("Authorization", &format!("Bearer {api_key}"));
                 }
-                // The overall deadline also remains active on into_reader()
-                // below; a slowly streaming body cannot reset the allowance.
                 let response = match request.send_bytes(&body) {
                     Ok(response) => response,
                     Err(ureq::Error::Status(413, _)) => {
@@ -842,9 +833,6 @@ fn transcribe_remote_attempt(
                         return Err(http_failure(code, response).into());
                     }
                     Err(ureq::Error::Transport(transport)) => {
-                        if Instant::now() >= deadline {
-                            anyhow::bail!(CloudFailure::Timeout);
-                        }
                         // Transport display strings may embed server-controlled
                         // headers or URLs. Keep only the kind and timeout cause.
                         let mut cause = std::error::Error::source(&transport);
@@ -868,20 +856,17 @@ fn transcribe_remote_attempt(
                 };
                 let response: RemoteTranscriptionResponse =
                     serde_json::from_reader(response.into_reader()).map_err(|error| {
-                        if Instant::now() >= deadline
-                            || error.io_error_kind().is_some_and(|kind| {
-                                matches!(
-                                    kind,
-                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                                )
-                            })
-                        {
+                        if error.io_error_kind().is_some_and(|kind| {
+                            matches!(
+                                kind,
+                                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                            )
+                        }) {
                             anyhow::anyhow!(CloudFailure::Timeout)
                         } else {
                             anyhow::anyhow!(CloudFailure::InvalidResponse)
                         }
                     })?;
-                remaining_cloud_budget(deadline)?;
                 let text = response.text.trim().to_owned();
                 if retain_suffix && text.is_empty() {
                     anyhow::bail!(CloudFailure::EmptyResponse);
@@ -921,7 +906,7 @@ fn http_failure(status: u16, response: ureq::Response) -> CloudFailure {
     if !matches!(status, 402 | 403) || !response.get_url().starts_with("https://openrouter.ai/") {
         return CloudFailure::Http { status };
     }
-    // Fixed-size, deadline-bound read. Never deserialize or display error.message.
+    // Fixed-size read. Never deserialize or display error.message.
     let mut reader = response.into_reader();
     let mut bytes = [0_u8; 4096];
     let mut used = 0;
@@ -935,13 +920,6 @@ fn http_failure(status: u16, response: ureq::Response) -> CloudFailure {
         }
     }
     CloudFailure::Http { status }
-}
-
-fn remaining_cloud_budget(deadline: Instant) -> Result<Duration> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or_else(|| CloudFailure::Timeout.into())
 }
 
 /// Metadata is small; audio stays in the source file until a bounded request

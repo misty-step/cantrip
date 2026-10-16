@@ -18,11 +18,12 @@ agent will otherwise re-propose. Do not write one per PR. Start from
 - [0027](0027-named-handoff-targets.md): named local handoffs never fall back to desktop injection.
 - [0030](0030-local-only-handoff-targets.md): local-only policy belongs to the handoff target.
 - [0031](0031-shared-engine-native-macos.md): one shared engine; macOS manual paste without silent downgrade.
+- [0032](0032-cloud-stt-without-inference-deadlines.md): wait for cloud STT without inference deadlines; cleanup honors its explicit timeout.
 
 ## Historical
 
-Former ADRs, with relative links rebased where needed; all other text is
-unchanged. Their numbers stay reserved.
+Former ADRs, with relative links rebased and supersession pointers added where
+needed; original decisions remain as history. Their numbers stay reserved.
 
 - [0001](historical/0001-new-rust-linux-app.md): new Rust Linux app instead of porting Vox.
 - [0002](historical/0002-milestone1-pragmatics.md): milestone-1 pragmatics.
@@ -38,7 +39,7 @@ unchanged. Their numbers stay reserved.
 - [0015](historical/0015-command-status-ipc-boundary.md): command acknowledgements and status snapshots use distinct IPC types.
 - [0016](historical/0016-typed-processing-stage.md): processing stage remains typed across the IPC boundary.
 - [0017](historical/0017-powder-board-of-record.md): powder is the board of record.
-- [0018](historical/0018-bounded-remote-stt-and-recovery.md): bound remote audio requests and preserve recoverable failures.
+- [0018](historical/0018-bounded-remote-stt-and-recovery.md): bound remote upload sizes and preserve recoverable failures; elapsed-time policy superseded by [0032](0032-cloud-stt-without-inference-deadlines.md).
 - [0021](historical/0021-signed-pixel-waveform.md): signed pixel waveform from independent PCM measurements.
 - [0023](historical/0023-persistent-pixel-field.md): one persistent pixel field, animated by active cells.
 - [0028](historical/0028-handoff-destination-tint.md): handoff takes are tinted and labelled; the default flow is not.

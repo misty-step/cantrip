@@ -144,28 +144,38 @@ Compressed WAV encodings, RF64/RIFX, and multiple data chunks must be converted
 to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
 16 kHz mono PCM16.
 
-**Automatic local fallback.** Cloud requests share a five-second budget across
-the take, including connection, upload, headers, and response-body reads. A cloud
-error (including unavailable credentials), exhausted budget, or empty recognition
-of nonempty audio switches to installed default Parakeet without another cloud
-request. For native 16 kHz mono PCM16, completed cloud chunks are kept and only
+**Waiting policy.** Cloud STT has no app-imposed total, per-chunk, per-request,
+upload, or response deadline. A valid response after five or sixty seconds is
+still selected; a twenty-minute take is valid. Elapsed recognition time never
+triggers local fallback, and neither take duration nor the local encoder's
+30-second input limit supplies a cloud inference budget. There is no STT timeout
+knob. See [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
+
+Providers may enforce their own timeouts and return real failures. Ureq's
+ordinary connection-establishment timeout remains a network-connect guard,
+not a deadline for recognition after connection. Such connection failures and
+provider errors still use the recovery path below.
+
+**Automatic local fallback.** A genuine cloud error (including HTTP/transport
+failure or unavailable credentials) or empty recognition of nonempty audio
+switches to installed default Parakeet without another cloud request.
+For native 16 kHz mono PCM16, completed cloud chunks are kept and only
 the failed/unstarted source-frame ranges are recognized locally. History records
 this combination as `mixed`; overlapping alternate passes are never concatenated.
 Without a usable native prefix/suffix, fallback attempts the whole take once.
 Missing, failing, or entirely empty suffix recognition preserves useful text as
 incomplete. Successful silent chunks do not stop recognition of later speech.
 Configured cleanup runs once on the selected transcript, not on each attempt.
-Cancellation prevents starting fallback or subsequent cleanup requests.
+Cancellation is checked before and after requests and between chunks. It
+prevents starting later chunks, fallback, cleanup, or delivery; an already-running
+blocking request may still finish before the worker settles. Its cancelled
+result is never delivered.
 There are no automatic downloads or switches to another cloud provider.
 Install the safety-net model deliberately with `models pull`; `doctor` reports
 whether its installed files are available, not a successful inference. With
 `keep_warm = true`, cloud-configured daemons preload local Parakeet too.
 External files outside Parakeet's native audio format can still fail locally;
 retain or convert the original file.
-
-These are HTTP deadlines, not hard bounds on blocking OS DNS resolution,
-keyring access, model loading, or local inference. Slow-but-working cloud
-recognition also switches to local when its budget expires.
 
 **Cloud failure feedback.** A failed cloud chunk keeps a content-free cause even
 when local recognition completes the take. The settled HUD/status and file CLI
@@ -238,11 +248,13 @@ contract, so keep it short and avoid redefining the task.
   later round is a focused proofread for residual speech-recognition errors,
   such as a truncated acronym. One pass avoids compounded drift and latency.
   Use 2 only after evaluating it on your own dictation corpus.
-- **`timeout_ms`.** Cleanup shares `min(timeout_ms, 5000)` milliseconds across
+- **`timeout_ms`.** Cleanup shares the explicit configured milliseconds across
   triage, every generative pass, and the final watchdog, including connections
-  and response bodies. An unfinished chain returns raw STT text. A watchdog
-  timeout after completed passes preserves the candidate under its existing
-  fail-open policy. No subsequent request starts after the budget expires.
+  and response bodies; there is no hidden five-second clamp. An unfinished chain
+  returns raw STT text. A watchdog timeout after completed passes preserves the
+  candidate under its existing fail-open policy. No subsequent request starts
+  after the budget expires. This cleanup budget is separate from cloud STT's
+  waiting policy.
 - **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
   many characters (default 40). Short commands skip the cloud round-trip.
   Set `0` to always run cleanup when enabled.

@@ -251,9 +251,10 @@ are deliberate choices after a successful trial, not prerequisites.
 - `start` and `stop` are separate commands for desktops that support key-down
   and key-up bindings. Do not use a repeating binding.
 - `cancel` stops capture or processing without delivering or deleting audio.
-  Cancellation prevents subsequent chunks, local fallback, cleanup requests,
-  and delivery; an already-running provider request may need to return before
-  the worker settles.
+  Cancellation is checked before and after requests and between chunks, preventing
+  subsequent chunks, local fallback, cleanup requests, and delivery. An already-running
+  blocking provider request may need to return before the worker settles; its
+  cancelled result is never delivered.
 - `stop` ends a recording, **not the daemon**. For a foreground daemon, finish
   or cancel the take, let processing settle, then use Ctrl+C in Terminal A.
   Services and other owners have [their own stop procedure](DESKTOP.md#stop-update-and-remove).
@@ -267,6 +268,16 @@ applies. Two shortcuts can run `toggle --postproc raw` and
 `toggle --postproc clean`, but configure a working cleanup endpoint/model
 [before using the clean shortcut](CONFIGURATION.md#postproc--cleanup).
 An explicit clean request does not install or start an LLM service.
+
+Cloud transcription waits for a response, a real failure, or cancellation; a
+slow response is not a failure. Twenty-minute takes and valid responses arriving
+after five or sixty seconds remain valid, without a fixed or duration-scaled
+inference deadline. Providers can still fail or enforce their own limits, and
+ordinary connection-establishment failures still trigger recovery. Upload byte
+caps and actual-error local recovery remain unchanged. Optional cleanup instead
+uses the explicit shared `postproc.timeout_ms`, with no hidden five-second clamp.
+See [waiting and recovery configuration](CONFIGURATION.md#stt--transcription)
+and [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
 
 ## Understand the outcome
 
