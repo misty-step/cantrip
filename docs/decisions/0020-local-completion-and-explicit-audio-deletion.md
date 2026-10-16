@@ -11,6 +11,9 @@ Cloud failure left locally recoverable speech waiting for manual action, while
 cancellation and empty recognition had implicit deletion paths. The accepted
 2026-10-12 amendment replaces the original whole-take-only fallback with the
 [current bounded suffix contract](../CONFIGURATION.md#stt--transcription).
+The elapsed-time fallback policy is superseded by
+[0032](0032-cloud-stt-without-inference-deadlines.md); retention and genuine-error
+local completion remain accepted.
 
 ## Decision
 
@@ -21,7 +24,8 @@ without implicit model downloads, cloud-provider switching, or a retry ledger.
 
 ## Consequences
 
-Cloud chunks share five seconds. Preserve completed native chunks and recognize
+Cloud STT waits under [0032](0032-cloud-stt-without-inference-deadlines.md).
+Preserve completed native chunks and recognize
 only untouched source frames locally; without a native suffix, attempt the
 whole take once. Never concatenate overlapping alternate passes. Archive actual
 local/cloud/mixed provenance. Cancellation stops later work, not retention.

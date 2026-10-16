@@ -144,18 +144,35 @@ Compressed WAV encodings, RF64/RIFX, and multiple data chunks must be converted
 to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
 16 kHz mono PCM16.
 
-**Automatic local fallback.** Cloud requests share a five-second budget across
-the take, including connection, upload, headers, and response-body reads. A cloud
-error (including unavailable credentials), exhausted budget, or empty recognition
-of nonempty audio switches to installed default Parakeet without another cloud
-request. For native 16 kHz mono PCM16, completed cloud chunks are kept and only
+**Waiting policy.** Cloud STT has no app-imposed total, per-chunk, per-request,
+upload, or response deadline. A valid response after five or sixty seconds is
+still selected; a twenty-minute take is valid. Elapsed recognition time never
+triggers local fallback, and neither take duration nor the local encoder's
+30-second input limit supplies a cloud inference budget. There is no STT timeout
+knob. See [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
+
+Providers may enforce their own timeouts and return real failures. The native
+ureq 3 transport explicitly guards DNS resolution and connection establishment
+with separate 30-second phase limits. These are network-establishment guards,
+not a total request budget or recognition deadline after connection. Such
+failures and provider errors still use the recovery path below; ureq 2 timeout
+defaults do not define this lane's policy.
+
+**Automatic local fallback.** A genuine cloud error (including HTTP/transport
+failure or unavailable credentials) or empty recognition of nonempty audio
+switches to installed default Parakeet without another cloud request.
+For native 16 kHz mono PCM16, completed cloud chunks are kept and only
 the failed/unstarted source-frame ranges are recognized locally. History records
 this combination as `mixed`; overlapping alternate passes are never concatenated.
 Without a usable native prefix/suffix, fallback attempts the whole take once.
 Missing, failing, or entirely empty suffix recognition preserves useful text as
 incomplete. Successful silent chunks do not stop recognition of later speech.
 Configured cleanup runs once on the selected transcript, not on each attempt.
-Cancellation prevents starting fallback or subsequent cleanup requests.
+Cancellation is checked before and after requests and between chunks. It
+prevents starting later chunks, fallback, cleanup, or delivery; DNS resolution
+and an already-running blocking HTTP request need not be interrupted. The
+worker may remain occupied until that call returns, but its cancelled result
+is never delivered.
 There are no automatic downloads or switches to another cloud provider.
 Install the safety-net model deliberately with `models pull`; `doctor` reports
 whether its installed files are available, not a successful inference. With
@@ -163,12 +180,16 @@ whether its installed files are available, not a successful inference. With
 External files outside Parakeet's native audio format can still fail locally;
 retain or convert the original file.
 
-The request budget includes DNS resolution. Cancellation during a blocking
-request settles within its remaining budget without another request or local
-fallback. Native credential reads have a separate five-second bound before
-recognition; cleanup includes them and DNS in its shared budget. Model loading
-and local inference are not hard-bounded by HTTP deadlines. Slow-but-working
-cloud recognition also switches to local when its budget expires.
+**Native credentials.** Before cloud recognition, native keyring reads have a
+separate five-second maximum and honor cancellation promptly while waiting;
+this is not an STT inference deadline. If the credential is unavailable,
+ordinary installed-local recovery applies unless the take was cancelled.
+Native keyring APIs themselves cannot be interrupted: at most one read remains
+outstanding, its late result is discarded, and later takes do not accumulate
+more blocked lookups. No credential is cached or logged. Cleanup charges
+credential waits to its explicit shared budget below while retaining this
+independent lookup guard. Model loading and local inference are not
+hard-bounded by HTTP deadlines.
 
 **Cloud failure feedback.** A failed cloud chunk keeps a content-free cause even
 when local recognition completes the take. The settled HUD/status and file CLI
@@ -241,11 +262,16 @@ contract, so keep it short and avoid redefining the task.
   later round is a focused proofread for residual speech-recognition errors,
   such as a truncated acronym. One pass avoids compounded drift and latency.
   Use 2 only after evaluating it on your own dictation corpus.
-- **`timeout_ms`.** Cleanup shares `min(timeout_ms, 5000)` milliseconds across
-  triage, every generative pass, and the final watchdog, including connections
-  and response bodies. An unfinished chain returns raw STT text. A watchdog
+- **`timeout_ms`.** Cleanup shares the explicit configured milliseconds across
+  native credential waits, triage, every generative pass, and the final
+  watchdog, including DNS, connections, and response bodies. There is no hidden
+  five-second cleanup inference clamp; individual native keyring reads still
+  have their independent five-second maximum and can use less when the shared
+  budget is nearly spent. An unfinished chain returns raw STT text. A watchdog
   timeout after completed passes preserves the candidate under its existing
-  fail-open policy. No subsequent request starts after the budget expires.
+  fail-open policy. No subsequent request starts after cancellation or budget
+  expiry, and a cancelled result is never delivered. This cleanup budget is
+  separate from cloud STT's waiting policy.
 - **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
   many characters (default 40). Short commands skip the cloud round-trip.
   Set `0` to always run cleanup when enabled.

@@ -14,8 +14,8 @@ Criteria:
 2. WHEN I release the shortcut, THE SYSTEM SHALL run CPU-only speech-to-text inference with the default installed local model.
 3. WHEN transcription succeeds and destination safety is verified, THE SYSTEM SHALL deliver the transcribed text to the active window.
 4. IF the local speech-to-text model is not installed, THEN THE SYSTEM SHALL report a missing model error without attempting transcription.
-5. WHERE cloud recognition is configured, THE SYSTEM SHALL wait at most five seconds for its native credential before the HTTP budget, then use the existing installed-local fallback on failure without downloading a model or changing the configured provider. Cancellation during that wait SHALL settle promptly without starting recognition or delivery; retained audio and already completed text SHALL survive.
-6. THE SYSTEM SHALL include DNS resolution in cloud recognition's shared five-second request budget. Cancellation during resolution SHALL settle within the remaining budget without starting fallback, subsequent requests, or delivery; retained audio and completed text SHALL survive. A later take SHALL work when resolution recovers.
+5. WHERE cloud recognition is configured, THE SYSTEM SHALL wait at most five seconds for its native credential before recognition, then use the existing installed-local fallback on failure without downloading a model or changing the configured provider. Cancellation during that wait SHALL settle promptly without starting recognition or delivery; retained audio and already completed text SHALL survive. An unresponsive credential store SHALL NOT accumulate outstanding native lookups across takes, and late results SHALL be discarded without caching or logging credentials.
+6. WHEN I cancel during DNS resolution or a blocking cloud recognition request, THE SYSTEM SHALL prevent subsequent requests, fallback, cleanup, and delivery after the call returns; cancellation need not interrupt that call. Retained audio and completed text SHALL survive, and a later take SHALL work when resolution recovers.
 
 No-gos: no automatic downloading of models without explicit operator action.
 
@@ -51,6 +51,26 @@ Criteria:
 No-gos: no count of unresolved recordings in the bar; no text or width changes in the bar item.
 
 Evidence: `integrations/omarchy/BarWidget.qml`, `integrations/omarchy/Status.js`, `docs/decisions/historical/0029-quiet-bar-mark.md`
+
+## Capability: Configured Cloud Dictation
+
+## US-014 Wait for configured cloud recognition without inference deadlines
+
+Statement: When I opt into cloud dictation, including a twenty-minute take, I
+want Cantrip to wait for my configured recognizer rather than abandon working
+recognition because it is slow, so I receive its result without losing speech.
+
+Criteria:
+1. WHILE cloud recognition is pending, THE SYSTEM SHALL wait for a response, actual failure, or cancellation without app-imposed total, chunk, request, upload, or response deadlines, fixed or duration-scaled.
+2. WHEN a valid cloud response arrives after five seconds or sixty seconds, THE SYSTEM SHALL select it without latency-driven local fallback or provenance downgrade.
+3. WHEN a twenty-minute take is submitted, THE SYSTEM SHALL retain the existing multipart byte cap and over-cap chunk planning without using take duration or local-model chunk limits as cloud inference deadlines.
+4. IF HTTP/provider/transport failure, unavailable credentials, or empty recognition of nonempty audio occurs, THEN THE SYSTEM SHALL recover using installed default local Parakeet, retaining completed native cloud chunks and recognizing only the untouched source-frame suffix, or attempting the whole take once without a usable native suffix.
+5. IF recovery is incomplete, THEN THE SYSTEM SHALL preserve useful partial text and retained audio and record actual local/cloud/mixed provenance without overlapping alternate text.
+6. WHEN I cancel during a request, THE SYSTEM SHALL check cancellation after it returns and before later chunks, fallback, cleanup, or delivery; an already-running blocking call may finish, but its cancelled result SHALL NOT be delivered.
+
+No-gos: no implicit model downloads or cloud-provider switching; no larger fixed deadline or duration-scaled replacement. Provider-side timeouts and separate 30-second DNS-resolution and connection-establishment guards remain real failure boundaries, not app-owned inference budgets.
+
+Evidence: `crates/engine/src/stt.rs`, `crates/engine/src/pipeline.rs`, `tests/http_clients.rs`, `docs/decisions/0032-cloud-stt-without-inference-deadlines.md`
 
 ## Capability: Guarded Delivery and Session Safety
 
@@ -119,8 +139,9 @@ Criteria:
 1. WHERE postproc is enabled in configuration, THE SYSTEM SHALL refine raw transcripts through the configured OpenAI-compatible endpoint.
 2. THE SYSTEM SHALL instruct the cleanup model to preserve speaker meaning, questions, and commands without answering them.
 3. IF cleanup fails or returns an empty response, THEN THE SYSTEM SHALL fall back to delivering the raw speech-to-text transcript.
-4. THE SYSTEM SHALL include native credential waits in cleanup's shared five-second budget (or a smaller configured timeout), honor cancellation while waiting, and preserve the completed candidate when only its optional watchdog becomes unavailable. An unresponsive credential store SHALL NOT accumulate outstanding lookups across takes.
-5. THE SYSTEM SHALL include DNS resolution for cleanup and its optional decisions in that same budget. A stalled generative pass SHALL preserve raw text; a stalled optional watchdog SHALL preserve the completed candidate. Cancellation SHALL settle within the remaining budget without delivery.
+4. WHERE cleanup runs, THE SYSTEM SHALL share explicit `postproc.timeout_ms` across native credential waits, DNS, triage, generative passes, and watchdog without a hidden five-second cleanup inference clamp. Native credential waits SHALL also respect their independent five-second maximum and honor cancellation promptly without accumulating outstanding native lookups across takes.
+5. IF the generative chain cannot finish, THEN THE SYSTEM SHALL preserve raw text; IF only the optional watchdog becomes unavailable after completed passes, THEN THE SYSTEM SHALL preserve the completed candidate.
+6. IF the take is cancelled or the shared cleanup budget expires, THEN THE SYSTEM SHALL prevent subsequent cleanup requests; a cancelled take SHALL NOT deliver either result.
 
 No-gos: no automatic enabling of cloud cleanup without explicit configuration.
 
@@ -133,7 +154,7 @@ Statement: When I dictate clear, error-free prose, I want a fast System One deci
 Criteria:
 1. WHERE postproc.decision_model is configured, THE SYSTEM SHALL evaluate the raw transcript with a structured decision triage question before generative passes.
 2. WHEN decision triage determines the transcript is already clean with high confidence, THE SYSTEM SHALL bypass the generative model and deliver the raw transcript immediately.
-3. IF the decision triage request fails or times out, THEN THE SYSTEM SHALL fail open and proceed with the standard post-processing pipeline.
+3. IF the decision triage request fails or times out, THEN THE SYSTEM SHALL fail open and proceed with the standard post-processing pipeline within the remaining shared `postproc.timeout_ms`; IF no budget remains, THEN THE SYSTEM SHALL preserve raw STT text.
 
 No-gos: no blocking the user's dictation on decision endpoint errors.
 

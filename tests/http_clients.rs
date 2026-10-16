@@ -12,6 +12,9 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Fixture safety only: this is not a deadline imposed on transcription.
+const FIXTURE_LIFETIME: Duration = Duration::from_secs(60);
+
 /// One-shot HTTP server: accepts a single request, captures it, sends `response`.
 fn mock_server(response: String) -> (String, thread::JoinHandle<CapturedRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binding mock server");
@@ -77,7 +80,10 @@ fn read_request(stream: &TcpStream) -> CapturedRequest {
     let mut headers = Vec::new();
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).expect("reading header line");
+        assert!(
+            reader.read_line(&mut line).expect("reading header line") > 0,
+            "request ended before its headers"
+        );
         let line = line.trim_end().to_owned();
         if line.is_empty() {
             break;
@@ -395,6 +401,75 @@ fn refine_transport_error_omits_private_endpoint_details() {
     }
 }
 
+#[test]
+fn refine_native_header_and_body_timeouts_keep_private_details_out_of_errors() {
+    for body_started in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/PRIVATE-PATH", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let _ = read_request(&stream);
+            if body_started {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"PRIVATE-RESPONSE-MARKER")
+                    .unwrap();
+            }
+            // Keep the boundary open until the native configured timeout closes it.
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let mut cfg = postproc_config(endpoint);
+        cfg.passes = 1;
+        cfg.timeout_ms = 150;
+        let started = Instant::now();
+        let error = postproc::refine(
+            "PRIVATE-TRANSCRIPT-MARKER",
+            &cfg,
+            &[],
+            Some("PRIVATE-CREDENTIAL-MARKER"),
+            None,
+        )
+        .expect_err("a stalled cleanup response must exhaust its configured budget");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("timed out"), "got: {diagnostic}");
+        for private in [
+            "PRIVATE-PATH",
+            "PRIVATE-RESPONSE-MARKER",
+            "PRIVATE-TRANSCRIPT-MARKER",
+            "PRIVATE-CREDENTIAL-MARKER",
+        ] {
+            assert!(!diagnostic.contains(private));
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the native body reader must not retry beyond the cleanup budget"
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn refine_malformed_json_does_not_expose_provider_content() {
+    let (endpoint, server) = mock_server(ok_json(
+        r#"{"choices":[{"message":{"content":"PRIVATE-RESPONSE-MARKER"#,
+    ));
+    let error = postproc::refine(
+        "PRIVATE-TRANSCRIPT-MARKER",
+        &postproc_config(endpoint),
+        &[],
+        None,
+        None,
+    )
+    .expect_err("a complete HTTP body containing malformed JSON must fail");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("unexpected response shape"));
+    assert!(!diagnostic.contains("PRIVATE-RESPONSE-MARKER"));
+    assert!(!diagnostic.contains("PRIVATE-TRANSCRIPT-MARKER"));
+    server.join().unwrap();
+}
+
 struct WavFixture {
     path: PathBuf,
 }
@@ -486,6 +561,26 @@ fn upload_error() -> String {
     )
 }
 
+fn accept_before(listener: &TcpListener, deadline: Instant) -> TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let stream = loop {
+        assert!(Instant::now() < deadline, "missing localhost HTTP request");
+        match listener.accept() {
+            Ok((stream, _)) => break stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("accepting localhost HTTP request: {error}"),
+        }
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    assert!(!remaining.is_zero(), "localhost HTTP fixture expired");
+    stream.set_nonblocking(false).unwrap();
+    stream.set_read_timeout(Some(remaining)).unwrap();
+    stream.set_write_timeout(Some(remaining)).unwrap();
+    stream
+}
+
 /// Respond until all source frames arrive, or fail a chosen request. The
 /// independent decoder makes malformed or unbounded uploads fail at the
 /// HTTP boundary, without predicting implementation-specific split points.
@@ -493,30 +588,17 @@ fn transcription_server(
     spec: hound::WavSpec,
     frames: usize,
     fail_at: Option<usize>,
+    total_response_delay: Duration,
 ) -> (String, mpsc::Receiver<Vec<CapturedRequest>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("binding transcription server");
     let addr = listener.local_addr().expect("transcription server address");
-    listener.set_nonblocking(true).unwrap();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + FIXTURE_LIFETIME;
         let mut requests = Vec::new();
         let mut received = 0;
         while received < frames {
-            let mut stream = loop {
-                assert!(Instant::now() < deadline, "missing transcription request");
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("accepting transcription request: {error}"),
-                }
-            };
-            let remaining = Some(deadline.saturating_duration_since(Instant::now()));
-            stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(remaining).unwrap();
-            stream.set_write_timeout(remaining).unwrap();
+            let mut stream = accept_before(&listener, deadline);
             let request = read_request(&stream);
             assert!(
                 request.body.len() <= 24_000_000,
@@ -535,6 +617,11 @@ fn transcription_server(
             requests.push(request);
             let index = requests.len();
             let failed = fail_at == Some(index);
+            if !total_response_delay.is_zero() {
+                // Delay in proportion to actual decoded frames, so aggregate
+                // healthy work stays slow regardless of the chosen split plan.
+                thread::sleep(total_response_delay.mul_f64(chunk_frames as f64 / frames as f64));
+            }
             let response = if failed {
                 upload_error()
             } else {
@@ -647,7 +734,12 @@ fn transcribe_remote_round_trip_preserves_short_wav() {
     assert_eq!(decoded.duration(), 1_001);
 }
 
-fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old_cap: bool) {
+fn assert_bounded_transcription(
+    spec: hound::WavSpec,
+    frames: usize,
+    exceeds_old_cap: bool,
+    total_response_delay: Duration,
+) {
     let mut fixture = WavFixture::new(spec, frames);
     if exceeds_old_cap {
         if std::fs::metadata(&fixture.path).unwrap().len() <= 25_000_000 {
@@ -655,7 +747,7 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
         }
         assert!(std::fs::metadata(&fixture.path).unwrap().len() > 25_000_000);
     }
-    let (endpoint, server) = transcription_server(spec, frames, None);
+    let (endpoint, server) = transcription_server(spec, frames, None, total_response_delay);
     let mut progress = Vec::new();
     let transcript = stt::transcribe_remote(
         &fixture.path,
@@ -668,7 +760,7 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
     )
     .expect("bounded transcription should succeed");
     let requests = server
-        .recv_timeout(Duration::from_secs(8))
+        .recv_timeout(FIXTURE_LIFETIME)
         .expect("transcription server requests");
     assert_audio_coverage(&requests, spec, frames);
     let total = requests.len() as u32;
@@ -693,26 +785,18 @@ fn assert_bounded_transcription(spec: hound::WavSpec, frames: usize, exceeds_old
 }
 
 #[test]
-fn transcribe_remote_uploads_long_native_wav_once_within_the_take_budget() {
+fn transcribe_remote_accepts_valid_slow_response_headers() {
     let fixture = WavFixture::new(native_spec(), 162 * 16_000);
     let original = std::fs::read(&fixture.path).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
+        let mut stream = accept_before(&listener, Instant::now() + FIXTURE_LIFETIME);
         let request = read_request(&stream);
-        // Six healthy one-second responses cannot complete within a shared
-        // five-second budget; local inference chunks must not multiply uploads.
-        thread::sleep(Duration::from_millis(1046));
-        stream
-            .write_all(ok_json(r#"{"text":"complete cloud take"}"#).as_bytes())
-            .unwrap();
+        thread::sleep(Duration::from_secs(6));
+        let _ = stream.write_all(ok_json(r#"{"text":"complete cloud take"}"#).as_bytes());
         request
     });
-    let started = Instant::now();
     let transcript = stt::transcribe_remote(
         &fixture.path,
         &endpoint,
@@ -721,16 +805,27 @@ fn transcribe_remote_uploads_long_native_wav_once_within_the_take_budget() {
         None,
         None,
         |_| {},
-    )
-    .unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
-    assert!(matches!(transcript, stt::Transcript::Complete(_)));
+    );
     let request = server.join().unwrap();
+    assert_eq!(
+        transcript.expect("valid slow headers must not force local fallback"),
+        stt::Transcript::Complete("complete cloud take".to_owned())
+    );
     assert!(request.body.len() <= 24_000_000);
     assert_eq!(
         request.part("file"),
         original,
         "all native source frames must arrive unchanged in one request"
+    );
+}
+
+#[test]
+fn transcribe_remote_completes_twenty_minute_wav_across_slow_requests() {
+    assert_bounded_transcription(
+        native_spec(),
+        20 * 60 * 16_000,
+        true,
+        Duration::from_secs(6),
     );
 }
 
@@ -742,7 +837,7 @@ fn transcribe_remote_preserves_non_native_stereo_frames() {
         bits_per_sample: 24,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 61 * 44_100 + 1, false);
+    assert_bounded_transcription(spec, 61 * 44_100 + 1, false, Duration::ZERO);
 }
 
 #[test]
@@ -753,7 +848,7 @@ fn transcribe_remote_bounds_bytes_even_for_short_high_bandwidth_wav() {
         bits_per_sample: 32,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 5 * 192_000, true);
+    assert_bounded_transcription(spec, 5 * 192_000, true, Duration::ZERO);
 }
 
 #[test]
@@ -764,7 +859,7 @@ fn transcribe_remote_preserves_float_samples_across_chunks() {
         sample_format: hound::SampleFormat::Float,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 31 * 8_000, true);
+    assert_bounded_transcription(spec, 31 * 8_000, true, Duration::ZERO);
 }
 
 #[test]
@@ -774,7 +869,7 @@ fn transcribe_remote_pads_odd_sized_pcm_chunks_without_adding_samples() {
         bits_per_sample: 8,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 31 * 8_001, true);
+    assert_bounded_transcription(spec, 31 * 8_001, true, Duration::ZERO);
 }
 
 #[derive(Clone)]
@@ -797,7 +892,7 @@ impl Write for LogCapture {
 fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_body() {
     let spec = native_spec();
     let fixture = WavFixture::new(spec, 70 * 16_000).with_oversized_metadata();
-    let (endpoint, server) = transcription_server(spec, 70 * 16_000, Some(2));
+    let (endpoint, server) = transcription_server(spec, 70 * 16_000, Some(2), Duration::ZERO);
     let (log_tx, log_rx) = mpsc::channel();
     let capture = LogCapture(log_tx);
     let subscriber = tracing_subscriber::fmt()
@@ -863,43 +958,29 @@ fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_bod
 }
 
 #[test]
-fn transcribe_remote_shares_the_take_budget_with_slow_response_body_reads() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
+fn transcribe_remote_accepts_valid_slow_response_body() {
+    let fixture = WavFixture::new(native_spec(), 1_001);
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let mut requests = Vec::new();
-        for index in 1..=3 {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(8)))
-                .unwrap();
-            requests.push(read_request(&stream));
-            if index < 3 {
-                thread::sleep(Duration::from_millis(900));
-                stream
-                    .write_all(ok_json(&format!(r#"{{"text":"cloud-{index}"}}"#)).as_bytes())
-                    .unwrap();
-            } else {
-                let body = r#"{"text":"a response body too slow for the remaining take budget"}"#;
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )
-                .unwrap();
-                for byte in body.bytes() {
-                    thread::sleep(Duration::from_millis(100));
-                    if stream.write_all(&[byte]).is_err() {
-                        break;
-                    }
-                }
+        let mut stream = accept_before(&listener, Instant::now() + FIXTURE_LIFETIME);
+        read_request(&stream);
+        let body = r#"{"text":"complete slow cloud body"}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        // Headers arrive immediately and each body fragment is healthy, but
+        // the complete JSON body takes six seconds to arrive.
+        for part in body.as_bytes().chunks(body.len().div_ceil(6)) {
+            thread::sleep(Duration::from_secs(1));
+            if stream.write_all(part).is_err() {
+                break;
             }
         }
-        requests
     });
-    let started = Instant::now();
-    let mut progress = Vec::new();
     let transcript = stt::transcribe_remote(
         &fixture.path,
         &endpoint,
@@ -907,23 +988,13 @@ fn transcribe_remote_shares_the_take_budget_with_slow_response_body_reads() {
         &[],
         None,
         None,
-        |chunk| progress.push(chunk),
-    )
-    .expect("the two completed chunks must survive a slow body");
-    assert!(
-        started.elapsed() < Duration::from_millis(6_300),
-        "each request and body must share the five-second take budget"
+        |_| {},
     );
+    server.join().unwrap();
     assert_eq!(
-        transcript,
-        stt::Transcript::Partial {
-            text: "cloud-1 cloud-2".to_owned(),
-            failed_at: 3,
-            total: 3,
-        }
+        transcript.expect("a valid slow body must not force local fallback"),
+        stt::Transcript::Complete("complete slow cloud body".to_owned())
     );
-    assert_eq!(progress.last().unwrap().completed, 2);
-    assert_eq!(server.join().unwrap().len(), 3);
 }
 
 #[test]

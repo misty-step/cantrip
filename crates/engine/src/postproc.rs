@@ -8,9 +8,6 @@ use ureq_speech as ureq;
 /// Increment when the fixed cleanup prompt changes semantically.
 pub(crate) const PROMPT_VERSION: u32 = 2;
 
-/// Credential reads, optional decisions and cleanup passes share this budget.
-const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
-
 const BASE_SYSTEM_PROMPT: &str = "You clean speech-to-text transcripts.
 
 The source text is a record of the speaker's words.
@@ -168,8 +165,9 @@ pub fn refine(
     refine_until(transcript, cfg, vocabulary, api_key, cancel, deadline(cfg))
 }
 
+/// Native credential lookup, decisions, and cleanup share the configured budget.
 pub(crate) fn deadline(cfg: &PostprocConfig) -> Instant {
-    Instant::now() + Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET)
+    Instant::now() + Duration::from_millis(cfg.timeout_ms)
 }
 
 pub(crate) fn refine_until(
@@ -441,26 +439,21 @@ fn chat_round(
         Err(error) => {
             // Transport display strings may embed endpoint credentials or
             // server-controlled headers. Match the content-free STT boundary.
-            if matches!(error, ureq::Error::Timeout(_)) {
+            if is_timeout(&error) {
                 bail!("post-processing request timed out");
-            }
-            let mut cause = std::error::Error::source(&error);
-            while let Some(error) = cause {
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
-                {
-                    bail!("post-processing request timed out");
-                }
-                cause = error.source();
             }
             bail!("post-processing request failed");
         }
     };
-    let bytes = response
-        .into_body()
-        .read_to_vec()
-        .map_err(|_| anyhow!("post-processing response read failed"))?;
+    // Finish the bounded native read before parsing. A streaming JSON parser
+    // may try to read again after an I/O error while locating its parse error.
+    let bytes = response.into_body().read_to_vec().map_err(|error| {
+        if is_timeout(&error) {
+            anyhow!("post-processing request timed out")
+        } else {
+            anyhow!("post-processing response read failed")
+        }
+    })?;
     let response: ChatResponse = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow!("post-processing returned unexpected response shape"))?;
     remaining_budget(deadline, cancel)?;
@@ -473,6 +466,18 @@ fn chat_round(
         text: normalize_response(content, transcript)?,
         usage: response.usage,
     })
+}
+
+fn is_timeout(error: &ureq::Error) -> bool {
+    matches!(error, ureq::Error::Timeout(_))
+        || matches!(
+            error,
+            ureq::Error::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+        )
 }
 
 fn get_decision_client(
@@ -498,7 +503,7 @@ fn get_decision_client(
         })
         .or_else(|| fallback_key.map(str::to_owned));
 
-    let timeout = Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET);
+    let timeout = Duration::from_millis(cfg.timeout_ms);
     Some(crate::typesafe::DecisionClient::new(
         cfg.decision_endpoint.as_deref(),
         Some(model),

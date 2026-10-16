@@ -15,7 +15,7 @@ toml = "0.8"
 dirs = "5"
 transcribe-rs = { version = "0.3", features = ["onnx"] }
 ureq = "2"
-# Speech needs native DNS deadlines; model downloads keep v2's idle-read timeout.
+# Native DNS/connect guards and explicit cleanup deadlines; downloads keep v2 idle reads.
 ureq-speech = { package = "ureq", version = "3" }
 tar = "0.4"
 flate2 = "1"

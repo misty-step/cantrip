@@ -13,7 +13,6 @@ use transcribe_rs::onnx::Quantization;
 use ureq::ResponseExt;
 use ureq_speech as ureq;
 
-const REMOTE_BUDGET: Duration = Duration::from_secs(5);
 const MULTIPART_BOUNDARY: &str = "cantrip-audio-boundary";
 /// Includes multipart framing and vocabulary, not just the WAV payload.
 const MAX_REMOTE_REQUEST_BYTES: usize = 24_000_000;
@@ -649,7 +648,7 @@ struct RemoteTranscriptionResponse {
 /// PCM and IEEE-float WAVs retain their source frames and format. Native
 /// 16 kHz mono PCM16 uses the local low-energy planner; other formats split on
 /// frame boundaries without decoding. A short bounded file is sent unchanged.
-/// Requests and body reads share one five-second budget across all chunks.
+/// Uploads and response reads have no elapsed-time cutoff. See Decision 0032.
 pub fn transcribe_remote(
     wav: &Path,
     endpoint: &str,
@@ -717,7 +716,6 @@ fn transcribe_remote_attempt(
         vocabulary,
         api_key,
     } = remote;
-    let deadline = Instant::now() + REMOTE_BUDGET;
     if is_cancelled(cancel) {
         return Ok(RemoteAttempt::whole(Transcript::Cancelled {
             text: String::new(),
@@ -797,6 +795,14 @@ fn transcribe_remote_attempt(
 
     let endpoint = format!("{}/audio/transcriptions", endpoint.trim_end_matches('/'));
     let content_type = format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}");
+    // Bound network establishment, not recognition. Once connected, uploads
+    // and inference responses have no elapsed-time cutoff (Decision 0032).
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_resolve(Some(Duration::from_secs(30)))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .http_status_as_error(false)
+        .build()
+        .into();
     let mut cloud_failure = None;
     let transcript = collect_chunks(
         &ranges,
@@ -805,7 +811,6 @@ fn transcribe_remote_attempt(
         &mut on_progress,
         |start, end| {
             (|| {
-                remaining_cloud_budget(deadline)?;
                 body.truncate(prefix_len);
                 source
                     .append_chunk(&mut body, start, end, unchanged)
@@ -820,24 +825,15 @@ fn transcribe_remote_attempt(
                 );
                 anyhow::ensure!(!is_cancelled(cancel), "transcription cancelled");
 
-                let remaining = remaining_cloud_budget(deadline)?;
                 let started = Instant::now();
-                // ureq's native global timeout covers DNS through body reads.
-                let agent: ureq::Agent = ureq::Agent::config_builder()
-                    .timeout_global(Some(remaining))
-                    .http_status_as_error(false)
-                    .build()
-                    .into();
                 let mut request = agent.post(&endpoint).header("Content-Type", &content_type);
                 if let Some(api_key) = api_key {
                     request = request.header("Authorization", &format!("Bearer {api_key}"));
                 }
-                // The overall deadline also remains active on into_reader()
-                // below; a slowly streaming body cannot reset the allowance.
                 let response = match request.send(body.as_slice()) {
                     Ok(response) => response,
                     Err(error) => {
-                        if Instant::now() >= deadline || matches!(error, ureq::Error::Timeout(_)) {
+                        if matches!(error, ureq::Error::Timeout(_)) {
                             anyhow::bail!(CloudFailure::Timeout);
                         }
                         // Transport display strings may embed server-controlled
@@ -872,10 +868,15 @@ fn transcribe_remote_attempt(
                 if status >= 400 {
                     return Err(http_failure(status, response).into());
                 }
-                // Finish the bounded body read before parsing: a deserializer
-                // may read again after an I/O error to locate its JSON error.
-                let bytes = response.into_body().read_to_vec().map_err(|_| {
-                    if Instant::now() >= deadline {
+                // Read before parsing so JSON error recovery cannot read again
+                // after a transport failure. The body has no inference deadline.
+                let bytes = response.into_body().read_to_vec().map_err(|error| {
+                    if matches!(error, ureq::Error::Timeout(_))
+                        || matches!(&error, ureq::Error::Io(error) if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                        ))
+                    {
                         anyhow::anyhow!(CloudFailure::Timeout)
                     } else {
                         anyhow::anyhow!(CloudFailure::InvalidResponse)
@@ -883,7 +884,6 @@ fn transcribe_remote_attempt(
                 })?;
                 let response: RemoteTranscriptionResponse = serde_json::from_slice(&bytes)
                     .map_err(|_| anyhow::anyhow!(CloudFailure::InvalidResponse))?;
-                remaining_cloud_budget(deadline)?;
                 let text = response.text.trim().to_owned();
                 if retain_suffix && text.is_empty() {
                     anyhow::bail!(CloudFailure::EmptyResponse);
@@ -928,7 +928,7 @@ fn http_failure(status: u16, response: ureq::http::Response<ureq::Body>) -> Clou
     {
         return CloudFailure::Http { status };
     }
-    // Fixed-size, deadline-bound read. Never deserialize or display error.message.
+    // Fixed-size read. Never deserialize or display error.message.
     let mut reader = response.into_body().into_reader();
     let mut bytes = [0_u8; 4096];
     let mut used = 0;
@@ -942,13 +942,6 @@ fn http_failure(status: u16, response: ureq::http::Response<ureq::Body>) -> Clou
         }
     }
     CloudFailure::Http { status }
-}
-
-fn remaining_cloud_budget(deadline: Instant) -> Result<Duration> {
-    deadline
-        .checked_duration_since(Instant::now())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or_else(|| CloudFailure::Timeout.into())
 }
 
 /// Metadata is small; audio stays in the source file until a bounded request

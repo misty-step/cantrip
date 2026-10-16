@@ -31,8 +31,10 @@ Cloud providers have their own retention and account policies. Cantrip does not
 make those policies local by using an OpenAI-compatible API. Review the endpoint
 and model before [enabling a cloud feature](CONFIGURATION.md).
 
-If configured-cloud transcription fails, exhausts its five-second HTTP budget,
-or recognizes nothing from nonempty audio, Cantrip uses the **already installed**
+Configured-cloud transcription waits without an app-imposed inference deadline;
+elapsed time alone never sends the take to local fallback
+([Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md)).
+If it actually fails or recognizes nothing from nonempty audio, Cantrip uses the **already installed**
 default local model. Completed native cloud chunks are preserved; local inference
 covers only the untouched source-frame suffix. Without a usable native suffix,
 fallback attempts the whole take once. It never silently downloads weights or
