@@ -4,7 +4,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -400,6 +399,16 @@ struct BudgetLedger {
     state: BudgetState,
 }
 
+impl Drop for BudgetLedger {
+    fn drop(&mut self) {
+        if let Some(file) = &self.file {
+            // CLOEXEC closes only at exec: an unrelated fork can still hold
+            // this open file description when the owner's File is dropped.
+            let _ = file.unlock();
+        }
+    }
+}
+
 impl BudgetLedger {
     fn open(path: &Path, commission_id: &str, create: bool) -> ClassResult<Self> {
         let mut options = OpenOptions::new();
@@ -433,7 +442,7 @@ impl BudgetLedger {
             }
             Err(_) => return Err("budget_open".into()),
         };
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if file.try_lock().is_err() {
             return Err("budget_locked".into());
         }
         let metadata = file.metadata().map_err(|_| "budget_metadata")?;
@@ -1585,6 +1594,38 @@ mod tests {
         assert!(ledger
             .reserve(&key("run-c", "extra"), 1, COMMISSION_CAP_NANOS)
             .is_err());
+    }
+
+    #[test]
+    fn ledger_release_is_not_delayed_by_inherited_descriptors() {
+        let temp = PrivateTemp::new();
+        let path = temp.0.join("commission.jsonl");
+        let mut ledger = BudgetLedger::open(&path, "commission", true).unwrap();
+        ledger
+            .reserve(&key("run-a", "failed"), 1_000_000_000, COMMISSION_CAP_NANOS)
+            .unwrap();
+        // dup and fork share the same open file description and flock. Keep
+        // that description alive deterministically, as a child does pre-exec.
+        let inherited = ledger.file.as_ref().unwrap().try_clone().unwrap();
+        assert!(
+            matches!(BudgetLedger::open(&path, "commission", false), Err(class) if class == "budget_locked")
+        );
+        drop(ledger);
+        let ledger = BudgetLedger::open(&path, "commission", false).unwrap();
+        assert_eq!(ledger.state.liability_nanos, 1_000_000_000);
+        drop(inherited);
+        // Closing the old description must not unlock the new owner's lock.
+        assert!(
+            matches!(BudgetLedger::open(&path, "commission", false), Err(class) if class == "budget_locked")
+        );
+        drop(ledger);
+        assert_eq!(
+            BudgetLedger::open(&path, "commission", false)
+                .unwrap()
+                .state
+                .liability_nanos,
+            1_000_000_000
+        );
     }
 
     #[test]
