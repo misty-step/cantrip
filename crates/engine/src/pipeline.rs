@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Result of the optional post-processing pass on a transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -695,7 +695,6 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::Ordering;
     use std::thread;
-    use std::time::Duration;
 
     struct Recording {
         root: PathBuf,
