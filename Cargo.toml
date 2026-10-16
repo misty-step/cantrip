@@ -14,7 +14,7 @@ default-members = [".", "crates/engine"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 
 [dependencies]
 anyhow = "1"
