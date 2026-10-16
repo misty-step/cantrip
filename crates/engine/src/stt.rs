@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
+use ureq::ResponseExt;
+use ureq_speech as ureq;
 
 const REMOTE_BUDGET: Duration = Duration::from_secs(5);
 const MULTIPART_BOUNDARY: &str = "cantrip-audio-boundary";
@@ -820,34 +822,27 @@ fn transcribe_remote_attempt(
 
                 let remaining = remaining_cloud_budget(deadline)?;
                 let started = Instant::now();
-                // ureq 2's default 30s connect timeout overrides its overall
-                // request timeout, so both must use the take's remaining budget.
-                let agent = ureq::AgentBuilder::new()
-                    .timeout_connect(remaining)
-                    .timeout(remaining)
-                    .build();
-                let mut request = agent.post(&endpoint).set("Content-Type", &content_type);
+                // ureq's native global timeout covers DNS through body reads.
+                let agent: ureq::Agent = ureq::Agent::config_builder()
+                    .timeout_global(Some(remaining))
+                    .http_status_as_error(false)
+                    .build()
+                    .into();
+                let mut request = agent.post(&endpoint).header("Content-Type", &content_type);
                 if let Some(api_key) = api_key {
-                    request = request.set("Authorization", &format!("Bearer {api_key}"));
+                    request = request.header("Authorization", &format!("Bearer {api_key}"));
                 }
                 // The overall deadline also remains active on into_reader()
                 // below; a slowly streaming body cannot reset the allowance.
-                let response = match request.send_bytes(&body) {
+                let response = match request.send(body.as_slice()) {
                     Ok(response) => response,
-                    Err(ureq::Error::Status(413, _)) => {
-                        return Err(anyhow::anyhow!(CloudFailure::Http { status: 413 })
-                            .context(format!("upload rejected: {} bytes", body.len())));
-                    }
-                    Err(ureq::Error::Status(code, response)) => {
-                        return Err(http_failure(code, response).into());
-                    }
-                    Err(ureq::Error::Transport(transport)) => {
-                        if Instant::now() >= deadline {
+                    Err(error) => {
+                        if Instant::now() >= deadline || matches!(error, ureq::Error::Timeout(_)) {
                             anyhow::bail!(CloudFailure::Timeout);
                         }
                         // Transport display strings may embed server-controlled
                         // headers or URLs. Keep only the kind and timeout cause.
-                        let mut cause = std::error::Error::source(&transport);
+                        let mut cause = std::error::Error::source(&error);
                         while let Some(error) = cause {
                             if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
                                 matches!(
@@ -859,28 +854,35 @@ fn transcribe_remote_attempt(
                             }
                             cause = error.source();
                         }
-                        anyhow::bail!(if transport.kind() == ureq::ErrorKind::ConnectionFailed {
+                        anyhow::bail!(if matches!(
+                            error,
+                            ureq::Error::ConnectionFailed | ureq::Error::Io(_)
+                        ) {
                             CloudFailure::Connection
                         } else {
                             CloudFailure::Transport
                         });
                     }
                 };
-                let response: RemoteTranscriptionResponse =
-                    serde_json::from_reader(response.into_reader()).map_err(|error| {
-                        if Instant::now() >= deadline
-                            || error.io_error_kind().is_some_and(|kind| {
-                                matches!(
-                                    kind,
-                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                                )
-                            })
-                        {
-                            anyhow::anyhow!(CloudFailure::Timeout)
-                        } else {
-                            anyhow::anyhow!(CloudFailure::InvalidResponse)
-                        }
-                    })?;
+                let status = response.status().as_u16();
+                if status == 413 {
+                    return Err(anyhow::anyhow!(CloudFailure::Http { status })
+                        .context(format!("upload rejected: {} bytes", body.len())));
+                }
+                if status >= 400 {
+                    return Err(http_failure(status, response).into());
+                }
+                // Finish the bounded body read before parsing: a deserializer
+                // may read again after an I/O error to locate its JSON error.
+                let bytes = response.into_body().read_to_vec().map_err(|_| {
+                    if Instant::now() >= deadline {
+                        anyhow::anyhow!(CloudFailure::Timeout)
+                    } else {
+                        anyhow::anyhow!(CloudFailure::InvalidResponse)
+                    }
+                })?;
+                let response: RemoteTranscriptionResponse = serde_json::from_slice(&bytes)
+                    .map_err(|_| anyhow::anyhow!(CloudFailure::InvalidResponse))?;
                 remaining_cloud_budget(deadline)?;
                 let text = response.text.trim().to_owned();
                 if retain_suffix && text.is_empty() {
@@ -917,12 +919,17 @@ fn transcribe_remote_attempt(
     })
 }
 
-fn http_failure(status: u16, response: ureq::Response) -> CloudFailure {
-    if !matches!(status, 402 | 403) || !response.get_url().starts_with("https://openrouter.ai/") {
+fn http_failure(status: u16, response: ureq::http::Response<ureq::Body>) -> CloudFailure {
+    if !matches!(status, 402 | 403)
+        || !response
+            .get_uri()
+            .to_string()
+            .starts_with("https://openrouter.ai/")
+    {
         return CloudFailure::Http { status };
     }
     // Fixed-size, deadline-bound read. Never deserialize or display error.message.
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     let mut bytes = [0_u8; 4096];
     let mut used = 0;
     while used < bytes.len() {

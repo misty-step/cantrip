@@ -3,6 +3,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
+use ureq_speech as ureq;
 
 /// Increment when the fixed cleanup prompt changes semantically.
 pub(crate) const PROMPT_VERSION: u32 = 2;
@@ -421,26 +422,29 @@ fn chat_round(
     let body = serde_json::to_string(&request).context("serializing post-processing request")?;
     let endpoint = format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/'));
     let remaining = remaining_budget(deadline, cancel)?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(remaining)
-        .timeout(remaining)
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(remaining))
+        .build()
+        .into();
     let mut request = agent
         .post(&endpoint)
-        .set("Content-Type", "application/json");
+        .header("Content-Type", "application/json");
     if let Some(api_key) = api_key {
-        request = request.set("Authorization", &format!("Bearer {api_key}"));
+        request = request.header("Authorization", &format!("Bearer {api_key}"));
     }
 
-    let response = match request.send_string(&body) {
+    let response = match request.send(&body) {
         Ok(response) => response,
-        Err(ureq::Error::Status(code, _)) => {
+        Err(ureq::Error::StatusCode(code)) => {
             bail!("post-processing endpoint returned HTTP {code}");
         }
-        Err(ureq::Error::Transport(transport)) => {
+        Err(error) => {
             // Transport display strings may embed endpoint credentials or
             // server-controlled headers. Match the content-free STT boundary.
-            let mut cause = std::error::Error::source(&transport);
+            if matches!(error, ureq::Error::Timeout(_)) {
+                bail!("post-processing request timed out");
+            }
+            let mut cause = std::error::Error::source(&error);
             while let Some(error) = cause {
                 if error
                     .downcast_ref::<std::io::Error>()
@@ -450,10 +454,14 @@ fn chat_round(
                 }
                 cause = error.source();
             }
-            bail!("post-processing request failed ({:?})", transport.kind());
+            bail!("post-processing request failed");
         }
     };
-    let response: ChatResponse = serde_json::from_reader(response.into_reader())
+    let bytes = response
+        .into_body()
+        .read_to_vec()
+        .map_err(|_| anyhow!("post-processing response read failed"))?;
+    let response: ChatResponse = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow!("post-processing returned unexpected response shape"))?;
     remaining_budget(deadline, cancel)?;
     let content = response

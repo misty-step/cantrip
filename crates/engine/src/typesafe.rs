@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use ureq_speech as ureq;
 
 pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-1.13";
 pub const DEFAULT_TYPESAFE_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
@@ -223,27 +224,29 @@ impl DecisionClient {
 
         let body = serde_json::to_vec(&request).context("serializing decision request")?;
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(self.timeout)
-            .timeout(self.timeout)
-            .build();
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(self.timeout))
+            .build()
+            .into();
 
         let mut req = agent
             .post(&self.endpoint)
-            .set("Content-Type", "application/json");
+            .header("Content-Type", "application/json");
 
         if let Some(api_key) = &self.api_key {
-            req = req.set("Authorization", &format!("Bearer {api_key}"));
+            req = req.header("Authorization", &format!("Bearer {api_key}"));
         }
 
-        let response = match req.send_bytes(&body) {
+        let response = match req.send(body.as_slice()) {
             Ok(response) => response,
-            Err(ureq::Error::Status(code, resp)) => {
-                let _ = resp;
+            Err(ureq::Error::StatusCode(code)) => {
                 bail!("decision endpoint returned HTTP {code}");
             }
-            Err(ureq::Error::Transport(transport)) => {
-                let mut cause = std::error::Error::source(&transport);
+            Err(error) => {
+                if matches!(error, ureq::Error::Timeout(_)) {
+                    bail!("decision request timed out");
+                }
+                let mut cause = std::error::Error::source(&error);
                 while let Some(error) = cause {
                     if error
                         .downcast_ref::<std::io::Error>()
@@ -253,7 +256,7 @@ impl DecisionClient {
                     }
                     cause = error.source();
                 }
-                bail!("decision request failed ({:?})", transport.kind());
+                bail!("decision request failed");
             }
         };
 
@@ -263,7 +266,11 @@ impl DecisionClient {
             }
         }
 
-        let parsed: DecisionResponse = serde_json::from_reader(response.into_reader())
+        let bytes = response
+            .into_body()
+            .read_to_vec()
+            .map_err(|_| anyhow!("decision response read failed"))?;
+        let parsed: DecisionResponse = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow!("decision endpoint returned unexpected response shape"))?;
 
         Ok(parsed)

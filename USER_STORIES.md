@@ -15,6 +15,7 @@ Criteria:
 3. WHEN transcription succeeds and destination safety is verified, THE SYSTEM SHALL deliver the transcribed text to the active window.
 4. IF the local speech-to-text model is not installed, THEN THE SYSTEM SHALL report a missing model error without attempting transcription.
 5. WHERE cloud recognition is configured, THE SYSTEM SHALL wait at most five seconds for its native credential before the HTTP budget, then use the existing installed-local fallback on failure without downloading a model or changing the configured provider. Cancellation during that wait SHALL settle promptly without starting recognition or delivery; retained audio and already completed text SHALL survive.
+6. THE SYSTEM SHALL include DNS resolution in cloud recognition's shared five-second request budget. Cancellation during resolution SHALL settle within the remaining budget without starting fallback, subsequent requests, or delivery; retained audio and completed text SHALL survive. A later take SHALL work when resolution recovers.
 
 No-gos: no automatic downloading of models without explicit operator action.
 
@@ -119,6 +120,7 @@ Criteria:
 2. THE SYSTEM SHALL instruct the cleanup model to preserve speaker meaning, questions, and commands without answering them.
 3. IF cleanup fails or returns an empty response, THEN THE SYSTEM SHALL fall back to delivering the raw speech-to-text transcript.
 4. THE SYSTEM SHALL include native credential waits in cleanup's shared five-second budget (or a smaller configured timeout), honor cancellation while waiting, and preserve the completed candidate when only its optional watchdog becomes unavailable. An unresponsive credential store SHALL NOT accumulate outstanding lookups across takes.
+5. THE SYSTEM SHALL include DNS resolution for cleanup and its optional decisions in that same budget. A stalled generative pass SHALL preserve raw text; a stalled optional watchdog SHALL preserve the completed candidate. Cancellation SHALL settle within the remaining budget without delivery.
 
 No-gos: no automatic enabling of cloud cleanup without explicit configuration.
 

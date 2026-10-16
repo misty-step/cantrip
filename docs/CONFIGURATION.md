@@ -163,9 +163,12 @@ whether its installed files are available, not a successful inference. With
 External files outside Parakeet's native audio format can still fail locally;
 retain or convert the original file.
 
-These are HTTP deadlines, not hard bounds on blocking OS DNS resolution,
-keyring access, model loading, or local inference. Slow-but-working cloud
-recognition also switches to local when its budget expires.
+The request budget includes DNS resolution. Cancellation during a blocking
+request settles within its remaining budget without another request or local
+fallback. Native credential reads have a separate five-second bound before
+recognition; cleanup includes them and DNS in its shared budget. Model loading
+and local inference are not hard-bounded by HTTP deadlines. Slow-but-working
+cloud recognition also switches to local when its budget expires.
 
 **Cloud failure feedback.** A failed cloud chunk keeps a content-free cause even
 when local recognition completes the take. The settled HUD/status and file CLI
