@@ -3,6 +3,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
+use ureq_speech as ureq;
 
 /// Increment when the fixed cleanup prompt changes semantically.
 pub(crate) const PROMPT_VERSION: u32 = 2;
@@ -161,16 +162,31 @@ pub fn refine(
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Refinement> {
+    refine_until(transcript, cfg, vocabulary, api_key, cancel, deadline(cfg))
+}
+
+/// Native credential lookup, decisions, and cleanup share the configured budget.
+pub(crate) fn deadline(cfg: &PostprocConfig) -> Instant {
+    Instant::now() + Duration::from_millis(cfg.timeout_ms)
+}
+
+pub(crate) fn refine_until(
+    transcript: &str,
+    cfg: &PostprocConfig,
+    vocabulary: &[String],
+    api_key: Option<&str>,
+    cancel: Option<&AtomicBool>,
+    deadline: Instant,
+) -> Result<Refinement> {
     let passes = cfg.passes.max(1);
     let started = Instant::now();
-    let deadline = started + Duration::from_millis(cfg.timeout_ms);
     remaining_budget(deadline, cancel)?;
 
     // Pre-cleanup triage gatekeeper (ADR 0026):
     // If an opt-in decision model is configured, evaluate whether generative cleanup
     // is required. If the raw transcript is already clean (needs_cleanup < 0.20),
     // bypass generative passes to save latency and token cost.
-    if let Some(mut client) = get_decision_client(cfg, api_key) {
+    if let Some(mut client) = get_decision_client(cfg, api_key, deadline, cancel) {
         if !crate::stt::is_cancelled(cancel) {
             let mut questions = std::collections::BTreeMap::new();
             questions.insert(
@@ -248,7 +264,7 @@ pub fn refine(
     // Post-cleanup watchdog (ADR 0026 / ADR 0012):
     // Check whether the candidate output answered a question, executed an instruction,
     // or distorted core content instead of transcribing. If tripped, reject and fall back.
-    if let Some(mut client) = get_decision_client(cfg, api_key) {
+    if let Some(mut client) = get_decision_client(cfg, api_key, deadline, cancel) {
         if let Ok(timeout) = remaining_budget(deadline, cancel) {
             let state = serde_json::json!({
                 "source": transcript,
@@ -404,51 +420,42 @@ fn chat_round(
     let body = serde_json::to_string(&request).context("serializing post-processing request")?;
     let endpoint = format!("{}/chat/completions", cfg.endpoint.trim_end_matches('/'));
     let remaining = remaining_budget(deadline, cancel)?;
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(remaining)
-        .timeout(remaining)
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(remaining))
+        .build()
+        .into();
     let mut request = agent
         .post(&endpoint)
-        .set("Content-Type", "application/json");
+        .header("Content-Type", "application/json");
     if let Some(api_key) = api_key {
-        request = request.set("Authorization", &format!("Bearer {api_key}"));
+        request = request.header("Authorization", &format!("Bearer {api_key}"));
     }
 
-    let response = match request.send_string(&body) {
+    let response = match request.send(&body) {
         Ok(response) => response,
-        Err(ureq::Error::Status(code, _)) => {
+        Err(ureq::Error::StatusCode(code)) => {
             bail!("post-processing endpoint returned HTTP {code}");
         }
-        Err(ureq::Error::Transport(transport)) => {
+        Err(error) => {
             // Transport display strings may embed endpoint credentials or
             // server-controlled headers. Match the content-free STT boundary.
-            let mut cause = std::error::Error::source(&transport);
-            while let Some(error) = cause {
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
-                {
-                    bail!("post-processing request timed out");
-                }
-                cause = error.source();
+            if is_timeout(&error) {
+                bail!("post-processing request timed out");
             }
-            bail!("post-processing request failed ({:?})", transport.kind());
+            bail!("post-processing request failed");
         }
     };
-    let response: ChatResponse =
-        serde_json::from_reader(response.into_reader()).map_err(|error| {
-            if error.io_error_kind().is_some_and(|kind| {
-                matches!(
-                    kind,
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                )
-            }) {
-                anyhow!("post-processing request timed out")
-            } else {
-                anyhow!("post-processing returned unexpected response shape")
-            }
-        })?;
+    // Finish the bounded native read before parsing. A streaming JSON parser
+    // may try to read again after an I/O error while locating its parse error.
+    let bytes = response.into_body().read_to_vec().map_err(|error| {
+        if is_timeout(&error) {
+            anyhow!("post-processing request timed out")
+        } else {
+            anyhow!("post-processing response read failed")
+        }
+    })?;
+    let response: ChatResponse = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow!("post-processing returned unexpected response shape"))?;
     remaining_budget(deadline, cancel)?;
     let content = response
         .choices
@@ -461,9 +468,23 @@ fn chat_round(
     })
 }
 
+fn is_timeout(error: &ureq::Error) -> bool {
+    matches!(error, ureq::Error::Timeout(_))
+        || matches!(
+            error,
+            ureq::Error::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                )
+        )
+}
+
 fn get_decision_client(
     cfg: &PostprocConfig,
     fallback_key: Option<&str>,
+    deadline: Instant,
+    cancel: Option<&AtomicBool>,
 ) -> Option<crate::typesafe::DecisionClient> {
     let model = cfg.decision_model.as_ref()?.trim();
     if model.is_empty() {
@@ -472,12 +493,12 @@ fn get_decision_client(
     let key = cfg
         .decision_api_key_id
         .as_deref()
-        .and_then(|id| crate::keys::get(id).ok())
+        .and_then(|id| crate::keys::get_until(id, deadline, cancel).ok())
         .or_else(|| {
             if model.starts_with("typesafe/") || model.contains("openrouter") {
-                crate::keys::get("openrouter").ok()
+                crate::keys::get_until("openrouter", deadline, cancel).ok()
             } else {
-                crate::keys::get("typesafe").ok()
+                crate::keys::get_until("typesafe", deadline, cancel).ok()
             }
         })
         .or_else(|| fallback_key.map(str::to_owned));

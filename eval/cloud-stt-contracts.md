@@ -182,6 +182,8 @@ are rejected:
   files with no additional hard links. Do not delete, reset or replace a
   commission ledger between runs. An exclusive nonblocking lock prevents
   concurrent spending, and fsynced append-only reservations survive crashes.
+  Releasing the ledger ends that run's ownership immediately; unrelated
+  subprocesses must not keep a subsequent run locked out.
   Missing usage, errors, timeouts and empty output retain the full reservation;
   successful responses may settle to authoritative `usage.cost`. Any observed
   cost above its ceiling permanently halts further paid commission calls.

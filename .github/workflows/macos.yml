@@ -39,6 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -71,9 +72,10 @@ jobs:
       - name: Build and package an explicit development app (never a production release)
         env:
           TARGET: ${{ matrix.target }}
+          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           python3 scripts/package-macos --target "$TARGET" --ad-hoc \
-            --source-revision "$GITHUB_SHA" --output "$RUNNER_TEMP/native-app"
+            --source-revision "$SOURCE_REVISION" --output "$RUNNER_TEMP/native-app"
       - name: Exercise relocated app, real public-file STT, capture refusal, and native HUD
         env:
           TARGET: ${{ matrix.target }}

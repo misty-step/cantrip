@@ -401,6 +401,75 @@ fn refine_transport_error_omits_private_endpoint_details() {
     }
 }
 
+#[test]
+fn refine_native_header_and_body_timeouts_keep_private_details_out_of_errors() {
+    for body_started in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/PRIVATE-PATH", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let _ = read_request(&stream);
+            if body_started {
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{\"choices\":[{\"message\":{\"content\":\"PRIVATE-RESPONSE-MARKER")
+                    .unwrap();
+            }
+            // Keep the boundary open until the native configured timeout closes it.
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        });
+        let mut cfg = postproc_config(endpoint);
+        cfg.passes = 1;
+        cfg.timeout_ms = 150;
+        let started = Instant::now();
+        let error = postproc::refine(
+            "PRIVATE-TRANSCRIPT-MARKER",
+            &cfg,
+            &[],
+            Some("PRIVATE-CREDENTIAL-MARKER"),
+            None,
+        )
+        .expect_err("a stalled cleanup response must exhaust its configured budget");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("timed out"), "got: {diagnostic}");
+        for private in [
+            "PRIVATE-PATH",
+            "PRIVATE-RESPONSE-MARKER",
+            "PRIVATE-TRANSCRIPT-MARKER",
+            "PRIVATE-CREDENTIAL-MARKER",
+        ] {
+            assert!(!diagnostic.contains(private));
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the native body reader must not retry beyond the cleanup budget"
+        );
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn refine_malformed_json_does_not_expose_provider_content() {
+    let (endpoint, server) = mock_server(ok_json(
+        r#"{"choices":[{"message":{"content":"PRIVATE-RESPONSE-MARKER"#,
+    ));
+    let error = postproc::refine(
+        "PRIVATE-TRANSCRIPT-MARKER",
+        &postproc_config(endpoint),
+        &[],
+        None,
+        None,
+    )
+    .expect_err("a complete HTTP body containing malformed JSON must fail");
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("unexpected response shape"));
+    assert!(!diagnostic.contains("PRIVATE-RESPONSE-MARKER"));
+    assert!(!diagnostic.contains("PRIVATE-TRANSCRIPT-MARKER"));
+    server.join().unwrap();
+}
+
 struct WavFixture {
     path: PathBuf,
 }

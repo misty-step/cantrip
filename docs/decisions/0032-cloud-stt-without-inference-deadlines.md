@@ -20,9 +20,12 @@ their upload, recovery, or retention contracts.
 ## Decision
 
 Cloud STT waits for a response, a real failure, or user cancellation, with no
-app-imposed total, per-chunk, per-request, upload, or response deadline. Optional
-cleanup separately shares its explicit `postproc.timeout_ms` across triage,
-generative passes, and watchdog; there is no hidden five-second clamp.
+app-imposed total, per-chunk, per-request, upload, response, read, or write
+deadline. Native credential reads are separately bounded and cancellable before
+recognition. Optional cleanup shares its explicit `postproc.timeout_ms` across
+credential waits, DNS, triage, generative passes, and watchdog; there is no hidden
+five-second cleanup inference clamp. Native credential operations retain their
+independent lookup guard within that shared maximum.
 
 ## Consequences
 
@@ -40,20 +43,33 @@ generative passes, and watchdog; there is no hidden five-second clamp.
   overlapping passes, and archive honest local/cloud/mixed provenance. No
   implicit model download, cloud-provider switch, or new worker/runtime is added.
 - A provider may still enforce its own timeout and return a real error; waiting
-  cannot override that policy. Ureq's ordinary connection-establishment timeout
-  remains a network-connect guard, not an inference deadline. Connection
-  establishment failure is a real transport failure; elapsed time after a
-  successful connection is not by itself a reason to abandon recognition.
+  cannot override that policy. The native ureq 3 transport explicitly configures
+  separate 30-second DNS-resolution and connection-establishment guards, not a
+  total request budget or inference deadline. Its global, per-call, DNS, connect,
+  request-send, upload, response-header, and response-body timeout defaults are
+  unset; Cantrip supplies only those network-establishment guards for STT rather
+  than relying on ureq 2 defaults. Network establishment failure is a real
+  transport failure; elapsed time after a successful connection is not by
+  itself a reason to abandon recognition. See the pinned dependency's
+  [timeout configuration](https://docs.rs/ureq/3.3.0/ureq/config/struct.ConfigBuilder.html#method.timeout_global).
+- Native credential reads keep their separate five-second maximum before STT
+  and honor cancellation promptly while waiting. Native keyring APIs cannot be
+  interrupted: leave at most one read outstanding, discard late results, and
+  allow subsequent takes to recover when the store does. Do not cache secrets
+  or expose credentials/provider content in errors or operational logs.
 - Check cancellation before and after requests and between chunks. An already
-  running synchronous request may finish and can keep the worker occupied until
-  it returns; cancellation does not promise to interrupt that socket call.
-  Afterwards, no later chunk, local fallback, cleanup, or delivery begins for
-  the cancelled take. Retained audio remains available.
-- Cleanup's explicit shared budget includes connections and response bodies; no
-  later cleanup request starts after it expires. An unfinished generative chain
-  preserves raw STT text. A watchdog failure or timeout after completed passes
-  preserves the candidate under the existing fail-open contract. Cancelling the
-  take prevents delivery of either result.
+  running synchronous HTTP request or DNS lookup may finish later and keep the
+  worker occupied until it returns; cancellation does not promise to interrupt
+  either. Afterwards, no later chunk, local fallback, cleanup, or delivery
+  begins for the cancelled take. Retained audio remains available.
+- Cleanup's explicit shared budget includes native credential waits, DNS,
+  connections, optional decisions, and response bodies; no later cleanup request
+  starts after cancellation or budget expiry. Credential reads also respect
+  their independent five-second maximum, not a hidden inference clamp on the
+  overall cleanup chain. An unfinished generative chain preserves raw STT text.
+  A watchdog failure or timeout after completed passes preserves the candidate
+  under the existing fail-open contract. Cancelling the take prevents delivery
+  of either result.
 
 Acceptance examples:
 
@@ -63,11 +79,14 @@ Acceptance examples:
   its duration nor elapsed recognition time supplies a rejection deadline.
 - A genuine provider error, broken connection, or empty result still recovers
   locally where possible, preserving completed text and audio on partial failure.
-- Cancel during a blocked request: it may return later, but its result is never
-  delivered and it starts no subsequent fallback or cleanup.
-- With `postproc.timeout_ms = 30000`, cleanup is not cut off at five seconds;
-  triage, passes, and watchdog share the configured thirty seconds, not thirty
-  seconds per request. Raw/watchdog preservation remains unchanged.
+- Cancel during blocked HTTP or DNS: it may return later, but its result is never
+  delivered and it starts no subsequent chunk, fallback, or cleanup.
+- Cancel during native credential waiting: it settles promptly, launches no
+  recognition or delivery, and leaves at most one native read outstanding.
+- With `postproc.timeout_ms = 30000`, cleanup inference is not cut off at five
+  seconds; credentials, DNS, triage, passes, and watchdog share the configured
+  thirty seconds, not thirty seconds per request. Individual credential reads
+  remain independently bounded. Raw/watchdog preservation remains unchanged.
 
 Revisit if: the operator explicitly authorizes a different waiting policy after
 reviewing its effect on long dictation and valid slow cloud responses.

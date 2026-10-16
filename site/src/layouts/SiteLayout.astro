@@ -7,6 +7,7 @@ import '@fontsource/ibm-plex-sans/latin-600.css';
 import '@fontsource/ibm-plex-sans/latin-400-italic.css';
 import '../styles/global.css';
 import { repositoryUrl } from '../lib/docs.mjs';
+import { siteIdentity } from '../lib/site-identity.mjs';
 
 interface Props {
   title: string;
@@ -29,6 +30,7 @@ const imageAlt = "Cantrip's native dictation HUD in a real Linux writing session
     <meta name="description" content={description} />
     <meta name="theme-color" content="#13141c" />
     <meta name="color-scheme" content="dark" />
+    <meta name="cantrip-site-release" content={siteIdentity.release} />
     {noindex && <meta name="robots" content="noindex" />}
     <link rel="canonical" href={canonical} />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -45,6 +47,9 @@ const imageAlt = "Cantrip's native dictation HUD in a real Linux writing session
     <meta name="twitter:image" content={image} />
     <meta name="twitter:image:alt" content={imageAlt} />
     <title>{title}</title>
+    <script>
+      import '../lib/sentry';
+    </script>
   </head>
   <body>
     <a class="skip-link" href={`#${skipTargetId}`}>Skip to content</a>
@@ -55,7 +60,7 @@ const imageAlt = "Cantrip's native dictation HUD in a real Linux writing session
       </a>
       <nav class="primary-nav" aria-label="Primary">
         <a href="/docs/install" aria-current={section === 'docs' ? 'true' : undefined}>Documentation</a>
-        <a href="/releases" aria-current={section === 'releases' ? 'true' : undefined}>Releases</a>
+        <a href="/changelog" aria-current={section === 'releases' ? 'true' : undefined}>Changelog</a>
         <a href="/evals" aria-current={section === 'evals' ? 'page' : undefined}>Speech evals</a>
         <a href={repositoryUrl}>GitHub</a>
       </nav>

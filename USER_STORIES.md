@@ -14,6 +14,8 @@ Criteria:
 2. WHEN I release the shortcut, THE SYSTEM SHALL run CPU-only speech-to-text inference with the default installed local model.
 3. WHEN transcription succeeds and destination safety is verified, THE SYSTEM SHALL deliver the transcribed text to the active window.
 4. IF the local speech-to-text model is not installed, THEN THE SYSTEM SHALL report a missing model error without attempting transcription.
+5. WHERE cloud recognition is configured, THE SYSTEM SHALL wait at most five seconds for its native credential before recognition, then use the existing installed-local fallback on failure without downloading a model or changing the configured provider. Cancellation during that wait SHALL settle promptly without starting recognition or delivery; retained audio and already completed text SHALL survive. An unresponsive credential store SHALL NOT accumulate outstanding native lookups across takes, and late results SHALL be discarded without caching or logging credentials.
+6. WHEN I cancel during DNS resolution or a blocking cloud recognition request, THE SYSTEM SHALL prevent subsequent requests, fallback, cleanup, and delivery after the call returns; cancellation need not interrupt that call. Retained audio and completed text SHALL survive, and a later take SHALL work when resolution recovers.
 
 No-gos: no automatic downloading of models without explicit operator action.
 
@@ -66,7 +68,7 @@ Criteria:
 5. IF recovery is incomplete, THEN THE SYSTEM SHALL preserve useful partial text and retained audio and record actual local/cloud/mixed provenance without overlapping alternate text.
 6. WHEN I cancel during a request, THE SYSTEM SHALL check cancellation after it returns and before later chunks, fallback, cleanup, or delivery; an already-running blocking call may finish, but its cancelled result SHALL NOT be delivered.
 
-No-gos: no implicit model downloads or cloud-provider switching; no larger fixed deadline or duration-scaled replacement. Provider-side timeouts and ordinary connection-establishment guards remain real failure boundaries, not app-owned inference budgets.
+No-gos: no implicit model downloads or cloud-provider switching; no larger fixed deadline or duration-scaled replacement. Provider-side timeouts and separate 30-second DNS-resolution and connection-establishment guards remain real failure boundaries, not app-owned inference budgets.
 
 Evidence: `crates/engine/src/stt.rs`, `crates/engine/src/pipeline.rs`, `tests/http_clients.rs`, `docs/decisions/0032-cloud-stt-without-inference-deadlines.md`
 
@@ -137,8 +139,9 @@ Criteria:
 1. WHERE postproc is enabled in configuration, THE SYSTEM SHALL refine raw transcripts through the configured OpenAI-compatible endpoint.
 2. THE SYSTEM SHALL instruct the cleanup model to preserve speaker meaning, questions, and commands without answering them.
 3. IF cleanup fails or returns an empty response, THEN THE SYSTEM SHALL fall back to delivering the raw speech-to-text transcript.
-4. WHERE cleanup runs, THE SYSTEM SHALL share explicit `postproc.timeout_ms` across triage, generative passes, and watchdog without a hidden five-second clamp, preserving raw text if the generative chain cannot finish.
-5. IF the take is cancelled, THEN THE SYSTEM SHALL prevent subsequent cleanup requests and delivery.
+4. WHERE cleanup runs, THE SYSTEM SHALL share explicit `postproc.timeout_ms` across native credential waits, DNS, triage, generative passes, and watchdog without a hidden five-second cleanup inference clamp. Native credential waits SHALL also respect their independent five-second maximum and honor cancellation promptly without accumulating outstanding native lookups across takes.
+5. IF the generative chain cannot finish, THEN THE SYSTEM SHALL preserve raw text; IF only the optional watchdog becomes unavailable after completed passes, THEN THE SYSTEM SHALL preserve the completed candidate.
+6. IF the take is cancelled or the shared cleanup budget expires, THEN THE SYSTEM SHALL prevent subsequent cleanup requests; a cancelled take SHALL NOT deliver either result.
 
 No-gos: no automatic enabling of cloud cleanup without explicit configuration.
 
