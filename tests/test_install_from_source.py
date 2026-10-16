@@ -77,7 +77,7 @@ class InstallFromSourceContracts(unittest.TestCase):
     def refuses(self, result):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_builds_release_locked_then_installs(self):
+    def test_locked_release_install(self):
         result = self.invoke()
         self.succeeds(result)
         args = (self.repo / "cargo.args").read_text()
@@ -154,7 +154,7 @@ class InstallFromSourceContracts(unittest.TestCase):
         self.assertIn("live Cantrip socket", result.stderr)
         self.assertFalse(self.dest.exists())
 
-    def test_refuses_outside_the_repository_root(self):
+    def test_outside_repo_is_refused(self):
         result = self.invoke(cwd=self.root)
         self.refuses(result)
         self.assertIn("repository root", result.stderr)
