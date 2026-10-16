@@ -2360,6 +2360,7 @@ fn run_handoff(
                 return if status.success() {
                     Ok(())
                 } else {
+                    kill_handoff(&mut child);
                     Err("handoff-failed")
                 }
             }
@@ -3551,6 +3552,33 @@ mod tests {
         assert_eq!(report.error, Some("handoff-failed"));
         assert_eq!(report.backend, None);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn handoff_nonzero_exit_stops_delayed_descendant_delivery() {
+        // The leader consumes stdin and exits before its background receiver delivers.
+        let (root, mut target) =
+            handoff_fixture("cat > /dev/null\n(sleep 1; printf delivered > \"$1\") &\nexit 7");
+        let marker = root.join("delivered");
+        target.command.push(marker.display().to_string());
+        let report = deliver_handoff(
+            "private words",
+            &target,
+            "take",
+            false,
+            &AtomicBool::new(false),
+        );
+        let delivered_before_failure = marker.exists();
+        thread::sleep(Duration::from_millis(1500));
+        let delivered_after_failure = marker.exists();
+        fs::remove_dir_all(root).unwrap();
+        assert_eq!(report.delivery, Delivery::Failed);
+        assert_eq!(report.error, Some("handoff-failed"));
+        assert!(!delivered_before_failure);
+        assert!(
+            !delivered_after_failure,
+            "background receiver delivered after handoff failure was reported"
+        );
     }
 
     #[test]
