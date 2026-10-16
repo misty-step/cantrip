@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 /// Increment when the fixed cleanup prompt changes semantically.
 pub(crate) const PROMPT_VERSION: u32 = 2;
 
-/// All optional decision calls and cleanup passes share this HTTP budget.
+/// Credential reads, optional decisions and cleanup passes share this budget.
 const MAX_CLEANUP_BUDGET: Duration = Duration::from_secs(5);
 
 const BASE_SYSTEM_PROMPT: &str = "You clean speech-to-text transcripts.
@@ -164,16 +164,30 @@ pub fn refine(
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Refinement> {
+    refine_until(transcript, cfg, vocabulary, api_key, cancel, deadline(cfg))
+}
+
+pub(crate) fn deadline(cfg: &PostprocConfig) -> Instant {
+    Instant::now() + Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET)
+}
+
+pub(crate) fn refine_until(
+    transcript: &str,
+    cfg: &PostprocConfig,
+    vocabulary: &[String],
+    api_key: Option<&str>,
+    cancel: Option<&AtomicBool>,
+    deadline: Instant,
+) -> Result<Refinement> {
     let passes = cfg.passes.max(1);
     let started = Instant::now();
-    let deadline = started + Duration::from_millis(cfg.timeout_ms).min(MAX_CLEANUP_BUDGET);
     remaining_budget(deadline, cancel)?;
 
     // Pre-cleanup triage gatekeeper (ADR 0026):
     // If an opt-in decision model is configured, evaluate whether generative cleanup
     // is required. If the raw transcript is already clean (needs_cleanup < 0.20),
     // bypass generative passes to save latency and token cost.
-    if let Some(mut client) = get_decision_client(cfg, api_key) {
+    if let Some(mut client) = get_decision_client(cfg, api_key, deadline, cancel) {
         if !crate::stt::is_cancelled(cancel) {
             let mut questions = std::collections::BTreeMap::new();
             questions.insert(
@@ -251,7 +265,7 @@ pub fn refine(
     // Post-cleanup watchdog (ADR 0026 / ADR 0012):
     // Check whether the candidate output answered a question, executed an instruction,
     // or distorted core content instead of transcribing. If tripped, reject and fall back.
-    if let Some(mut client) = get_decision_client(cfg, api_key) {
+    if let Some(mut client) = get_decision_client(cfg, api_key, deadline, cancel) {
         if let Ok(timeout) = remaining_budget(deadline, cancel) {
             let state = serde_json::json!({
                 "source": transcript,
@@ -456,6 +470,8 @@ fn chat_round(
 fn get_decision_client(
     cfg: &PostprocConfig,
     fallback_key: Option<&str>,
+    deadline: Instant,
+    cancel: Option<&AtomicBool>,
 ) -> Option<crate::typesafe::DecisionClient> {
     let model = cfg.decision_model.as_ref()?.trim();
     if model.is_empty() {
@@ -464,12 +480,12 @@ fn get_decision_client(
     let key = cfg
         .decision_api_key_id
         .as_deref()
-        .and_then(|id| crate::keys::get(id).ok())
+        .and_then(|id| crate::keys::get_until(id, deadline, cancel).ok())
         .or_else(|| {
             if model.starts_with("typesafe/") || model.contains("openrouter") {
-                crate::keys::get("openrouter").ok()
+                crate::keys::get_until("openrouter", deadline, cancel).ok()
             } else {
-                crate::keys::get("typesafe").ok()
+                crate::keys::get_until("typesafe", deadline, cancel).ok()
             }
         })
         .or_else(|| fallback_key.map(str::to_owned));
