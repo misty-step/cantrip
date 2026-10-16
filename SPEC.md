@@ -45,3 +45,16 @@ Run `./scripts/check` and the downloaded-artifact procedure in
 isolated prior-artifact rollback and offline public-speech journey. Native Mac
 production distribution requires the separate real signing/notarization
 prerequisites in that guide; development CI is not production publication.
+
+## Identify and diagnose the public website
+
+The public website exposes `/health.json` with its service, deployment environment,
+and full source revision. This describes the static website only, not desktop
+dictation, speech evaluations, or an outside uptime check.
+
+Unhandled website JavaScript errors reach Sentry with the same source identity
+and deployment environment. Diagnostics contain error classes and bundled-code
+locations, never error text, page content, URL queries, cookies, or user identity.
+Collection is bounded and a blocked or unavailable sink cannot prevent browsing.
+New and regressed issues notify the existing approved agent-triage intake.
+Paid native uptime activation remains a separate owner spend decision.

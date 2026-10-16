@@ -11,6 +11,13 @@ in a trial, and review home-directory backup and sync policies.
 
 ## What leaves the machine
 
+This page describes the installed app. The public documentation website separately
+reports unhandled browser errors to Sentry: error class, bundled-code location,
+deployment environment, and source revision only. It excludes error text, page
+content, URL queries, cookies, and user identity; no replay or usage analytics is
+enabled. Blocking this diagnostic endpoint does not block the website. This does
+not enable telemetry in the desktop app.
+
 | Choice | Network and content boundary |
 |---|---|
 | Default local transcription | Installed Parakeet runs on CPU. Dictation audio and text are not sent to a provider. |

@@ -145,3 +145,25 @@ pages, fragments, and assets before upload.
 not a change to analytics settings for other domains. Production smoke checks
 compare the delivered homepage with the verified build to catch stale output or
 upstream body rewrites.
+
+## Website diagnostics
+
+`/health.json` and each page's `cantrip-site-release` metadata are generated from
+the checked-out Git revision. They identify only this static website, not desktop
+dictation or the speech-evaluation schedule. CI compares the deployed health
+document and HTML against the verified build.
+
+The bundled Sentry browser SDK captures only unhandled errors/rejections. It
+allowlists error classes and same-origin `/_astro/*.js` locations, replaces error
+messages, and omits user data, page/request context and breadcrumbs. Replay,
+tracing, logs, metrics and client reports are off. Capture stops after three
+events per page load; an unavailable sink does not block navigation. The ingest
+DSN is public, not an administrative token. Sentry's Cantrip project separately
+scrubs IP/user data, disables source scraping and paid Seer automation, and sends
+new/regressed issues to the existing Kaylee alert intake (team `misty-step`).
+
+The current Team plan returns `rateLimit: null` even after a per-key limit update;
+do not claim a provider-side per-project cap. Included organization error quota
+and its existing zero on-demand error budget remain unchanged. Native uptime
+activation and its controlled outage/recovery drill are pending owner spend
+approval; no additional monitor, probe, cron, controller or server is installed.
