@@ -243,6 +243,20 @@ No-gos: no transcript or audio in logs or retained files; no automatic fallback 
 
 Evidence: `integrations/t3/cantrip_t3_converse.py`, `integrations/t3/test_cantrip_t3_converse.py`, `integrations/t3/README.md`
 
+## US-018 See at a glance when I am talking with my agent
+
+Statement: When a voice conversation with my coordinating agent is running, I want my desktop bar to say so plainly, and what it is doing, so I never wonder whether it is listening or billing.
+
+Criteria:
+1. WHILE a live, hands-free or push-to-talk exchange is active, THE SYSTEM SHALL show its mode and phase in the bar (listening, hearing you, recording, transcribing, thinking, speaking) and whether the microphone or replies are muted.
+2. WHEN nothing is active, THE SYSTEM SHALL show nothing, except a dim marker while spoken replies are muted.
+3. IF a session's process has ended, THEN THE SYSTEM SHALL NOT show it, whatever its state file says.
+4. WHEN a live or hands-free session starts or ends, THE SYSTEM SHALL show a desktop notification.
+
+No-gos: no transcript or reply text in the bar or its status; no new colors beyond the bar's own.
+
+Evidence: `integrations/t3/cantrip_t3.py`, `integrations/t3/omarchy/cantrip.home-voice/BarWidget.qml`, `integrations/t3/test_cantrip_t3.py`
+
 ## Capability: Native macOS Clipboard Dictation
 
 ## US-013 Dictate on Mac and deliberately paste into my editor

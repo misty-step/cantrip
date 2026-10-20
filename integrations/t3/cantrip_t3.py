@@ -836,6 +836,100 @@ def set_mute(action):
     return target
 
 
+# ── voice status for the desktop bar ──────────────────────────────────────
+
+SESSION_MODES = {"live": "cantrip_t3_live", "hands-free": "cantrip_t3_converse"}
+SESSION_PHASES = ("listening", "hearing", "thinking", "speaking")
+
+
+def session_state(mode):
+    """A running session's state file, trusted only while its process lives.
+
+    Sessions write $XDG_RUNTIME_DIR/cantrip-t3/session-<mode>.json:
+    {"mode", "pid", "phase": listening|hearing|thinking|speaking, "muted": bool}.
+    """
+    path = runtime_dir() / ("session-" + mode + ".json")
+    try:
+        state = json.loads(path.read_text())
+        argv = Path("/proc", str(int(state["pid"])), "cmdline").read_bytes().decode(errors="replace")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if SESSION_MODES[mode] not in argv.replace("-", "_") or state.get("phase") not in SESSION_PHASES:
+        return None
+    return state
+
+
+def player_live():
+    try:
+        pid = int((runtime_dir() / "player.pid").read_text())
+        argv0 = Path("/proc", str(pid), "cmdline").read_bytes().split(b"\0")[0].decode()
+    except (OSError, ValueError):
+        return False
+    return Path(argv0).name in PLAYERS
+
+
+def cantrip_snapshot():
+    try:
+        result = subprocess.run(["cantrip", "status", "--json"], capture_output=True, text=True, timeout=3)
+        return json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+PHASE_WORDS = {"listening": "listening", "hearing": "hearing you", "thinking": "{label} thinking",
+               "speaking": "{label} speaking", "recording": "recording", "transcribing": "transcribing"}
+PTT_WORDS = {"recording": "recording", "transcribing": "transcribing", "thinking": "thinking", "speaking": "speaking"}
+GLYPHS = {"listening": "\U000f036c", "hearing": "\U000f036c", "recording": "\U000f036c",   # nf-md-microphone
+          "transcribing": "\U000f0150", "thinking": "\U000f0150",                            # nf-md-clock_outline
+          "speaking": "\U000f057e", "muted": "\U000f036d"}                                   # volume_high, mic_off
+
+
+def voice_status(config, snapshot=None, now=time.time):
+    """One transcript-free line for the bar: which voice mode is active and what it is doing."""
+    label = config.get("label", "Home")
+    pending = [readable(p) for p in (state_dir() / "pending").glob("*.json")]
+    pending = [record for record in pending if record]
+    speaking = player_live()
+    muted = is_muted()
+    mode = phase = None
+    live = session_state("live")
+    hands_free = session_state("hands-free")
+    if live:
+        mode, phase = "live", live["phase"]
+        muted = bool(live.get("muted"))
+    elif hands_free:
+        mode = "hands-free"
+        phase = hands_free["phase"]
+        if phase == "listening":
+            phase = "speaking" if speaking else "thinking" if any(
+                r["take"].startswith("converse-") for r in pending) else "listening"
+    else:
+        snapshot = snapshot if snapshot is not None else cantrip_snapshot()
+        handoff = (snapshot or {}).get("handoff") or {}
+        if handoff.get("label") == label and snapshot.get("state") in ("recording", "processing"):
+            mode, phase = "push-to-talk", "recording" if snapshot["state"] == "recording" else "transcribing"
+        elif speaking:
+            mode, phase = "push-to-talk", "speaking"
+        elif pending:
+            mode, phase = "push-to-talk", "thinking"
+    names = {"live": "Live", "hands-free": "Hands-free", "push-to-talk": label}
+    if not mode:
+        return {"visible": muted, "mode": None, "phase": None, "muted": muted,
+                "segments": [{"glyph": GLYPHS["muted"], "text": "replies muted", "tone": "dim"}] if muted else [],
+                "tooltip": label + " voice: spoken replies are muted. Super+Alt+Shift+H to unmute." if muted else ""}
+    # Push-to-talk is already named for the thread ("Home · thinking"); sessions name it in the phase.
+    words = PTT_WORDS[phase] if mode == "push-to-talk" else PHASE_WORDS[phase].format(label=label)
+    segments = [{"glyph": GLYPHS[phase], "text": names[mode] + " · " + words,
+                 "tone": "active" if phase in ("listening", "hearing", "recording") else "normal"}]
+    if muted:
+        segments.append({"glyph": GLYPHS["muted"], "text": "muted", "tone": "dim"})
+    hints = {"live": "Super+Alt+V ends the live session; Super+Alt+Shift+V mutes the microphone.",
+             "hands-free": "Super+Alt+L stops hands-free.",
+             "push-to-talk": "Super+Alt+. stops speech; Super+Alt+Shift+H mutes replies."}
+    return {"visible": True, "mode": mode, "phase": phase, "muted": muted, "segments": segments,
+            "tooltip": names[mode] + " with " + label + ": " + words + (", muted" if muted else "") + ". " + hints[mode]}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="cantrip-t3", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path)
@@ -849,6 +943,7 @@ def main(argv=None):
     commands.add_parser("repeat", help="speak the most recent reply again")
     commands.add_parser("talk", help="stop speech, then toggle a Cantrip take to this handoff")
     commands.add_parser("status", help="print mute state and pending take count")
+    commands.add_parser("state", help="one JSON line for the desktop bar: active voice mode and phase")
     args = parser.parse_args(argv)
 
     if args.command == "stop":
@@ -866,6 +961,9 @@ def main(argv=None):
         print(json.dumps({"muted": is_muted(), "pending": pending, "last_error": error}))
         return 0
     config = load_config(args.config)
+    if args.command == "state":
+        print(json.dumps(voice_status(config), ensure_ascii=False))
+        return 0
     if args.command == "talk":
         stop_speaking()
         os.execvp("cantrip", ["cantrip", "toggle", "--handoff", config["handoff"]])
