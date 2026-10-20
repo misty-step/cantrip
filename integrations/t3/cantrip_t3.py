@@ -190,8 +190,19 @@ class Mcp:
         return content
 
 
+def secret(name):
+    """A secret from the environment: the first line only, as `pass` stores it."""
+    value = os.environ.get(name, "").strip()
+    return value.splitlines()[0].strip() if value else ""
+
+
+def describe(error):
+    """Loggable error description: our own codes, otherwise only the class (messages can echo headers)."""
+    return str(error)[:40] if isinstance(error, McpError) else type(error).__name__
+
+
 def connect(config, timeout=HTTP_SECONDS):
-    token = os.environ.get("T3_MCP_TOKEN", "").strip()
+    token = secret("T3_MCP_TOKEN")
     if not token:
         raise SystemExit("cantrip-t3: T3_MCP_TOKEN is not set")
     return Mcp(config["mcp_url"], token, timeout=timeout)
@@ -224,6 +235,12 @@ def send(config, text, take, mcp=None, now=time.time):
         record = {**record, **json.loads(pending.read_text())}
     try:
         mcp = mcp or connect(config, timeout=SEND_STEP_SECONDS)
+    except (McpError, OSError, ValueError) as error:
+        if created:   # never reached t3_thread_send: nothing was posted
+            pending.unlink(missing_ok=True)
+        record_error("send", error)
+        raise
+    try:
         result = mcp.call("t3_thread_send", {"threadId": config["thread_id"],
                                              "message": config["prefix"] + text,
                                              "mode": "queue", "clientRequestId": request_id(take)},
@@ -249,7 +266,7 @@ def send(config, text, take, mcp=None, now=time.time):
 
 def record_error(stage, error):
     """Keep the last failure's class and code (never text) for `cantrip-t3 status`."""
-    code = str(error) if isinstance(error, McpError) else type(error).__name__
+    code = describe(error)
     write_json(state_dir() / "last-error.json", {"stage": stage, "code": code, "at": time.time()})
 
 
@@ -272,10 +289,10 @@ def find_key(value, key):
 # ── collect ───────────────────────────────────────────────────────────────
 
 
-def read_items(mcp, thread_id, after=None):
+def read_items(mcp, thread_id, after=None, chars=50_000):
     """Thread items after position `after` (exclusive), or from the start when None."""
     while True:
-        arguments = {"threadId": thread_id, "limit": 100, "maxCharsPerItem": 50_000}
+        arguments = {"threadId": thread_id, "limit": 100, "maxCharsPerItem": chars}
         if after is not None:
             arguments["afterPosition"] = after
         page = mcp.call("t3_thread_read", arguments)
@@ -290,10 +307,10 @@ def thread_head(mcp, thread_id):
     return mcp.call("t3_thread_read", {"threadId": thread_id, "limit": 1, "maxCharsPerItem": 1, "runLimit": 50})
 
 
-def recent_items(mcp, thread_id, head=None):
+def recent_items(mcp, thread_id, head=None, chars=50_000):
     head = head or thread_head(mcp, thread_id)
     after = int((head.get("thread") or {}).get("itemCount") or 0) - RECENT_ITEMS - 1
-    return read_items(mcp, thread_id, after if after >= 0 else None)
+    return read_items(mcp, thread_id, after if after >= 0 else None, chars)
 
 
 def full_text(mcp, thread_id, item):
@@ -311,7 +328,7 @@ def full_text(mcp, thread_id, item):
 def locate_run(mcp, record):
     """Find the run that carries this take's message, for a send that was never acknowledged."""
     marker = "thread-send:" + record["request_id"]
-    for item in recent_items(mcp, record["thread_id"]):
+    for item in recent_items(mcp, record["thread_id"], chars=1):
         message = item.get("messageId") or ""
         if item.get("type") == "user_message" and (message == record.get("message_id") or message.endswith(marker)):
             return item.get("runId")
@@ -326,6 +343,9 @@ def final_reply(mcp, record, head=None):
         page = mcp.call("t3_thread_read", {"threadId": record["thread_id"], "limit": 1, "maxCharsPerItem": 50_000,
                                            **({"afterPosition": after} if after >= 0 else {})})
         reply = next(iter(page.get("items", [])), None)
+        if not reply or reply.get("runId") != record.get("run_id"):
+            record.pop("reply_position")
+            return final_reply(mcp, record, head)
     else:
         for item in recent_items(mcp, record["thread_id"], head):
             if item.get("runId") == record["run_id"] and item.get("type") == "assistant_message":
@@ -373,14 +393,33 @@ def advance(mcp, record, now=time.time):
     return ("reply", record, final_reply(mcp, record, head))
 
 
+REQUIRED = ("take", "thread_id", "request_id")
+
+
+def readable(path):
+    """A state record, or None for a damaged one."""
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not all(isinstance(record.get(key), str) for key in REQUIRED):
+        return None
+    return record
+
+
 def pending_records():
+    """Pending takes, oldest first; damaged records move aside once instead of failing every pass."""
     records = []
     for path in sorted((state_dir() / "pending").glob("*.json")):
-        try:
-            records.append((path, json.loads(path.read_text())))
-        except ValueError:
-            log("unreadable pending record " + path.name)
-    return sorted(records, key=lambda pair: pair[1].get("sent_at", 0))
+        record = readable(path)
+        if record is None:
+            damaged = state_dir() / "damaged"
+            damaged.mkdir(exist_ok=True, mode=0o700)
+            os.replace(path, damaged / path.name)
+            log("damaged pending record moved aside " + path.name)
+            continue
+        records.append((path, record))
+    return sorted(records, key=lambda pair: pair[1].get("sent_at") or 0)
 
 
 def collect(config, once=False, mcp=None, speaker=None, now=time.time):
@@ -412,7 +451,7 @@ def run_collector(config, once, mcp, speaker, now):
                 time.sleep(1)
         except McpError as error:
             if error.unauthorized():
-                notify("T3 refused Home's voice sign-in; spoken replies are paused.")
+                notify("T3 refused " + config.get("label", "Home") + "'s voice sign-in; spoken replies are paused.")
                 record_error("collect", error)
                 raise SystemExit(AUTH_EXIT)
             mcp, backoff = transport_failure(error, backoff, once)
@@ -423,7 +462,7 @@ def run_collector(config, once, mcp, speaker, now):
 
 
 def transport_failure(error, backoff, once):
-    log("collector error class=" + type(error).__name__ + " code=" + str(error)[:40])
+    log("collector error class=" + type(error).__name__ + " code=" + describe(error))
     if not once:
         time.sleep(backoff)
     return None, min(backoff * 2, 120)
@@ -502,8 +541,8 @@ def finish(path, record, outcome, text, speaker, now):
         if result != "spoken":
             record["speech"] = result
             write_json(state_dir() / "done" / path.name, record)
-            if result == "muted":
-                notice = label + " " + verb + " (muted); see the thread."
+            if result in ("muted", "held"):
+                notice = label + " " + verb + " (" + result + "); see the thread."
             elif result == "unplayable":
                 notice = label + "'s reply could not be played; see the thread."
     if notice:
@@ -592,15 +631,17 @@ class Speaker:
             fcntl.flock(lock, fcntl.LOCK_EX)
             started = time.time()
             self.checked = (0.0, False)
-            while self.recording() and time.time() - started < 600:
+            while self.recording():
                 if self.silenced(started):
                     return self.silenced(started)
+                if time.time() - started > 600:
+                    return "held"   # still recording after ten minutes: leave it to the thread
                 time.sleep(0.5)
             if self.silenced(started):
                 return self.silenced(started)
             parts = list(chunks(text))
             played = 0
-            key = os.environ.get("CANTRIP_T3_SPEECH_KEY", "").strip()
+            key = secret("CANTRIP_T3_SPEECH_KEY")
             if key:
                 try:
                     played = self.remote(parts, key, started)
@@ -694,6 +735,7 @@ class Speaker:
                     played = index + 1
                 else:
                     process.stdin.write(block)
+                    process.stdin.flush()   # unflushed PCM would sit in the pipe buffer as a gap
         except BrokenPipeError:
             pass
         finally:
@@ -718,11 +760,11 @@ class Speaker:
 
 def repeat(config, mcp=None, speaker=None):
     """Speak the most recent reply again, fetched from T3; no reply text is stored locally."""
-    done = [json.loads(p.read_text()) for p in (state_dir() / "done").glob("*.json")]
-    done = [record for record in done if record.get("outcome") == "reply"]
+    done = [readable(p) for p in (state_dir() / "done").glob("*.json")]
+    done = [record for record in done if record and record.get("outcome") == "reply"]
     if not done:
         return False
-    record = max(done, key=lambda item: item.get("finished_at", 0))
+    record = max(done, key=lambda item: item.get("finished_at") or 0)
     text = final_reply(mcp or connect(config), record)
     log("repeat take=" + record["take"] + " chars=" + str(len(text)))
     if text and not is_muted():
@@ -802,13 +844,13 @@ def main(argv=None):
         try:
             return 0 if repeat(config) else 1
         except (McpError, OSError, ValueError) as error:
-            log("repeat failed class=" + type(error).__name__ + " code=" + str(error)[:40])
+            log("repeat failed class=" + type(error).__name__ + " code=" + describe(error))
             return 1
     if args.command == "send":
         try:
             send(config, sys.stdin.read(), os.environ.get("CANTRIP_TAKE_ID", ""))
         except (McpError, OSError, ValueError) as error:
-            log("send failed class=" + type(error).__name__ + " code=" + str(error)[:40])
+            log("send failed class=" + type(error).__name__ + " code=" + describe(error))
             return 1
         return 0
     collect(config, once=args.once)

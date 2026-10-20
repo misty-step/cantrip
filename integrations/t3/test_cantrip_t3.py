@@ -381,6 +381,54 @@ class ReviewRegressionTest(Base):
             speaker.say("Hello.")
         opener.assert_not_called()
 
+    def test_pcm_is_flushed_per_block(self):
+        flushed = []
+        player = mock.Mock(pid=1, poll=mock.Mock(return_value=0))
+        player.stdin.write = lambda block: flushed.append(("write", len(block)))
+        player.stdin.flush = lambda: flushed.append(("flush",))
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        speaker = t3.Speaker(CONFIG, opener=lambda request, timeout: Response(b"\x00" * 20000),
+                             recording=lambda: False)
+        with mock.patch.object(t3.subprocess, "Popen", return_value=player), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            speaker.say("Hello.")
+        writes = [i for i, entry in enumerate(flushed) if entry[0] == "write"]
+        self.assertTrue(writes and all(flushed[i + 1] == ("flush",) for i in writes))
+
+    def test_damaged_records_are_moved_aside_not_crash_looped(self):
+        pending = t3.state_dir() / "pending"
+        (pending / "garbage.json").write_text("{not json")
+        (pending / "list.json").write_text("[1, 2]")
+        (pending / "partial.json").write_text('{"take": "x"}')
+        (t3.state_dir() / "done" / "bad.json").write_text("[]")
+        t3.send(CONFIG, "status?", "take-1", mcp=self.t3)
+        self.t3.reply("Fine.")
+        t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker, now=self.finished)
+        self.assertEqual(self.speaker.said, ["Fine."])
+        self.assertEqual(sorted(p.name for p in (t3.state_dir() / "damaged").iterdir()),
+                         ["garbage.json", "list.json", "partial.json"])
+        self.assertTrue(t3.repeat(CONFIG, mcp=self.t3, speaker=self.speaker))
+
+    def test_secrets_use_the_first_line_and_never_reach_logs(self):
+        with mock.patch.dict(os.environ, {"T3_MCP_TOKEN": "tok-123\nlogin: me\n"}):
+            self.assertEqual(t3.secret("T3_MCP_TOKEN"), "tok-123")
+        error = ValueError("Invalid header value b'Bearer tok-123\\nlogin'")
+        self.assertEqual(t3.describe(error), "ValueError")
+        self.assertEqual(t3.describe(t3.McpError("http-401")), "http-401")
+
+    def test_unreachable_t3_drops_the_record_it_created(self):
+        with mock.patch.object(t3, "connect", side_effect=OSError("network down")):
+            with self.assertRaises(OSError):
+                t3.send(CONFIG, "status?", "take-1")
+        self.assertEqual(self.records("pending"), [])
+
     def test_redirects_are_refused(self):
         handler = t3.NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere.example/"))
