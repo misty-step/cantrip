@@ -115,6 +115,18 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.submitted), 1)
         self.assertIn("already", self.commentary()[-1] + self.commentary()[0])
 
+    async def test_words_running_on_past_the_delegation_point_stay_with_the_request(self):
+        await self.bridge.handle(heard(0, 900, "Give me one link to a"))
+        await self.bridge.handle(delegation("item_1", 950))
+        await asyncio.sleep(0.05)
+        await self.bridge.handle(heard(1000, 1300, " source."))     # spoken after GPT-Live delegated
+        await self.finish()
+        await self.bridge.handle(heard(4000, 4500, "Also ship it."))  # after a pause: a new request
+        await self.bridge.handle(delegation("item_2", 4600))
+        await self.finish()
+        self.assertEqual([m for _, m in self.submitted],
+                         ["[voice live] Give me one link to a source.", "[voice live] Also ship it."])
+
     async def test_a_short_reply_carries_the_question_it_answers(self):
         await self.bridge.handle(said(0, 2000, "Should I merge the docs PR now?"))
         await self.bridge.handle(heard(2500, 2800, "Yes."))
@@ -285,6 +297,28 @@ class HomeCallsTest(unittest.TestCase):
 
 
 class PlayerTest(unittest.TestCase):
+    def test_a_burst_after_a_stall_catches_up_by_dropping_silence(self):
+        clock = [0.0]
+        with mock.patch.object(live.subprocess, "Popen"):
+            player = live.Player(clock=lambda: clock[0])
+        written = []
+        player.write = lambda pcm: written.append(len(pcm))
+        loud = (b"\x00\x10" * (live.RATE // 10))      # 100 ms of speech-level samples
+        silent = bytes(live.RATE * 2 // 10)              # 100 ms of silence
+        player.start()
+        clock[0] = 0.0
+        for _ in range(20):                               # a 2 s burst arrives at once after a stall
+            player.audio.put(silent)
+        for _ in range(5):
+            player.audio.put(loud)
+        time.sleep(0.3)
+        player.audio.put(None)
+        player.join(2)
+        self.assertGreater(player.skipped, 0)
+        self.assertEqual(sum(written) % len(loud), 0)
+        self.assertGreaterEqual(sum(written), 5 * len(loud))   # speech is never dropped
+
+
     def test_a_real_dropout_is_counted_and_a_turn_end_is_not(self):
         clock = [0.0]
         with mock.patch.object(live.subprocess, "Popen"):

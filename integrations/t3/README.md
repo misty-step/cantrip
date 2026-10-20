@@ -103,9 +103,17 @@ thread directly; Cantrip is not involved.
   `cantrip-t3-live mute` toggles the microphone.
 - Use headphones, or set `echo_cancel = true` to route the session through a
   PipeWire echo-cancel source and sink that are removed afterwards.
-- Playback goes through a 0.4 s jitter buffer. GPT-Live streams 100 ms
-  blocks at about real time with arrival gaps up to ~0.3 s; without the
-  buffer those gaps were audible as glitches.
+- Playback goes through a jitter buffer. GPT-Live streams 100 ms blocks at
+  about real time, with arrival gaps that are usually under 0.3 s but have
+  reached 1.3 s. Each turn starts once 0.4 s is queued. Each audible dropout
+  adds 0.2 s for the rest of the session, up to 1 s. When playback runs
+  0.6 s behind after a burst, silent blocks are dropped to catch up; speech
+  never is.
+- Words that run on without a pause past the point where GPT-Live
+  delegates stay with that request.
+- The bridge writes `$XDG_RUNTIME_DIR/cantrip-t3/session-live.json`
+  (`listening`, `thinking`, `speaking`, `muted`) for status readers such as
+  the desktop bar, and removes it on exit.
 - The session closes after `idle_minutes` (default 5) with no speech in either
   direction and no request pending (GPT-Live's continuous silent audio does not
   count as speech), and after `max_minutes` (default 60), with

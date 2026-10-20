@@ -40,6 +40,7 @@ APPEND_CHARS = 1_500           # comfortably inside 500 tokens per append
 SUMMARY_CHARS = 16_000
 SETTLE_SECONDS = 0.6           # quiet in the request's transcript before it is complete
 SETTLE_MAX_SECONDS = 2.5
+CONTINUATION_MS = 700          # speech running on past the delegation point, without a pause, is the same request
 SETTLE_UNCOVERED_SECONDS = 1.5 # stop waiting for coverage sooner when the user paused before delegating
 COVER_MS = 600                 # transcript ending this close to the delegation point covers it
 CONTEXT_CHARS = 300
@@ -48,7 +49,10 @@ PROGRESS_SECONDS = 45
 CLOSE_SECONDS = 15
 SPEECH_LEVEL = 300             # output RMS above this is GPT-Live speaking, for the bar
 SUMMARY_SECONDS = 20           # deadline for the end-of-session summary, within the unit's stop timeout
-PREBUFFER_SECONDS = 0.4        # jitter buffer before each spoken turn (measured: 107 gaps → 11)
+PREBUFFER_SECONDS = 0.4        # jitter buffer before each turn; grows by 0.2 s per heard dropout
+MAX_PREBUFFER_SECONDS = 1.0
+CATCH_UP_SECONDS = 0.6         # behind by more than prebuffer + this: drop silent blocks
+SILENT_LEVEL = 100             # output RMS below this is silence (measured: 0.4 s buffer cut 107 gaps to 11)
 
 LIVE_DEFAULTS = {
     "model": "gpt-live-1",
@@ -217,12 +221,28 @@ class Bridge:
         """Speech reaching close to the delegation point has been transcribed."""
         return any(e >= end - COVER_MS for s, e, _, _ in self.heard if s < end)
 
+    def reach(self, end):
+        """The delegation point extended over speech that runs on without a pause: GPT-Live may
+        delegate before the user's last words, which belong to the same request. Stops at a
+        CONTINUATION_MS gap; never when a later delegation exists."""
+        if any(b > end for b in self.boundaries):
+            return end   # a later delegation already owns what was said after this point
+        reach = end
+        last_end = max((e for s, e, _, _ in self.heard if s < end), default=None)
+        for s, e, _, _ in sorted(self.heard):
+            if s < end or last_end is None:
+                continue
+            if s - last_end > CONTINUATION_MS:
+                break
+            reach, last_end = s + 1, max(last_end, e)
+        return reach
+
     async def settle(self, start, end):
         """Wait for the request's transcript: until it reaches the delegation point and has gone
         quiet, or SETTLE_MAX_SECONDS."""
         began = self.now()
         while self.now() - began < SETTLE_MAX_SECONDS:
-            arrived = [at for s, _, _, at in self.heard if s < end]
+            arrived = [at for s, _, _, at in self.heard if s < self.reach(end)]
             quiet = self.now() - max(arrived, default=began) >= SETTLE_SECONDS
             if quiet and (self.covered(end) or self.now() - began >= SETTLE_UNCOVERED_SECONDS):
                 return
@@ -303,7 +323,7 @@ class Bridge:
     async def run_delegation(self, delegation_id, offset_ms):
         start, end = self.window(offset_ms)
         await self.settle(start, end)
-        text = self.claim(end, delegation_id)
+        text = self.claim(self.reach(end), delegation_id)
         log("delegation id=" + delegation_id + " chars=" + str(len(text)))
         if not text:
             already = offset_ms is not None and self.boundaries.count(offset_ms) > 1
@@ -423,6 +443,8 @@ class Player(threading.Thread):
         self.audio = queue.Queue()
         self.clock = clock
         self.underruns = 0
+        self.skipped = 0
+        self.prebuffer = PREBUFFER_SECONDS
 
     def write(self, pcm):
         self.process.stdin.write(pcm)
@@ -443,14 +465,20 @@ class Player(threading.Thread):
             if block and dry_since is not None:
                 if now - dry_since < 0.6:   # audio came back quickly: a dropout heard, not the end of a turn
                     self.underruns += 1
+                    # This connection stalls longer than the buffer covers: buffer more from now on.
+                    self.prebuffer = min(MAX_PREBUFFER_SECONDS, self.prebuffer + 0.2)
                 dry_since = None
+            lead = (plays_until - now if plays_until is not None else 0) + len(pending) / (RATE * 2)
+            if block and lead > self.prebuffer + CATCH_UP_SECONDS and audioop_rms(block) < SILENT_LEVEL:
+                self.skipped += 1   # running behind after a burst: drop a silent block to catch up
+                continue
             if block:
                 pending += block
                 first = first if first is not None else now
             if not pending:
                 continue
             seconds = len(pending) / (RATE * 2)
-            if plays_until is None and seconds < PREBUFFER_SECONDS and now - first < PREBUFFER_SECONDS + 0.2:
+            if plays_until is None and seconds < self.prebuffer and now - first < self.prebuffer + 0.2:
                 continue
             try:
                 self.write(bytes(pending))
@@ -467,7 +495,7 @@ class Player(threading.Thread):
     def close(self):
         self.audio.put(None)
         self.join(timeout=2)
-        log("player underruns=" + str(self.underruns))
+        log("player underruns=%d skipped_silent=%d prebuffer=%.1f" % (self.underruns, self.skipped, self.prebuffer))
         self.process.terminate()
 
 
@@ -502,8 +530,8 @@ def audioop_rms(pcm):
 
 
 class SessionState:
-    """$XDG_RUNTIME_DIR/cantrip-t3/session-live.json for the desktop bar (`cantrip-t3 state`):
-    {"mode", "pid", "phase": listening|thinking|speaking, "muted"}. Written on change only."""
+    """$XDG_RUNTIME_DIR/cantrip-t3/session-live.json, for a status reader such as the desktop bar
+    (PR #161): {"mode", "pid", "phase": listening|thinking|speaking, "muted"}. Written on change only."""
 
     def __init__(self):
         self.path = t3.runtime_dir() / "session-live.json"
@@ -608,8 +636,8 @@ async def run(config):
                     idle = time.monotonic() - bridge.active_at > idle_limit and not bridge.tasks
                     if not warned and time.monotonic() - opened > max_limit - 60:
                         warned = True
-                        await bridge.append("instructions", None, "The session ends in about a minute. "
-                                            "Tell the user briefly at the next natural pause.")
+                        # Commentary is what GPT-Live speaks; an appended instruction was never said in QA.
+                        await bridge.append("commentary", None, "This live session ends in about a minute.")
                     if idle or time.monotonic() - opened > max_limit:
                         log("closing reason=" + ("idle" if idle else "max-duration"))
                         notify_later("Live session closing (" + ("idle" if idle else "time limit") + ")")
