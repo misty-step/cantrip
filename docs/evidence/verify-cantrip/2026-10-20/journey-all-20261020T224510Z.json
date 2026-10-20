@@ -1,0 +1,197 @@
+{
+  "journeys": [
+    "transcribe",
+    "dictate",
+    "recover",
+    "breaks",
+    "windows"
+  ],
+  "binary": "/home/phaedrus/.cache/tmp/vc/f174206/prefix/bin/cantrip",
+  "binary_version": "cantrip 0.1.8",
+  "binary_sha256": "f2025db2b115e6d0699d2d8370a86f80b8126d382028d7b5b77dd2682a060163",
+  "isolation": "headless sway (pixman), private HOME/XDG/runtime/clipboard, private PipeWire null sink + remapped source as the microphone, inherited audio routing dropped, node.dont-fallback set, capture links checked",
+  "fixture": "samples/jfk.wav (public speech)",
+  "results": [
+    {
+      "check": "transcribe --local prints the JFK sentence on stdout",
+      "ok": true
+    },
+    {
+      "check": "one-shot transcript saved to private history",
+      "ok": true
+    },
+    {
+      "check": "doctor reports capture ready against the private source",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "ok": true
+    },
+    {
+      "check": "take completeness is complete (got complete)",
+      "ok": true
+    },
+    {
+      "check": "delivery is copied (got copied)",
+      "ok": true
+    },
+    {
+      "check": "real clipboard holds the spoken JFK sentence (100 chars)",
+      "ok": true
+    },
+    {
+      "check": "transcript archived owner-only in history",
+      "ok": true
+    },
+    {
+      "check": "recordings lists the take with text and audio",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "ok": true
+    },
+    {
+      "check": "take completeness is complete (got complete)",
+      "ok": true
+    },
+    {
+      "check": "delivery is copied (got copied)",
+      "ok": true
+    },
+    {
+      "check": "real clipboard holds the spoken JFK sentence (105 chars)",
+      "ok": true
+    },
+    {
+      "check": "transcript archived owner-only in history",
+      "ok": true
+    },
+    {
+      "check": "recordings lists the take with text and audio",
+      "ok": true
+    },
+    {
+      "check": "copy ID accepted (exit 0)",
+      "ok": true
+    },
+    {
+      "check": "copy ID restored the saved transcript to the clipboard",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "ok": true
+    },
+    {
+      "check": "cancel settles as cancelled (got cancelled)",
+      "ok": true
+    },
+    {
+      "check": "cancel delivered nothing to the clipboard",
+      "ok": true
+    },
+    {
+      "check": "cancelled take keeps its audio on disk",
+      "ok": true
+    },
+    {
+      "check": "recover --local --clipboard accepted (exit 0)",
+      "ok": true
+    },
+    {
+      "check": "recover --local --clipboard completes and copies (got complete/copied)",
+      "ok": true
+    },
+    {
+      "check": "recovered transcript is on the clipboard",
+      "ok": true
+    },
+    {
+      "check": "forget without --yes is refused and keeps the audio",
+      "ok": true
+    },
+    {
+      "check": "forget --yes accepted (exit 0)",
+      "ok": true
+    },
+    {
+      "check": "confirmed Forget deleted the take's audio file",
+      "ok": true
+    },
+    {
+      "check": "recordings shows the forgotten take without audio",
+      "ok": true
+    },
+    {
+      "check": "complete archived text remains after Forget",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "ok": true
+    },
+    {
+      "check": "silence settles empty with audio kept (got empty)",
+      "ok": true
+    },
+    {
+      "check": "a second daemon for the same runtime exits non-zero",
+      "ok": true
+    },
+    {
+      "check": "original daemon still answers ping",
+      "ok": true
+    },
+    {
+      "check": "missing model refuses transcription and downloads nothing",
+      "ok": true
+    },
+    {
+      "check": "absent microphone is not substituted by another device here (links empty)",
+      "ok": true
+    },
+    {
+      "check": "absent microphone never yields a complete take (got failed)",
+      "ok": true
+    },
+    {
+      "check": "Cantrip itself refuses an absent microphone or disables PipeWire fallback for it (otherwise a real desktop records the default microphone)",
+      "ok": false,
+      "known_issue": "https://github.com/misty-step/cantrip/issues/162"
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "ok": true
+    },
+    {
+      "check": "auto on an unverified desktop copies or defers, and the clipboard agrees (got copied)",
+      "ok": true
+    },
+    {
+      "check": "ping with no daemon fails fast with a start hint",
+      "ok": true
+    },
+    {
+      "check": "settings window shows ('Past transcripts', 'Copy') (missing [])",
+      "ok": true
+    },
+    {
+      "check": "actions window shows ('Recordings', 'Recover locally') (missing [])",
+      "ok": true
+    },
+    {
+      "check": "HUD renders the copied state",
+      "ok": true
+    }
+  ],
+  "passed": true,
+  "known_failures": [
+    {
+      "check": "Cantrip itself refuses an absent microphone or disables PipeWire fallback for it (otherwise a real desktop records the default microphone)",
+      "ok": false,
+      "known_issue": "https://github.com/misty-step/cantrip/issues/162"
+    }
+  ]
+}

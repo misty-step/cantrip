@@ -1,33 +1,39 @@
-Cantrip Settings
+Cantrip Settings  dication: idle
 
-Confla: /home/phacdrus/cache/tap/ver 1y-cantr p/proof-20261628/sess on/X06_CONFLG_WOE/cantrp/conf. tanl
-
- didation: dle
+Conig: /home/shasdus/ cache/rp/uc/17420/sesstn/c/cantr o/ confg. o
 
 Past transcripts
-Soved on this conputer, neest firs, Copy reptaces you Cligboar,
 
+oI o e G o ik
 5 saved transcripts Refresh
-2026-10-20 16:56:15 local  @m 89s Copy
-Fellow Americans, ask not what your country ask what you can ..
-2026-10-20 16:55:33 local Om 11s [
+2026-10-20 17:44:49 local om 11s Copy
+And so, my fellow, ask not what your country can do for you. ..
+2026-10-20 17:44:01 local om 11s Copy
 And so, my fellow Americans, ask not what your country can do..
-2026-10-20 16:55:11 local  Om 11s Copy
+2026-10-20 17:43:26 local om 11s Copy
+And so, my fellow Americans, ask not what your tree can do fo.
+2026-10-20 17:42:54 local om 10s Copy
 And so, my fellow Americans, ask not what your country can do..
-2026-10-20 16:54:49 local Om 11s Copy
-And so, my fellow Americans, ask not what your country can do..
-2026-10-20 16:54:35 local @m 11s [
+2026-10-20 17:42:48 local om 11s Copy
+
 And so, my fellow Americans, ask not what your country can do..
 
 General
-Injection, varn-p, aulio, vocaulary
 
-Injection clipboard v
+Injection, varn-up, audio, vocabulary
+
+Injection
 
 eep STT model warm (faster dictation)
+Audio source (empty = default)
 
-Audio source (empty = default) cantrip_verify_ 3995725
-Vocabulary (comma-separated) PipeWire, Parakeet
+Vocabulary (comma-separated)
+
+clipboard ¥
+
+cantrip_verify_1582073_mic
+
+PipeWire, Parakeet
 
 HUD
 

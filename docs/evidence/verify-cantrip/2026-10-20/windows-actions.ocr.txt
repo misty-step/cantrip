@@ -21,16 +21,17 @@ never automatically deleted.
 
 [|Include completed history
 
-2026- 16:55:52 local  Om 03s
+2026- 17:44:21 local  Om 04s
 no transcript saved; audio saved; pending
 
-2026-10-20 16:55:59 local
+2026-10-20 17:44:30 local
 
 Duration: 6m 03s
 
 Transcript: no transcript saved
-Audio: saved on this machine
-Recording Tb: 01792533356561295620-3997136-26
+Audio: not retained
+
+Recording T0: O1702536264486514453-156526226
 
 Copy this transcript
 

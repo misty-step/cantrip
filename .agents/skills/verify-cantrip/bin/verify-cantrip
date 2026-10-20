@@ -3,11 +3,13 @@
 
 Every Cantrip process this helper starts runs with private HOME/XDG
 directories, a headless Sway compositor (its own clipboard and layer-shell
-HUD), and a private PipeWire null sink used as the "microphone". The
+HUD), and a private PipeWire microphone: a null sink the helper plays speech
+into, remapped as a real source node that the session config selects. The
 operator's daemon, clipboard, configuration, keyring, and history are never
 touched. Run `verify-cantrip --help` or see ../SKILL.md.
 """
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -17,10 +19,10 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
+import wave
 
 SKILL = Path(__file__).resolve().parent.parent
 REPO = SKILL.parent.parent.parent
@@ -29,23 +31,41 @@ JFK_TEXT = "And so my fellow Americans, ask not what your country can do for you
 OPERATOR_MODELS = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "cantrip/models"
 REPOSITORY = "misty-step/cantrip"
 SITE = "https://cantrip.mistystep.io"
-SESSION_TOOLS = ("sway", "swaymsg", "grim", "wtype", "wl-copy", "wl-paste", "tesseract", "pw-record", "pw-play", "pactl")
+SESSION_TOOLS = ("sway", "grim", "wtype", "wl-copy", "wl-paste", "tesseract", "pw-record", "pw-play", "pw-dump", "pactl")
 OTHER_TOOLS = ("gh", "jq", "curl", "playwright")
-SCRUB = ("DISPLAY", "WAYLAND_DISPLAY", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS",
-         "XDG_SESSION_ID", "XDG_SEAT_PATH", "XDG_SESSION_PATH", "XDG_SEAT", "XDG_VTNR")
-XDG = ("HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")
+# Desktop/session handles that would reach the operator's compositor, seat, or
+# D-Bus (and with it the OS keyring). The session gets none of them.
+DESKTOP_VARS = ("DISPLAY", "WAYLAND_DISPLAY", "SWAYSOCK", "HYPRLAND_INSTANCE_SIGNATURE", "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_SESSION_ID", "XDG_SEAT_PATH", "XDG_SESSION_PATH", "XDG_SEAT", "XDG_VTNR")
+# Audio routing overrides (an agent sandbox may set these). Any of them can
+# silently redirect pw-play/pw-record away from the private nodes.
+AUDIO_VARS = ("PIPEWIRE_NODE", "PIPEWIRE_PROPS", "PIPEWIRE_DEBUG", "PULSE_PROP", "PULSE_SINK", "PULSE_SOURCE", "PULSE_SERVER")
+# Safety net: never let a stream fall back to the operator's default devices.
+NO_FALLBACK = "{ node.dont-fallback = true }"
+XDG = {"HOME": "h", "XDG_RUNTIME_DIR": "r", "XDG_CONFIG_HOME": "c", "XDG_STATE_HOME": "s", "XDG_DATA_HOME": "d", "XDG_CACHE_HOME": "k"}
+SOCKET_MAX = 107  # sun_path; sway names its IPC socket sway-ipc.<uid>.<pid>.sock in XDG_RUNTIME_DIR
+
+
+class Failure(Exception):
+    pass
 
 
 def die(message):
-    print(f"verify-cantrip: {message}", file=sys.stderr)
-    sys.exit(1)
+    raise Failure(message)
+
+
+def audio_env():
+    """Environment for host-side PipeWire commands: no inherited routing, no fallback."""
+    env = {k: v for k, v in os.environ.items() if k not in AUDIO_VARS}
+    env["PIPEWIRE_PROPS"] = NO_FALLBACK
+    return env
 
 
 class Run:
     """A run directory: `session/` is scratch, `evidence/` survives `down`."""
 
     def __init__(self, path):
-        self.root = Path(path).resolve()
+        self.root = Path(path).expanduser().resolve()
         self.session = self.root / "session"
         self.evidence = self.root / "evidence"
         self.state_file = self.root / "session.json"
@@ -55,8 +75,12 @@ class Run:
             die(f"no session at {self.root}; run `verify-cantrip up --run {self.root} --binary PATH` first")
         return json.loads(self.state_file.read_text())
 
-    def env(self):
-        return self.state()["env"]
+    def env(self, state=None):
+        """The caller's environment minus desktop/audio handles, plus the session's own values."""
+        state = state or self.state()
+        env = {k: v for k, v in os.environ.items() if k not in DESKTOP_VARS + AUDIO_VARS}
+        env.update(state["overrides"])
+        return env
 
     def log(self, record):
         self.evidence.mkdir(parents=True, exist_ok=True)
@@ -65,14 +89,16 @@ class Run:
 
 
 def run_cmd(run, argv, env, label=None, timeout=60, check=False, quiet=False):
-    """Run one command, record command/exit/stdout/stderr in evidence, echo it."""
+    """Run one command and record command/exit/stdout/stderr. A timeout is a failure, never an exit code."""
     started = time.time()
+    shown = [label or Path(argv[0]).name] + [str(a) for a in argv[1:]]
     try:
         result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout)
-        code, out, err = result.returncode, result.stdout, result.stderr
-    except subprocess.TimeoutExpired as error:
-        code, out, err = "timeout", (error.stdout or b"").decode(errors="replace") if isinstance(error.stdout, bytes) else (error.stdout or ""), f"timed out after {timeout}s"
-    shown = [label or Path(argv[0]).name] + [str(a) for a in argv[1:]]
+    except subprocess.TimeoutExpired:
+        if run:
+            run.log({"at": round(started, 3), "argv": shown, "exit": None, "error": f"timed out after {timeout}s"})
+        die(f"{' '.join(shown)} timed out after {timeout}s")
+    code, out, err = result.returncode, result.stdout, result.stderr
     if run:
         run.log({"at": round(started, 3), "argv": shown, "exit": code, "stdout": out, "stderr": err[-4000:]})
     if not quiet:
@@ -96,22 +122,18 @@ def until(predicate, description, timeout=30, interval=0.25):
     die(f"timed out after {timeout}s waiting for {description}")
 
 
-def alive(pid):
+def start_time(pid):
+    """Kernel start time of pid (field 22 of /proc/PID/stat), or None if it is gone."""
     try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-def own_pid(pid, needle):
-    """True only if pid is still the process we started (guards against pid reuse)."""
-    try:
-        return needle in Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
-        return False
+        return None
+    return stat.rsplit(")", 1)[1].split()[19]
+
+
+def own_pid(record):
+    """True only if the recorded pid is still the very process we started (pid + start time)."""
+    return start_time(record["pid"]) == record["start"]
 
 
 # ---------------------------------------------------------------- doctor
@@ -127,6 +149,11 @@ def cmd_doctor(args):
     for tool in SESSION_TOOLS + OTHER_TOOLS:
         report(bool(shutil.which(tool)), f"tool {tool}" + ("" if shutil.which(tool) else " missing (see SKILL.md Launch)"))
     report(JFK.is_file(), f"public speech fixture {JFK.relative_to(REPO)}")
+    load = os.getloadavg()[0]
+    print(f"[{'info' if load < os.cpu_count() else 'warn'}] host load {load:.1f} on {os.cpu_count()} CPUs"
+          + ("" if load < os.cpu_count() else "; audio xruns and slow pw-record stops (#164) get likelier"))
+    overrides = [k for k in AUDIO_VARS if k in os.environ]
+    print(f"[info] inherited audio routing vars {overrides or 'none'}; the session and its PipeWire commands drop them")
     model = OPERATOR_MODELS / "parakeet-tdt-0.6b-v3-int8"
     print(f"[{'ok' if model.is_dir() else 'info'}] reusable local model {'present' if model.is_dir() else 'absent; `up` will run `models pull` (~640 MB)'}")
     if args.binary:
@@ -134,37 +161,35 @@ def cmd_doctor(args):
         code, out, _ = run_cmd(None, [str(binary), "--version"], os.environ, quiet=True)
         report(code == 0, f"binary {binary}: {out.strip() or 'does not run'}")
     # The operator's own install is observed read-only and never driven.
-    live = shutil.which("cantrip") or str(Path.home() / ".local/bin/cantrip")
-    if Path(live).exists():
-        code, out, _ = run_cmd(None, [live, "ping"], os.environ, quiet=True)
-        print(f"[info] operator daemon ({live}): {'running — do not drive it' if code == 0 else 'not reachable'}")
+    # The operator's own daemon is never contacted (even ping writes to its log): look at its socket only.
+    socket = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "cantrip/cantrip.sock"
+    print(f"[info] operator daemon socket {socket}: {'present — never drive it' if socket.exists() else 'absent'}")
     try:
         code, body, _ = fetch(f"{SITE}/health.json", timeout=15)
         health = json.loads(body) if code == 200 else {}
-        report(health.get("status") == "ok", f"website {SITE}/health.json HTTP {code} revision {health.get('revision', '?')[:12]} ({health.get('environment')})")
+        report(health.get("status") == "ok", f"website {SITE}/health.json HTTP {code} status {health.get('status')} revision {health.get('revision', '?')[:12]}")
     except (urllib.error.URLError, OSError, ValueError) as error:
         report(False, f"website {SITE}/health.json: {error}")
     if args.run:
         run = Run(args.run)
         state = run.state()
-        env = state["env"]
-        for name, pid in state["pids"].items():
-            report(own_pid(pid, state["markers"][name]), f"session {name} pid {pid}")
-        code, out, _ = run_cmd(None, ["pactl", "list", "short", "sinks"], os.environ, quiet=True)
-        report(state["sink"] in out, f"private microphone sink {state['sink']}")
+        env = run.env(state)
+        for name, record in state["procs"].items():
+            report(own_pid(record), f"session {name} pid {record['pid']} still the process `up` started")
+        code, out, _ = run_cmd(None, ["pactl", "list", "short", "sources"], audio_env(), quiet=True)
+        report(state["source"] in out.split(), f"private microphone source {state['source']}")
         code, out, err = run_cmd(None, [state["binary"], "ping"], env, quiet=True)
-        report(code == 0, f"session daemon ping: {(out or err).strip()[:120]}")
-        code, out, _ = run_cmd(None, [state["binary"], "status", "--json"], env, quiet=True)
-        if code == 0:
-            print(f"[info] session state: {json.loads(out)['state']}")
+        report(code == 0, f"session daemon ping: {' '.join((out or err).split())[:120]}")
     sys.exit(0 if ok else 1)
 
 
 # ---------------------------------------------------------------- install
 
 def cmd_install(args):
-    out = Path(args.out).resolve()
+    out = Path(args.out).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
+    if (out / "prefix").exists():
+        die(f"{out}/prefix already exists; use a new --out directory")
     run = Run(out)
     env = dict(os.environ)
     version = args.version
@@ -179,7 +204,9 @@ def cmd_install(args):
     run_cmd(run, ["gh", "release", "download", f"v{version}", "--repo", REPOSITORY, "--dir", str(download),
                   "--pattern", archive, "--pattern", "release.json", "--pattern", "SHA256SUMS", "--pattern", "provenance.json"], env, check=True, timeout=300)
     os.chdir(download)
-    run_cmd(run, ["sha256sum", "--check", "--strict", "--ignore-missing", "SHA256SUMS"], env, check=True)
+    code, sums, _ = run_cmd(run, ["sha256sum", "--check", "--strict", "--ignore-missing", "SHA256SUMS"], env, check=True)
+    if f"{archive}: OK" not in sums or "release.json: OK" not in sums:
+        die("SHA256SUMS did not cover both the archive and release.json")
     meta = json.loads((download / "release.json").read_text())
     if not (meta["version"] == version and meta["tag"] == f"v{version}" and meta["archive"]["name"] == archive
             and re.fullmatch(r"[0-9a-f]{40}", meta["source_revision"])):
@@ -188,6 +215,8 @@ def cmd_install(args):
         run_cmd(run, ["gh", "attestation", "verify", subject, "--repo", REPOSITORY, "--bundle", "provenance.json",
                       "--source-digest", meta["source_revision"], "--signer-workflow", f"{REPOSITORY}/.github/workflows/release.yml",
                       "--deny-self-hosted-runners"], env, check=True, timeout=120)
+    if hashlib.sha256((download / archive).read_bytes()).hexdigest() != meta["archive"]["sha256"]:
+        die("archive sha256 differs from release.json")
     run_cmd(run, ["tar", "-xzf", archive], env, check=True)
     folder = download / archive.removesuffix(".tar.gz")
     os.chdir(folder)
@@ -197,8 +226,8 @@ def cmd_install(args):
     # daemon is neither seen nor disturbed.
     prefix = out / "prefix"
     iso = dict(env)
-    for key in XDG:
-        path = out / "install-env" / key
+    for key, short in XDG.items():
+        path = out / "install-env" / short
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         iso[key] = str(path)
     run_cmd(run, ["./install.sh", "install", "--prefix", str(prefix)], iso, check=True)
@@ -209,44 +238,46 @@ def cmd_install(args):
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     if digest != meta["binary_sha256"]:
         die("installed binary sha256 differs from release.json binary_sha256")
-    code, again, _ = run_cmd(run, ["./install.sh", "install", "--prefix", str(prefix)], iso)
+    code, _, refusal = run_cmd(run, ["./install.sh", "install", "--prefix", str(prefix)], iso)
+    refused = code != 0 and "already exists" in refusal
     proof = {"feature": "install", "version": version, "source_revision": meta["source_revision"],
              "binary": str(binary), "binary_sha256": digest, "attestation": "verified (release.json + archive)",
-             "repeat_install_refused": code != 0, "sample_wav": str(folder / "sample.wav")}
+             "repeat_install_refused": refused}
     (out / "evidence").mkdir(exist_ok=True)
     (out / "evidence/install.json").write_text(json.dumps(proof, indent=2) + "\n")
     print(json.dumps(proof, indent=2))
+    if not refused:
+        die("a repeat install over an existing binary was not refused")
 
 
 # ---------------------------------------------------------------- session
 
-def session_env(run, sink=None):
-    env = dict(os.environ)
-    real_runtime = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    for key in SCRUB:
-        env.pop(key, None)
-    for key in XDG:
-        path = run.session / key
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        env[key] = str(path)
-    # PipeWire stays the operator's server (that is how the private sink is
-    # reachable); everything else resolves inside the run directory.
-    env.update(PIPEWIRE_RUNTIME_DIR=real_runtime, PULSE_RUNTIME_PATH=f"{real_runtime}/pulse",
-               WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1",
-               LIBGL_ALWAYS_SOFTWARE="1", XDG_SESSION_TYPE="wayland", XDG_CURRENT_DESKTOP="sway",
-               BROWSER="none", EDITOR="true", VISUAL="true", NO_COLOR="1")
-    return env
-
-
-def write_config(binary, env, sink, injection):
-    subprocess.run([binary, "config", "init"], env=env, check=True, capture_output=True)
-    path = Path(subprocess.run([binary, "config", "path"], env=env, check=True, capture_output=True, text=True).stdout.strip())
+def write_config(binary, env, source, injection):
+    subprocess.run([binary, "config", "init"], env=env, check=True, capture_output=True, timeout=30)
+    path = Path(subprocess.run([binary, "config", "path"], env=env, check=True, capture_output=True, text=True, timeout=30).stdout.strip())
     text = path.read_text()
     text = re.sub(r'^injection = "[a-z]+"', f'injection = "{injection}"', text, count=1, flags=re.M)
-    text = text.replace('# audio_source = "…"', f'audio_source = "{sink}"', 1)
+    text = text.replace('# audio_source = "…"', f'audio_source = "{source}"', 1)
     text = text.replace("labels = false", "labels = true", 1)
     path.write_text(text)
+    shown = subprocess.run([binary, "config", "show"], env=env, check=True, capture_output=True, text=True, timeout=30).stdout
+    if f'audio_source = "{source}"' not in shown or f'injection = "{injection}"' not in shown:
+        die(f"session config edits did not take; `config show` was:\n{shown}")
     return path
+
+
+def unload_own_modules(state):
+    """Unload only modules whose arguments name this run's private nodes (module ids are reused)."""
+    code, out, _ = run_cmd(None, ["pactl", "list", "short", "modules"], audio_env(), quiet=True)
+    mine = {line.split("\t")[0] for line in out.splitlines() if state["sink"] in line}
+    result = {}
+    for module in reversed(state.get("modules", [])):
+        if module in mine:
+            code, _, _ = run_cmd(None, ["pactl", "unload-module", module], audio_env(), quiet=True)
+            result[module] = "unloaded" if code == 0 else "unload failed"
+        else:
+            result[module] = "not ours anymore; left alone"
+    return result
 
 
 def cmd_up(args):
@@ -256,44 +287,65 @@ def cmd_up(args):
     run = Run(args.run)
     if run.state_file.exists():
         die(f"{run.root} already has a session; run `verify-cantrip down --run {run.root}` first")
+    runtime = run.session / XDG["XDG_RUNTIME_DIR"]
+    if len(str(runtime)) + len("/sway-ipc.4294967295.4194304.sock") > SOCKET_MAX:
+        die(f"--run path is too long for Wayland/IPC sockets ({len(str(runtime))} chars before the socket name); "
+            "use a short one such as ~/.cache/tmp/vc/<HHMMSS>")
     binary = str(Path(args.binary).resolve())
     run.session.mkdir(parents=True, exist_ok=True)
     run.evidence.mkdir(parents=True, exist_ok=True)
     sink = f"cantrip_verify_{os.getpid()}"
-    env = session_env(run)
-    state = {"binary": binary, "sink": sink, "env": env, "pids": {}, "markers": {}, "module": None, "started": time.time()}
+    real_runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    overrides = {}
+    for key, short in XDG.items():
+        path = run.session / short
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        overrides[key] = str(path)
+    # PipeWire stays the operator's server (that is how the private nodes are
+    # reachable); everything else resolves inside the run directory.
+    overrides.update(PIPEWIRE_RUNTIME_DIR=real_runtime, PULSE_RUNTIME_PATH=f"{real_runtime}/pulse", PIPEWIRE_PROPS=NO_FALLBACK,
+                     WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1",
+                     LIBGL_ALWAYS_SOFTWARE="1", XDG_SESSION_TYPE="wayland", XDG_CURRENT_DESKTOP="sway",
+                     BROWSER="none", EDITOR="true", VISUAL="true", NO_COLOR="1")
+    state = {"binary": binary, "sink": sink, "source": f"{sink}_mic", "overrides": overrides, "procs": {}, "modules": [],
+             "started": time.time()}
 
     def save():
         run.state_file.write_text(json.dumps(state, indent=2))
+        run.state_file.chmod(0o600)
 
-    def launch(name, argv, marker):
+    def launch(name, argv):
         log = (run.evidence / f"{name}.log").open("ab")
-        process = subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
-        state["pids"][name] = process.pid
-        state["markers"][name] = marker
+        process = subprocess.Popen(argv, env=run.env(state), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
+        state["procs"][name] = {"pid": process.pid, "start": until(lambda: start_time(process.pid), f"{name} start time", timeout=5)}
         save()
         return process
 
     save()
     try:
-        code, module, err = run_cmd(run, ["pactl", "load-module", "module-null-sink", f"sink_name={sink}",
-                                          f"sink_properties=device.description={sink}"], os.environ, check=True)
-        state["module"] = module.strip()
+        _, module, _ = run_cmd(run, ["pactl", "load-module", "module-null-sink", f"sink_name={sink}",
+                                     f"sink_properties=device.description={sink}"], audio_env(), check=True)
+        state["modules"].append(module.strip())
+        save()
+        _, module, _ = run_cmd(run, ["pactl", "load-module", "module-remap-source", f"master={sink}.monitor",
+                                     f"source_name={state['source']}", f"source_properties=device.description={state['source']}"],
+                               audio_env(), check=True)
+        state["modules"].append(module.strip())
         save()
         conf = run.session / "sway.conf"
         conf.write_text("output HEADLESS-1 mode 1280x900\nseat seat0 fallback true\nxwayland disable\n"
                         "default_border pixel 0\nfor_window [app_id=\".*\"] floating enable\n")
-        compositor = launch("compositor", ["sway", "-c", str(conf)], str(conf))
-        runtime = Path(env["XDG_RUNTIME_DIR"])
+        compositor = launch("compositor", ["sway", "-c", str(conf)])
         lock = until(lambda: next(runtime.glob("wayland-*.lock"), None), "headless Wayland socket")
-        env["WAYLAND_DISPLAY"] = lock.name.removesuffix(".lock")
-        env["SWAYSOCK"] = str(runtime / f"sway-ipc.{os.getuid()}.{compositor.pid}.sock")
-        until(lambda: Path(env["SWAYSOCK"]).exists(), "headless compositor IPC")
-        state["env"] = env
+        overrides["WAYLAND_DISPLAY"] = lock.name.removesuffix(".lock")
+        overrides["SWAYSOCK"] = str(runtime / f"sway-ipc.{os.getuid()}.{compositor.pid}.sock")
+        until(lambda: Path(overrides["SWAYSOCK"]).exists(), "headless compositor IPC")
         save()
-        launch("keyboard", ["wtype", "-s", "3600000"], "3600000")
-        config = write_config(binary, env, sink, args.injection)
-        run.log({"config": str(config), "injection": args.injection, "audio_source": sink})
+        # A virtual keyboard gives the headless seat input capabilities.
+        launch("keyboard", ["wtype", "-s", "3600000"])
+        env = run.env(state)
+        config = write_config(binary, env, state["source"], args.injection)
+        run.log({"config": str(config), "injection": args.injection, "audio_source": state["source"]})
         models = Path(env["XDG_DATA_HOME"]) / "cantrip/models"
         source = OPERATOR_MODELS / "parakeet-tdt-0.6b-v3-int8"
         if args.no_model:
@@ -307,27 +359,35 @@ def cmd_up(args):
             run_cmd(run, [binary, "models", "pull"], env, check=True, timeout=1800)
         run_cmd(run, [binary, "models", "status"], env)
         if not args.no_daemon:
-            launch("daemon", [binary, "daemon"], " daemon")
+            launch("daemon", [binary, "daemon"])
             until(lambda: subprocess.run([binary, "ping"], env=env, capture_output=True).returncode == 0, "session daemon ping", timeout=60)
-        print(json.dumps({"run": str(run.root), "binary": binary, "sink": sink, "wayland": env["WAYLAND_DISPLAY"],
-                          "evidence": str(run.evidence)}, indent=2))
+        print(json.dumps({"run": str(run.root), "binary": binary, "microphone": state["source"], "speaker": sink,
+                          "wayland": overrides["WAYLAND_DISPLAY"], "evidence": str(run.evidence)}, indent=2))
     except BaseException:
         print("verify-cantrip: up failed; tearing down what it started", file=sys.stderr)
         teardown(run)
         raise
 
 
-def stop_pid(pid, marker, sig=signal.SIGTERM, timeout=20):
-    if not own_pid(pid, marker):
+def stop_proc(record, timeout=20):
+    if not own_pid(record):
         return "gone"
-    os.kill(pid, sig)
+    try:
+        os.kill(record["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        return "gone"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not own_pid(pid, marker):
+        if not own_pid(record):
             return "exited"
         time.sleep(0.2)
-    os.kill(pid, signal.SIGKILL)
-    return "killed"
+    if own_pid(record):
+        try:
+            os.kill(record["pid"], signal.SIGKILL)
+        except ProcessLookupError:
+            return "exited"
+        return "killed"
+    return "exited"
 
 
 def teardown(run):
@@ -336,11 +396,12 @@ def teardown(run):
     state = json.loads(run.state_file.read_text())
     result = {}
     for name in ("daemon", "keyboard", "compositor"):
-        if name in state["pids"]:
-            result[name] = stop_pid(state["pids"][name], state["markers"][name])
-    if state.get("module"):
-        code, _, _ = run_cmd(None, ["pactl", "unload-module", state["module"]], os.environ, quiet=True)
-        result["sink"] = "unloaded" if code == 0 else "unload failed"
+        if name in state["procs"]:
+            try:
+                result[name] = stop_proc(state["procs"][name])
+            except OSError as error:
+                result[name] = f"stop failed: {error}"
+    result["modules"] = unload_own_modules(state)
     run.log({"teardown": result})
     shutil.rmtree(run.session, ignore_errors=True)
     run.state_file.unlink()
@@ -361,14 +422,19 @@ def cmd_cantrip(args):
     run = Run(args.run)
     state = run.state()
     argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
-    code, _, _ = run_cmd(run, [state["binary"]] + argv, state["env"], label="cantrip", timeout=args.timeout)
-    sys.exit(code if isinstance(code, int) else 1)
+    code, out, err = run_cmd(run, [state["binary"]] + argv, run.env(state), label="cantrip", timeout=args.timeout, quiet=True)
+    sys.stdout.write(out)
+    sys.stderr.write(err)
+    sys.exit(code)
+
+
+def play_argv(run, wav):
+    return ["pw-play", "--target", run.state()["sink"], str(wav)]
 
 
 def speak(run, wav):
-    state = run.state()
-    # pw-play blocks for the clip's duration; the sink is private to this run.
-    return run_cmd(run, ["pw-play", "--target", state["sink"], str(wav)], os.environ, timeout=120)
+    # pw-play blocks for the clip's duration; it plays into the private sink only.
+    return run_cmd(run, play_argv(run, wav), audio_env(), timeout=120)
 
 
 def cmd_speak(args):
@@ -379,19 +445,24 @@ def cmd_speak(args):
 
 def status(run):
     state = run.state()
-    code, out, err = run_cmd(run, [state["binary"], "status", "--json"], state["env"], quiet=True)
+    code, out, _ = run_cmd(run, [state["binary"], "status", "--json"], run.env(state), quiet=True)
     return json.loads(out) if code == 0 else None
 
 
-def wait_settled(run, after_event=None, timeout=180):
+def last_event(run):
+    snap = status(run)
+    if snap is None:
+        die("session daemon did not answer status; run doctor --run")
+    return snap["outcome"]["event_id"] if snap.get("outcome") else 0
+
+
+def wait_settled(run, after_event, timeout=180):
     """Wait for idle with a terminal outcome newer than after_event."""
     def settled():
         snap = status(run)
         if not snap or snap["state"] != "idle" or not snap.get("outcome"):
             return None
-        if after_event is not None and snap["outcome"]["event_id"] <= after_event:
-            return None
-        return snap
+        return snap if snap["outcome"]["event_id"] > after_event else None
     return until(settled, "an idle state with a new terminal outcome", timeout=timeout, interval=0.5)
 
 
@@ -403,22 +474,67 @@ def cmd_wait(args):
 
 
 def clipboard(run):
-    state = run.state()
-    result = subprocess.run(["wl-paste", "--no-newline"], env=state["env"], capture_output=True, timeout=10)
+    result = subprocess.run(["wl-paste", "--no-newline"], env=run.env(), capture_output=True, timeout=10)
     return result.stdout.decode(errors="replace") if result.returncode == 0 else None
+
+
+def set_clipboard(run, text):
+    subprocess.run(["wl-copy", text], env=run.env(), check=True, timeout=10)
 
 
 def cmd_clipboard(args):
     run = Run(args.run)
+    if args.set is not None:
+        set_clipboard(run, args.set)
+        run.log({"clipboard_set_chars": len(args.set)})
     text = clipboard(run)
     run.log({"clipboard_chars": None if text is None else len(text)})
     print(text if text is not None else "(clipboard empty)")
 
 
+def recorder_pids(run):
+    """PIDs of pw-record processes the session daemon is running."""
+    daemon = run.state()["procs"].get("daemon", {}).get("pid")
+    found = []
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            fields = stat.read_text().rsplit(")", 1)
+            comm = fields[0].split("(", 1)[1]
+            ppid = int(fields[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            continue
+        if ppid == daemon and comm == "pw-record":
+            found.append(stat.parent.name)
+    return found
+
+
+def capture_links(run):
+    """Names of the PipeWire nodes feeding the session daemon's pw-record child (empty if not recording)."""
+    children = recorder_pids(run)
+    if not children:
+        return None
+    dump = json.loads(subprocess.run(["pw-dump"], env=audio_env(), capture_output=True, text=True, timeout=20).stdout)
+    names = {obj["id"]: obj["info"]["props"].get("node.name") for obj in dump
+             if obj.get("type") == "PipeWire:Interface:Node" and obj.get("info")}
+    clients = {obj["id"] for obj in dump if obj.get("type") == "PipeWire:Interface:Client" and obj.get("info")
+               and str(obj["info"]["props"].get("application.process.id")) in children}
+    recorders = {obj["id"] for obj in dump if obj.get("type") == "PipeWire:Interface:Node" and obj.get("info")
+                 and obj["info"]["props"].get("client.id") in clients}
+    return sorted({names.get(obj["info"]["output-node-id"]) for obj in dump
+                   if obj.get("type") == "PipeWire:Interface:Link" and obj.get("info")
+                   and obj["info"].get("input-node-id") in recorders})
+
+
+def cmd_links(args):
+    run = Run(args.run)
+    links = capture_links(run)
+    run.log({"capture_links": links})
+    print(json.dumps({"recording_from": links, "private_microphone": run.state()["source"]}))
+
+
 def shot(run, name):
-    state = run.state()
     path = run.evidence / f"{name}.png"
-    subprocess.run(["grim", str(path)], env=state["env"], check=True, capture_output=True, timeout=15)
+    subprocess.run(["grim", str(path)], env=run.env(), check=True, capture_output=True, timeout=15)
     text = subprocess.run(["tesseract", str(path), "stdout"], capture_output=True, text=True, timeout=60).stdout
     (run.evidence / f"{name}.ocr.txt").write_text(text)
     return path, " ".join(text.split())
@@ -430,18 +546,24 @@ def cmd_shot(args):
     print(f"{path}\nOCR: {text[:400]}")
 
 
-def cmd_window(args):
-    """Open a native window (settings/actions) in the headless compositor and screenshot it."""
-    run = Run(args.run)
+def open_window(run, window, name, doctor=False, settle=4):
+    """Open a native window (settings/actions) in the headless compositor, screenshot it, close it."""
     state = run.state()
-    log = (run.evidence / f"{args.name}.log").open("ab")
-    process = subprocess.Popen([state["binary"], args.window] + (["--doctor"] if args.doctor else []), env=state["env"],
+    log = (run.evidence / f"{name}.log").open("ab")
+    process = subprocess.Popen([state["binary"], window] + (["--doctor"] if doctor else []), env=run.env(state),
                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     try:
-        time.sleep(args.settle)
-        path, text = shot(run, args.name)
-        run.log({"window": args.window, "screenshot": path.name, "ocr_excerpt": text[:300]})
-        print(f"{path}\nOCR: {text[:600]}")
+        time.sleep(settle)
+        path, text = shot(run, name)
+        deadline = time.monotonic() + 15
+        while "Connecting" in text and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(1)
+            path, text = shot(run, name)
+        alive = process.poll() is None
+        run.log({"window": window, "screenshot": path.name, "alive": alive, "ocr_excerpt": text[:300]})
+        if not alive:
+            die(f"{window} exited ({process.returncode}) before the screenshot; see evidence/{name}.log")
+        return path, text
     finally:
         process.terminate()
         try:
@@ -451,46 +573,91 @@ def cmd_window(args):
             process.wait()
 
 
+def cmd_window(args):
+    if args.doctor and args.window != "actions":
+        die("--doctor exists only for `actions`")
+    run = Run(args.run)
+    path, text = open_window(run, args.window, args.name or f"window-{args.window}", args.doctor, args.settle)
+    print(f"{path}\nOCR: {text[:600]}")
+
+
 # ---------------------------------------------------------------- journeys
 
 def words(text):
     return re.findall(r"[a-z']+", text.lower())
 
 
-def jfk_match(text):
-    """Recognition varies take to take; require the sentence, not exact words."""
-    import difflib
-    return difflib.SequenceMatcher(None, words(text), words(JFK_TEXT)).ratio() >= 0.75
+def jfk_coverage(text):
+    """Share of the JFK sentence's words recognized in order (0..1)."""
+    expected = words(JFK_TEXT)
+    matcher = difflib.SequenceMatcher(None, words(text), expected, autojunk=False)
+    return sum(block.size for block in matcher.get_matching_blocks()) / len(expected)
 
 
-def check(condition, message, results):
-    results.append({"check": message, "ok": bool(condition)})
-    print(f"[{'ok' if condition else 'FAIL'}] {message}")
+def jfk_match(text, run=None, where=""):
+    """Recognition varies by a word or two per take: require >= 80% of the sentence's words, in order.
+    Only fixture-derived text is ever compared, so it is safe to log."""
+    coverage = jfk_coverage(text)
+    if run:
+        run.log({"jfk_coverage": round(coverage, 3), "where": where, "text": text[:300]})
+    return coverage >= 0.8
+
+
+def check(condition, message, results, known_issue=None):
+    item = {"check": message, "ok": bool(condition)}
+    if known_issue and not condition:
+        item["known_issue"] = known_issue
+    results.append(item)
+    tag = "ok" if condition else ("KNOWN" if known_issue else "FAIL")
+    print(f"[{tag}] {message}" + (f" ({known_issue})" if known_issue and not condition else ""))
     return condition
-
-
-def last_event(run):
-    snap = status(run)
-    return snap["outcome"]["event_id"] if snap and snap.get("outcome") else 0
 
 
 def cantrip(run, *argv, timeout=60):
     state = run.state()
-    return run_cmd(run, [state["binary"], *argv], state["env"], label="cantrip", timeout=timeout)
+    return run_cmd(run, [state["binary"], *argv], run.env(state), label="cantrip", timeout=timeout)
 
 
-def journey_dictate(run, results):
+def act(run, results, label, *argv, timeout=180):
+    """Run a daemon command and wait for its outcome; a rejected command fails the check without waiting."""
+    before = last_event(run)
+    code, _, err = cantrip(run, *argv)
+    check(code == 0, f"{label} accepted (exit {code}{': ' + err.strip()[:120] if code else ''})", results)
+    if code != 0:
+        die(f"{label} was rejected; later steps depend on it")
+    return wait_settled(run, before, timeout)
+
+
+def history_dir(run):
+    return Path(run.env()["XDG_STATE_HOME"]) / "cantrip/transcripts"
+
+
+def record_take(run, wav, results, name=None):
+    """start → (speak) → stop through the CLI; returns the settled snapshot."""
     before = last_event(run)
     cantrip(run, "start")
     until(lambda: (status(run) or {}).get("state") == "recording", "recording state", timeout=20)
     time.sleep(1.0)  # let pw-record link to the source, as a speaker pauses after pressing start
-    voice = subprocess.Popen(["pw-play", "--target", run.state()["sink"], str(JFK)])
-    time.sleep(4)
-    shot(run, "dictate-1-recording")
-    voice.wait(timeout=60)
-    run.log({"argv": ["pw-play", "--target", run.state()["sink"], str(JFK)], "exit": voice.returncode})
-    check(voice.returncode == 0, "public speech played into the private microphone", results)
+    voice = subprocess.Popen(play_argv(run, wav), env=audio_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(3)
+        links = capture_links(run)
+        run.log({"capture_links": links})
+        check(links == [run.state()["source"]], f"daemon records only the private microphone (links: {links})", results)
+        if name:
+            shot(run, name)
+        voice.wait(timeout=60)
+    finally:
+        if voice.poll() is None:
+            voice.kill()
+            voice.wait()
+    run.log({"argv": play_argv(run, wav), "exit": voice.returncode})
     time.sleep(0.5)
+    return before
+
+
+def journey_dictate(run, results):
+    before = record_take(run, JFK, results, "dictate-1-recording")
     cantrip(run, "stop")
     snap = wait_settled(run, before)
     shot(run, "dictate-2-settled")
@@ -498,150 +665,152 @@ def journey_dictate(run, results):
     check(outcome["completeness"] == "complete", f"take completeness is complete (got {outcome['completeness']})", results)
     check(outcome["delivery"] == "copied", f"delivery is copied (got {outcome['delivery']})", results)
     text = clipboard(run) or ""
-    check(jfk_match(text), f"real clipboard holds the spoken JFK sentence ({len(text)} chars)", results)
-    code, out, _ = cantrip(run, "status")
+    check(jfk_match(text, run, "clipboard"), f"real clipboard holds the spoken JFK sentence ({len(text)} chars)", results)
+    cantrip(run, "status")
     take = outcome["artifacts"]["take_id"]
-    history = Path(run.env()["XDG_STATE_HOME"]) / "cantrip/transcripts" / f"{take}.json"
-    check(history.is_file() and oct(history.stat().st_mode & 0o777) == "0o600", "transcript archived owner-only in history", results)
+    archive = history_dir(run) / f"{take}.json"
+    check(archive.is_file() and archive.stat().st_mode & 0o777 == 0o600, "transcript archived owner-only in history", results)
     code, out, _ = cantrip(run, "recordings", "--json")
-    takes = json.loads(out) if code == 0 else []
-    check(any(take in json.dumps(item) for item in takes), "recordings lists the take by id", results)
+    rows = [row for row in json.loads(out) if row["id"] == take] if code == 0 else []
+    check(rows and rows[0]["text_available"] and rows[0]["audio_available"], "recordings lists the take with text and audio", results)
     return take
 
 
 def journey_recover(run, results, take=None):
     if take is None:
         take = journey_dictate(run, results)
+    placeholder = "verify-cantrip placeholder"
     # Copy by exact id after the clipboard was overwritten.
-    subprocess.run(["wl-copy", "verify-cantrip placeholder"], env=run.env(), check=True, timeout=10)
-    before = last_event(run)
-    code, _, _ = cantrip(run, "copy", take)
-    check(code == 0, "copy ID accepted", results)
-    wait_settled(run, before)
-    check(jfk_match(clipboard(run) or ""), "copy ID restored the saved transcript to the clipboard", results)
+    set_clipboard(run, placeholder)
+    act(run, results, "copy ID", "copy", take)
+    check(jfk_match(clipboard(run) or "", run, "clipboard"), "copy ID restored the saved transcript to the clipboard", results)
     # Cancel mid-recording: nothing delivered, audio retained.
-    subprocess.run(["wl-copy", "verify-cantrip placeholder"], env=run.env(), check=True, timeout=10)
-    before = last_event(run)
-    cantrip(run, "start")
-    until(lambda: (status(run) or {}).get("state") == "recording", "recording state", timeout=20)
-    time.sleep(1.0)
-    speak(run, JFK)
+    set_clipboard(run, placeholder)
+    before = record_take(run, JFK, results)
     cantrip(run, "cancel")
     snap = wait_settled(run, before)
     shot(run, "recover-1-cancelled")
     cancelled = snap["outcome"]
     check(cancelled["completeness"] == "cancelled", f"cancel settles as cancelled (got {cancelled['completeness']})", results)
-    check(clipboard(run) == "verify-cantrip placeholder", "cancel delivered nothing to the clipboard", results)
+    check(clipboard(run) == placeholder, "cancel delivered nothing to the clipboard", results)
     cancelled_id = cancelled["artifacts"]["take_id"]
-    check(cancelled["artifacts"].get("audio") is True, "cancelled take keeps its audio", results)
+    audio = history_dir(run) / f"{cancelled_id}.wav"
+    check(audio.is_file() and audio.stat().st_size > 44, "cancelled take keeps its audio on disk", results)
     # Local recovery of the cancelled take, copied rather than typed.
-    before = last_event(run)
-    cantrip(run, "recover", "--id", cancelled_id, "--local", "--clipboard")
-    snap = wait_settled(run, before)
+    snap = act(run, results, "recover --local --clipboard", "recover", "--id", cancelled_id, "--local", "--clipboard")
     shot(run, "recover-2-recovered")
     check(snap["outcome"]["completeness"] == "complete" and snap["outcome"]["delivery"] == "copied",
           f"recover --local --clipboard completes and copies (got {snap['outcome']['completeness']}/{snap['outcome']['delivery']})", results)
-    check(jfk_match(clipboard(run) or ""), "recovered transcript is on the clipboard", results)
+    check(jfk_match(clipboard(run) or "", run, "clipboard"), "recovered transcript is on the clipboard", results)
     # Forget requires confirmation and removes audio only.
-    code, _, _ = cantrip(run, "forget", cancelled_id)
-    check(code != 0, "forget without --yes is refused", results)
-    before = last_event(run)
-    cantrip(run, "forget", cancelled_id, "--yes")
-    wait_settled(run, before)
+    code, _, err = cantrip(run, "forget", cancelled_id)
+    check(code != 0 and "--yes" in err and audio.is_file(), "forget without --yes is refused and keeps the audio", results)
+    act(run, results, "forget --yes", "forget", cancelled_id, "--yes")
+    check(not audio.exists(), "confirmed Forget deleted the take's audio file", results)
     code, out, _ = cantrip(run, "recordings", "--json")
-    entry = next((item for item in json.loads(out) if cancelled_id in json.dumps(item)), None) if code == 0 else None
-    check(entry is not None and entry["audio_available"] is False, f"forgotten take keeps its row without retained audio ({entry})", results)
-    archive = Path(run.env()["XDG_STATE_HOME"]) / "cantrip/transcripts" / f"{cancelled_id}.json"
-    check(archive.is_file(), "complete archived text for the recovered take remains after Forget", results)
+    rows = [row for row in json.loads(out) if row["id"] == cancelled_id] if code == 0 else []
+    check(rows and rows[0]["audio_available"] is False, "recordings shows the forgotten take without audio", results)
+    check((history_dir(run) / f"{cancelled_id}.json").is_file(), "complete archived text remains after Forget", results)
 
 
 def journey_breaks(run, results):
     state = run.state()
-    env = state["env"]
-    # Silence: an empty take is reported, not invented.
-    silence = run.session / "silence.wav"
-    if not silence.exists():
-        import wave
+    env = run.env(state)
+    config = Path(subprocess.run([state["binary"], "config", "path"], env=env, capture_output=True, text=True, timeout=30).stdout.strip())
+    original = config.read_text()
+    try:
+        # Silence: an empty take is reported, not invented, and its audio is kept.
+        silence = run.session / "silence.wav"
         with wave.open(str(silence), "wb") as out:
             out.setnchannels(1)
             out.setsampwidth(2)
             out.setframerate(16000)
             out.writeframes(b"\0\0" * 16000 * 3)
-    before = last_event(run)
-    cantrip(run, "start")
-    until(lambda: (status(run) or {}).get("state") == "recording", "recording state", timeout=20)
-    speak(run, silence)
-    cantrip(run, "stop")
-    snap = wait_settled(run, before)
-    shot(run, "breaks-1-silence")
-    check(snap["outcome"]["completeness"] in ("empty", "failed"), f"silence yields an honest empty/failed outcome (got {snap['outcome']['completeness']})", results)
-    # Second daemon in the same runtime dir is refused; the first keeps running.
-    code, _, err = run_cmd(run, [state["binary"], "daemon"], env, label="cantrip", timeout=20)
-    check(code != 0, "a second daemon for the same runtime is refused", results)
-    check(subprocess.run([state["binary"], "ping"], env=env, capture_output=True).returncode == 0, "original daemon still answers ping", results)
-    # Missing model: transcribe refuses without an implicit download.
-    bare = dict(env)
-    empty = run.session / "no-model-data"
-    empty.mkdir(exist_ok=True, mode=0o700)
-    bare["XDG_DATA_HOME"] = str(empty)
-    code, out, err = run_cmd(run, [state["binary"], "transcribe", "--local", str(JFK)], bare, label="cantrip", timeout=60)
-    check(code != 0 and not any(empty.rglob("*.onnx")), "missing model refuses transcription and downloads nothing", results)
-    # Missing microphone target: capture fails visibly, never records another device.
-    config = Path(subprocess.run([state["binary"], "config", "path"], env=env, capture_output=True, text=True).stdout.strip())
-    original = config.read_text()
-    config.write_text(original.replace(f'audio_source = "{state["sink"]}"', 'audio_source = "cantrip_verify_absent_source"'))
-    cantrip(run, "reload")
-    before = last_event(run)
-    cantrip(run, "start")
-    time.sleep(3)
-    cantrip(run, "stop")
-    snap = until(lambda: (lambda s: s if s and s["state"] == "idle" and s.get("outcome") and s["outcome"]["event_id"] > before else None)(status(run)),
-                 "outcome for absent microphone", timeout=60, interval=0.5)
-    shot(run, "breaks-2-absent-mic")
-    check(snap["outcome"]["completeness"] != "complete", f"absent microphone is not reported as a complete take (got {snap['outcome']['completeness']})", results)
-    config.write_text(original)
-    cantrip(run, "reload")
-    # Automatic delivery on an unverified (non-Hyprland) desktop must not send keys.
-    config.write_text(re.sub(r'^injection = "[a-z]+"', 'injection = "auto"', original, count=1, flags=re.M))
-    cantrip(run, "reload")
-    subprocess.run(["wl-copy", "verify-cantrip placeholder"], env=env, check=True, timeout=10)
-    before = last_event(run)
-    cantrip(run, "start")
-    until(lambda: (status(run) or {}).get("state") == "recording", "recording state", timeout=20)
-    time.sleep(1.0)
-    speak(run, JFK)
-    cantrip(run, "stop")
-    snap = wait_settled(run, before)
-    shot(run, "breaks-3-auto-unverified-desktop")
-    delivery = snap["outcome"]["delivery"]
-    check(delivery in ("deferred", "copied"), f"auto mode on unverified desktop defers or copies, never pastes/types (got {delivery})", results)
-    config.write_text(original)
-    cantrip(run, "reload")
+        before = record_take(run, silence, results)
+        cantrip(run, "stop")
+        snap = wait_settled(run, before)
+        shot(run, "breaks-1-silence")
+        take = snap["outcome"]["artifacts"]["take_id"]
+        check(snap["outcome"]["completeness"] == "empty" and (history_dir(run) / f"{take}.wav").is_file(),
+              f"silence settles empty with audio kept (got {snap['outcome']['completeness']})", results)
+        # Second daemon in the same runtime dir is refused; the first keeps running.
+        code, _, err = run_cmd(run, [state["binary"], "daemon"], env, label="cantrip", timeout=20)
+        check(code != 0, "a second daemon for the same runtime exits non-zero", results)
+        check(subprocess.run([state["binary"], "ping"], env=env, capture_output=True, timeout=15).returncode == 0, "original daemon still answers ping", results)
+        # Missing model: transcribe refuses without an implicit download.
+        bare = dict(env)
+        empty = run.session / "no-model-data"
+        empty.mkdir(exist_ok=True, mode=0o700)
+        bare["XDG_DATA_HOME"] = str(empty)
+        code, out, err = run_cmd(run, [state["binary"], "transcribe", "--local", str(JFK)], bare, label="cantrip", timeout=60)
+        check(code != 0 and not out.strip() and not any(empty.rglob("*")), "missing model refuses transcription and downloads nothing", results)
+        # Missing microphone: expected to be refused, like macOS. The session's
+        # node.dont-fallback keeps this probe from recording the operator's mic.
+        config.write_text(original.replace(f'audio_source = "{state["source"]}"', 'audio_source = "cantrip_verify_absent_source"'))
+        cantrip(run, "reload")
+        before = last_event(run)
+        code, out, err = cantrip(run, "start")
+        refused_at_start = code != 0
+        product_guard = refused_at_start
+        if not refused_at_start:
+            time.sleep(3)
+            check(capture_links(run) in (None, []), "absent microphone is not substituted by another device here (links empty)", results)
+            # The session's dont-fallback hides what a real desktop does. Cantrip
+            # itself must refuse or disable fallback for an explicit source.
+            argv = [Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace") for pid in recorder_pids(run)]
+            run.log({"recorder_cmdlines": argv})
+            product_guard = any("dont-fallback" in line for line in argv)
+            cantrip(run, "stop")
+        snap = wait_settled(run, before) if not refused_at_start else None
+        shot(run, "breaks-2-absent-mic")
+        outcome = snap["outcome"] if snap else {}
+        check(outcome.get("completeness") != "complete", f"absent microphone never yields a complete take (got {outcome.get('completeness') or 'refused'})", results)
+        check(product_guard, "Cantrip itself refuses an absent microphone or disables PipeWire fallback for it "
+              "(otherwise a real desktop records the default microphone)", results,
+              known_issue="https://github.com/misty-step/cantrip/issues/162")
+        config.write_text(original)
+        cantrip(run, "reload")
+        # Automatic delivery on an unverified (non-Hyprland) desktop must not send keys.
+        config.write_text(re.sub(r'^injection = "[a-z]+"', 'injection = "auto"', original, count=1, flags=re.M))
+        cantrip(run, "reload")
+        placeholder = "verify-cantrip placeholder"
+        set_clipboard(run, placeholder)
+        before = record_take(run, JFK, results)
+        cantrip(run, "stop")
+        snap = wait_settled(run, before)
+        shot(run, "breaks-3-auto-unverified-desktop")
+        delivery = snap["outcome"]["delivery"]
+        board = clipboard(run) or ""
+        consistent = (delivery == "copied" and jfk_match(board)) or (delivery == "deferred" and board == placeholder)
+        check(consistent, f"auto on an unverified desktop copies or defers, and the clipboard agrees (got {delivery})", results)
+    finally:
+        config.write_text(original)
+        cantrip(run, "reload")
     # Daemon down: client commands fail clearly instead of hanging.
     down_env = dict(env)
-    down_env["XDG_RUNTIME_DIR"] = str(run.session / "no-daemon-runtime")
+    down_env["XDG_RUNTIME_DIR"] = str(run.session / "nd")
     Path(down_env["XDG_RUNTIME_DIR"]).mkdir(exist_ok=True, mode=0o700)
     started = time.monotonic()
     code, _, err = run_cmd(run, [state["binary"], "ping"], down_env, label="cantrip", timeout=30)
-    check(code != 0 and time.monotonic() - started < 15 and "daemon" in err.lower(), "ping with no daemon fails fast with a daemon hint", results)
+    check(code != 0 and time.monotonic() - started < 15 and "cantrip daemon" in err, "ping with no daemon fails fast with a start hint", results)
 
 
 def journey_windows(run, results):
-    for window, extra in (("settings", []), ("actions", [])):
-        args = argparse.Namespace(run=str(run.root), window=window, name=f"windows-{window}", doctor=False, settle=4)
-        cmd_window(args)
-        text = (run.evidence / f"windows-{window}.ocr.txt").read_text()
-        check(len(text.split()) > 5, f"{window} window rendered readable text", results)
+    for window, expected in (("settings", ("Past transcripts", "Copy")), ("actions", ("Recordings", "Recover locally"))):
+        _, text = open_window(run, window, f"windows-{window}")
+        missing = [phrase for phrase in expected if phrase.lower() not in text.lower()]
+        check(not missing, f"{window} window shows {expected} (missing {missing})", results)
     hud = run.evidence / "windows-hud-copied.png"
     code, _, _ = cantrip(run, "hud", "--screenshot", str(hud), "--state", "copied")
-    check(code == 0 and hud.is_file(), "HUD renders the copied state", results)
+    check(code == 0 and hud.is_file() and hud.stat().st_size > 1000, "HUD renders the copied state", results)
 
 
 def journey_transcribe(run, results):
     code, out, _ = cantrip(run, "transcribe", "--local", str(JFK), timeout=180)
     check(code == 0 and jfk_match(out), "transcribe --local prints the JFK sentence on stdout", results)
-    history = list((Path(run.env()["XDG_STATE_HOME"]) / "cantrip/transcripts").glob("*.json"))
-    check(any(json.loads(p.read_text()).get("source") == "transcribe" for p in history), "one-shot transcript saved to private history", results)
+    saved = [json.loads(p.read_text()) for p in history_dir(run).glob("*.json")]
+    check(any(item.get("source") == "transcribe" and jfk_match(item.get("raw_transcript") or "") for item in saved),
+          "one-shot transcript saved to private history", results)
     code, out, _ = cantrip(run, "doctor")
     check(code == 0 and "capture: ready" in out, "doctor reports capture ready against the private source", results)
 
@@ -652,30 +821,29 @@ JOURNEYS = {"transcribe": journey_transcribe, "dictate": journey_dictate, "recov
 
 def cmd_journey(args):
     run = Run(args.run)
-    run.state()
+    state = run.state()
     results = []
     names = list(JOURNEYS) if args.name == "all" else [args.name]
-    failed = None
     for name in names:
         print(f"== journey {name}")
         try:
             JOURNEYS[name](run, results)
-        except SystemExit as error:
-            failed = f"{name}: aborted"
-            results.append({"check": f"{name} journey ran to completion", "ok": False})
-        except Exception as error:  # noqa: BLE001 - record and continue to the report
-            failed = f"{name}: {type(error).__name__}: {error}"
-            results.append({"check": f"{name} journey ran to completion ({type(error).__name__})", "ok": False})
-    state = run.state()
+        except Exception as error:  # noqa: BLE001 - record why and continue to the report
+            print(f"[FAIL] {name} aborted: {type(error).__name__}: {error}")
+            results.append({"check": f"{name} journey ran to completion", "ok": False, "error": f"{type(error).__name__}: {error}"})
+    failed = [r for r in results if not r["ok"] and "known_issue" not in r]
+    known = [r for r in results if "known_issue" in r]
     report = {"journeys": names, "binary": state["binary"],
               "binary_version": subprocess.run([state["binary"], "--version"], capture_output=True, text=True).stdout.strip(),
               "binary_sha256": hashlib.sha256(Path(state["binary"]).read_bytes()).hexdigest(),
-              "isolation": "headless sway (pixman), private HOME/XDG/runtime/clipboard, private PipeWire null sink as microphone",
-              "fixture": "samples/jfk.wav (public domain speech)", "results": results,
-              "passed": all(item["ok"] for item in results) and failed is None}
+              "isolation": "headless sway (pixman), private HOME/XDG/runtime/clipboard, private PipeWire null sink + remapped source "
+                           "as the microphone, inherited audio routing dropped, node.dont-fallback set, capture links checked",
+              "fixture": "samples/jfk.wav (public speech)", "results": results,
+              "passed": not failed, "known_failures": known}
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     (run.evidence / f"journey-{args.name}-{stamp}.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps({"passed": report["passed"], "failed": [r["check"] for r in results if not r["ok"]]}, indent=2))
+    print(json.dumps({"passed": report["passed"], "failed": [r["check"] for r in failed],
+                      "known_failures": [f"{r['check']} -> {r['known_issue']}" for r in known]}, indent=2))
     sys.exit(0 if report["passed"] else 1)
 
 
@@ -690,25 +858,34 @@ def fetch(url, timeout=20):
         return error.code, error.read().decode(errors="replace"), url
 
 
+def gh(*args):
+    result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=60)
+    if result.returncode != 0 or not result.stdout.strip():
+        die(f"gh {' '.join(args)} failed: {result.stderr.strip()[:300]}")
+    return result.stdout.strip()
+
+
 def cmd_site(args):
-    out = Path(args.out).resolve()
-    run = Run(out)
+    run = Run(args.out)
     run.evidence.mkdir(parents=True, exist_ok=True)
     base = args.url.rstrip("/")
     results = []
+    master = gh("api", f"repos/{REPOSITORY}/commits/master", "-q", ".sha")
+    tag = gh("release", "view", "--repo", REPOSITORY, "--json", "tagName", "-q", ".tagName")
     status_code, body, _ = fetch(f"{base}/health.json")
     health = json.loads(body) if status_code == 200 else {}
     run.log({"url": f"{base}/health.json", "status": status_code, "body": health})
     check(health.get("status") == "ok" and health.get("environment") == "production", "health.json reports ok/production", results)
-    master = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/commits/master", "-q", ".sha"], capture_output=True, text=True).stdout.strip()
     deployed = health.get("revision", "")
-    if deployed != master:
-        ancestry = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/compare/{deployed}...{master}", "-q", ".status"], capture_output=True, text=True).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed):
+        relation = "missing"
+    elif deployed == master:
+        relation = "identical"
     else:
-        ancestry = "identical"
-    check(ancestry in ("identical", "ahead"), f"deployed revision {deployed[:12]} is master or an ancestor of master {master[:12]} ({ancestry})", results)
-    run.log({"master": master, "deployed": deployed, "relation": ancestry})
-    tag = subprocess.run(["gh", "release", "view", "--repo", REPOSITORY, "--json", "tagName", "-q", ".tagName"], capture_output=True, text=True).stdout.strip()
+        # "behind": master is ahead of the deployed revision, i.e. deploy pending.
+        relation = gh("api", f"repos/{REPOSITORY}/compare/{master}...{deployed}", "-q", ".status")
+    check(relation in ("identical", "behind"), f"deployed revision {deployed[:12]} is master {master[:12]} or an ancestor ({relation})", results)
+    run.log({"master": master, "deployed": deployed, "relation": relation, "release": tag})
     pages = {"/": ["Speak.", "Download for Linux x86-64", tag], "/docs/install": ["Install Cantrip"],
              "/docs/use": ["First dictation"], "/changelog": [tag], "/releases": [tag], "/evals": ["speech"]}
     for path, needles in pages.items():
@@ -717,7 +894,8 @@ def cmd_site(args):
         run.log({"url": base + path, "status": status_code, "final_url": final, "bytes": len(body), "missing": missing})
         check(status_code == 200 and not missing, f"{path} renders (HTTP {status_code}) with {needles}", results)
     status_code, home, _ = fetch(base + "/")
-    downloads = sorted(set(re.findall(r'href="(https://github\.com/misty-step/cantrip/releases/[^"]+)"', home)))
+    downloads = sorted(set(re.findall(r'href="(https://github\.com/misty-step/cantrip/releases/download/[^"]+)"', home)))
+    check(any(f"/{tag}/" in link for link in downloads), f"home page links the {tag} release download", results)
     for link in downloads[:3]:
         request = urllib.request.Request(link, method="HEAD", headers={"User-Agent": "verify-cantrip"})
         try:
@@ -726,7 +904,6 @@ def cmd_site(args):
         except urllib.error.HTTPError as error:
             code = error.code
         check(code == 200, f"download link {link} resolves (HTTP {code})", results)
-    check(bool(downloads), "home page links a GitHub release download", results)
     internal = sorted(set(re.findall(r'href="(/[^"#?]*)"', home)))
     broken = [link for link in internal if fetch(base + link)[0] != 200]
     run.log({"internal_links": internal, "broken": broken})
@@ -758,15 +935,15 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--version", help="X.Y.Z without v; default latest release")
     p.set_defaults(func=cmd_install)
-    p = sub.add_parser("up", help="start headless sway, private mic sink, and an isolated daemon")
-    p.add_argument("--run", required=True)
+    p = sub.add_parser("up", help="start headless sway, a private microphone, and an isolated daemon")
+    p.add_argument("--run", required=True, help="short path, e.g. ~/.cache/tmp/vc/$(date +%%H%%M%%S)")
     p.add_argument("--binary", required=True)
     p.add_argument("--injection", default="clipboard", choices=["clipboard", "auto", "paste", "type"])
     p.add_argument("--pull-model", action="store_true", help="download the model instead of reflink-copying the operator's")
     p.add_argument("--no-model", action="store_true")
     p.add_argument("--no-daemon", action="store_true")
     p.set_defaults(func=cmd_up)
-    p = sub.add_parser("down", help="stop what `up` started and unload the sink; evidence/ is kept")
+    p = sub.add_parser("down", help="stop what `up` started and unload its PipeWire modules; evidence/ is kept")
     p.add_argument("--run", required=True)
     p.set_defaults(func=cmd_down)
     p = sub.add_parser("cantrip", help="run the session's cantrip binary with the session env: cantrip --run DIR -- status --json")
@@ -778,13 +955,17 @@ def main():
     p.add_argument("--run", required=True)
     p.add_argument("wav", nargs="?")
     p.set_defaults(func=cmd_speak)
+    p = sub.add_parser("links", help="show which PipeWire nodes the session daemon is recording from right now")
+    p.add_argument("--run", required=True)
+    p.set_defaults(func=cmd_links)
     p = sub.add_parser("wait", help="wait for idle with a terminal outcome newer than --after-event")
     p.add_argument("--run", required=True)
-    p.add_argument("--after-event", type=int)
+    p.add_argument("--after-event", type=int, required=True)
     p.add_argument("--timeout", type=int, default=180)
     p.set_defaults(func=cmd_wait)
-    p = sub.add_parser("clipboard", help="print the session clipboard (wl-paste)")
+    p = sub.add_parser("clipboard", help="print the session clipboard (wl-paste); --set TEXT overwrites it first")
     p.add_argument("--run", required=True)
+    p.add_argument("--set", metavar="TEXT")
     p.set_defaults(func=cmd_clipboard)
     p = sub.add_parser("shot", help="screenshot the headless output (+ OCR text) into evidence/NAME.png")
     p.add_argument("--run", required=True)
@@ -796,7 +977,7 @@ def main():
     p.add_argument("--name")
     p.add_argument("--doctor", action="store_true", help="actions --doctor")
     p.add_argument("--settle", type=float, default=4)
-    p.set_defaults(func=lambda a: cmd_window(argparse.Namespace(**{**vars(a), "name": a.name or f"window-{a.window}"})))
+    p.set_defaults(func=cmd_window)
     p = sub.add_parser("journey", help="scripted proof: transcribe | dictate | recover | breaks | windows | all")
     p.add_argument("--run", required=True)
     p.add_argument("name", choices=list(JOURNEYS) + ["all"])
@@ -806,7 +987,11 @@ def main():
     p.add_argument("--url", default=SITE)
     p.set_defaults(func=cmd_site)
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except Failure as error:
+        print(f"verify-cantrip: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

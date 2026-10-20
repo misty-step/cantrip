@@ -13,16 +13,24 @@ required.
 
 Every Cantrip process it starts runs with **private HOME/XDG directories**, a
 **headless Sway** compositor (own clipboard, own layer-shell HUD), and a
-**private PipeWire null sink as the microphone**. The operator's daemon,
-clipboard, configuration, keyring, model directory (read-only reflink copy),
-and transcript history are never touched. Two runs with different `--run`
-directories can coexist.
+**private PipeWire microphone**: a null sink `cantrip_verify_<pid>` that speech
+is played into, remapped as the source node `cantrip_verify_<pid>_mic`, which
+the session config selects as `audio_source`. Inherited audio routing
+(`PIPEWIRE_NODE`, `PIPEWIRE_PROPS`, `PULSE_SINK`, `PULSE_SOURCE`, …, which agent
+sandboxes set) is dropped from the session and from every PipeWire command the
+helper runs, and `node.dont-fallback = true` is set so no stream can fall back
+to the operator's default microphone or speakers. Every journey take checks
+with `pw-dump` that the daemon's recorder is linked **only** to its own `_mic`.
+The session has no D-Bus session bus, so the OS keyring is unreachable from it.
+The operator's daemon, clipboard, configuration, keyring, model directory
+(read-only reflink copy), and transcript history are never touched. Two runs
+with different `--run` directories can coexist.
 
 Paths below are relative to the repository root. `V` is the helper:
 
 ```sh
 V=.agents/skills/verify-cantrip/bin/verify-cantrip
-RUN=~/.cache/tmp/verify-cantrip/$(date -u +%Y%m%dT%H%M%SZ)   # scratch + evidence; never /tmp (RAM)
+RUN=~/.cache/tmp/vc/$(date +%H%M%S)   # keep it short: socket paths must fit 107 bytes; never /tmp (RAM)
 ```
 
 ## Account and sign-in
@@ -50,7 +58,7 @@ grim wtype wl-clipboard tesseract tesseract-data-eng` covers the session tools.
    - This checkout: `cargo build --release --locked`, binary
      `target/release/cantrip`.
 2. **Start the session:** `$V up --run "$RUN" --binary "$RUN/prefix/bin/cantrip"`.
-   It creates the null sink `cantrip_verify_<pid>`, starts headless Sway,
+   It creates the private sink and `_mic` source, starts headless Sway,
    writes a fresh config (`config init`, then `injection = "clipboard"`,
    `audio_source = <sink>`, `[hud] labels = true`), reflink-copies the
    operator's Parakeet model if present (`--pull-model` downloads ~640 MB
@@ -65,14 +73,14 @@ grim wtype wl-clipboard tesseract tesseract-data-eng` covers the session tools.
 `$V doctor [--binary PATH] [--run "$RUN"]` is read-only. It checks tools, the
 speech fixture, the reusable model, the binary's `--version`, the public
 website's `/health.json`, and with `--run` that every process `up` started is
-still the same process, the sink exists, and the session daemon answers `ping`.
-It also reports whether the **operator's own daemon** is running: that daemon
-is observed only, never driven. Run doctor first, after any failed drive, and
+still the same process (PID + start time), the private `_mic` source exists, and the session daemon answers `ping`.
+It also reports host load, and whether the **operator's own daemon** socket
+exists: that daemon is observed only, never contacted or driven. Run doctor first, after any failed drive, and
 whenever something looks off. A non-zero exit means do not drive.
 
 ## Drive
 
-Scripted journeys (each prints `[ok]/[FAIL]` lines and writes
+Scripted journeys (each prints `[ok]/[FAIL]/[KNOWN]` lines and writes
 `evidence/journey-<name>-<UTC>.json`; exit 0 only if all checks pass):
 
 ```sh
@@ -88,12 +96,14 @@ $V site --out "$RUN"                 # public website, read-only
 Primitives for exploring beyond the journeys (all logged to evidence):
 
 ```sh
-$V cantrip --run "$RUN" -- status --json        # any cantrip subcommand, session env
-$V speak --run "$RUN" [file.wav]                # play into the private mic (default samples/jfk.wav)
+$V cantrip --run "$RUN" -- status --json | jq .  # any cantrip subcommand, session env; raw stdout/stderr/exit
+$V speak --run "$RUN" [file.wav]                # play into the private mic (default samples/jfk.wav); blocks ~11 s, add & to act mid-speech
+$V links --run "$RUN"                           # nodes the daemon is recording from now (expect only the _mic)
 $V wait --run "$RUN" --after-event N            # block until idle with an outcome newer than N
-$V clipboard --run "$RUN"                       # wl-paste from the session clipboard
+                                                # (N = .outcome.event_id from status --json before acting; 0 if none)
+$V clipboard --run "$RUN" [--set TEXT]          # read (or overwrite, then read) the session clipboard
 $V shot --run "$RUN" NAME                       # screenshot + OCR text of the headless output
-$V window --run "$RUN" settings|actions [--doctor] [--name NAME]
+$V window --run "$RUN" settings|actions [--doctor] [--name NAME]   # fails if the window exits early
 ```
 
 A user's "press the shortcut" is `cantrip toggle` (or `start`/`stop`); the
@@ -115,16 +125,20 @@ Proof standards:
 - The speech fixture is public (`samples/jfk.wav`). Never feed private audio,
   never commit anything from `session/` (history, WAVs), never paste transcript
   text from the operator's own history into evidence.
-- Recognition varies by a word or two between takes; journeys compare word
-  sequences (≥ 0.75 similarity), not exact strings.
+- Recognition varies by a word or two between takes; journeys require at
+  least 80% of the JFK sentence's words, in order, not exact strings.
+- A check that fails because of a tracked product bug is reported as `KNOWN`
+  with its issue link under `known_failures`; it does not fail the journey,
+  and it is never weakened to pass. Any other failed check exits 1.
 - To publish proof, copy `evidence/` into
   `docs/evidence/verify-cantrip/<YYYY-MM-DD>/` on the PR branch.
 
 ## Cleanup
 
-`$V down --run "$RUN"` stops only the PIDs `up` recorded (checked against their
-command lines, so a reused PID is never signalled), sends the daemon SIGTERM and
-waits, unloads only its own sink module, and deletes `$RUN/session/` (private
+`$V down --run "$RUN"` stops only the processes `up` recorded (PID plus kernel
+start time, so a reused PID is never signalled), sends the daemon SIGTERM and
+waits, unloads only PipeWire modules whose arguments still name this run's sink
+(module IDs are reused), and deletes `$RUN/session/` (private
 history, audio, config, model copy). `$RUN/evidence/` survives. Run it after
 every failed iteration too. `up` refuses a run directory that still has a
 session. Never `pkill cantrip`: the operator's daemon and other agents'

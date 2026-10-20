@@ -13,7 +13,8 @@ fresh directory under `~/.cache/tmp/verify-cantrip/`.
 - `$V up --run "$RUN" --binary <binary>` printed its JSON and
   `$V doctor --run "$RUN"` shows the session daemon idle.
 - Never drive the operator's own daemon (`~/.local/bin/cantrip`, default XDG
-  dirs). Every command goes through `$V cantrip --run "$RUN" -- ...` or a journey.
+  dirs); not even `ping`, which writes to its log. Every command goes through
+  `$V cantrip --run "$RUN" -- ...` or a journey.
 
 ## Driving conventions
 
@@ -69,5 +70,7 @@ keys. Verify them only on an explicit request, with the owner's chosen provider.
   endpoint; local cleanup through an OpenAI-compatible localhost server is the
   free route.
 - Handoff targets and the T3 voice integration (US-011, US-015,
-  `integrations/t3/`), Omarchy bar (US-012, `integrations/omarchy/`).
+  `integrations/t3/`; it uses a T3 MCP token and a speech provider key from
+  `pass`, which are integration credentials, not a Cantrip sign-in), Omarchy
+  bar (US-012, `integrations/omarchy/`).
 - macOS app (US-013): `scripts/verify-macos` on a Mac.

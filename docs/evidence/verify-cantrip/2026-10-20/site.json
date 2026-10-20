@@ -2,7 +2,7 @@
   "feature": "website",
   "url": "https://cantrip.mistystep.io",
   "deployed_revision": "476093a928389426fad8b790e8385d7eba1e2f02",
-  "master": "476093a928389426fad8b790e8385d7eba1e2f02",
+  "master": "9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c",
   "release": "v0.1.8",
   "results": [
     {
@@ -10,7 +10,7 @@
       "ok": true
     },
     {
-      "check": "deployed revision 476093a92838 is master or an ancestor of master 476093a92838 (identical)",
+      "check": "deployed revision 476093a92838 is master 9bc7ac3d02bf or an ancestor (behind)",
       "ok": true
     },
     {
@@ -38,11 +38,11 @@
       "ok": true
     },
     {
-      "check": "download link https://github.com/misty-step/cantrip/releases/download/v0.1.8/cantrip-v0.1.8-x86_64-unknown-linux-gnu.tar.gz resolves (HTTP 200)",
+      "check": "home page links the v0.1.8 release download",
       "ok": true
     },
     {
-      "check": "home page links a GitHub release download",
+      "check": "download link https://github.com/misty-step/cantrip/releases/download/v0.1.8/cantrip-v0.1.8-x86_64-unknown-linux-gnu.tar.gz resolves (HTTP 200)",
       "ok": true
     },
     {

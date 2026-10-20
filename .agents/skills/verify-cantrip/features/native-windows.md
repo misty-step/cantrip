@@ -27,7 +27,9 @@ Preconditions:
 - **By hand.** `$V window --run "$RUN" settings`, `$V window --run "$RUN" actions`,
   `$V window --run "$RUN" actions --doctor --name actions-doctor`.
   OCR shows "Past transcripts" and "Copy" (Settings) and "Recordings",
-  "Recover locally to clipboard" (Actions).
+  "Recover locally to clipboard" (Actions). The helper exits 1 if the window
+  process exits before the screenshot, and re-shoots while it still says
+  "Connecting to Cantrip…".
 - **Interact.** Keyboard input goes through `wtype` with the session env, as
   `scripts/verify-settings-history.py` does for the US-005 copy journey
   (`BROWSER=none CI=1 python3 scripts/verify-settings-history.py --binary
@@ -38,6 +40,8 @@ Preconditions:
 ## Gotchas
 
 - OCR is approximate; assert a few stable words, not full lines.
+- `--doctor` exists only for `actions`; `settings` rejects it.
+- HUD PNGs have no useful OCR text; inspect the image.
 - Windows render in a floating Sway window; nothing else is on screen.
 - `--screenshot` flags render one frame and exit; `$V window` shows the real
   running window instead.

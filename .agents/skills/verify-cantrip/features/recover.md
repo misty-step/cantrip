@@ -25,13 +25,18 @@ Preconditions:
 
 - **Journey.** `$V journey --run "$RUN" recover`. Checks: copy ID restores the
   sentence after the clipboard was overwritten; `cancel` settles `cancelled`
-  with the placeholder clipboard untouched and `audio: true`; local recover
-  completes and copies; `forget` without `--yes` exits non-zero; with `--yes`
-  the row shows `audio_available: false` and the archive JSON still exists.
-- **By hand.** Each step goes through `$V cantrip --run "$RUN" -- ...`:
-  1. `copy <ID>`, `$V wait --after-event N`, then `$V clipboard --run "$RUN"` shows the sentence.
-  2. `start`, `sleep 1`, `$V speak --run "$RUN"`, `cancel`, `$V wait` shows `"completeness": "cancelled"`.
-  3. `recover --id <cancelled ID> --local --clipboard`, `$V wait` shows complete/copied.
+  with the placeholder clipboard untouched and the take's WAV still on disk;
+  local recover completes and copies; `forget` without `--yes` exits non-zero
+  asking for `--yes` and keeps the WAV; with `--yes` the WAV is gone, the row
+  shows `audio_available: false`, and the archive JSON still exists.
+- **By hand.** Each step goes through `$V cantrip --run "$RUN" -- ...`. Take
+  IDs come from `recordings --json` (`.id`) or an outcome's
+  `artifacts.take_id`; before each action read
+  `N=$($V cantrip --run "$RUN" -- status --json | jq '.outcome.event_id // 0')`.
+  1. `$V clipboard --run "$RUN" --set placeholder`, then `copy <ID>`,
+     `$V wait --run "$RUN" --after-event "$N"`, and `$V clipboard --run "$RUN"` shows the sentence.
+  2. `start`, `sleep 1`, `$V speak --run "$RUN"`, `cancel`, `$V wait --run "$RUN" --after-event "$N"` shows `"completeness": "cancelled"`.
+  3. `recover --id <cancelled ID> --local --clipboard`, `$V wait --run "$RUN" --after-event "$N"` shows complete/copied.
   4. `forget <ID>` exits 1 asking for `--yes`; `forget <ID> --yes`, then
      `recordings --json` shows the row with `"audio_available": false`.
 - **Proof.** `evidence/recover-1-cancelled.png`, `recover-2-recovered.png`,

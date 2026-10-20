@@ -2,9 +2,8 @@
   "feature": "install",
   "version": "0.1.8",
   "source_revision": "b23d488e82ab79886b17c1976197c4c2504dbf1d",
-  "binary": "/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip",
+  "binary": "/home/phaedrus/.cache/tmp/vc/f174206/prefix/bin/cantrip",
   "binary_sha256": "f2025db2b115e6d0699d2d8370a86f80b8126d382028d7b5b77dd2682a060163",
   "attestation": "verified (release.json + archive)",
-  "repeat_install_refused": true,
-  "sample_wav": "/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/download/cantrip-v0.1.8-x86_64-unknown-linux-gnu/sample.wav"
+  "repeat_install_refused": true
 }
