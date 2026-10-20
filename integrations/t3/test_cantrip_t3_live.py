@@ -265,6 +265,22 @@ class PlayerTest(unittest.TestCase):
         self.assertEqual(sum(size for _, size in writes), len(block) * 6)
 
 
+class SessionStateTest(unittest.TestCase):
+    def test_state_file_follows_the_session_and_is_removed(self):
+        with tempfile.TemporaryDirectory() as run, mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": run}):
+            state = live.SessionState()
+            state.update("listening", False)
+            first = state.path.stat().st_mtime_ns
+            state.update("listening", False)   # unchanged: not rewritten
+            self.assertEqual(state.path.stat().st_mtime_ns, first)
+            state.update("speaking", True)
+            import json
+            self.assertEqual(json.loads(state.path.read_text()),
+                             {"mode": "live", "pid": os.getpid(), "phase": "speaking", "muted": True})
+            state.clear()
+            self.assertFalse(state.path.exists())
+
+
 class LimitsTest(unittest.TestCase):
     def test_bad_limits_fall_back_to_defaults(self):
         self.assertEqual(live.limits({"idle_minutes": "x", "max_minutes": 0}), (300, 3600))

@@ -46,18 +46,19 @@ CONTEXT_CHARS = 300
 SHORT_WORDS = 6                # a reply this short ("yes", "the second one") travels with its question
 PROGRESS_SECONDS = 45
 CLOSE_SECONDS = 15
+SPEECH_LEVEL = 300             # output RMS above this is GPT-Live speaking, for the bar
 PREBUFFER_SECONDS = 0.4        # jitter buffer before each spoken turn (measured: 107 gaps → 11)
 
 LIVE_DEFAULTS = {
     "model": "gpt-live-1",
     "voice": "marin",
     "summary_command": [],
-    "echo_cancel": False,
+    "echo_cancel": False,       # PipeWire echo cancellation for speakers; headphones need none
     "input_device": "",         # PipeWire source to listen on; default input when empty
     "output_device": "",        # PipeWire sink to speak on; default output when empty
     # Close after this long with no speech either way and nothing pending, and after this long in total.
     "idle_minutes": 5,
-    "max_minutes": 60,   # PipeWire echo cancellation for speakers; headphones need none
+    "max_minutes": 60,
 }
 
 INSTRUCTIONS = """You are the voice of {label}, the user's coordinating agent, in a live spoken conversation.
@@ -390,7 +391,7 @@ class Player(threading.Thread):
                 break
             now = self.clock()
             if plays_until is not None and now > plays_until:   # ran dry: re-prime before resuming
-                if now - plays_until < 1.0:
+                if block and now - plays_until < 0.3:   # audio resumed at once: a real dropout, not a turn end
                     self.underruns += 1
                 plays_until = None
             if block:
@@ -450,6 +451,24 @@ def audioop_rms(pcm):
     return int((sum(x * x for x in samples) / max(1, len(samples))) ** 0.5)
 
 
+class SessionState:
+    """$XDG_RUNTIME_DIR/cantrip-t3/session-live.json for the desktop bar (`cantrip-t3 state`):
+    {"mode", "pid", "phase": listening|thinking|speaking, "muted"}. Written on change only."""
+
+    def __init__(self):
+        self.path = t3.runtime_dir() / "session-live.json"
+        self.last = None
+
+    def update(self, phase, muted):
+        state = {"mode": "live", "pid": os.getpid(), "phase": phase, "muted": muted}
+        if state != self.last:
+            t3.write_json(self.path, state)
+            self.last = state
+
+    def clear(self):
+        self.path.unlink(missing_ok=True)
+
+
 def notify_later(message):
     """Desktop notice without blocking the event loop."""
     threading.Thread(target=t3.notify, args=(message,), daemon=True).start()
@@ -469,6 +488,7 @@ async def run(config):
     loop.add_signal_handler(signal.SIGTERM, stopping.set)
     loop.add_signal_handler(signal.SIGUSR1, toggled.set)
     pid_file = t3.runtime_dir() / "live.pid"
+    session_state = SessionState()
     echo = player = recorder = None
     try:
         pid_file.write_text(str(os.getpid()))
@@ -491,6 +511,7 @@ async def run(config):
             muted = False
             opened = time.monotonic()
             idle_limit, max_limit = limits(live)
+            spoke_at = [0.0]
             trace_path = os.environ.get("CANTRIP_T3_LIVE_TRACE")
             trace = open(trace_path, "a", buffering=1) if trace_path else None
 
@@ -519,6 +540,14 @@ async def run(config):
                         await connection.session.input_audio.unmute(event_id=bridge.event_id("unmute"))
                     notify_later("Live microphone " + ("muted" if muted else "on"))
 
+            async def show_state():
+                """Keep the bar's view of the session current: listening, thinking or speaking."""
+                await started.wait()
+                while not stopping.is_set():
+                    speaking = time.monotonic() - spoke_at[0] < 0.6
+                    session_state.update("speaking" if speaking else "thinking" if bridge.tasks else "listening", muted)
+                    await asyncio.sleep(0.25)
+
             async def watchdog():
                 """Close a forgotten session: it bills every connected second."""
                 warned = False
@@ -543,7 +572,7 @@ async def run(config):
                     log("close unconfirmed")
                     await connection.close()
 
-            helpers = [asyncio.create_task(job()) for job in (pump_audio, controls, watchdog, close_on_stop)]
+            helpers = [asyncio.create_task(job()) for job in (pump_audio, controls, show_state, watchdog, close_on_stop)]
             try:
                 async for event in connection:
                     data = event.model_dump(exclude_none=True)
@@ -554,6 +583,8 @@ async def run(config):
                     elif data.get("type") == "session.output_audio.delta":
                         bridge.active_at = time.monotonic()
                         pcm = base64.b64decode(data["delta"])
+                        if audioop_rms(pcm) > SPEECH_LEVEL:
+                            spoke_at[0] = time.monotonic()
                         if trace:
                             level = audioop_rms(pcm)
                             trace.write("%.4f %d %d\n" % (time.monotonic(), len(pcm), level))   # timing, size, level only
@@ -567,6 +598,7 @@ async def run(config):
                     task.cancel()
     finally:
         pid_file.unlink(missing_ok=True)
+        session_state.clear()
         if recorder:
             recorder.terminate()
         if player:
