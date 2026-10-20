@@ -308,6 +308,22 @@ class HomeCallsTest(unittest.TestCase):
 
 
 class PlayerTest(unittest.TestCase):
+    def test_catch_up_is_measured_from_the_base_buffer_even_after_growth(self):
+        clock = [0.0]
+        with mock.patch.object(live.subprocess, "Popen"):
+            player = live.Player(clock=lambda: clock[0])
+        player.prebuffer = live.MAX_PREBUFFER_SECONDS     # grown after stalls
+        player.write = lambda pcm: None
+        silent = bytes(live.RATE * 2 // 10)
+        player.start()
+        for _ in range(15):                               # 1.5 s backlog arrives at once
+            player.audio.put(silent)
+        time.sleep(0.3)
+        player.audio.put(None)
+        player.join(2)
+        # Lead above 0.4 + 0.6 s is trimmed although the grown buffer is 1.0 s.
+        self.assertGreater(player.skipped, 0)
+
     def test_a_burst_after_a_stall_catches_up_by_dropping_silence(self):
         clock = [0.0]
         with mock.patch.object(live.subprocess, "Popen"):

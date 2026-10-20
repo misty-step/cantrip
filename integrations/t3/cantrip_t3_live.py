@@ -486,7 +486,8 @@ class Player(threading.Thread):
             elif block and plays_until is None and first is None:
                 target = self.prebuffer
             lead = (plays_until - now if plays_until is not None else 0) + len(pending) / (RATE * 2)
-            if block and lead > self.prebuffer + CATCH_UP_SECONDS and level < SILENT_LEVEL:
+            # Measured from the base buffer: a buffer grown after stalls must not let latency settle higher.
+            if block and lead > PREBUFFER_SECONDS + CATCH_UP_SECONDS and level < SILENT_LEVEL:
                 self.skipped += 1   # running behind after a burst: drop a silent block to catch up
                 continue
             if block:
@@ -495,7 +496,7 @@ class Player(threading.Thread):
                 if level > SPEECH_LEVEL:
                     last_loud = True
                 elif level < SILENT_LEVEL:
-                    last_loud, grown = False, False     # a pause between turns
+                    last_loud = False                   # a pause; only a real turn end resets `grown`
             if not pending:
                 continue
             seconds = len(pending) / (RATE * 2)
