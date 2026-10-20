@@ -415,9 +415,14 @@ def pending_records():
     for path in sorted((state_dir() / "pending").glob("*.json")):
         record = readable(path)
         if record is None:
+            if not path.exists():
+                continue   # finished or withdrawn by `send` since the listing
             damaged = state_dir() / "damaged"
             damaged.mkdir(exist_ok=True, mode=0o700)
-            os.replace(path, damaged / path.name)
+            try:
+                os.replace(path, damaged / path.name)
+            except FileNotFoundError:
+                continue
             log("damaged pending record moved aside " + path.name)
             continue
         records.append((path, record))

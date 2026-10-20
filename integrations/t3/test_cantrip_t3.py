@@ -447,6 +447,19 @@ class ReviewRegressionTest(Base):
                 mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
             self.assertEqual(speaker.say("Hello there."), "stopped")
 
+    def test_a_record_withdrawn_mid_listing_is_skipped(self):
+        path = t3.state_dir() / "pending" / "gone.json"
+        path.write_text("{}")
+        real = t3.readable
+
+        def vanish(candidate):
+            candidate.unlink(missing_ok=True)
+            return real(candidate)
+
+        with mock.patch.object(t3, "readable", side_effect=vanish):
+            self.assertEqual(t3.pending_records(), [])
+        self.assertFalse((t3.state_dir() / "damaged").exists())
+
     def test_redirects_are_refused(self):
         handler = t3.NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere.example/"))

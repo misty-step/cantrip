@@ -44,6 +44,14 @@ cannot be forwarded to another host.
 
 ## Setup
 
+Install the scripts somewhere on `PATH`, keeping them together, because the
+live and hands-free modules import `cantrip_t3.py` from their own directory:
+
+```sh
+install -D -m 755 integrations/t3/cantrip_t3.py ~/.local/lib/cantrip-t3/cantrip_t3.py
+ln -s ~/.local/lib/cantrip-t3/cantrip_t3.py ~/.local/bin/cantrip-t3
+```
+
 `$XDG_CONFIG_HOME/cantrip/t3.toml`:
 
 ```toml
