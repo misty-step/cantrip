@@ -243,6 +243,20 @@ No-gos: no transcript or reply text in logs; the voice model never acts or decid
 
 Evidence: `integrations/t3/cantrip_t3_live.py`, `integrations/t3/test_cantrip_t3_live.py`, `integrations/t3/README.md`
 
+## US-017 Talk with my agent thread hands-free, turn by turn
+
+Statement: When I am talking things through with my coordinating agent, I want to just speak and hear its answers, without pressing a key for every sentence.
+
+Criteria:
+1. WHILE a hands-free session runs, THE SYSTEM SHALL end an utterance after configured silence, ignore bursts shorter than the configured minimum, and send each transcribed utterance to the configured thread as its own take.
+2. THE SYSTEM SHALL send no audio off the machine except detected speech, and SHALL send nothing for an empty transcript.
+3. WHILE a reply is playing on speakers, THE SYSTEM SHALL NOT treat microphone input as speech; WITH headphones configured, speaking SHALL stop the reply.
+4. IF transcription or sending fails, THEN THE SYSTEM SHALL ask the user to repeat; the session SHALL end after the configured idle time or when stopped.
+
+No-gos: no transcript or audio in logs or retained files; no automatic fallback to another provider.
+
+Evidence: `integrations/t3/cantrip_t3_converse.py`, `integrations/t3/test_cantrip_t3_converse.py`, `integrations/t3/README.md`
+
 ## Capability: Native macOS Clipboard Dictation
 
 ## US-013 Dictate on Mac and deliberately paste into my editor

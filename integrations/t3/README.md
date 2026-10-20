@@ -44,6 +44,14 @@ cannot be forwarded to another host.
 
 ## Setup
 
+Install the scripts somewhere on `PATH`, keeping them together, because the
+hands-free module imports `cantrip_t3.py` from its own directory:
+
+```sh
+install -D -m 755 integrations/t3/cantrip_t3.py ~/.local/lib/cantrip-t3/cantrip_t3.py
+ln -s ~/.local/lib/cantrip-t3/cantrip_t3.py ~/.local/bin/cantrip-t3
+```
+
 `$XDG_CONFIG_HOME/cantrip/t3.toml`:
 
 ```toml
@@ -141,3 +149,61 @@ It needs `OPENAI_API_KEY` with GPT-Live access and runs with
 connecting. Install [`cantrip-t3-live.service`](cantrip-t3-live.service) and
 bind keys to start/stop it and to `cantrip-t3-live mute`; GPT-Live
 bills per connected second, so stop the session when you are done.
+
+## Hands-free turn-taking (OpenRouter)
+
+`cantrip_t3_converse.py` keeps the microphone open and takes turns with the
+thread without a key per utterance. Local energy endpointing ends an utterance
+after 1 s of quiet. The utterance is transcribed by OpenRouter's JSON
+`/audio/transcriptions` endpoint (Parakeet by default) on a worker thread, so
+capture never stalls, and sent with `cantrip_t3.send` as its own take. The
+running collector then speaks the reply exactly as for push-to-talk. Audio
+leaves the machine only for detected speech; nothing is retained.
+
+- **Speakers (default):** the microphone is ignored while a reply plays and
+  for 0.6 s after, so the agent never hears its own voice. Speech already under
+  way is protected: a reply waits until you finish speaking. Use `stop` or the
+  mute key to cut a reply.
+- **Headphones** (`headphones = true`): speaking over a reply stops it
+  (barge-in).
+- **Background sound:** the noise floor learns only between utterances, never
+  from your voice. Sound that stays loud for 3 s without the dips syllables
+  make, such as a fan, hum or vacuum, is steady noise. It is never uploaded and
+  becomes the background; speech just before it is kept. Typing never counts,
+  because speech needs 150 ms of continuous sound. Music with a beat looks like
+  speech: three utterances in a row cut at `max_utterance_s` stop hands-free with
+  a notice. Speech must be about three times louder than the background, and
+  on a typical mic a moderate fan can cost a third or more of the words, so use
+  push-to-talk or headphones near one.
+- The microphone is ignored only once a reply is audible: speech that starts
+  while a reply is still being fetched is heard, and the reply waits for it.
+- Hands-free writes `$XDG_RUNTIME_DIR/cantrip-t3/session-hands-free.json`
+  (`listening` or `hearing`) for status readers such as the desktop bar.
+- While a Cantrip take records (push-to-talk), hands-free ignores the
+  microphone, so nothing is sent twice.
+- A transient transcription failure asks you to say it again. A refused key
+  or model (401/402/403/404) stops the session with a notice, and a refused key
+  is caught at start. If a send may have reached the thread, you are told to
+  wait for the reply instead of repeating.
+- It ends after `idle_minutes` with no speech, no reply playing and no reply
+  owed, or on SIGTERM.
+
+```toml
+[converse]            # in t3.toml; these are the defaults
+stt_endpoint = "https://openrouter.ai/api/v1"
+stt_model = "nvidia/parakeet-tdt-0.6b-v3"
+language = "en"
+end_silence_ms = 1000
+min_speech_ms = 350
+max_utterance_s = 60
+idle_minutes = 5
+headphones = false
+```
+
+Measured on Linux with OpenRouter: end of speech to the reply's first word
+took 5.8 s against a fast, idle agent. That was endpointing (now 1 s), about
+0.7 s of STT, a 3.5 s agent run, and about 1.4 s to first speech. A busy agent
+adds its queue and run time, which dominated QA's 15–83 s measurements. OpenRouter offers no realtime or full-duplex voice API, so
+this is turn-taking, not a live conversation. Install
+[`cantrip-t3-converse.service`](cantrip-t3-converse.service) with the same
+speech key entry as `cantrip-t3.service`, and bind a key to start and stop it.
