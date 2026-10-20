@@ -83,18 +83,31 @@ with your launcher and entries, then run
 
 `cantrip_t3_converse.py` keeps the microphone open and takes turns with the
 thread without a key per utterance. Local energy endpointing ends an utterance
-after 0.7 s of quiet. The utterance is transcribed by an OpenAI-compatible
-`/audio/transcriptions` endpoint (Parakeet on OpenRouter by default) and sent
-with `cantrip_t3.send` as its own take, so the running collector speaks the
-reply exactly as for push-to-talk. Audio leaves the machine only for detected
-speech; nothing is retained.
+after 0.7 s of quiet. The utterance is transcribed by OpenRouter's JSON
+`/audio/transcriptions` endpoint (Parakeet by default) on a worker thread, so
+capture never stalls, and sent with `cantrip_t3.send` as its own take. The
+running collector then speaks the reply exactly as for push-to-talk. Audio
+leaves the machine only for detected speech; nothing is retained.
 
 - **Speakers (default):** the microphone is ignored while a reply plays and
-  for 0.6 s after, so the agent never hears its own voice. Use `stop` or the
-  mute key to cut a reply.
+  for 0.6 s after, so the agent never hears its own voice. Speech already under
+  way when a reply starts is dropped; use `stop` or the mute key to cut a reply.
 - **Headphones** (`headphones = true`): speaking over a reply stops it
   (barge-in).
-- It ends after `idle_minutes` without speech, or on SIGTERM.
+- **Background sound:** the noise floor follows quiet quickly and rises
+  slowly through sustained sound. A steady sound such as a fan is recognized
+  by its even level, never uploaded, and becomes the new background. Typing
+  never counts, because speech needs 150 ms of continuous sound. Speech must be
+  about three times louder than the background, so use push-to-talk in a loud
+  room or with a TV talking.
+- While a Cantrip take records (push-to-talk), hands-free ignores the
+  microphone, so nothing is sent twice.
+- A transient transcription failure asks you to say it again. A refused key
+  or model (401/402/403/404) stops the session with a notice, and a refused key
+  is caught at start. If a send may have reached the thread, you are told to
+  wait for the reply instead of repeating.
+- It ends after `idle_minutes` with no speech, no reply playing and no reply
+  owed, or on SIGTERM.
 
 ```toml
 [converse]            # in t3.toml; these are the defaults
@@ -109,9 +122,9 @@ headphones = false
 ```
 
 Measured on Linux with OpenRouter: end of speech to the reply's first word
-took 5.8 s against a fast agent, made up of 0.7 s endpointing, about 0.7 s
-STT, the agent's run, and about 1.4 s to first speech. The agent's own run time
-comes on top. OpenRouter offers no realtime or full-duplex voice API, so this
-is turn-taking, not a live conversation; see `cantrip_t3_live.py` for that.
-Install [`cantrip-t3-converse.service`](cantrip-t3-converse.service) and bind
-a key to start and stop it.
+took 5.8 s against a fast agent. That was 0.7 s of endpointing, about 0.7 s of
+STT, a 3.5 s agent run, and about 1.4 s to first speech. A slower agent adds
+its own run time. OpenRouter offers no realtime or full-duplex voice API, so
+this is turn-taking, not a live conversation. Install
+[`cantrip-t3-converse.service`](cantrip-t3-converse.service) with the same
+speech key entry as `cantrip-t3.service`, and bind a key to start and stop it.

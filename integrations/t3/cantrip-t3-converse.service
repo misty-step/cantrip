@@ -2,6 +2,7 @@
 # No [Install]: it listens only while started, and ends itself after idle_minutes.
 [Unit]
 Description=Cantrip T3 hands-free conversation
+Wants=cantrip-t3.service
 After=graphical-session.target pipewire.service cantrip-t3.service
 
 [Service]
