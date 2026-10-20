@@ -96,6 +96,10 @@ thread directly; Cantrip is not involved.
   GPT-Live to say. Long runs add a progress note every 45 seconds, and a failed
   run or unreachable thread is reported honestly.
 - SIGTERM or SIGINT closes the session gracefully and logs billed seconds.
+  The thread then gets one `[voice live] session summary` message: start and
+  end time, how many requests were handed off, and, verbatim and in order,
+  everything said that never went out in a request, so nothing said live is
+  lost to the agent's memory. It is idempotent on the session.
   `cantrip-t3-live mute` toggles the microphone.
 - Use headphones, or set `echo_cancel = true` to route the session through a
   PipeWire echo-cancel source and sink that are removed afterwards.
@@ -103,7 +107,8 @@ thread directly; Cantrip is not involved.
   blocks at about real time with arrival gaps up to ~0.3 s; without the
   buffer those gaps were audible as glitches.
 - The session closes after `idle_minutes` (default 5) with no speech in either
-  direction and no request pending, and after `max_minutes` (default 60), with
+  direction and no request pending (GPT-Live's continuous silent audio does not
+  count as speech), and after `max_minutes` (default 60), with
   a spoken one-minute warning. While muted, silence is streamed in place of
   the microphone.
 - `input_device` and `output_device` pick PipeWire nodes. Set

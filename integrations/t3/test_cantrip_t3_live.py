@@ -177,6 +177,26 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(self.commentary()), 1)
         self.assertTrue(all(len(piece) <= live.APPEND_CHARS for piece in self.commentary()))
 
+    async def test_session_summary_keeps_everything_not_handed_off(self):
+        await self.bridge.handle(heard(0, 500, "Pause Tach."))
+        await self.bridge.handle(delegation("item_1", 600))
+        await self.finish()
+        await self.bridge.handle(heard(5000, 6000, "I like shorter answers,"))
+        await self.bridge.handle(heard(6000, 6800, " by the way."))
+        await self.bridge.handle(heard(20000, 21500, "Maybe a weekly digest would help."))
+        message = self.bridge.summary_message(1_800_000_000, 1_800_000_000 + 25 * 60, self.bridge.handed)
+        self.assertTrue(message.startswith("[voice live] session summary"))
+        self.assertIn("(25 min); 1 request handed to Home.", message)
+        self.assertIn('- "I like shorter answers, by the way."', message)
+        self.assertIn('- "Maybe a weekly digest would help."', message)
+        self.assertNotIn("Pause Tach", message)
+
+    async def test_summary_says_when_everything_was_handed_off(self):
+        await self.bridge.handle(heard(0, 500, "Pause Tach."))
+        await self.bridge.handle(delegation("item_1", 600))
+        await self.finish()
+        self.assertIn("Everything said was handed off.", self.bridge.summary_message(0, 60, self.bridge.handed))
+
     async def test_close_records_usage(self):
         await self.bridge.handle({"type": "session.usage.updated", "usage": {"seconds": 12}})
         await self.bridge.handle({"type": "session.closed", "reason": "close_requested", "usage": {"seconds": 15}})

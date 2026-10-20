@@ -164,6 +164,7 @@ class Bridge:
         self.said = []              # (start_ms, end_ms, text) GPT-Live's own speech
         self.boundaries = [-1]      # offsets of earlier delegations: each request starts at the last one
         self.claimed = set()        # indexes of fragments already sent
+        self.handed = 0             # requests that reached the thread
         self.tasks = set()
         self.sequence = 0
         self.usage_seconds = 0
@@ -232,6 +233,34 @@ class Bridge:
         self.claimed.update(mine)
         return "".join(self.heard[i][2] for i in mine).strip()
 
+    def unsent_utterances(self):
+        """Speech never claimed by a delegation, grouped into utterances at 1.5 s pauses."""
+        groups, last_end = [], None
+        for index, (start, end, text, _) in sorted(enumerate(self.heard), key=lambda pair: pair[1][0]):
+            if index in self.claimed or not text.strip():
+                continue
+            if last_end is None or start - last_end > 1500:
+                groups.append("")
+            groups[-1] += text
+            last_end = end
+        return [group.strip() for group in groups if len(group.split()) >= 2]
+
+    def summary_message(self, started, ended, handed):
+        """One end-of-session message so nothing said live is lost to the thread's memory."""
+        minutes = max(0, round((ended - started) / 60))
+        when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(started)) + "–" + time.strftime("%H:%M UTC", time.gmtime(ended))
+        lines = [self.config.get("live_prefix", "[voice live] ") + "session summary",
+                 "Session: %s (%d min); %d request%s handed to %s." % (when, minutes, handed, "" if handed == 1 else "s",
+                                                                         self.label)]
+        unsent = self.unsent_utterances()
+        if unsent:
+            lines.append("Said but not handed off, verbatim and in order "
+                         "(preferences, feedback, decisions and ideas may be in here):")
+            lines += ['- "%s"' % utterance for utterance in unsent]
+        else:
+            lines.append("Everything said was handed off.")
+        return "\n".join(lines)
+
     def context(self, start, end):
         """What GPT-Live said just before, so a bare "yes" reaches the thread with its question."""
         spoken = "".join(text for s, _, text in sorted(self.said) if start - 30_000 <= s < end).strip()
@@ -276,6 +305,7 @@ class Bridge:
                 await self.append("commentary", delegation_id, "I'm not sure " + self.label + " received that. "
                                   "Ask the user to check its thread before repeating it.")
             return
+        self.handed += 1
         await self.append("thinking", delegation_id,
                           "Sent to " + self.label + ". Waiting for its answer; nothing is done yet.")
         loop = asyncio.get_running_loop()
@@ -489,6 +519,7 @@ async def run(config):
     loop.add_signal_handler(signal.SIGUSR1, toggled.set)
     pid_file = t3.runtime_dir() / "live.pid"
     session_state = SessionState()
+    session_id, session_started, bridge_ref = [None], [None], [None]
     echo = player = recorder = None
     try:
         pid_file.write_text(str(os.getpid()))
@@ -506,6 +537,7 @@ async def run(config):
             bridge = Bridge(config, send,
                             lambda delegation, message: submit_request(config, t3.connect(config), delegation, message),
                             lambda record, progress: collect_reply(t3.connect(config), record, progress))
+            bridge_ref[0] = bridge
             await connection.session.start(session=session_config(config, context), event_id="start")
             started = asyncio.Event()
             muted = False
@@ -577,16 +609,19 @@ async def run(config):
                 async for event in connection:
                     data = event.model_dump(exclude_none=True)
                     if data.get("type") == "session.started":
-                        log("started session=" + str((data.get("session") or {}).get("id")))
+                        session_id[0] = str((data.get("session") or {}).get("id"))
+                        session_started[0] = time.time()
+                        log("started session=" + session_id[0])
                         notify_later("Live with " + bridge.label)
                         started.set()
                     elif data.get("type") == "session.output_audio.delta":
-                        bridge.active_at = time.monotonic()
                         pcm = base64.b64decode(data["delta"])
-                        if audioop_rms(pcm) > SPEECH_LEVEL:
-                            spoke_at[0] = time.monotonic()
+                        level = audioop_rms(pcm)
+                        if level > SPEECH_LEVEL:
+                            # GPT-Live streams silence continuously: only audible speech is activity,
+                            # otherwise a forgotten session never goes idle (one billed a full hour in QA).
+                            spoke_at[0] = bridge.active_at = time.monotonic()
                         if trace:
-                            level = audioop_rms(pcm)
                             trace.write("%.4f %d %d\n" % (time.monotonic(), len(pcm), level))   # timing, size, level only
                         player.audio.put(pcm)
                         continue
@@ -597,6 +632,8 @@ async def run(config):
                 for task in helpers + list(bridge.tasks):
                     task.cancel()
     finally:
+        if session_started[0] and bridge_ref[0]:
+            send_summary(config, bridge_ref[0], session_id[0], session_started[0])
         pid_file.unlink(missing_ok=True)
         session_state.clear()
         if recorder:
@@ -606,6 +643,17 @@ async def run(config):
         if echo:
             echo.__exit__(None, None, None)
         t3.notify("Live session ended")   # synchronous: it is the sign that billing stopped
+
+
+def send_summary(config, bridge, session_id, started):
+    """Hand the thread one end-of-session summary; idempotent on the session."""
+    message = bridge.summary_message(started, time.time(), bridge.handed)
+    try:
+        submit_request(config, t3.connect(config, timeout=t3.SEND_STEP_SECONDS), "summary-" + session_id, message)
+        log("summary sent unsent_utterances=" + str(len(bridge.unsent_utterances())))
+    except Exception as error:  # never block exit; the summary is reported as lost
+        log("summary failed code=" + t3.describe(error))
+        t3.notify("The live session summary didn't reach " + bridge.label + ".")
 
 
 def live_pid():

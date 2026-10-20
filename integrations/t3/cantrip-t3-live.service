@@ -7,4 +7,4 @@ After=graphical-session.target pipewire.service
 [Service]
 ExecStart=%h/.local/bin/pass-env run -e OPENAI_API_KEY=openai/api-key -e T3_MCP_TOKEN=t3/home-mcp -- %h/.local/bin/uv run --script %h/.local/bin/cantrip-t3-live run
 KillSignal=SIGTERM
-TimeoutStopSec=20
+TimeoutStopSec=45
