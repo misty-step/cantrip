@@ -48,7 +48,8 @@ CONVERSE_DEFAULTS = {
     "headphones": False,        # True enables barge-in; on speakers input pauses while a reply plays
 }
 PLAYBACK_TAIL_S = 0.6           # room echo after a reply stops
-CAPPED_LIMIT = 2                # consecutive maximum-length cuts that mean continuous sound
+CAPPED_LIMIT = 3                # consecutive maximum-length cuts that mean continuous sound
+                                # (measured: 2 stopped 9 of 300 real sessions at 1 s endpointing; 3 stopped none)
 
 
 def log(message):
@@ -251,7 +252,10 @@ class Conversation:
         if playing:
             self.played_until = self.now()
             self.active_at = self.now()
-        deaf = not self.settings["headphones"] and (playing or self.now() - self.played_until < PLAYBACK_TAIL_S)
+        # On speakers, ignore the room while a reply plays, except an utterance already under way:
+        # the reply's player holds its audio until that utterance ends (the user-speaking marker).
+        deaf = not self.settings["headphones"] and not self.endpointer.started and (
+            playing or self.now() - self.played_until < PLAYBACK_TAIL_S)
         if deaf or self.cantrip_take():
             self.endpointer.reset()   # on speakers, never hear the reply; keep the floor
             return
@@ -269,20 +273,18 @@ class Conversation:
                 log("barge-in")
         else:
             if self.endpointer.capped:
-                # Real turns almost never reach the cap (8 of 5,451 measured); music with a beat does.
+                # Long turns sometimes reach the cap; music with a beat always does.
                 self.capped += 1
-                if self.capped >= CAPPED_LIMIT:
-                    log("continuous sound: pausing")
-                    t3.notify("Hands-free stopped: continuous sound, such as music. Press the key to start again.")
-                    self.refused = "continuous-sound"
-                    return
             else:
                 self.capped = 0
                 self.active_at = self.now()
-            if self.work:
+            if self.work:   # sent even when it trips the stop below: real speech is never thrown away
                 self.work.put(event[1])
             else:
                 self.utterance(event[1])
+            if self.capped >= CAPPED_LIMIT:
+                log("continuous sound: stopping")
+                self.refused = "continuous-sound"
 
     def show_state(self, hearing):
         """$XDG_RUNTIME_DIR/cantrip-t3/session-hands-free.json for the desktop bar (`cantrip-t3 state`).
@@ -384,7 +386,8 @@ def run(config):
         if not check_key(converse_config(config), key):
             raise ValueError("speech-to-text key refused")
     except (t3.McpError, OSError, ValueError, SystemExit) as error:
-        t3.notify("Hands-free couldn't start (" + t3.describe(error) + ").")
+        reason = str(error) if isinstance(error, ValueError) else t3.describe(error)
+        t3.notify("Hands-free couldn't start: " + reason + ".")
         raise SystemExit("cantrip-t3-converse: could not start: " + t3.describe(error)) from None
     conversation = Conversation(config, key, threaded=True)
     stopping = []
@@ -412,7 +415,9 @@ def run(config):
             recorder.kill()
             recorder.wait()
         unsent = conversation.work.qsize() + (1 if conversation.busy else 0)
-        t3.notify("Stopped listening for " + label + (" (" + str(unsent) + " unsent)" if unsent else ""))
+        why = (": " + str(CAPPED_LIMIT) + " minutes of continuous sound, such as music"
+               if conversation.refused == "continuous-sound" else "")
+        t3.notify("Stopped listening for " + label + why + (" (" + str(unsent) + " unsent)" if unsent else ""))
         log("stopped turns=%d" % conversation.turns)
 
 

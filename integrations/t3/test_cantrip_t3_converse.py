@@ -200,6 +200,8 @@ class ConversationTest(unittest.TestCase):
 
     def speak(self, conversation, frames):
         for frame in frames:
+            if conversation.refused:
+                return
             self.clock[0] += converse.FRAME_MS / 1000
             conversation.feed(frame)
 
@@ -215,6 +217,15 @@ class ConversationTest(unittest.TestCase):
         conversation = self.conversation()
         self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         self.assertEqual(self.sent, [])
+
+    def test_an_utterance_under_way_survives_a_reply_starting(self):
+        conversation = self.conversation()
+        playing = [False]
+        conversation.speaking = lambda: playing[0]
+        self.speak(conversation, quiet(20) + speech(20))
+        playing[0] = True   # a reply's player appears mid-utterance; it holds its audio meanwhile
+        self.speak(conversation, speech(20) + quiet(40))
+        self.assertEqual(len(self.sent), 1)
 
     def test_on_speakers_the_reply_is_never_heard_as_input(self):
         conversation = self.conversation()
@@ -296,8 +307,7 @@ class ConversationTest(unittest.TestCase):
         conversation = self.conversation(max_utterance_s=1)
         self.speak(conversation, quiet(20) + speech(200))
         self.assertEqual(conversation.refused, "continuous-sound")
-        self.assertEqual(len(self.sent), 1)   # only the first capped cut was sent
-        self.assertIn("continuous sound", self.notified.call_args.args[0])
+        self.assertEqual(len(self.sent), converse.CAPPED_LIMIT)   # every cut is sent; none is thrown away
 
     def test_idle_session_ends_but_not_while_a_reply_is_owed(self):
         conversation = self.conversation(idle_minutes=1)

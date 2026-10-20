@@ -755,6 +755,8 @@ class Speaker:
                 if block is None:
                     played = index + 1
                 else:
+                    while user_speaking() and not self.stopped(started):   # never talk over hands-free speech
+                        time.sleep(0.1)
                     process.stdin.write(block)
                     process.stdin.flush()   # unflushed PCM would sit in the pipe buffer as a gap
         except BrokenPipeError:
