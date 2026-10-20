@@ -191,6 +191,24 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('- "Maybe a weekly digest would help."', message)
         self.assertNotIn("Pause Tach", message)
 
+    async def test_summary_keeps_speech_whose_request_did_not_certainly_arrive(self):
+        def submit(delegation_id, message):
+            raise live.t3.McpError("tool-capability_denied") if "Pause" in message else TimeoutError()
+
+        self.bridge.submit = submit
+        await self.bridge.handle(heard(0, 500, "Pause Tach."))
+        await self.bridge.handle(delegation("item_1", 600))
+        await self.finish()
+        await self.bridge.handle(heard(1000, 1500, "Ship the docs."))
+        await self.bridge.handle(delegation("item_2", 1600))
+        await self.finish()
+        await self.bridge.handle(heard(5000, 5300, "No."))
+        message = self.bridge.summary_message(0, 60, self.bridge.handed)
+        self.assertIn("0 requests handed", message)
+        self.assertIn('- "Pause Tach." (not delivered)', message)
+        self.assertIn('- "Ship the docs." (delivery uncertain)', message)
+        self.assertIn('- "No."', message)   # one-word decisions are kept
+
     async def test_summary_says_when_everything_was_handed_off(self):
         await self.bridge.handle(heard(0, 500, "Pause Tach."))
         await self.bridge.handle(delegation("item_1", 600))
@@ -267,6 +285,31 @@ class HomeCallsTest(unittest.TestCase):
 
 
 class PlayerTest(unittest.TestCase):
+    def test_a_real_dropout_is_counted_and_a_turn_end_is_not(self):
+        clock = [0.0]
+        with mock.patch.object(live.subprocess, "Popen"):
+            player = live.Player(clock=lambda: clock[0])
+        player.write = lambda pcm: None
+        block = bytes(live.RATE * 2 // 10)   # 100 ms
+        player.start()
+
+        def at(seconds, data=block):
+            clock[0] = seconds
+            player.audio.put(data)
+            time.sleep(0.08)
+
+        for n in range(5):
+            at(n * 0.1)          # 0.5 s buffered → plays until ~0.9 s
+        clock[0] = 1.2           # dry at 0.9 s; an idle poll passes
+        time.sleep(0.08)
+        at(1.3)                  # back 0.4 s later: an audible dropout
+        for n in range(4):
+            at(1.4 + n * 0.1)
+        at(10.0)                 # a new turn long after: not a dropout
+        player.audio.put(None)
+        player.join(2)
+        self.assertEqual(player.underruns, 1)
+
     def test_turns_start_only_after_the_jitter_buffer_fills(self):
         writes, clock = [], [0.0]
         with mock.patch.object(live.subprocess, "Popen"):

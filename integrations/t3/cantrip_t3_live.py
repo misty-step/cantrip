@@ -47,6 +47,7 @@ SHORT_WORDS = 6                # a reply this short ("yes", "the second one") tr
 PROGRESS_SECONDS = 45
 CLOSE_SECONDS = 15
 SPEECH_LEVEL = 300             # output RMS above this is GPT-Live speaking, for the bar
+SUMMARY_SECONDS = 20           # deadline for the end-of-session summary, within the unit's stop timeout
 PREBUFFER_SECONDS = 0.4        # jitter buffer before each spoken turn (measured: 107 gaps → 11)
 
 LIVE_DEFAULTS = {
@@ -165,6 +166,7 @@ class Bridge:
         self.boundaries = [-1]      # offsets of earlier delegations: each request starts at the last one
         self.claimed = set()        # indexes of fragments already sent
         self.handed = 0             # requests that reached the thread
+        self.outcomes = {}          # delegation id → claimed fragment indexes and delivery outcome
         self.tasks = set()
         self.sequence = 0
         self.usage_seconds = 0
@@ -226,24 +228,38 @@ class Bridge:
                 return
             await asyncio.sleep(0.1)
 
-    def claim(self, end):
+    def claim(self, end, delegation_id=None):
         """Every not-yet-sent fragment spoken before the delegation point, each sent exactly once.
         A straggler that missed its own request joins the next one instead of being lost."""
         mine = sorted(i for i, (s, _, _, _) in enumerate(self.heard) if s < end and i not in self.claimed)
         self.claimed.update(mine)
+        if delegation_id:
+            self.outcomes[delegation_id] = {"indexes": mine, "outcome": "sending"}
         return "".join(self.heard[i][2] for i in mine).strip()
 
     def unsent_utterances(self):
-        """Speech never claimed by a delegation, grouped into utterances at 1.5 s pauses."""
-        groups, last_end = [], None
+        """Speech that did not certainly reach the thread, grouped into utterances at 1.5 s pauses:
+        never claimed, or claimed by a request that was refused, uncertain or still sending.
+        Returns (text, why) pairs, why being "" for speech never handed off."""
+        why = {}
+        for record in self.outcomes.values():
+            if record["outcome"] != "handed":
+                for index in record["indexes"]:
+                    why[index] = {"refused": "not delivered", "uncertain": "delivery uncertain",
+                                  "sending": "still being sent when the session ended"}[record["outcome"]]
+        groups, last_end, last_why = [], None, None
         for index, (start, end, text, _) in sorted(enumerate(self.heard), key=lambda pair: pair[1][0]):
-            if index in self.claimed or not text.strip():
+            if (index in self.claimed and index not in why) or not text.strip():
                 continue
-            if last_end is None or start - last_end > 1500:
-                groups.append("")
-            groups[-1] += text
-            last_end = end
-        return [group.strip() for group in groups if len(group.split()) >= 2]
+            reason = why.get(index, "")
+            if last_end is None or start - last_end > 1500 or reason != last_why:
+                groups.append(["", reason])
+            groups[-1][0] += text
+            last_end, last_why = end, reason
+        return [(text.strip(), reason) for text, reason in groups if text.strip()]
+
+    def anything_said(self):
+        return any(text.strip() for _, _, text, _ in self.heard)
 
     def summary_message(self, started, ended, handed):
         """One end-of-session message so nothing said live is lost to the thread's memory."""
@@ -254,9 +270,9 @@ class Bridge:
                                                                          self.label)]
         unsent = self.unsent_utterances()
         if unsent:
-            lines.append("Said but not handed off, verbatim and in order "
+            lines.append("Said but not confirmed as handed off, verbatim and in order "
                          "(preferences, feedback, decisions and ideas may be in here):")
-            lines += ['- "%s"' % utterance for utterance in unsent]
+            lines += ['- "%s"%s' % (utterance, " (" + why + ")" if why else "") for utterance, why in unsent]
         else:
             lines.append("Everything said was handed off.")
         return "\n".join(lines)
@@ -287,7 +303,7 @@ class Bridge:
     async def run_delegation(self, delegation_id, offset_ms):
         start, end = self.window(offset_ms)
         await self.settle(start, end)
-        text = self.claim(end)
+        text = self.claim(end, delegation_id)
         log("delegation id=" + delegation_id + " chars=" + str(len(text)))
         if not text:
             already = offset_ms is not None and self.boundaries.count(offset_ms) > 1
@@ -298,6 +314,7 @@ class Bridge:
             record = await in_daemon_thread(self.submit, delegation_id, self.message(text, self.context(start, end)))
         except Exception as error:
             log("send failed id=" + delegation_id + " code=" + t3.describe(error))
+            self.outcomes[delegation_id]["outcome"] = "refused" if definite_refusal(error) else "uncertain"
             if definite_refusal(error):
                 await self.append("commentary", delegation_id,
                                   "I couldn't reach " + self.label + " just now. Nothing was sent to it.")
@@ -306,6 +323,7 @@ class Bridge:
                                   "Ask the user to check its thread before repeating it.")
             return
         self.handed += 1
+        self.outcomes[delegation_id]["outcome"] = "handed"
         await self.append("thinking", delegation_id,
                           "Sent to " + self.label + ". Waiting for its answer; nothing is done yet.")
         loop = asyncio.get_running_loop()
@@ -411,7 +429,7 @@ class Player(threading.Thread):
         self.process.stdin.flush()
 
     def run(self):
-        pending, first, plays_until = bytearray(), None, None
+        pending, first, plays_until, dry_since = bytearray(), None, None, None
         while True:
             try:
                 block = self.audio.get(timeout=0.02)
@@ -421,9 +439,11 @@ class Player(threading.Thread):
                 break
             now = self.clock()
             if plays_until is not None and now > plays_until:   # ran dry: re-prime before resuming
-                if block and now - plays_until < 0.3:   # audio resumed at once: a real dropout, not a turn end
+                dry_since, plays_until = plays_until, None
+            if block and dry_since is not None:
+                if now - dry_since < 0.6:   # audio came back quickly: a dropout heard, not the end of a turn
                     self.underruns += 1
-                plays_until = None
+                dry_since = None
             if block:
                 pending += block
                 first = first if first is not None else now
@@ -632,8 +652,7 @@ async def run(config):
                 for task in helpers + list(bridge.tasks):
                     task.cancel()
     finally:
-        if session_started[0] and bridge_ref[0]:
-            send_summary(config, bridge_ref[0], session_id[0], session_started[0])
+        ended = time.time()
         pid_file.unlink(missing_ok=True)
         session_state.clear()
         if recorder:
@@ -643,11 +662,20 @@ async def run(config):
         if echo:
             echo.__exit__(None, None, None)
         t3.notify("Live session ended")   # synchronous: it is the sign that billing stopped
+        if session_started[0] and bridge_ref[0] and (bridge_ref[0].anything_said() or bridge_ref[0].handed):
+            # Last, with its own deadline, so a slow T3 never delays the cleanup above.
+            sender = threading.Thread(target=send_summary, daemon=True,
+                                      args=(config, bridge_ref[0], session_id[0], session_started[0], ended))
+            sender.start()
+            sender.join(SUMMARY_SECONDS)
+            if sender.is_alive():
+                log("summary unconfirmed: deadline")
+                t3.notify("The live session summary may not have reached " + bridge_ref[0].label + ".")
 
 
-def send_summary(config, bridge, session_id, started):
+def send_summary(config, bridge, session_id, started, ended):
     """Hand the thread one end-of-session summary; idempotent on the session."""
-    message = bridge.summary_message(started, time.time(), bridge.handed)
+    message = bridge.summary_message(started, ended, bridge.handed)
     try:
         submit_request(config, t3.connect(config, timeout=t3.SEND_STEP_SECONDS), "summary-" + session_id, message)
         log("summary sent unsent_utterances=" + str(len(bridge.unsent_utterances())))
