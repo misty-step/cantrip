@@ -424,10 +424,98 @@ class ReviewRegressionTest(Base):
         self.assertEqual(t3.describe(t3.McpError("http-401")), "http-401")
 
     def test_unreachable_t3_drops_the_record_it_created(self):
-        with mock.patch.object(t3, "connect", side_effect=OSError("network down")):
+        with mock.patch.object(t3, "connect", side_effect=OSError("network down")), \
+                mock.patch.dict(os.environ, {"T3_MCP_TOKEN": "tok"}):
             with self.assertRaises(OSError):
                 t3.send(CONFIG, "status?", "take-1")
         self.assertEqual(self.records("pending"), [])
+
+    def test_missing_token_leaves_no_record(self):
+        with mock.patch.dict(os.environ, {"T3_MCP_TOKEN": ""}):
+            with self.assertRaises(ValueError):
+                t3.send(CONFIG, "status?", "take-1")
+        self.assertEqual(self.records("pending"), [])
+
+    def test_speech_cut_short_is_recorded_as_stopped(self):
+        speaker = t3.Speaker(CONFIG, recording=lambda: False)
+
+        def remote(parts, key, started):
+            t3.stop_speaking()
+            return 1
+
+        with mock.patch.object(speaker, "remote", side_effect=remote), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            self.assertEqual(speaker.say("Hello there."), "stopped")
+
+    def test_a_record_withdrawn_mid_listing_is_skipped(self):
+        path = t3.state_dir() / "pending" / "gone.json"
+        path.write_text("{}")
+        real = t3.readable
+
+        def vanish(candidate):
+            candidate.unlink(missing_ok=True)
+            return real(candidate)
+
+        with mock.patch.object(t3, "readable", side_effect=vanish):
+            self.assertEqual(t3.pending_records(), [])
+        self.assertFalse((t3.state_dir() / "damaged").exists())
+
+    def test_a_reply_waits_while_the_user_is_speaking(self):
+        marker = t3.runtime_dir() / "user-speaking"
+        marker.write_text("")
+        speaker = t3.Speaker(CONFIG, recording=lambda: False)
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 3:
+                marker.unlink()
+
+        with mock.patch.object(speaker, "remote", return_value=1) as remote, \
+                mock.patch.object(t3.time, "sleep", side_effect=sleep), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            self.assertEqual(speaker.say("Hello."), "spoken")
+        self.assertEqual(len(sleeps), 3)
+        remote.assert_called_once()
+
+    def test_playing_marker_is_set_only_once_audio_is_written_and_cleared_after(self):
+        marker = t3.runtime_dir() / "playing"
+        marker.write_text("")   # left behind by a crashed collector
+        seen = []
+
+        class Player:
+            pid = 1
+
+            def __init__(self):
+                self.stdin = mock.Mock(write=lambda block: seen.append(marker.exists()), flush=lambda: None)
+
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        speaker = t3.Speaker(CONFIG, opener=lambda request, timeout: Response(b"\x00" * 100),
+                             recording=lambda: False)
+        spawned = []
+
+        def popen(*args, **kwargs):
+            spawned.append(marker.exists())
+            return Player()
+
+        with mock.patch.object(t3.subprocess, "Popen", side_effect=popen), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            self.assertEqual(speaker.say("Hello."), "spoken")
+        self.assertEqual(spawned, [False])        # the stale marker is gone before the player starts
+        self.assertTrue(seen and all(seen))       # set before every audible write
+        self.assertFalse(marker.exists())         # cleared when the reply ends
 
     def test_redirects_are_refused(self):
         handler = t3.NoRedirect()
