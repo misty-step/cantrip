@@ -63,7 +63,7 @@ class FakeSpeaker:
 
     def say(self, text):
         self.said.append(text)
-        return self.plays
+        return "spoken" if self.plays else "unplayable"
 
 
 class Base(unittest.TestCase):
@@ -265,8 +265,21 @@ class ReviewRegressionTest(Base):
         t3.write_json(t3.state_dir() / "pending" / "take-2.json", {
             "take": "take-2", "thread_id": THREAD, "request_id": "cantrip-voice-take-2",
             "sent_at": 0, "status": "sending"})
-        t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker, now=lambda: t3.LOST_SECONDS + 1)
-        self.assertEqual(self.records("done")[0]["outcome"], "lost")
+        clock = [t3.SENDING_GRACE_SECONDS + 1]
+        t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker, now=lambda: clock[0])
+        self.assertEqual(self.records("pending")[0]["run_id"], None)   # still queued, not given up
+        self.t3.items.append({"position": len(self.t3.items), "type": "user_message", "runId": "run:1",
+                              "messageId": "message:mcp:client%3Ax:thread-send:cantrip-voice-take-2"})
+        self.t3.reply("Found it.")
+        clock[0] += t3.LOCATE_SECONDS
+        t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker, now=lambda: clock[0])
+        self.assertEqual(self.speaker.said, ["Found it."])
+        t3.write_json(t3.state_dir() / "pending" / "take-3.json", {
+            "take": "take-3", "thread_id": THREAD, "request_id": "cantrip-voice-take-3",
+            "sent_at": 0, "status": "sending"})
+        t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker,
+                   now=lambda: t3.EXPIRE_SECONDS + 1)
+        self.assertIn("expired", [record["outcome"] for record in self.records("done")])
 
     def test_retry_racing_completion_does_not_resurrect_the_take(self):
         t3.send(CONFIG, "status?", "take-1", mcp=self.t3)
@@ -297,7 +310,7 @@ class ReviewRegressionTest(Base):
         speaker = t3.Speaker(CONFIG, opener=mock.Mock(side_effect=OSError()), recording=lambda: False)
         with mock.patch.object(t3.subprocess, "Popen", side_effect=FileNotFoundError()), \
                 mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
-            self.assertFalse(speaker.say("Hello."))
+            self.assertEqual(speaker.say("Hello."), "unplayable")
 
     def test_stop_never_signals_a_reused_pid(self):
         (t3.runtime_dir() / "player.pid").write_text(str(os.getpid()))
@@ -313,6 +326,60 @@ class ReviewRegressionTest(Base):
             t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker)
         self.assertEqual(self.notified.call_count, 1)
         self.assertIn("waiting", self.notified.call_args.args[0])
+
+    def test_collector_never_regresses_a_record_send_just_acknowledged(self):
+        path = t3.state_dir() / "pending" / "take-1.json"
+        t3.write_json(path, {"take": "take-1", "thread_id": THREAD, "request_id": "cantrip-voice-take-1",
+                             "sent_at": 0, "status": "sending"})
+        stale_copy = json.loads(path.read_text())
+        t3.write_json(path, {**stale_copy, "status": "sent", "run_id": "run:1", "message_id": "m"})
+        t3.save(path, {**stale_copy, "located_at": 5})
+        saved = json.loads(path.read_text())
+        self.assertEqual((saved["status"], saved["run_id"]), ("sent", "run:1"))
+
+    def test_a_fresh_sending_record_is_left_alone(self):
+        t3.write_json(t3.state_dir() / "pending" / "take-1.json", {
+            "take": "take-1", "thread_id": THREAD, "request_id": "cantrip-voice-take-1",
+            "sent_at": 100, "status": "sending"})
+        calls = mock.Mock(side_effect=AssertionError("no T3 call during the grace period"))
+        t3.collect(CONFIG, once=True, mcp=mock.Mock(call=calls), speaker=self.speaker, now=lambda: 110)
+        calls.assert_not_called()
+
+    def test_refused_retry_keeps_an_earlier_attempts_record(self):
+        t3.write_json(t3.state_dir() / "pending" / "take-1.json", {
+            "take": "take-1", "thread_id": THREAD, "request_id": "cantrip-voice-take-1",
+            "sent_at": 0, "status": "sending"})
+        self.t3.refuse["t3_thread_send"] = "http-401"
+        with self.assertRaises(t3.McpError):
+            t3.send(CONFIG, "status?", "take-1", mcp=self.t3)
+        self.assertEqual(len(self.records("pending")), 1)
+
+    def test_reply_silenced_while_held_is_recorded_and_notified(self):
+        self.speaker.say = lambda text: "muted"
+        t3.send(CONFIG, "status?", "take-1", mcp=self.t3)
+        self.t3.reply("Fine.")
+        t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker, now=self.finished)
+        self.assertEqual(self.records("done")[0]["speech"], "muted")
+        self.assertIn("replied (muted)", self.notified.call_args.args[0])
+
+    def test_repeat_finds_the_reply_by_position_after_later_runs(self):
+        t3.send(CONFIG, "status?", "take-1", mcp=self.t3)
+        self.t3.reply("The first answer.")
+        t3.collect(CONFIG, once=True, mcp=self.t3, speaker=self.speaker, now=self.finished)
+        for n in range(t3.RECENT_ITEMS + 50):
+            self.t3.items.append({"position": len(self.t3.items), "type": "assistant_message",
+                                  "runId": "run:later", "itemId": "x" + str(n), "text": "later"})
+        self.speaker.said.clear()
+        self.assertTrue(t3.repeat(CONFIG, mcp=self.t3, speaker=self.speaker))
+        self.assertEqual(self.speaker.said, ["The first answer."])
+
+    def test_missing_player_costs_no_speech_request(self):
+        opener = mock.Mock(side_effect=AssertionError("speech requested without a player"))
+        speaker = t3.Speaker(CONFIG, opener=opener, recording=lambda: False)
+        with mock.patch.object(t3.subprocess, "Popen", side_effect=FileNotFoundError()), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            speaker.say("Hello.")
+        opener.assert_not_called()
 
     def test_redirects_are_refused(self):
         handler = t3.NoRedirect()

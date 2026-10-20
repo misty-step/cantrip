@@ -9,13 +9,16 @@ Python 3.11+ with no install step beyond copying the file.
   `clientRequestId` is `cantrip-voice-<CANTRIP_TAKE_ID>`, so a retried or
   recovered take never creates a second message. T3 scopes that key to the
   OAuth client, so re-authorizing with a new client can repost an old take. It
-  writes the pending record first and exits once T3 acknowledges, within the
-  handoff's 30-second budget.
+  writes the pending record first and exits once T3 acknowledges. Each network
+  step is bounded (6 s to connect, 15 s to send) to fit the handoff's 30-second
+  timeout; if a slow DNS lookup still overruns it, the record is already in place
+  and the collector finds the message once it appears.
 - `collect` is a user service. For each sent take it finds the reply run, waits
   for it, and speaks the run's final assistant message once. One failing take
   never blocks the others: after three refusals from T3 it is given up with a
-  notification, as is a send whose message never appeared or a reply still
-  missing after six hours. A run waiting for your input in the thread raises
+  notification, as is a reply still missing after six hours. A send that was
+  never acknowledged keeps being looked for until then, since a queued message
+  joins the timeline only when its turn starts. A run waiting for your input in the thread raises
   one notification. If T3 refuses the sign-in, the collector notifies you and
   exits so systemd restarts it with a renewed token.
 - `talk` stops speech, then runs `cantrip toggle --handoff <handoff>`.

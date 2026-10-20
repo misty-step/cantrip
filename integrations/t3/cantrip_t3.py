@@ -38,7 +38,8 @@ HTTP_SECONDS = 75
 SEND_STEP_SECONDS = 6          # initialize and notification, inside the 30 s handoff timeout
 SEND_SECONDS = 15
 STALE_SECONDS = 15 * 60
-LOST_SECONDS = 10 * 60         # an unacknowledged send whose message never appears
+SENDING_GRACE_SECONDS = 60     # leave a record alone while its handoff may still be sending
+LOCATE_SECONDS = 10            # how often to look for an unacknowledged message
 EXPIRE_SECONDS = 6 * 60 * 60   # stop waiting on a reply after this long
 TOOL_FAILURES = 3              # consecutive T3 refusals before a take is given up
 RECENT_ITEMS = 200
@@ -216,10 +217,11 @@ def send(config, text, take, mcp=None, now=time.time):
         return json.loads(done.read_text())
     record = {"take": take, "thread_id": config["thread_id"], "request_id": request_id(take),
               "sent_at": now(), "status": "sending"}
-    if pending.exists():
-        record = {**record, **json.loads(pending.read_text())}
-    else:
+    created = not pending.exists()
+    if created:
         write_json(pending, record)
+    else:
+        record = {**record, **json.loads(pending.read_text())}
     try:
         mcp = mcp or connect(config, timeout=SEND_STEP_SECONDS)
         result = mcp.call("t3_thread_send", {"threadId": config["thread_id"],
@@ -227,9 +229,9 @@ def send(config, text, take, mcp=None, now=time.time):
                                              "mode": "queue", "clientRequestId": request_id(take)},
                           timeout=SEND_SECONDS)
     except McpError as error:
-        # A definite refusal posted nothing; an uncertain transport failure stays pending
-        # so the collector can find the message or report it lost.
-        if record["status"] == "sending" and (error.refused() or str(error).startswith(("http-4", "rpc-"))):
+        # A definite refusal of this take's first attempt posted nothing. An uncertain
+        # failure, or a retry after an earlier attempt, stays pending for the collector.
+        if created and (error.refused() or str(error).startswith(("http-4", "rpc-"))):
             pending.unlink(missing_ok=True)
         record_error("send", error)
         raise
@@ -317,10 +319,19 @@ def locate_run(mcp, record):
 
 
 def final_reply(mcp, record, head=None):
+    """The run's last assistant message. Its position (not its text) is kept for `repeat`."""
     reply = None
-    for item in recent_items(mcp, record["thread_id"], head):
-        if item.get("runId") == record["run_id"] and item.get("type") == "assistant_message":
-            reply = item
+    if record.get("reply_position") is not None:
+        after = record["reply_position"] - 1
+        page = mcp.call("t3_thread_read", {"threadId": record["thread_id"], "limit": 1, "maxCharsPerItem": 50_000,
+                                           **({"afterPosition": after} if after >= 0 else {})})
+        reply = next(iter(page.get("items", [])), None)
+    else:
+        for item in recent_items(mcp, record["thread_id"], head):
+            if item.get("runId") == record["run_id"] and item.get("type") == "assistant_message":
+                reply = item
+        if reply:
+            record["reply_position"] = reply.get("position")
     return full_text(mcp, record["thread_id"], reply) if reply else ""
 
 
@@ -338,17 +349,21 @@ def completed_at(head, run_id):
 def advance(mcp, record, now=time.time):
     """Advance one pending take: ("wait", record, "") or (outcome, record, reply text)."""
     if not record.get("run_id"):
+        # Unacknowledged send: the message may still be queued outside the timeline, so keep
+        # looking (throttled) until the take expires.
+        if now() - record.get("located_at", 0) < LOCATE_SECONDS:
+            return ("wait", record, "")
+        record["located_at"] = now()
         record["run_id"] = locate_run(mcp, record)
         if not record["run_id"]:
-            lost = record.get("status") == "sending" and now() - record.get("sent_at", now()) > LOST_SECONDS
-            return ("lost" if lost else "wait", record, "")
+            return ("wait", record, "")
     waited = mcp.call("t3_thread_wait", {"threadId": record["thread_id"], "runId": record["run_id"],
                                          "timeoutMs": WAIT_MS}, timeout=WAIT_MS / 1000 + 30)
     status = find_key(waited, "status")
     if status not in TERMINAL:
         if status == "waiting" and not record.get("waiting_noticed"):
             record["waiting_noticed"] = True
-            notify("Home is waiting for you in its thread.")
+            notify(record.get("label", "Home") + " is waiting for you in its thread.")
         return ("wait", record, "")
     record["run_status"] = status
     head = thread_head(mcp, record["thread_id"])
@@ -390,8 +405,11 @@ def run_collector(config, once, mcp, speaker, now):
         try:
             mcp = mcp or connect(config)
             for path, record in records:
+                record["label"] = config.get("label", "Home")
                 step(mcp, path, record, speaker, now)
             backoff = 5
+            if not once:
+                time.sleep(1)
         except McpError as error:
             if error.unauthorized():
                 notify("T3 refused Home's voice sign-in; spoken replies are paused.")
@@ -411,8 +429,21 @@ def transport_failure(error, backoff, once):
     return None, min(backoff * 2, 120)
 
 
+def save(path, record):
+    """Write back a pending record without regressing what `send` wrote meanwhile."""
+    try:
+        current = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return   # finished or removed meanwhile
+    if current.get("status") == "sent" and record.get("status") != "sent":
+        record.update({key: current[key] for key in ("status", "run_id", "message_id") if current.get(key)})
+    write_json(path, record)
+
+
 def step(mcp, path, record, speaker, now):
     """Advance one record; a refusal for this record never blocks the others."""
+    if record.get("status") == "sending" and now() - record.get("sent_at", now()) < SENDING_GRACE_SECONDS:
+        return   # its handoff may still be talking to T3
     if now() - record.get("sent_at", now()) > EXPIRE_SECONDS:
         finish(path, record, "expired", "", speaker, now)
         return
@@ -427,11 +458,11 @@ def step(mcp, path, record, speaker, now):
         if record["failures"] >= TOOL_FAILURES:
             finish(path, record, "error", "", speaker, now)
         else:
-            write_json(path, record)
+            save(path, record)
         return
     record.pop("failures", None)
     if outcome == "wait":
-        write_json(path, record)
+        save(path, record)
     else:
         finish(path, record, outcome, text, speaker, now)
 
@@ -449,8 +480,9 @@ def finish(path, record, outcome, text, speaker, now):
         spoken = text
     elif outcome == "reply":
         record["outcome"] = "empty"
-    else:   # lost, expired or refused: nothing to say, but the user should know
+    else:   # expired or refused: nothing to say, but the user should know
         notice = label + "'s reply could not be collected; see the thread."
+    verb = "could not finish a request" if outcome == "failed" else "replied"
     if not spoken:
         record["speech"] = "none"
     elif is_muted():
@@ -460,15 +492,20 @@ def finish(path, record, outcome, text, speaker, now):
     else:
         record["speech"] = "spoken"
     if record["speech"] in ("muted", "stale"):
-        notice = label + " replied (" + record["speech"] + "); see the thread."
+        notice = label + " " + verb + " (" + record["speech"] + "); see the thread."
     write_json(state_dir() / "done" / path.name, record)
     path.unlink(missing_ok=True)
     log("reply take=" + record["take"] + " outcome=" + record["outcome"] + " chars="
         + str(len(text)) + " speech=" + record["speech"])
-    if record["speech"] == "spoken" and not speaker.say(spoken):
-        record["speech"] = "unplayable"
-        write_json(state_dir() / "done" / path.name, record)
-        notice = label + "'s reply could not be played; see the thread."
+    if record["speech"] == "spoken":
+        result = speaker.say(spoken)
+        if result != "spoken":
+            record["speech"] = result
+            write_json(state_dir() / "done" / path.name, record)
+            if result == "muted":
+                notice = label + " " + verb + " (muted); see the thread."
+            elif result == "unplayable":
+                notice = label + "'s reply could not be played; see the thread."
     if notice:
         notify(notice)
 
@@ -547,20 +584,20 @@ class Speaker:
         self.recording = recording
 
     def say(self, text):
-        """Speak once, one voice at a time. Returns False when nothing could play."""
+        """Speak once, one voice at a time: "spoken", "muted", "stopped" or "unplayable"."""
         text = speakable(text)
         if not text:
-            return True
+            return "spoken"
         with open(runtime_dir() / "speech.lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             started = time.time()
             self.checked = (0.0, False)
             while self.recording() and time.time() - started < 600:
-                if self.stopped(started) or is_muted():
-                    return True
+                if self.silenced(started):
+                    return self.silenced(started)
                 time.sleep(0.5)
-            if self.stopped(started) or is_muted():
-                return True
+            if self.silenced(started):
+                return self.silenced(started)
             parts = list(chunks(text))
             played = 0
             key = os.environ.get("CANTRIP_T3_SPEECH_KEY", "").strip()
@@ -575,8 +612,11 @@ class Speaker:
                     self.local(" ".join(parts[played:]), started)
                 except OSError as error:
                     log("local speech unavailable class=" + type(error).__name__)
-                    return played > 0
-            return True
+                    return "spoken" if played else "unplayable"
+            return "spoken"
+
+    def silenced(self, started):
+        return "muted" if is_muted() else "stopped" if self.stopped(started) else None
 
     def stopped(self, started):
         marker = runtime_dir() / "stop"
@@ -632,9 +672,9 @@ class Speaker:
         """Play natural speech; return how many chunks were fully handed to the player."""
         audio = queue.Queue()
         cancelled = threading.Event()
-        threading.Thread(target=self.fetch, args=(parts, key, audio, cancelled), daemon=True).start()
         process = self.player(["pw-cat", "--playback", "--raw", "--format", "s16",
-                               "--rate", str(PCM_RATE), "--channels", "1", "-"])
+                               "--rate", str(PCM_RATE), "--channels", "1", "-"])   # before paying for speech
+        threading.Thread(target=self.fetch, args=(parts, key, audio, cancelled), daemon=True).start()
         played = 0
         last = time.time()
         try:
