@@ -7,13 +7,23 @@ Python 3.11+ with no install step beyond copying the file.
 - `send` is the handoff command. It posts the transcript to the thread with
   `t3_thread_send` in `queue` mode, so each take gets its own reply run.
   `clientRequestId` is `cantrip-voice-<CANTRIP_TAKE_ID>`, so a retried or
-  recovered take never creates a second message. It exits once T3 acknowledges.
+  recovered take never creates a second message. T3 scopes that key to the
+  OAuth client, so re-authorizing with a new client can repost an old take. It
+  writes the pending record first and exits once T3 acknowledges, within the
+  handoff's 30-second budget.
 - `collect` is a user service. For each sent take it finds the reply run, waits
-  for it, and speaks the run's final assistant message once.
+  for it, and speaks the run's final assistant message once. One failing take
+  never blocks the others: after three refusals from T3 it is given up with a
+  notification, as is a send whose message never appeared or a reply still
+  missing after six hours. A run waiting for your input in the thread raises
+  one notification. If T3 refuses the sign-in, the collector notifies you and
+  exits so systemd restarts it with a renewed token.
 - `talk` stops speech, then runs `cantrip toggle --handoff <handoff>`.
 - `mute [on|off|toggle]` switches reply speech; muting also stops it.
-  `stop` silences the current reply. `repeat` speaks the last reply again,
-  fetched from T3. `status` prints mute state and the pending count.
+  `stop` silences the current reply, including one held while you record.
+  `repeat` speaks the last reply again, fetched from T3. Only one reply speaks
+  at a time. `status` prints mute state, the pending count and the last error
+  code, which is otherwise invisible because Cantrip discards handoff stderr.
 
 Replies are spoken with an OpenAI-compatible `/audio/speech` voice when
 `CANTRIP_T3_SPEECH_KEY` is set, falling back to local `espeak-ng` when that
@@ -25,8 +35,9 @@ desktop notification points to the thread instead.
 
 Privacy: the transcript goes only to the T3 thread, and reply text only to the
 configured speech endpoint. State under `$XDG_STATE_HOME/cantrip-t3` holds
-take, message and run IDs and timestamps, never text. Logs carry character
-counts and error classes only.
+take, message and run IDs, timestamps, counts and error codes, never text.
+Logs carry the same. Requests never follow redirects, so a bearer token
+cannot be forwarded to another host.
 
 ## Setup
 

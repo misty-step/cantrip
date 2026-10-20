@@ -6,7 +6,7 @@ After=graphical-session.target pipewire.service
 [Service]
 ExecStart=%h/.local/bin/pass-env run -e T3_MCP_TOKEN=t3/home-mcp -e CANTRIP_T3_SPEECH_KEY=openrouter/speech -- %h/.local/bin/cantrip-t3 collect
 Restart=on-failure
-RestartSec=10
+RestartSec=120
 
 [Install]
 WantedBy=graphical-session.target
