@@ -41,7 +41,7 @@ CONVERSE_DEFAULTS = {
     "stt_endpoint": "https://openrouter.ai/api/v1",
     "stt_model": "nvidia/parakeet-tdt-0.6b-v3",
     "language": "en",
-    "end_silence_ms": 700,      # this much quiet ends an utterance
+    "end_silence_ms": 1000,     # this much quiet ends an utterance (shorter splits normal pauses)
     "min_speech_ms": 350,       # shorter bursts are noise
     "max_utterance_s": 60,
     "idle_minutes": 5,
@@ -242,6 +242,7 @@ class Conversation:
             self.endpointer.reset()   # on speakers, never hear the reply; keep the floor
             return
         event = self.endpointer.feed(frame)
+        self.mark_speaking(self.endpointer.started)
         if not event:
             return
         if event[0] == "noise":
@@ -257,6 +258,18 @@ class Conversation:
                 self.work.put(event[1])
             else:
                 self.utterance(event[1])
+
+    def mark_speaking(self, speaking):
+        """Tell the collector the user is mid-utterance, so a reply never starts over them."""
+        marker = t3.runtime_dir() / "user-speaking"
+        marked = getattr(self, "marked_at", None)
+        if speaking:
+            if marked is None or self.now() - marked >= 1:   # refresh once a second
+                marker.write_text("")
+                self.marked_at = self.now()
+        elif marked is not None:
+            marker.unlink(missing_ok=True)
+            self.marked_at = None
 
     def worker(self):
         while True:
@@ -322,20 +335,24 @@ def check_key(settings, key, opener=None):
 
 
 def run(config):
-    key = t3.secret("CANTRIP_T3_SPEECH_KEY")
-    if not key:
-        raise SystemExit("cantrip-t3-converse: CANTRIP_T3_SPEECH_KEY is not set")
-    t3.connect(config, timeout=t3.SEND_STEP_SECONDS)   # fail now if T3 refuses the sign-in
-    if not check_key(converse_config(config), key):
-        t3.notify("Speech-to-text key was refused; hands-free did not start.")
-        raise SystemExit("cantrip-t3-converse: speech-to-text key refused")
+    label = config.get("label", "Home")
+    try:
+        key = t3.secret("CANTRIP_T3_SPEECH_KEY")
+        if not key:
+            raise ValueError("CANTRIP_T3_SPEECH_KEY is not set")
+        t3.connect(config, timeout=t3.SEND_STEP_SECONDS)   # fail now if T3 refuses the sign-in
+        if not check_key(converse_config(config), key):
+            raise ValueError("speech-to-text key refused")
+    except (t3.McpError, OSError, ValueError, SystemExit) as error:
+        t3.notify("Hands-free couldn't start (" + t3.describe(error) + ").")
+        raise SystemExit("cantrip-t3-converse: could not start: " + t3.describe(error)) from None
     conversation = Conversation(config, key, threaded=True)
     stopping = []
     signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
     signal.signal(signal.SIGINT, lambda *_: stopping.append(1))
     recorder = subprocess.Popen(["pw-record", "--raw", "--format", "s16", "--rate", str(RATE),
                                  "--channels", "1", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    t3.notify("Listening for " + config.get("label", "Home"))
+    t3.notify("Listening for " + label)
     log("listening model=" + conversation.settings["stt_model"])
     try:
         while not stopping and not conversation.idle() and not conversation.refused:
@@ -344,11 +361,16 @@ def run(config):
                 break
             conversation.feed(frame)
     finally:
+        conversation.mark_speaking(False)
+        recorder.stdout.close()   # a recorder blocked on a full pipe can then exit
         recorder.terminate()
-        recorder.wait()
+        try:
+            recorder.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            recorder.kill()
+            recorder.wait()
         unsent = conversation.work.qsize()
-        t3.notify("Stopped listening for " + config.get("label", "Home")
-                  + (" (" + str(unsent) + " unsent)" if unsent else ""))
+        t3.notify("Stopped listening for " + label + (" (" + str(unsent) + " unsent)" if unsent else ""))
         log("stopped turns=%d" % conversation.turns)
 
 

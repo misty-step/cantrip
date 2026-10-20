@@ -47,7 +47,7 @@ class EndpointerTest(unittest.TestCase):
         return [e for e in (endpointer.feed(f) for f in frames) if e], endpointer
 
     def test_speech_then_silence_makes_one_utterance(self):
-        events, _ = self.events(quiet(20) + speech(40) + quiet(30))
+        events, _ = self.events(quiet(20) + speech(40) + quiet(40))
         self.assertEqual([e[0] for e in events], ["start", "utterance"])
         self.assertGreater(len(events[1][1]), 40 * converse.FRAME_BYTES)
 
@@ -137,6 +137,13 @@ class ConversationTest(unittest.TestCase):
         conversation.pending = lambda: False
         return conversation
 
+    def test_speech_in_progress_holds_the_reply(self):
+        conversation = self.conversation()
+        self.speak(conversation, quiet(20) + speech(20))
+        self.assertTrue(converse.t3.user_speaking())
+        self.speak(conversation, speech(10) + quiet(40))
+        self.assertFalse(converse.t3.user_speaking())
+
     def test_send_failure_message_follows_whether_anything_may_have_arrived(self):
         conversation = self.conversation()
 
@@ -146,10 +153,10 @@ class ConversationTest(unittest.TestCase):
             raise TimeoutError()
 
         conversation.send = kept
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         self.assertIn("Not sure", self.notified.call_args.args[0])
         conversation.send = lambda *args: (_ for _ in ()).throw(OSError("unreachable"))
-        self.speak(conversation, speech(30) + quiet(30))
+        self.speak(conversation, speech(30) + quiet(40))
         self.assertIn("say it again", self.notified.call_args.args[0])
 
     def test_a_failing_turn_never_kills_the_worker(self):
@@ -166,7 +173,7 @@ class ConversationTest(unittest.TestCase):
             return self.heard
 
         conversation.transcribe = flaky
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40) + speech(30) + quiet(40))
         for _ in range(100):
             if self.sent:
                 break
@@ -180,7 +187,7 @@ class ConversationTest(unittest.TestCase):
 
     def test_each_utterance_becomes_its_own_take(self):
         conversation = self.conversation()
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40) + speech(30) + quiet(40))
         self.assertEqual([text for text, _ in self.sent], [self.heard, self.heard])
         self.assertEqual(len({take for _, take in self.sent}), 2)
         self.assertTrue(all(take.startswith("converse-") for _, take in self.sent))
@@ -188,14 +195,14 @@ class ConversationTest(unittest.TestCase):
     def test_empty_transcript_sends_nothing(self):
         self.heard = ""
         conversation = self.conversation()
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         self.assertEqual(self.sent, [])
 
     def test_on_speakers_the_reply_is_never_heard_as_input(self):
         conversation = self.conversation()
         conversation.speaking = lambda: True
         with mock.patch.object(converse.t3, "stop_speaking") as stop:
-            self.speak(conversation, speech(60) + quiet(30))
+            self.speak(conversation, speech(60) + quiet(40))
         self.assertEqual(self.sent, [])
         stop.assert_not_called()
 
@@ -203,7 +210,7 @@ class ConversationTest(unittest.TestCase):
         conversation = self.conversation(headphones=True)
         conversation.speaking = lambda: True
         with mock.patch.object(converse.t3, "stop_speaking") as stop:
-            self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+            self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         stop.assert_called_once()
         self.assertEqual([text for text, _ in self.sent], [self.heard])
 
@@ -214,7 +221,7 @@ class ConversationTest(unittest.TestCase):
             raise converse.t3.McpError("stt-http-503")
 
         conversation.transcribe = broken
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         self.assertEqual(self.sent, [])
         self.assertIn("say it again", self.notified.call_args.args[0])
         self.assertIsNone(conversation.refused)
@@ -223,7 +230,7 @@ class ConversationTest(unittest.TestCase):
             raise converse.SttRefused("stt-http-402")
 
         conversation.transcribe = refused
-        self.speak(conversation, speech(30) + quiet(30))
+        self.speak(conversation, speech(30) + quiet(40))
         self.assertEqual(conversation.refused, "stt-http-402")
 
     def test_malformed_stt_reply_loses_only_that_utterance(self):
@@ -233,15 +240,15 @@ class ConversationTest(unittest.TestCase):
             raise ValueError("Expecting value")
 
         conversation.transcribe = malformed
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         conversation.transcribe = lambda *args: self.heard
-        self.speak(conversation, speech(30) + quiet(30))
+        self.speak(conversation, speech(30) + quiet(40))
         self.assertEqual(len(self.sent), 1)
 
     def test_push_to_talk_speech_is_not_heard_twice(self):
         conversation = self.conversation()
         conversation.recording = lambda: True
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         self.assertEqual(self.sent, [])
 
     def test_a_stale_player_pid_does_not_deafen_the_session(self):
@@ -256,9 +263,9 @@ class ConversationTest(unittest.TestCase):
         threading.Thread(target=conversation.worker, daemon=True).start()
         entered = threading.Event()
         conversation.transcribe = lambda *args: (entered.set(), gate.wait(2), self.heard)[2]
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+        self.speak(conversation, quiet(20) + speech(30) + quiet(40))
         self.assertTrue(entered.wait(2))   # the worker is now busy with the first turn
-        self.speak(conversation, speech(30) + quiet(30))
+        self.speak(conversation, speech(30) + quiet(40))
         self.assertEqual((conversation.work.qsize(), len(self.sent)), (1, 0))   # second captured meanwhile
         gate.set()
         for _ in range(100):

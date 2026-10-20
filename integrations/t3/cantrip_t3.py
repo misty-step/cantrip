@@ -368,7 +368,7 @@ def completed_at(head, run_id):
     return None
 
 
-def advance(mcp, record, now=time.time):
+def advance(mcp, record, now=time.time, wait_ms=WAIT_MS):
     """Advance one pending take: ("wait", record, "") or (outcome, record, reply text)."""
     if not record.get("run_id"):
         # Unacknowledged send: the message may still be queued outside the timeline, so keep
@@ -380,7 +380,7 @@ def advance(mcp, record, now=time.time):
         if not record["run_id"]:
             return ("wait", record, "")
     waited = mcp.call("t3_thread_wait", {"threadId": record["thread_id"], "runId": record["run_id"],
-                                         "timeoutMs": WAIT_MS}, timeout=WAIT_MS / 1000 + 30)
+                                         "timeoutMs": wait_ms}, timeout=wait_ms / 1000 + 30)
     status = find_key(waited, "status")
     if status not in TERMINAL:
         if status == "waiting" and not record.get("waiting_noticed"):
@@ -450,9 +450,11 @@ def run_collector(config, once, mcp, speaker, now):
             continue
         try:
             mcp = mcp or connect(config)
+            # With several takes pending, wait briefly on each so one long run never delays another's reply.
+            wait_ms = WAIT_MS if len(records) == 1 else 3000
             for path, record in records:
                 record["label"] = config.get("label", "Home")
-                step(mcp, path, record, speaker, now)
+                step(mcp, path, record, speaker, now, wait_ms)
             backoff = 5
             if not once:
                 time.sleep(1)
@@ -486,7 +488,7 @@ def save(path, record):
     write_json(path, record)
 
 
-def step(mcp, path, record, speaker, now):
+def step(mcp, path, record, speaker, now, wait_ms=WAIT_MS):
     """Advance one record; a refusal for this record never blocks the others."""
     if record.get("status") == "sending" and now() - record.get("sent_at", now()) < SENDING_GRACE_SECONDS:
         return   # its handoff may still be talking to T3
@@ -494,7 +496,7 @@ def step(mcp, path, record, speaker, now):
         finish(path, record, "expired", "", speaker, now)
         return
     try:
-        outcome, record, text = advance(mcp, record, now=now)
+        outcome, record, text = advance(mcp, record, now=now, wait_ms=wait_ms)
     except McpError as error:
         if not error.refused():
             raise
@@ -603,6 +605,18 @@ def chunks(text, limit=CHUNK_LIMIT, first=FIRST_CHUNK_LIMIT):
         yield current
 
 
+USER_SPEAKING_SECONDS = 30   # a hands-free marker older than this is stale
+
+
+def user_speaking():
+    """Hands-free capture marks speech in progress; replies wait for the user to finish."""
+    marker = runtime_dir() / "user-speaking"
+    try:
+        return time.time() - marker.stat().st_mtime < USER_SPEAKING_SECONDS
+    except OSError:
+        return False
+
+
 def cantrip_recording():
     try:
         status = subprocess.run(["cantrip", "status", "--json"], capture_output=True, text=True, timeout=5)
@@ -638,7 +652,7 @@ class Speaker:
             fcntl.flock(lock, fcntl.LOCK_EX)
             started = time.time()
             self.checked = (0.0, False)
-            while self.recording():
+            while self.recording() or user_speaking():
                 if self.silenced(started):
                     return self.silenced(started)
                 if time.time() - started > 600:

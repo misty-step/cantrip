@@ -460,6 +460,24 @@ class ReviewRegressionTest(Base):
             self.assertEqual(t3.pending_records(), [])
         self.assertFalse((t3.state_dir() / "damaged").exists())
 
+    def test_a_reply_waits_while_the_user_is_speaking(self):
+        marker = t3.runtime_dir() / "user-speaking"
+        marker.write_text("")
+        speaker = t3.Speaker(CONFIG, recording=lambda: False)
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 3:
+                marker.unlink()
+
+        with mock.patch.object(speaker, "remote", return_value=1) as remote, \
+                mock.patch.object(t3.time, "sleep", side_effect=sleep), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            self.assertEqual(speaker.say("Hello."), "spoken")
+        self.assertEqual(len(sleeps), 3)
+        remote.assert_called_once()
+
     def test_redirects_are_refused(self):
         handler = t3.NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere.example/"))

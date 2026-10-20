@@ -91,7 +91,7 @@ with your launcher and entries, then run
 
 `cantrip_t3_converse.py` keeps the microphone open and takes turns with the
 thread without a key per utterance. Local energy endpointing ends an utterance
-after 0.7 s of quiet. The utterance is transcribed by OpenRouter's JSON
+after 1 s of quiet. The utterance is transcribed by OpenRouter's JSON
 `/audio/transcriptions` endpoint (Parakeet by default) on a worker thread, so
 capture never stalls, and sent with `cantrip_t3.send` as its own take. The
 running collector then speaks the reply exactly as for push-to-talk. Audio
@@ -99,7 +99,8 @@ leaves the machine only for detected speech; nothing is retained.
 
 - **Speakers (default):** the microphone is ignored while a reply plays and
   for 0.6 s after, so the agent never hears its own voice. Speech already under
-  way when a reply starts is dropped; use `stop` or the mute key to cut a reply.
+  way is protected: a reply waits until you finish speaking. Use `stop` or the
+  mute key to cut a reply.
 - **Headphones** (`headphones = true`): speaking over a reply stops it
   (barge-in).
 - **Background sound:** the noise floor follows quiet quickly and rises
@@ -122,7 +123,7 @@ leaves the machine only for detected speech; nothing is retained.
 stt_endpoint = "https://openrouter.ai/api/v1"
 stt_model = "nvidia/parakeet-tdt-0.6b-v3"
 language = "en"
-end_silence_ms = 700
+end_silence_ms = 1000
 min_speech_ms = 350
 max_utterance_s = 60
 idle_minutes = 5
@@ -130,9 +131,9 @@ headphones = false
 ```
 
 Measured on Linux with OpenRouter: end of speech to the reply's first word
-took 5.8 s against a fast agent. That was 0.7 s of endpointing, about 0.7 s of
-STT, a 3.5 s agent run, and about 1.4 s to first speech. A slower agent adds
-its own run time. OpenRouter offers no realtime or full-duplex voice API, so
+took 5.8 s against a fast, idle agent. That was endpointing (now 1 s), about
+0.7 s of STT, a 3.5 s agent run, and about 1.4 s to first speech. A busy agent
+adds its queue and run time, which dominated QA's 15–83 s measurements. OpenRouter offers no realtime or full-duplex voice API, so
 this is turn-taking, not a live conversation. Install
 [`cantrip-t3-converse.service`](cantrip-t3-converse.service) with the same
 speech key entry as `cantrip-t3.service`, and bind a key to start and stop it.
