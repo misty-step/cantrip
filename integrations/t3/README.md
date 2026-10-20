@@ -78,3 +78,39 @@ Install [`cantrip-t3.service`](cantrip-t3.service) in `~/.config/systemd/user/`
 with your launcher and entries, then run
 `systemctl --user enable --now cantrip-t3.service`. Bind keys to
 `cantrip-t3 talk`, `cantrip-t3 mute toggle` and `cantrip-t3 stop`.
+
+## Live conversation (GPT-Live)
+
+`cantrip_t3_live.py` holds a full-duplex, interruptible conversation through
+[GPT-Live](https://developers.openai.com/api/docs/guides/live) in client
+delegation mode, with the same thread as its only backend. It talks to the
+thread directly; Cantrip is not involved.
+
+- At connect, `[live] summary_command` output seeds the session as developer
+  context, for example the agent's `NOW.md`.
+- GPT-Live is told to delegate every request, decision and status question.
+  Each `session.delegation.created` sends the user's speech since the previous
+  delegation to the thread as `[voice live] …`, idempotent on the delegation
+  ID. A quiet `session.thinking.append` follows; the run's final reply returns
+  as `session.commentary.append` pieces of at most 1,500 characters, for
+  GPT-Live to say. Long runs add a progress note every 45 seconds, and a failed
+  run or unreachable thread is reported honestly.
+- SIGTERM or SIGINT closes the session gracefully and logs billed seconds.
+  `cantrip-t3-live mute` toggles the microphone.
+- Use headphones, or set `echo_cancel = true` to route the session through a
+  PipeWire echo-cancel source and sink that are removed afterwards.
+
+```toml
+[live]                # in t3.toml
+model = "gpt-live-1"
+voice = "marin"
+summary_command = ["ssh", "host", "cat ~/home/NOW.md"]
+echo_cancel = false
+```
+
+It needs `OPENAI_API_KEY` with GPT-Live access and runs with
+`uv run --script`, which installs its one dependency (`openai[realtime]`).
+`cantrip-t3-live session` prints the session configuration without
+connecting. Install [`cantrip-t3-live.service`](cantrip-t3-live.service) and
+bind keys to start/stop it and to `cantrip-t3-live mute`; GPT-Live
+bills per connected second, so stop the session when you are done.
