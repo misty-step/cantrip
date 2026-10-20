@@ -1,0 +1,76 @@
+2026-10-20T21:54:26.422536Z  INFO cantrip_engine::engine: [Daemon] starting cantrip 0.1.8
+2026-10-20T21:54:31.500776Z  INFO cantrip_engine::engine: [Daemon] listening
+2026-10-20T21:54:31.506766Z  INFO cantrip::daemon: [Daemon] HUD not running; spawned it
+2026-10-20T21:54:31.507142Z  INFO cantrip_engine::engine: [Daemon] command=ping sender=pid=3997137 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:3995725<-bash:3978475<-bash:3978472
+2026-10-20T21:54:31.899458Z  INFO cantrip_engine::engine: [Daemon] command=ping sender=pid=4000405 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000066<-bash:3978475<-bash:3978472
+2026-10-20T21:54:34.290604Z  INFO cantrip_engine::stt: [STT] model loaded in 2789 ms
+2026-10-20T21:54:35.982247Z  INFO cantrip_engine::engine: [Daemon] command=start handoff=none sender=pid=4002582 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:54:36.009691Z  INFO cantrip::capture::linux: [Capture] recording started
+2026-10-20T21:54:36.009717Z  INFO cantrip_engine::engine: [Daemon] state idle -> recording
+2026-10-20T21:54:48.696289Z  INFO cantrip_engine::engine: [Daemon] command=stop sender=pid=4010456 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:54:48.696385Z  INFO cantrip_engine::engine: [Daemon] state recording -> processing reason=stop
+2026-10-20T21:54:48.746570Z  INFO cantrip::capture::linux: [Capture] recording stopped after 12736 ms
+2026-10-20T21:54:49.428716Z  INFO cantrip_engine::stt: [STT] chunk=1/1 start_s=0.00 duration_s=11.78
+2026-10-20T21:54:49.896148Z  INFO cantrip_engine::stt: [STT] audio_seconds=11.785 inference_ms=467 output_char_count=108 partial=false
+2026-10-20T21:54:56.328015Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Complete delivery=Copied cleanup=Off
+2026-10-20T21:54:57.580495Z  INFO cantrip_engine::engine: [Daemon] command=start handoff=none sender=pid=4017171 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:54:57.611366Z  INFO cantrip::capture::linux: [Capture] recording started
+2026-10-20T21:54:57.611416Z  INFO cantrip_engine::engine: [Daemon] state idle -> recording
+2026-10-20T21:55:10.218799Z  INFO cantrip_engine::engine: [Daemon] command=stop sender=pid=4025913 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:10.219035Z  INFO cantrip_engine::engine: [Daemon] state recording -> processing reason=stop
+2026-10-20T21:55:10.269284Z  INFO cantrip::capture::linux: [Capture] recording stopped after 12657 ms
+2026-10-20T21:55:11.231414Z  INFO cantrip_engine::stt: [STT] chunk=1/1 start_s=0.00 duration_s=11.29
+2026-10-20T21:55:11.841843Z  INFO cantrip_engine::stt: [STT] audio_seconds=11.294 inference_ms=610 output_char_count=101 partial=false
+2026-10-20T21:55:18.003665Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Complete delivery=Copied cleanup=Off
+2026-10-20T21:55:18.817024Z  INFO cantrip_engine::engine: [Daemon] command=copy sender=pid=4030534 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:19.099475Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Complete delivery=Copied cleanup=Off
+2026-10-20T21:55:19.363942Z  INFO cantrip_engine::engine: [Daemon] command=start handoff=none sender=pid=4030920 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:19.364460Z  INFO cantrip::capture::linux: [Capture] recording started
+2026-10-20T21:55:19.364486Z  INFO cantrip_engine::engine: [Daemon] state idle -> recording
+2026-10-20T21:55:31.420838Z  INFO cantrip_engine::engine: [Daemon] command=cancel sender=pid=4040277 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:31.420920Z  INFO cantrip_engine::engine: [Daemon] state recording -> processing reason=cancel
+2026-10-20T21:55:31.471137Z  INFO cantrip::capture::linux: [Capture] recording stopped after 12106 ms
+2026-10-20T21:55:33.609015Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Cancelled delivery=Cancelled cleanup=Off
+2026-10-20T21:55:34.306729Z  INFO cantrip_engine::engine: [Daemon] command=recover sender=pid=4042263 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:41.393842Z  INFO cantrip_engine::stt: [STT] chunk=1/1 start_s=0.00 duration_s=11.52
+2026-10-20T21:55:42.511356Z  INFO cantrip_engine::stt: [STT] audio_seconds=11.518 inference_ms=1117 output_char_count=108 partial=false
+2026-10-20T21:55:45.006365Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Complete delivery=Copied cleanup=Off
+2026-10-20T21:55:45.508307Z  INFO cantrip_engine::engine: [Daemon] command=forget sender=pid=4049291 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:48.223426Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Complete delivery=None cleanup=Off
+2026-10-20T21:55:49.421613Z  INFO cantrip_engine::engine: [Daemon] command=start handoff=none sender=pid=4052220 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:49.422132Z  INFO cantrip::capture::linux: [Capture] recording started
+2026-10-20T21:55:49.422159Z  INFO cantrip_engine::engine: [Daemon] state idle -> recording
+2026-10-20T21:55:52.558766Z  INFO cantrip_engine::engine: [Daemon] command=stop sender=pid=4054335 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:52.558827Z  INFO cantrip_engine::engine: [Daemon] state recording -> processing reason=stop
+2026-10-20T21:55:52.648612Z  INFO cantrip::capture::linux: [Capture] recording stopped after 3226 ms
+2026-10-20T21:55:52.765467Z  INFO cantrip_engine::stt: [STT] chunk=1/1 start_s=0.00 duration_s=3.07
+2026-10-20T21:55:53.841186Z  INFO cantrip_engine::stt: [STT] audio_seconds=3.070 inference_ms=1075 output_char_count=0 partial=false
+2026-10-20T21:55:55.770060Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Empty delivery=None cleanup=Off
+2026-10-20T21:55:56.514494Z  INFO cantrip_engine::engine: [Daemon] command=ping sender=pid=4056182 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:56.535427Z  INFO cantrip_engine::engine: [Daemon] command=reload sender=pid=4056209 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:56.535567Z  INFO cantrip_engine::engine: [Daemon] config reloaded
+2026-10-20T21:55:56.561251Z  INFO cantrip_engine::engine: [Daemon] command=start handoff=none sender=pid=4056224 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:56.561584Z  INFO cantrip::capture::linux: [Capture] recording started
+2026-10-20T21:55:56.561594Z  INFO cantrip_engine::engine: [Daemon] state idle -> recording
+2026-10-20T21:55:59.575245Z  INFO cantrip_engine::engine: [Daemon] command=stop sender=pid=4058244 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:55:59.575299Z  INFO cantrip_engine::engine: [Daemon] state recording -> processing reason=stop
+2026-10-20T21:55:59.625467Z  INFO cantrip::capture::linux: [Capture] recording stopped after 3063 ms
+2026-10-20T21:55:59.732476Z  INFO cantrip_engine::stt: [STT] chunk=1/1 start_s=0.00 duration_s=3.01
+2026-10-20T21:56:00.079512Z  INFO cantrip_engine::stt: [STT] audio_seconds=3.006 inference_ms=347 output_char_count=0 partial=false
+2026-10-20T21:56:03.182074Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Empty delivery=None cleanup=Off
+2026-10-20T21:56:03.411751Z  INFO cantrip_engine::engine: [Daemon] command=reload sender=pid=4060010 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:56:03.411839Z  INFO cantrip_engine::engine: [Daemon] config reloaded
+2026-10-20T21:56:03.422142Z  INFO cantrip_engine::engine: [Daemon] command=reload sender=pid=4060027 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:56:03.422249Z  INFO cantrip_engine::engine: [Daemon] config reloaded
+2026-10-20T21:56:03.442608Z  INFO cantrip_engine::engine: [Daemon] command=start handoff=none sender=pid=4060031 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:56:03.442885Z  INFO cantrip::capture::linux: [Capture] recording started
+2026-10-20T21:56:03.442892Z  INFO cantrip_engine::engine: [Daemon] state idle -> recording
+2026-10-20T21:56:15.495217Z  INFO cantrip_engine::engine: [Daemon] command=stop sender=pid=4066863 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:56:15.495262Z  INFO cantrip_engine::engine: [Daemon] state recording -> processing reason=stop
+2026-10-20T21:56:15.545481Z  INFO cantrip::capture::linux: [Capture] recording stopped after 12102 ms
+2026-10-20T21:56:15.630114Z  INFO cantrip_engine::stt: [STT] chunk=1/1 start_s=0.00 duration_s=9.58
+2026-10-20T21:56:16.031687Z  INFO cantrip_engine::stt: [STT] audio_seconds=9.577 inference_ms=401 output_char_count=81 partial=false
+2026-10-20T21:56:17.368593Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Complete delivery=Copied cleanup=Off
+2026-10-20T21:56:18.046442Z  INFO cantrip_engine::engine: [Daemon] command=reload sender=pid=4069353 exe=/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip parents=python3:4000436<-bash:3978475<-bash:3978472
+2026-10-20T21:56:18.046550Z  INFO cantrip_engine::engine: [Daemon] config reloaded
+2026-10-20T21:56:42.039286Z  INFO cantrip_engine::engine: [Daemon] shutting down

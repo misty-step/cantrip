@@ -1,0 +1,157 @@
+{
+  "journeys": [
+    "transcribe",
+    "dictate",
+    "recover",
+    "breaks",
+    "windows"
+  ],
+  "binary": "/home/phaedrus/.cache/tmp/verify-cantrip/proof-20261020/prefix/bin/cantrip",
+  "binary_version": "cantrip 0.1.8",
+  "binary_sha256": "f2025db2b115e6d0699d2d8370a86f80b8126d382028d7b5b77dd2682a060163",
+  "isolation": "headless sway (pixman), private HOME/XDG/runtime/clipboard, private PipeWire null sink as microphone",
+  "fixture": "samples/jfk.wav (public domain speech)",
+  "results": [
+    {
+      "check": "transcribe --local prints the JFK sentence on stdout",
+      "ok": true
+    },
+    {
+      "check": "one-shot transcript saved to private history",
+      "ok": true
+    },
+    {
+      "check": "doctor reports capture ready against the private source",
+      "ok": true
+    },
+    {
+      "check": "public speech played into the private microphone",
+      "ok": true
+    },
+    {
+      "check": "take completeness is complete (got complete)",
+      "ok": true
+    },
+    {
+      "check": "delivery is copied (got copied)",
+      "ok": true
+    },
+    {
+      "check": "real clipboard holds the spoken JFK sentence (108 chars)",
+      "ok": true
+    },
+    {
+      "check": "transcript archived owner-only in history",
+      "ok": true
+    },
+    {
+      "check": "recordings lists the take by id",
+      "ok": true
+    },
+    {
+      "check": "public speech played into the private microphone",
+      "ok": true
+    },
+    {
+      "check": "take completeness is complete (got complete)",
+      "ok": true
+    },
+    {
+      "check": "delivery is copied (got copied)",
+      "ok": true
+    },
+    {
+      "check": "real clipboard holds the spoken JFK sentence (101 chars)",
+      "ok": true
+    },
+    {
+      "check": "transcript archived owner-only in history",
+      "ok": true
+    },
+    {
+      "check": "recordings lists the take by id",
+      "ok": true
+    },
+    {
+      "check": "copy ID accepted",
+      "ok": true
+    },
+    {
+      "check": "copy ID restored the saved transcript to the clipboard",
+      "ok": true
+    },
+    {
+      "check": "cancel settles as cancelled (got cancelled)",
+      "ok": true
+    },
+    {
+      "check": "cancel delivered nothing to the clipboard",
+      "ok": true
+    },
+    {
+      "check": "cancelled take keeps its audio",
+      "ok": true
+    },
+    {
+      "check": "recover --local --clipboard completes and copies (got complete/copied)",
+      "ok": true
+    },
+    {
+      "check": "recovered transcript is on the clipboard",
+      "ok": true
+    },
+    {
+      "check": "forget without --yes is refused",
+      "ok": true
+    },
+    {
+      "check": "forgotten take keeps its row without retained audio ({'id': '01792533319363995225-3997136-13', 'created_at_unix_ms': 1792533333357, 'duration_ms': 11518, 'text_available': True, 'audio_available': False, 'partial': False, 'unresolved': False})",
+      "ok": true
+    },
+    {
+      "check": "complete archived text for the recovered take remains after Forget",
+      "ok": true
+    },
+    {
+      "check": "silence yields an honest empty/failed outcome (got empty)",
+      "ok": true
+    },
+    {
+      "check": "a second daemon for the same runtime is refused",
+      "ok": true
+    },
+    {
+      "check": "original daemon still answers ping",
+      "ok": true
+    },
+    {
+      "check": "missing model refuses transcription and downloads nothing",
+      "ok": true
+    },
+    {
+      "check": "absent microphone is not reported as a complete take (got empty)",
+      "ok": true
+    },
+    {
+      "check": "auto mode on unverified desktop defers or copies, never pastes/types (got copied)",
+      "ok": true
+    },
+    {
+      "check": "ping with no daemon fails fast with a daemon hint",
+      "ok": true
+    },
+    {
+      "check": "settings window rendered readable text",
+      "ok": true
+    },
+    {
+      "check": "actions window rendered readable text",
+      "ok": true
+    },
+    {
+      "check": "HUD renders the copied state",
+      "ok": true
+    }
+  ],
+  "passed": true
+}

@@ -1,0 +1,66 @@
+{
+  "feature": "website",
+  "url": "https://cantrip.mistystep.io",
+  "deployed_revision": "476093a928389426fad8b790e8385d7eba1e2f02",
+  "master": "476093a928389426fad8b790e8385d7eba1e2f02",
+  "release": "v0.1.8",
+  "results": [
+    {
+      "check": "health.json reports ok/production",
+      "ok": true
+    },
+    {
+      "check": "deployed revision 476093a92838 is master or an ancestor of master 476093a92838 (identical)",
+      "ok": true
+    },
+    {
+      "check": "/ renders (HTTP 200) with ['Speak.', 'Download for Linux x86-64', 'v0.1.8']",
+      "ok": true
+    },
+    {
+      "check": "/docs/install renders (HTTP 200) with ['Install Cantrip']",
+      "ok": true
+    },
+    {
+      "check": "/docs/use renders (HTTP 200) with ['First dictation']",
+      "ok": true
+    },
+    {
+      "check": "/changelog renders (HTTP 200) with ['v0.1.8']",
+      "ok": true
+    },
+    {
+      "check": "/releases renders (HTTP 200) with ['v0.1.8']",
+      "ok": true
+    },
+    {
+      "check": "/evals renders (HTTP 200) with ['speech']",
+      "ok": true
+    },
+    {
+      "check": "download link https://github.com/misty-step/cantrip/releases/download/v0.1.8/cantrip-v0.1.8-x86_64-unknown-linux-gnu.tar.gz resolves (HTTP 200)",
+      "ok": true
+    },
+    {
+      "check": "home page links a GitHub release download",
+      "ok": true
+    },
+    {
+      "check": "all 15 internal links on / return 200 (broken: [])",
+      "ok": true
+    },
+    {
+      "check": "unknown route returns 404 (got 404)",
+      "ok": true
+    },
+    {
+      "check": "site-desktop screenshot at 1440,900",
+      "ok": true
+    },
+    {
+      "check": "site-mobile screenshot at 390,844",
+      "ok": true
+    }
+  ],
+  "passed": true
+}
