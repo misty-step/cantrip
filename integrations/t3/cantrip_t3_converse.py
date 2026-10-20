@@ -48,6 +48,7 @@ CONVERSE_DEFAULTS = {
     "headphones": False,        # True enables barge-in; on speakers input pauses while a reply plays
 }
 PLAYBACK_TAIL_S = 0.6           # room echo after a reply stops
+PROVISIONAL_FRAMES = 17         # ~0.5 s: how long unconfirmed sound may hold a reply
 CAPPED_LIMIT = 3                # consecutive maximum-length cuts that mean continuous sound
                                 # (measured: 2 stopped 9 of 300 real sessions at 1 s endpointing; 3 stopped none)
 
@@ -264,8 +265,10 @@ class Conversation:
             self.endpointer.reset()   # on speakers, never hear the reply; keep the floor
             return
         event = self.endpointer.feed(frame)
-        # From the first loud frame, so a reply never starts over speech still being confirmed.
-        self.mark_speaking(bool(self.endpointer.frames))
+        # Provisionally from the first loud frame, so a reply never starts over speech still being
+        # confirmed; dropped after PROVISIONAL_FRAMES unless confirmed, so typing never holds replies.
+        frames = len(self.endpointer.frames)
+        self.mark_speaking(self.endpointer.started or 0 < frames <= PROVISIONAL_FRAMES)
         self.show_state(self.endpointer.started)
         if not event:
             return

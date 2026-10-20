@@ -144,6 +144,17 @@ class ConversationTest(unittest.TestCase):
         conversation.pending = lambda: False
         return conversation
 
+    def test_typing_never_holds_replies_but_speech_does(self):
+        conversation = self.conversation()
+        held = []
+        for frame in quiet(20) + clicks(300):
+            self.clock[0] += converse.FRAME_MS / 1000
+            conversation.feed(frame)
+            held.append(converse.t3.user_speaking())
+        self.assertLess(sum(held), len(held) * 0.15)   # only brief provisional marks, never sustained
+        self.speak(conversation, quiet(40) + speech(20))
+        self.assertTrue(converse.t3.user_speaking())
+
     def test_bar_state_shows_hearing_while_the_user_speaks(self):
         import json
         conversation = self.conversation()
