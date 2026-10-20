@@ -49,10 +49,10 @@ PROGRESS_SECONDS = 45
 CLOSE_SECONDS = 15
 SPEECH_LEVEL = 300             # output RMS above this is GPT-Live speaking, for the bar
 SUMMARY_SECONDS = 20           # deadline for the end-of-session summary, within the unit's stop timeout
-PREBUFFER_SECONDS = 0.4        # jitter buffer before each turn; grows 0.2 s per dropout heard next to speech
+PREBUFFER_SECONDS = 0.4        # jitter buffer before each turn; grows 0.2 s after a dropout heard in speech
 MAX_PREBUFFER_SECONDS = 1.0
 REPRIME_SECONDS = 0.2          # after a dropout inside speech
-CATCH_UP_SECONDS = 0.6         # behind by more than prebuffer + this: drop silent blocks
+CATCH_UP_SECONDS = 0.2         # behind by more than the base buffer + this: drop silent blocks
 SILENT_LEVEL = 100             # output RMS below this is silence (measured: 0.4 s buffer cut 107 gaps to 11)
 
 LIVE_DEFAULTS = {
@@ -455,7 +455,9 @@ class Player(threading.Thread):
     def run(self):
         """Start each turn, and resume after any dry spell in silence, once `prebuffer` is queued
         (waiting costs nothing in silence). After a dropout inside speech, resume once
-        REPRIME_SECONDS is queued, and raise `prebuffer` for later turns at most once per turn."""
+        REPRIME_SECONDS is queued, and raise `prebuffer` at most once until the stream goes dry for
+        0.6 s or more (rare: GPT-Live streams silence continuously, so in practice about once a
+        session)."""
         pending, first, plays_until, dry_since = bytearray(), None, None, None
         target, last_loud, grown = self.prebuffer, False, False
         while True:
