@@ -173,7 +173,7 @@ class Bridge:
         try:
             status, reply = await asyncio.to_thread(self.ask, delegation_id, text, progress)
         except (t3.McpError, OSError, ValueError) as error:
-            log("delegation failed id=" + delegation_id + " class=" + type(error).__name__)
+            log("delegation failed id=" + delegation_id + " code=" + t3.describe(error))
             await self.append("commentary", delegation_id,
                               "I couldn't reach " + self.label + " just now. Nothing was sent to it.")
             return
@@ -383,7 +383,8 @@ def main(argv=None):
     if args.command == "session":
         print(json.dumps(session_config(config, summary(live_config(config)["summary_command"])), indent=2))
         return 0
-    if not os.environ.get("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = t3.secret("OPENAI_API_KEY")   # first line, as `pass` stores it
+    if not os.environ["OPENAI_API_KEY"]:
         raise SystemExit("cantrip-t3-live: OPENAI_API_KEY is not set")
     asyncio.run(run(config))
     return 0
