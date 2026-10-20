@@ -66,17 +66,18 @@ def rms(frame):
 class Endpointer:
     """Energy endpointing with an adaptive noise floor.
 
-    The floor follows quiet quickly and rises slowly through sustained sound, so
-    a fan, music or a TV becomes background. Speech needs a run of consecutive
-    loud frames, so typing never counts. A full-length "utterance" that is loud
-    almost throughout is steady noise: it is dropped, never uploaded, and the
-    floor jumps to it.
+    The floor learns only between utterances, never from the user's voice.
+    Speech needs a run of consecutive loud frames, so typing never counts.
+    Sound that stays loud for three seconds without the dips that syllables
+    make (a fan, a hum) is steady noise: it is dropped, never uploaded, and
+    becomes the new floor.
     """
 
     RUN_FRAMES = 5          # 150 ms of continuous sound: a syllable, not a click
-    NOISE_RATIO = 0.9
-    STEADY_FRAMES = 100     # judge steadiness over at least 3 s
-    STEADY_CV = 0.35        # speech level varies far more than a fan's
+    STEADY_FRAMES = 100     # judge steadiness after 3 s of sound
+    DIP_WINDOW = 10         # a dip is a frame below 40% of the loudest of the last 300 ms
+    DIP_RATIO = 0.4
+    MIN_DIPS_PER_S = 0.5    # speech dips several times a second; a fan almost never
 
     def __init__(self, settings, floor=200.0):
         self.end_frames = settings["end_silence_ms"] // FRAME_MS
@@ -87,7 +88,7 @@ class Endpointer:
 
     def reset(self):
         self.frames, self.levels = [], []
-        self.voiced = self.quiet = self.run = self.longest = 0
+        self.voiced = self.quiet = self.run = self.longest = self.dips = 0
         self.started = False
 
     def threshold(self):
@@ -97,29 +98,22 @@ class Endpointer:
         return self.voiced >= self.min_frames and self.longest >= self.RUN_FRAMES
 
     def steady(self):
-        loud = [level for level in self.levels if level > self.threshold()] or self.levels
-        if len(loud) < self.STEADY_FRAMES:
+        if len(self.frames) < self.STEADY_FRAMES:
             return False
-        mean = sum(loud) / len(loud)
-        spread = math.sqrt(sum((level - mean) ** 2 for level in loud) / len(loud))
-        return mean > 0 and spread / mean < self.STEADY_CV
-
-    def drop_noise(self):
-        self.floor = max(self.floor, sorted(self.levels)[len(self.levels) // 2] / 2.5)
-        self.reset()
-        return ("noise", None)
+        return self.dips < self.MIN_DIPS_PER_S * len(self.frames) * FRAME_MS / 1000
 
     def feed(self, frame):
         """("start", None) once speech is established, ("utterance", pcm) when it ends,
         ("noise", None) for dropped steady sound, else None."""
         level = rms(frame)
         loud = level > self.threshold()
-        if loud:
-            self.floor = min(self.floor * 1.002, level)
-        else:
-            self.floor = 0.95 * self.floor + 0.05 * max(level, 50.0)
-        if not self.frames and not loud:
-            return None
+        if not self.frames:
+            if not loud:
+                self.floor = 0.95 * self.floor + 0.05 * max(level, 50.0)
+                return None
+        recent = self.levels[-self.DIP_WINDOW:]
+        if recent and level < self.DIP_RATIO * max(recent):
+            self.dips += 1
         self.frames.append(frame)
         self.levels.append(level)
         if loud:
@@ -130,13 +124,14 @@ class Endpointer:
         else:
             self.quiet += 1
             self.run = 0
+        if self.steady():
+            self.floor = max(self.floor, sorted(self.levels)[len(self.levels) // 2] / 2)
+            self.reset()
+            return ("noise", None)
         if not self.started and self.speech():
             self.started = True
             return ("start", None)
-        full = len(self.frames) >= self.max_frames
-        if full and self.voiced / len(self.frames) > self.NOISE_RATIO or self.steady():
-            return self.drop_noise()
-        if self.quiet >= self.end_frames or full:
+        if self.quiet >= self.end_frames or len(self.frames) >= self.max_frames:
             pcm, speech = b"".join(self.frames), self.speech()
             self.reset()
             if speech:
@@ -183,9 +178,17 @@ def speaking():
     return Path(argv0).name in t3.PLAYERS
 
 
+OWED_SECONDS = 10 * 60          # a reply owed longer than this no longer holds the mic open
+
+
 def busy_elsewhere():
-    """Replies still owed or a Cantrip take recording: not idle, and not ours to hear."""
-    return any((t3.state_dir() / "pending").glob("*.json"))
+    """A reply this session is still owed, recently enough to be worth staying for."""
+    now = time.time()
+    for path in (t3.state_dir() / "pending").glob("converse-*.json"):
+        record = t3.readable(path)
+        if record and now - (record.get("sent_at") or 0) < OWED_SECONDS:
+            return True
+    return False
 
 
 class Conversation:
@@ -210,18 +213,24 @@ class Conversation:
         self.speaking = speaking
         self.recording = t3.cantrip_recording
         self.pending = busy_elsewhere
-        self.checked = (-10.0, False)
+        self.take_recording = False
         self.refused = None
         self.work = queue.Queue() if threaded else None
         if threaded:
             threading.Thread(target=self.worker, daemon=True).start()
+            threading.Thread(target=self.watch_cantrip, daemon=True).start()
+
+    def watch_cantrip(self):
+        """Poll Cantrip off the capture thread, so a slow daemon never stalls capture."""
+        while True:
+            self.take_recording = self.recording()
+            time.sleep(1)
 
     def cantrip_take(self):
-        """A push-to-talk take is recording (checked once a second): its speech is not ours."""
-        checked, recording = self.checked
-        if self.now() - checked >= 1:
-            self.checked = (self.now(), self.recording())
-        return self.checked[1]
+        """A push-to-talk take is recording: its speech is not ours."""
+        if self.work is None:   # synchronous (tests): ask directly
+            return self.recording()
+        return self.take_recording
 
     def feed(self, frame):
         playing = self.speaking()
@@ -251,7 +260,12 @@ class Conversation:
 
     def worker(self):
         while True:
-            self.utterance(self.work.get())
+            pcm = self.work.get()
+            try:
+                self.utterance(pcm)
+            except Exception as error:  # never let one turn end the worker
+                log("turn failed class=" + type(error).__name__)
+                t3.notify("Something went wrong with that; please say it again.")
 
     def utterance(self, pcm):
         seconds = len(pcm) / 2 / RATE
@@ -273,16 +287,13 @@ class Conversation:
         take = "converse-" + uuid.uuid4().hex[:16]
         try:
             self.send(self.config, text, take)
-        except t3.McpError as error:
+        except (t3.McpError, OSError, ValueError) as error:
+            # `send` keeps the pending record only when the message may have arrived.
             log("send failed code=" + t3.describe(error))
-            if error.refused() or str(error).startswith(("http-4", "rpc-")):
-                t3.notify(self.label + " didn't get that; please say it again.")
-            else:
+            if (t3.state_dir() / "pending" / (take + ".json")).exists():
                 t3.notify("Not sure " + self.label + " got that; if it did, you'll hear the reply.")
-            return
-        except (OSError, ValueError) as error:
-            log("send failed code=" + t3.describe(error))
-            t3.notify("Not sure " + self.label + " got that; if it did, you'll hear the reply.")
+            else:
+                t3.notify(self.label + " didn't get that; please say it again.")
             return
         self.turns += 1
         self.active_at = self.now()
@@ -335,7 +346,9 @@ def run(config):
     finally:
         recorder.terminate()
         recorder.wait()
-        t3.notify("Stopped listening for " + config.get("label", "Home"))
+        unsent = conversation.work.qsize()
+        t3.notify("Stopped listening for " + config.get("label", "Home")
+                  + (" (" + str(unsent) + " unsent)" if unsent else ""))
         log("stopped turns=%d" % conversation.turns)
 
 

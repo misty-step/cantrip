@@ -75,6 +75,44 @@ def rms(frame):
     return converse.rms(frame)
 
 
+def espeak(text):
+    """Real synthesized speech at 16 kHz, or None where espeak-ng is missing."""
+    import shutil, subprocess, wave, io
+    if not shutil.which("espeak-ng"):
+        return None
+    raw = subprocess.run(["espeak-ng", "--stdout", text], capture_output=True, check=True).stdout
+    with wave.open(io.BytesIO(raw)) as w:
+        rate, samples = w.getframerate(), array.array("h", w.readframes(w.getnframes()))
+    out = array.array("h", (samples[int(i * rate / 16000)] for i in range(int(len(samples) * 16000 / rate))))
+    b = out.tobytes()
+    return [b[i:i + converse.FRAME_BYTES] for i in range(0, len(b) - converse.FRAME_BYTES + 1, converse.FRAME_BYTES)]
+
+
+class RealSpeechTest(unittest.TestCase):
+    """Regression for the review at 64ce49a: tone fixtures hid speech being judged as noise."""
+
+    def test_synthesized_speech_is_uploaded_whole_even_when_long(self):
+        frames = espeak("This is a voice test. I want to know what the agents are doing right now, "
+                        "which pull requests are waiting for review, and whether the release went out "
+                        "this afternoon as planned, because I need to decide what to work on next.")
+        if frames is None:
+            self.skipTest("espeak-ng not installed")
+        endpointer = converse.Endpointer(converse.CONVERSE_DEFAULTS)
+        events = [e for e in (endpointer.feed(f) for f in quiet(20) + frames + quiet(40)) if e]
+        self.assertNotIn("noise", [e[0] for e in events])
+        uploaded = sum(len(e[1]) for e in events if e[0] == "utterance")
+        self.assertGreater(uploaded, 0.9 * len(frames) * converse.FRAME_BYTES)
+
+    def test_the_floor_never_learns_the_voice(self):
+        frames = espeak("Keep talking for a while so the floor would climb if it learned from speech. " * 3)
+        if frames is None:
+            self.skipTest("espeak-ng not installed")
+        endpointer = converse.Endpointer(converse.CONVERSE_DEFAULTS)
+        for f in quiet(20) + frames:
+            endpointer.feed(f)
+        self.assertLess(endpointer.floor, 200)
+
+
 class ConversationTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -98,6 +136,42 @@ class ConversationTest(unittest.TestCase):
         conversation.recording = lambda: False
         conversation.pending = lambda: False
         return conversation
+
+    def test_send_failure_message_follows_whether_anything_may_have_arrived(self):
+        conversation = self.conversation()
+
+        def kept(config, text, take):
+            path = converse.t3.state_dir() / "pending" / (take + ".json")
+            path.write_text("{}")
+            raise TimeoutError()
+
+        conversation.send = kept
+        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
+        self.assertIn("Not sure", self.notified.call_args.args[0])
+        conversation.send = lambda *args: (_ for _ in ()).throw(OSError("unreachable"))
+        self.speak(conversation, speech(30) + quiet(30))
+        self.assertIn("say it again", self.notified.call_args.args[0])
+
+    def test_a_failing_turn_never_kills_the_worker(self):
+        import queue, threading
+        conversation = self.conversation()
+        conversation.work = queue.Queue()
+        threading.Thread(target=conversation.worker, daemon=True).start()
+        calls = []
+
+        def flaky(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise AttributeError("boom")
+            return self.heard
+
+        conversation.transcribe = flaky
+        self.speak(conversation, quiet(20) + speech(30) + quiet(30) + speech(30) + quiet(30))
+        for _ in range(100):
+            if self.sent:
+                break
+            __import__("time").sleep(0.02)
+        self.assertEqual(len(self.sent), 1)
 
     def speak(self, conversation, frames):
         for frame in frames:
@@ -163,19 +237,6 @@ class ConversationTest(unittest.TestCase):
         conversation.transcribe = lambda *args: self.heard
         self.speak(conversation, speech(30) + quiet(30))
         self.assertEqual(len(self.sent), 1)
-
-    def test_uncertain_send_failure_does_not_ask_for_a_repeat(self):
-        conversation = self.conversation()
-
-        def timeout(*args):
-            raise TimeoutError()
-
-        conversation.send = timeout
-        self.speak(conversation, quiet(20) + speech(30) + quiet(30))
-        self.assertIn("Not sure", self.notified.call_args.args[0])
-        conversation.send = lambda *args: (_ for _ in ()).throw(converse.t3.McpError("tool-capability_denied"))
-        self.speak(conversation, speech(30) + quiet(30))
-        self.assertIn("say it again", self.notified.call_args.args[0])
 
     def test_push_to_talk_speech_is_not_heard_twice(self):
         conversation = self.conversation()
