@@ -65,6 +65,13 @@ class EndpointerTest(unittest.TestCase):
         self.assertGreater(endpointer.threshold(), rms(tone(3000)[0]))
         self.assertNotIn("utterance", [e[0] for e in events])
 
+    def test_noise_starting_right_after_speech_keeps_the_speech_and_drops_the_noise(self):
+        events, _ = self.events(quiet(20) + speech(60) + tone(3000, 300))
+        kinds = [e[0] for e in events]
+        self.assertIn("utterance", kinds)
+        pcm = next(e[1] for e in events if e[0] == "utterance")
+        self.assertLess(len(pcm), 70 * converse.FRAME_BYTES)   # the speech, not the fan
+
     def test_speech_over_learned_noise_is_still_heard(self):
         # a fan at ~1,000 RMS, then speech about ten times louder, as a voice near the mic is
         events, _ = self.events(tone(1500, 400) + speech(40, scale=4) + tone(1500, 40))
@@ -273,6 +280,13 @@ class ConversationTest(unittest.TestCase):
                 break
             __import__("time").sleep(0.02)
         self.assertEqual(len(self.sent), 2)
+
+    def test_continuous_sound_stops_the_session_instead_of_uploading_forever(self):
+        conversation = self.conversation(max_utterance_s=1)
+        self.speak(conversation, quiet(20) + speech(200))
+        self.assertEqual(conversation.refused, "continuous-sound")
+        self.assertEqual(len(self.sent), 1)   # only the first capped cut was sent
+        self.assertIn("continuous sound", self.notified.call_args.args[0])
 
     def test_idle_session_ends_but_not_while_a_reply_is_owed(self):
         conversation = self.conversation(idle_minutes=1)

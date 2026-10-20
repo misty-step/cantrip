@@ -103,12 +103,15 @@ leaves the machine only for detected speech; nothing is retained.
   mute key to cut a reply.
 - **Headphones** (`headphones = true`): speaking over a reply stops it
   (barge-in).
-- **Background sound:** the noise floor follows quiet quickly and rises
-  slowly through sustained sound. A steady sound such as a fan is recognized
-  by its even level, never uploaded, and becomes the new background. Typing
-  never counts, because speech needs 150 ms of continuous sound. Speech must be
-  about three times louder than the background, so use push-to-talk in a loud
-  room or with a TV talking.
+- **Background sound:** the noise floor learns only between utterances, never
+  from your voice. Sound that stays loud for 3 s without the dips syllables
+  make, such as a fan, hum or vacuum, is steady noise. It is never uploaded and
+  becomes the background; speech just before it is kept. Typing never counts,
+  because speech needs 150 ms of continuous sound. Music with a beat looks like
+  speech: two utterances in a row cut at `max_utterance_s` stop hands-free with
+  a notice. Speech must be about three times louder than the background, and
+  on a typical mic a moderate fan can cost a third or more of the words, so use
+  push-to-talk or headphones near one.
 - While a Cantrip take records (push-to-talk), hands-free ignores the
   microphone, so nothing is sent twice.
 - A transient transcription failure asks you to say it again. A refused key

@@ -48,6 +48,7 @@ CONVERSE_DEFAULTS = {
     "headphones": False,        # True enables barge-in; on speakers input pauses while a reply plays
 }
 PLAYBACK_TAIL_S = 0.6           # room echo after a reply stops
+CAPPED_LIMIT = 2                # consecutive maximum-length cuts that mean continuous sound
 
 
 def log(message):
@@ -74,7 +75,7 @@ class Endpointer:
     """
 
     RUN_FRAMES = 5          # 150 ms of continuous sound: a syllable, not a click
-    STEADY_FRAMES = 100     # judge steadiness after 3 s of sound
+    STEADY_FRAMES = 100     # judge steadiness over the last 3 s of sound
     DIP_WINDOW = 10         # a dip is a frame below 40% of the loudest of the last 300 ms
     DIP_RATIO = 0.4
     MIN_DIPS_PER_S = 0.5    # speech dips several times a second; a fan almost never
@@ -87,24 +88,36 @@ class Endpointer:
         self.reset()
 
     def reset(self):
-        self.frames, self.levels = [], []
-        self.voiced = self.quiet = self.run = self.longest = self.dips = 0
+        self.frames, self.levels, self.dipped, self.loud = [], [], [], []
+        self.quiet = 0
         self.started = False
+        self.capped = False
 
     def threshold(self):
         return max(self.floor * 3, 400.0)
 
-    def speech(self):
-        return self.voiced >= self.min_frames and self.longest >= self.RUN_FRAMES
+    def speech(self, upto=None):
+        """Enough loud frames, including one 150 ms run, among the first `upto` frames."""
+        loud = self.loud[:upto] if upto is not None else self.loud
+        longest = run = 0
+        for flag in loud:
+            run = run + 1 if flag else 0
+            longest = max(longest, run)
+        return sum(loud) >= self.min_frames and longest >= self.RUN_FRAMES
 
-    def steady(self):
+    def steady_since(self):
+        """Index where steady sound began, judged over the last 3 s, or None."""
         if len(self.frames) < self.STEADY_FRAMES:
-            return False
-        return self.dips < self.MIN_DIPS_PER_S * len(self.frames) * FRAME_MS / 1000
+            return None
+        window = self.dipped[-self.STEADY_FRAMES:]
+        if sum(window) >= self.MIN_DIPS_PER_S * self.STEADY_FRAMES * FRAME_MS / 1000:
+            return None
+        return len(self.frames) - self.STEADY_FRAMES
 
     def feed(self, frame):
         """("start", None) once speech is established, ("utterance", pcm) when it ends,
-        ("noise", None) for dropped steady sound, else None."""
+        ("noise", None) for dropped steady sound, else None. `capped` is set on an
+        utterance cut at the maximum length."""
         level = rms(frame)
         loud = level > self.threshold()
         if not self.frames:
@@ -112,28 +125,27 @@ class Endpointer:
                 self.floor = 0.95 * self.floor + 0.05 * max(level, 50.0)
                 return None
         recent = self.levels[-self.DIP_WINDOW:]
-        if recent and level < self.DIP_RATIO * max(recent):
-            self.dips += 1
+        self.dipped.append(bool(recent) and level < self.DIP_RATIO * max(recent))
         self.frames.append(frame)
         self.levels.append(level)
-        if loud:
-            self.voiced += 1
-            self.quiet = 0
-            self.run += 1
-            self.longest = max(self.longest, self.run)
-        else:
-            self.quiet += 1
-            self.run = 0
-        if self.steady():
-            self.floor = max(self.floor, sorted(self.levels)[len(self.levels) // 2] / 2)
+        self.loud.append(loud)
+        self.quiet = 0 if loud else self.quiet + 1
+        onset = self.steady_since()
+        if onset is not None:
+            # Steady sound (a fan or vacuum) took over: keep any speech before it, drop the rest.
+            noise = self.levels[onset:]
+            speech = self.speech(onset) and b"".join(self.frames[:onset])
+            self.floor = max(self.floor, sorted(noise)[len(noise) // 2] / 2)
             self.reset()
-            return ("noise", None)
+            return ("utterance", speech) if speech else ("noise", None)
         if not self.started and self.speech():
             self.started = True
             return ("start", None)
-        if self.quiet >= self.end_frames or len(self.frames) >= self.max_frames:
+        full = len(self.frames) >= self.max_frames
+        if self.quiet >= self.end_frames or full:
             pcm, speech = b"".join(self.frames), self.speech()
             self.reset()
+            self.capped = full
             if speech:
                 return ("utterance", pcm)
         return None
@@ -215,6 +227,8 @@ class Conversation:
         self.pending = busy_elsewhere
         self.take_recording = False
         self.refused = None
+        self.capped = 0
+        self.busy = False
         self.work = queue.Queue() if threaded else None
         if threaded:
             threading.Thread(target=self.worker, daemon=True).start()
@@ -253,7 +267,17 @@ class Conversation:
                 t3.stop_speaking()
                 log("barge-in")
         else:
-            self.active_at = self.now()
+            if self.endpointer.capped:
+                # Real turns almost never reach the cap (8 of 5,451 measured); music with a beat does.
+                self.capped += 1
+                if self.capped >= CAPPED_LIMIT:
+                    log("continuous sound: pausing")
+                    t3.notify("Hands-free stopped: continuous sound, such as music. Press the key to start again.")
+                    self.refused = "continuous-sound"
+                    return
+            else:
+                self.capped = 0
+                self.active_at = self.now()
             if self.work:
                 self.work.put(event[1])
             else:
@@ -274,11 +298,14 @@ class Conversation:
     def worker(self):
         while True:
             pcm = self.work.get()
+            self.busy = True
             try:
                 self.utterance(pcm)
             except Exception as error:  # never let one turn end the worker
                 log("turn failed class=" + type(error).__name__)
                 t3.notify("Something went wrong with that; please say it again.")
+            finally:
+                self.busy = False
 
     def utterance(self, pcm):
         seconds = len(pcm) / 2 / RATE
@@ -369,7 +396,7 @@ def run(config):
         except subprocess.TimeoutExpired:
             recorder.kill()
             recorder.wait()
-        unsent = conversation.work.qsize()
+        unsent = conversation.work.qsize() + (1 if conversation.busy else 0)
         t3.notify("Stopped listening for " + label + (" (" + str(unsent) + " unsent)" if unsent else ""))
         log("stopped turns=%d" % conversation.turns)
 
