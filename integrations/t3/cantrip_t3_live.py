@@ -11,8 +11,9 @@ the only decision-maker and its memory sees everything. Its final reply comes
 back as commentary for GPT-Live to say. The thread's summary command seeds the
 session at connect.
 
-`run` holds one session until SIGINT/SIGTERM closes it gracefully; SIGUSR1,
-sent by `mute`, toggles the microphone. Logs carry counts, IDs and error classes, never
+`run` holds one session until SIGINT/SIGTERM, `idle_minutes` without speech,
+or `max_minutes` closes it gracefully; SIGUSR1, sent by `mute`, toggles the
+microphone and stops sending its audio. Logs carry counts, IDs and error classes, never
 transcript or reply text. Secrets come from the environment: OPENAI_API_KEY
 and T3_MCP_TOKEN.
 """
@@ -37,7 +38,10 @@ RATE = 24_000
 CHUNK_BYTES = 4_800            # 100 ms of mono PCM16
 APPEND_CHARS = 1_500           # comfortably inside 500 tokens per append
 SUMMARY_CHARS = 16_000
-SETTLE_SECONDS = 0.8           # let the request's transcript arrive
+SETTLE_SECONDS = 0.6           # quiet in the request's transcript before it is complete
+SETTLE_MAX_SECONDS = 2.5
+CONTEXT_CHARS = 300
+SHORT_WORDS = 6                # a reply this short ("yes", "the second one") travels with its question
 PROGRESS_SECONDS = 45
 CLOSE_SECONDS = 15
 
@@ -45,7 +49,9 @@ LIVE_DEFAULTS = {
     "model": "gpt-live-1",
     "voice": "marin",
     "summary_command": [],
-    "echo_cancel": False,   # PipeWire echo cancellation for speakers; headphones need none
+    "echo_cancel": False,
+    "idle_minutes": 5,          # close after this long with no speech either way and nothing pending
+    "max_minutes": 60,   # PipeWire echo cancellation for speakers; headphones need none
 }
 
 INSTRUCTIONS = """You are the voice of {label}, the user's coordinating agent, in a live spoken conversation.
@@ -102,20 +108,56 @@ def pieces(text, limit=APPEND_CHARS):
     return list(t3.chunks(text, limit=limit, first=limit))
 
 
-class Bridge:
-    """Conversation state and delegation handling, independent of the transport."""
+def in_daemon_thread(function, *args):
+    """Run blocking work on a daemon thread, so closing the session never waits for Home's run."""
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
 
-    def __init__(self, config, send, ask, now=time.monotonic):
+    def settle(outcome, failed):
+        if not future.done():
+            (future.set_exception if failed else future.set_result)(outcome)
+
+    def work():
+        try:
+            outcome, failed = function(*args), False
+        except BaseException as error:  # handed to the awaiting coroutine, never lost
+            outcome, failed = error, True
+        try:
+            loop.call_soon_threadsafe(settle, outcome, failed)
+        except RuntimeError:
+            pass   # the loop already closed: the session ended while this ran
+
+    threading.Thread(target=work, daemon=True).start()
+    return future
+
+
+def definite_refusal(error):
+    """True when T3 certainly did not accept the message; anything else may have arrived."""
+    return isinstance(error, t3.McpError) and (error.refused() or str(error).startswith(("http-4", "rpc-")))
+
+
+class Bridge:
+    """Conversation state and delegation handling, independent of the transport.
+
+    `submit(delegation_id, message)` sends one request and returns its record;
+    `collect(record, progress)` waits for that run and returns (status, reply).
+    Both block and run off the event loop.
+    """
+
+    def __init__(self, config, send, submit, collect, now=time.monotonic):
         self.config = config
         self.label = config.get("label", "Home")
         self.send = send            # async callable taking one event dict
-        self.ask = ask              # blocking callable (delegation_id, text, progress) -> (status, reply)
+        self.submit = submit
+        self.collect = collect
         self.now = now
-        self.heard = []             # (start_ms, end_ms, text) user transcript fragments
-        self.cursor_ms = -1         # end of the user speech already delegated
+        self.heard = []             # (start_ms, end_ms, text, arrived) user transcript fragments
+        self.said = []              # (start_ms, end_ms, text) GPT-Live's own speech
+        self.boundaries = [-1]      # offsets of earlier delegations: each request starts at the last one
         self.tasks = set()
         self.sequence = 0
         self.usage_seconds = 0
+        self.active_at = now()
         self.closed = asyncio.Event()
 
     def event_id(self, kind):
@@ -129,10 +171,15 @@ class Bridge:
     async def handle(self, event):
         kind = event.get("type")
         if kind == "session.input_transcript.delta":
-            self.heard.append((event.get("start_ms", 0), event.get("end_ms", 0), event.get("delta", "")))
+            self.active_at = self.now()
+            self.heard.append((event.get("start_ms", 0), event.get("end_ms", 0), event.get("delta", ""), self.now()))
+        elif kind == "session.output_transcript.delta":
+            self.said.append((event.get("start_ms", 0), event.get("end_ms", 0), event.get("delta", "")))
         elif kind == "session.delegation.created":
+            self.active_at = self.now()
             delegation = event.get("delegation") or {}
-            task = asyncio.create_task(self.delegate(delegation.get("id"), event.get("offset_ms")))
+            offset = event.get("offset_ms")
+            task = asyncio.create_task(self.delegate(delegation.get("id"), offset))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         elif kind == "session.usage.updated":
@@ -145,38 +192,84 @@ class Bridge:
             error = event.get("error") or {}
             log("error code=" + str(error.get("code")) + " type=" + str(error.get("type")))
 
-    def request_text(self):
-        """User speech since the previous delegation, up to the delegation point plus late fragments."""
-        fresh = [(start, end, text) for start, end, text in self.heard if end > self.cursor_ms]
-        if not fresh:
-            return ""
-        self.cursor_ms = max(end for _, end, _ in fresh)
-        return "".join(text for _, _, text in sorted(fresh)).strip()
+    def window(self, offset_ms):
+        """The session-time span this delegation's request was spoken in."""
+        if offset_ms is None:
+            offset_ms = max((end for _, end, _, _ in self.heard), default=0)
+        earlier = max((b for b in self.boundaries if b < offset_ms), default=-1)
+        self.boundaries.append(offset_ms)
+        return earlier, offset_ms   # transcript times share the session timeline with offset_ms
+
+    async def settle(self, start, end):
+        """Wait until fragments spoken before the delegation stop arriving; late ones still belong here."""
+        began = self.now()
+        while self.now() - began < SETTLE_MAX_SECONDS:
+            arrived = [at for s, _, _, at in self.heard if start <= s < end]
+            if self.now() - max(arrived, default=began) >= SETTLE_SECONDS:
+                return
+            await asyncio.sleep(0.1)
+
+    def request_text(self, start, end):
+        fragments = sorted((s, text) for s, _, text, _ in self.heard if start <= s < end)
+        return "".join(text for _, text in fragments).strip()
+
+    def context(self, start, end):
+        """What GPT-Live said just before, so a bare "yes" reaches the thread with its question."""
+        spoken = "".join(text for s, _, text in sorted(self.said) if start - 30_000 <= s < end).strip()
+        return spoken[-CONTEXT_CHARS:]
+
+    def message(self, text, context):
+        prefix = self.config.get("live_prefix", "[voice live] ")
+        if context and len(text.split()) <= SHORT_WORDS:
+            return prefix + text + "\n\n(Replying to the voice assistant, which had just said: " + context + ")"
+        return prefix + text
 
     async def delegate(self, delegation_id, offset_ms=None):
         if not delegation_id:
             return
-        await asyncio.sleep(SETTLE_SECONDS)
-        text = self.request_text()
+        try:
+            await self.run_delegation(delegation_id, offset_ms)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # never leave GPT-Live waiting forever
+            log("delegation broke id=" + delegation_id + " class=" + type(error).__name__)
+            await self.append("commentary", delegation_id, "Something went wrong on my side. "
+                              "Ask the user to check " + self.label + "'s thread before repeating anything.")
+
+    async def run_delegation(self, delegation_id, offset_ms):
+        start, end = self.window(offset_ms)
+        await self.settle(start, end)
+        text = self.request_text(start, end)
         log("delegation id=" + delegation_id + " chars=" + str(len(text)))
         if not text:
             await self.append("commentary", delegation_id, "I didn't catch the request. Ask the user to repeat it.")
+            return
+        try:
+            record = await in_daemon_thread(self.submit, delegation_id, self.message(text, self.context(start, end)))
+        except Exception as error:
+            log("send failed id=" + delegation_id + " code=" + t3.describe(error))
+            if definite_refusal(error):
+                await self.append("commentary", delegation_id,
+                                  "I couldn't reach " + self.label + " just now. Nothing was sent to it.")
+            else:
+                await self.append("commentary", delegation_id, "I'm not sure " + self.label + " received that. "
+                                  "Ask the user to check its thread before repeating it.")
             return
         await self.append("thinking", delegation_id,
                           "Sent to " + self.label + ". Waiting for its answer; nothing is done yet.")
         loop = asyncio.get_running_loop()
 
-        def progress():
-            asyncio.run_coroutine_threadsafe(self.append(
-                "thinking", delegation_id, self.label + " is still working on it."), loop)
+        def progress(note):
+            asyncio.run_coroutine_threadsafe(self.append("thinking", delegation_id, note), loop)
 
         try:
-            status, reply = await asyncio.to_thread(self.ask, delegation_id, text, progress)
-        except (t3.McpError, OSError, ValueError) as error:
-            log("delegation failed id=" + delegation_id + " code=" + t3.describe(error))
-            await self.append("commentary", delegation_id,
-                              "I couldn't reach " + self.label + " just now. Nothing was sent to it.")
+            status, reply = await in_daemon_thread(self.collect, record, progress)
+        except Exception as error:
+            log("reply lost id=" + delegation_id + " code=" + t3.describe(error))
+            await self.append("commentary", delegation_id, self.label + " has the request, but I lost track "
+                              "of its answer. It will be in " + self.label + "'s thread.")
             return
+        self.active_at = self.now()
         if status != "completed":
             await self.append("commentary", delegation_id,
                               self.label + " couldn't finish that request; the details are in its thread.")
@@ -187,22 +280,30 @@ class Bridge:
             await self.append("commentary", delegation_id, piece)
 
 
-def ask_home(config, mcp, delegation_id, text, progress, now=time.monotonic):
-    """Send one request to the thread and wait for its run's final reply."""
+def submit_request(config, mcp, delegation_id, message):
+    """Send one request to the thread, idempotent on the delegation."""
     request = "cantrip-live-" + delegation_id
-    result = mcp.call("t3_thread_send", {"threadId": config["thread_id"],
-                                         "message": config.get("live_prefix", "[voice live] ") + text,
+    result = mcp.call("t3_thread_send", {"threadId": config["thread_id"], "message": message,
                                          "mode": "queue", "clientRequestId": request},
                       timeout=t3.SEND_SECONDS)
-    record = {"thread_id": config["thread_id"], "request_id": request, "status": "sent",
-              "run_id": t3.find_key(result, "runId"), "message_id": t3.find_key(result, "messageId")}
+    return {"thread_id": config["thread_id"], "request_id": request, "status": "sent", "label": config.get("label"),
+            "run_id": t3.find_key(result, "runId"), "message_id": t3.find_key(result, "messageId")}
+
+
+def collect_reply(mcp, record, progress, now=time.monotonic, sleep=time.sleep):
+    """Wait for the request's run and return (status, final reply)."""
     reported = now()
     while True:
-        outcome, record, reply = t3.advance(mcp, record)
+        began = now()
+        outcome, record, reply = t3.advance(mcp, record, now=time.time)
         if outcome != "wait":
             return record.get("run_status", outcome), reply
+        if now() - began < 1:
+            sleep(1)   # queued behind other work: no run to wait on yet, so don't spin
         if now() - reported > PROGRESS_SECONDS:
-            progress()
+            label = record.get("label") or "Home"
+            progress(label + (" is waiting for the user in its thread." if record.get("waiting_noticed")
+                              else " is still working on it."))
             reported = now()
 
 
@@ -274,6 +375,11 @@ def microphone(loop, chunks, target=None):
     return process
 
 
+def notify_later(message):
+    """Desktop notice without blocking the event loop."""
+    threading.Thread(target=t3.notify, args=(message,), daemon=True).start()
+
+
 async def run(config):
     from openai import AsyncOpenAI
 
@@ -288,23 +394,27 @@ async def run(config):
     loop.add_signal_handler(signal.SIGTERM, stopping.set)
     loop.add_signal_handler(signal.SIGUSR1, toggled.set)
     pid_file = t3.runtime_dir() / "live.pid"
-    pid_file.write_text(str(os.getpid()))
-    echo = EchoCancel() if live["echo_cancel"] else None
-    devices = (echo.__enter__() if echo else None) or (None, None)
-    chunks = asyncio.Queue()
-    player = Player(devices[1])
-    player.start()
-    recorder = microphone(loop, chunks, devices[0])
+    echo = player = recorder = None
     try:
+        pid_file.write_text(str(os.getpid()))
+        echo = EchoCancel() if live["echo_cancel"] else None
+        devices = (echo.__enter__() if echo else None) or (None, None)
+        chunks = asyncio.Queue()
+        player = Player(devices[1])
+        player.start()
+        recorder = microphone(loop, chunks, devices[0])
         async with AsyncOpenAI() as client, client.live.connect() as connection:
             async def send(event):
                 await connection.send(event)
 
-            # One MCP client per delegation: delegations run concurrently on worker threads.
-            bridge = Bridge(config, send, lambda *args: ask_home(config, t3.connect(config), *args))
+            # One MCP client per call: delegations run concurrently on their own threads.
+            bridge = Bridge(config, send,
+                            lambda delegation, message: submit_request(config, t3.connect(config), delegation, message),
+                            lambda record, progress: collect_reply(t3.connect(config), record, progress))
             await connection.session.start(session=session_config(config, context), event_id="start")
             started = asyncio.Event()
             muted = False
+            opened = time.monotonic()
 
             async def pump_audio():
                 pending = b""
@@ -313,12 +423,13 @@ async def run(config):
                     block = pending + await chunks.get()
                     whole = len(block) - len(block) % 2
                     pending = block[whole:]
-                    if whole and not stopping.is_set():
+                    if whole and not muted and not stopping.is_set():   # muted audio never leaves the machine
                         await connection.session.input_audio.append(
                             audio=base64.b64encode(block[:whole]).decode("ascii"))
 
             async def controls():
                 nonlocal muted
+                await started.wait()
                 while True:
                     await toggled.wait()
                     toggled.clear()
@@ -327,7 +438,17 @@ async def run(config):
                         await connection.session.input_audio.mute(event_id=bridge.event_id("mute"))
                     else:
                         await connection.session.input_audio.unmute(event_id=bridge.event_id("unmute"))
-                    t3.notify("Live microphone " + ("muted" if muted else "on"))
+                    notify_later("Live microphone " + ("muted" if muted else "on"))
+
+            async def watchdog():
+                """Close a forgotten session: it bills every connected second."""
+                while not stopping.is_set():
+                    await asyncio.sleep(5)
+                    idle = time.monotonic() - bridge.active_at > live["idle_minutes"] * 60 and not bridge.tasks
+                    if idle or time.monotonic() - opened > live["max_minutes"] * 60:
+                        log("closing reason=" + ("idle" if idle else "max-duration"))
+                        notify_later("Live session closing (" + ("idle" if idle else "time limit") + ")")
+                        stopping.set()
 
             async def close_on_stop():
                 await stopping.wait()
@@ -338,15 +459,16 @@ async def run(config):
                     log("close unconfirmed")
                     await connection.close()
 
-            helpers = [asyncio.create_task(job()) for job in (pump_audio, controls, close_on_stop)]
+            helpers = [asyncio.create_task(job()) for job in (pump_audio, controls, watchdog, close_on_stop)]
             try:
                 async for event in connection:
                     data = event.model_dump(exclude_none=True)
                     if data.get("type") == "session.started":
                         log("started session=" + str((data.get("session") or {}).get("id")))
-                        t3.notify("Live with " + bridge.label)
+                        notify_later("Live with " + bridge.label)
                         started.set()
                     elif data.get("type") == "session.output_audio.delta":
+                        bridge.active_at = time.monotonic()
                         player.audio.put(base64.b64decode(data["delta"]))
                         continue
                     await bridge.handle(data)
@@ -357,11 +479,23 @@ async def run(config):
                     task.cancel()
     finally:
         pid_file.unlink(missing_ok=True)
-        recorder.terminate()
-        player.close()
+        if recorder:
+            recorder.terminate()
+        if player:
+            player.close()
         if echo:
             echo.__exit__(None, None, None)
-        t3.notify("Live session ended")
+        notify_later("Live session ended")
+
+
+def live_pid():
+    """The running session's pid, only if it really is this bridge (a stale pid is never signalled)."""
+    try:
+        pid = int((t3.runtime_dir() / "live.pid").read_text())
+        argv = Path("/proc", str(pid), "cmdline").read_bytes().decode(errors="replace")
+    except (OSError, ValueError):
+        return None
+    return pid if "cantrip_t3_live" in argv or "cantrip-t3-live" in argv else None
 
 
 def main(argv=None):
@@ -373,11 +507,11 @@ def main(argv=None):
     commands.add_parser("mute", help="toggle the running session's microphone")
     args = parser.parse_args(argv)
     if args.command == "mute":
-        try:
-            os.kill(int((t3.runtime_dir() / "live.pid").read_text()), signal.SIGUSR1)
-        except (OSError, ValueError):
+        pid = live_pid()
+        if pid is None:
             print("no live session", file=sys.stderr)
             return 1
+        os.kill(pid, signal.SIGUSR1)
         return 0
     config = t3.load_config(args.config)
     if args.command == "session":
