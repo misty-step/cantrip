@@ -424,10 +424,28 @@ class ReviewRegressionTest(Base):
         self.assertEqual(t3.describe(t3.McpError("http-401")), "http-401")
 
     def test_unreachable_t3_drops_the_record_it_created(self):
-        with mock.patch.object(t3, "connect", side_effect=OSError("network down")):
+        with mock.patch.object(t3, "connect", side_effect=OSError("network down")), \
+                mock.patch.dict(os.environ, {"T3_MCP_TOKEN": "tok"}):
             with self.assertRaises(OSError):
                 t3.send(CONFIG, "status?", "take-1")
         self.assertEqual(self.records("pending"), [])
+
+    def test_missing_token_leaves_no_record(self):
+        with mock.patch.dict(os.environ, {"T3_MCP_TOKEN": ""}):
+            with self.assertRaises(ValueError):
+                t3.send(CONFIG, "status?", "take-1")
+        self.assertEqual(self.records("pending"), [])
+
+    def test_speech_cut_short_is_recorded_as_stopped(self):
+        speaker = t3.Speaker(CONFIG, recording=lambda: False)
+
+        def remote(parts, key, started):
+            t3.stop_speaking()
+            return 1
+
+        with mock.patch.object(speaker, "remote", side_effect=remote), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            self.assertEqual(speaker.say("Hello there."), "stopped")
 
     def test_redirects_are_refused(self):
         handler = t3.NoRedirect()

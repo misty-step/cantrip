@@ -226,6 +226,8 @@ def send(config, text, take, mcp=None, now=time.time):
     done = state_dir() / "done" / (take + ".json")
     if done.exists():
         return json.loads(done.read_text())
+    if mcp is None and not secret("T3_MCP_TOKEN"):
+        raise ValueError("T3_MCP_TOKEN is not set")   # before any record: nothing can be sent
     record = {"take": take, "thread_id": config["thread_id"], "request_id": request_id(take),
               "sent_at": now(), "status": "sending"}
     created = not pending.exists()
@@ -654,7 +656,7 @@ class Speaker:
                 except OSError as error:
                     log("local speech unavailable class=" + type(error).__name__)
                     return "spoken" if played else "unplayable"
-            return "spoken"
+            return self.silenced(started) or "spoken"   # cut short by stop or mute: say so
 
     def silenced(self, started):
         return "muted" if is_muted() else "stopped" if self.stopped(started) else None
