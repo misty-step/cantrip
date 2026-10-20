@@ -78,3 +78,40 @@ Install [`cantrip-t3.service`](cantrip-t3.service) in `~/.config/systemd/user/`
 with your launcher and entries, then run
 `systemctl --user enable --now cantrip-t3.service`. Bind keys to
 `cantrip-t3 talk`, `cantrip-t3 mute toggle` and `cantrip-t3 stop`.
+
+## Hands-free turn-taking (OpenRouter)
+
+`cantrip_t3_converse.py` keeps the microphone open and takes turns with the
+thread without a key per utterance. Local energy endpointing ends an utterance
+after 0.7 s of quiet. The utterance is transcribed by an OpenAI-compatible
+`/audio/transcriptions` endpoint (Parakeet on OpenRouter by default) and sent
+with `cantrip_t3.send` as its own take, so the running collector speaks the
+reply exactly as for push-to-talk. Audio leaves the machine only for detected
+speech; nothing is retained.
+
+- **Speakers (default):** the microphone is ignored while a reply plays and
+  for 0.6 s after, so the agent never hears its own voice. Use `stop` or the
+  mute key to cut a reply.
+- **Headphones** (`headphones = true`): speaking over a reply stops it
+  (barge-in).
+- It ends after `idle_minutes` without speech, or on SIGTERM.
+
+```toml
+[converse]            # in t3.toml; these are the defaults
+stt_endpoint = "https://openrouter.ai/api/v1"
+stt_model = "nvidia/parakeet-tdt-0.6b-v3"
+language = "en"
+end_silence_ms = 700
+min_speech_ms = 350
+max_utterance_s = 60
+idle_minutes = 5
+headphones = false
+```
+
+Measured on Linux with OpenRouter: end of speech to the reply's first word
+took 5.8 s against a fast agent, made up of 0.7 s endpointing, about 0.7 s
+STT, the agent's run, and about 1.4 s to first speech. The agent's own run time
+comes on top. OpenRouter offers no realtime or full-duplex voice API, so this
+is turn-taking, not a live conversation; see `cantrip_t3_live.py` for that.
+Install [`cantrip-t3-converse.service`](cantrip-t3-converse.service) and bind
+a key to start and stop it.
