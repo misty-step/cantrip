@@ -264,7 +264,8 @@ class Conversation:
             self.endpointer.reset()   # on speakers, never hear the reply; keep the floor
             return
         event = self.endpointer.feed(frame)
-        self.mark_speaking(self.endpointer.started)
+        # From the first loud frame, so a reply never starts over speech still being confirmed.
+        self.mark_speaking(bool(self.endpointer.frames))
         self.show_state(self.endpointer.started)
         if not event:
             return
@@ -325,6 +326,7 @@ class Conversation:
                 t3.notify("Something went wrong with that; please say it again.")
             finally:
                 self.busy = False
+                self.work.task_done()
 
     def utterance(self, pcm):
         seconds = len(pcm) / 2 / RATE
@@ -411,11 +413,6 @@ def run(config):
     finally:
         conversation.mark_speaking(False)
         conversation.clear_state()
-        if conversation.refused == "continuous-sound":
-            # Send what was already captured, including the cut that tripped the stop.
-            drained = time.monotonic() + 30
-            while (conversation.work.qsize() or conversation.busy) and time.monotonic() < drained:
-                time.sleep(0.1)
         recorder.stdout.close()   # a recorder blocked on a full pipe can then exit
         recorder.terminate()
         try:
@@ -423,8 +420,14 @@ def run(config):
         except subprocess.TimeoutExpired:
             recorder.kill()
             recorder.wait()
+        if conversation.refused == "continuous-sound":
+            # Mic closed; now send what was already captured, including the cut that tripped the stop.
+            waiter = threading.Thread(target=conversation.work.join, daemon=True)
+            waiter.start()
+            waiter.join(30)
         unsent = conversation.work.qsize() + (1 if conversation.busy else 0)
-        why = (": " + str(CAPPED_LIMIT) + " minutes of continuous sound, such as music"
+        capped_minutes = CAPPED_LIMIT * conversation.settings["max_utterance_s"] / 60
+        why = (": %g minutes of continuous sound, such as music" % capped_minutes
                if conversation.refused == "continuous-sound" else "")
         t3.notify("Stopped listening for " + label + why + (" (" + str(unsent) + " unsent)" if unsent else ""))
         log("stopped turns=%d" % conversation.turns)

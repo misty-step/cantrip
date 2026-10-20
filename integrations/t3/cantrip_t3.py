@@ -695,6 +695,7 @@ class Speaker:
         return recording
 
     def player(self, argv):
+        (runtime_dir() / "playing").unlink(missing_ok=True)   # left by a crashed collector: nothing audible yet
         process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, start_new_session=True)
         (runtime_dir() / "player.pid").write_text(str(process.pid))

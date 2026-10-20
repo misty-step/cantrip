@@ -108,7 +108,7 @@ leaves the machine only for detected speech; nothing is retained.
   make, such as a fan, hum or vacuum, is steady noise. It is never uploaded and
   becomes the background; speech just before it is kept. Typing never counts,
   because speech needs 150 ms of continuous sound. Music with a beat looks like
-  speech: two utterances in a row cut at `max_utterance_s` stop hands-free with
+  speech: three utterances in a row cut at `max_utterance_s` stop hands-free with
   a notice. Speech must be about three times louder than the background, and
   on a typical mic a moderate fan can cost a third or more of the words, so use
   push-to-talk or headphones near one.

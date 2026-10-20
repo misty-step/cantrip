@@ -478,6 +478,45 @@ class ReviewRegressionTest(Base):
         self.assertEqual(len(sleeps), 3)
         remote.assert_called_once()
 
+    def test_playing_marker_is_set_only_once_audio_is_written_and_cleared_after(self):
+        marker = t3.runtime_dir() / "playing"
+        marker.write_text("")   # left behind by a crashed collector
+        seen = []
+
+        class Player:
+            pid = 1
+
+            def __init__(self):
+                self.stdin = mock.Mock(write=lambda block: seen.append(marker.exists()), flush=lambda: None)
+
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        speaker = t3.Speaker(CONFIG, opener=lambda request, timeout: Response(b"\x00" * 100),
+                             recording=lambda: False)
+        spawned = []
+
+        def popen(*args, **kwargs):
+            spawned.append(marker.exists())
+            return Player()
+
+        with mock.patch.object(t3.subprocess, "Popen", side_effect=popen), \
+                mock.patch.dict(os.environ, {"CANTRIP_T3_SPEECH_KEY": "k"}):
+            self.assertEqual(speaker.say("Hello."), "spoken")
+        self.assertEqual(spawned, [False])        # the stale marker is gone before the player starts
+        self.assertTrue(seen and all(seen))       # set before every audible write
+        self.assertFalse(marker.exists())         # cleared when the reply ends
+
     def test_redirects_are_refused(self):
         handler = t3.NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere.example/"))
