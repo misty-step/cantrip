@@ -38,7 +38,8 @@ Preconditions:
   (pw-record; configured source)` and the take settles `empty` ("No text
   returned. Saved audio is available.") with a silent WAV retained. PipeWire
   leaves `pw-record` unlinked, so no other microphone is recorded, but the user
-  is not told the source is missing. Tracked as a product gap; the check
+  is not told the source is missing. Tracked in
+  https://github.com/misty-step/cantrip/issues/162; the check
   asserts only "not complete".
 - Silence may settle `empty` or `failed`; both are honest.
 - The daemon-down check uses a private empty runtime dir, so it never touches
