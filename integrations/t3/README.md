@@ -99,6 +99,16 @@ thread directly; Cantrip is not involved.
   `cantrip-t3-live mute` toggles the microphone.
 - Use headphones, or set `echo_cancel = true` to route the session through a
   PipeWire echo-cancel source and sink that are removed afterwards.
+- Playback goes through a 0.4 s jitter buffer. GPT-Live streams 100 ms
+  blocks at about real time with arrival gaps up to ~0.3 s; without the
+  buffer those gaps were audible as glitches.
+- The session closes after `idle_minutes` (default 5) with no speech in either
+  direction and no request pending, and after `max_minutes` (default 60), with
+  a spoken one-minute warning. While muted, silence is streamed in place of
+  the microphone.
+- `input_device` and `output_device` pick PipeWire nodes. Set
+  `CANTRIP_T3_LIVE_TRACE=<file>` to log each received block's arrival time,
+  size and level (never audio or text) when diagnosing playback.
 
 ```toml
 [live]                # in t3.toml
@@ -106,6 +116,10 @@ model = "gpt-live-1"
 voice = "marin"
 summary_command = ["ssh", "host", "cat ~/home/NOW.md"]
 echo_cancel = false
+idle_minutes = 5
+max_minutes = 60
+input_device = ""      # PipeWire source; default input when empty
+output_device = ""     # PipeWire sink; default output when empty
 ```
 
 It needs `OPENAI_API_KEY` with GPT-Live access and runs with

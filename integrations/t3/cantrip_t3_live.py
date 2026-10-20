@@ -40,17 +40,23 @@ APPEND_CHARS = 1_500           # comfortably inside 500 tokens per append
 SUMMARY_CHARS = 16_000
 SETTLE_SECONDS = 0.6           # quiet in the request's transcript before it is complete
 SETTLE_MAX_SECONDS = 2.5
+SETTLE_UNCOVERED_SECONDS = 1.5 # stop waiting for coverage sooner when the user paused before delegating
+COVER_MS = 600                 # transcript ending this close to the delegation point covers it
 CONTEXT_CHARS = 300
 SHORT_WORDS = 6                # a reply this short ("yes", "the second one") travels with its question
 PROGRESS_SECONDS = 45
 CLOSE_SECONDS = 15
+PREBUFFER_SECONDS = 0.4        # jitter buffer before each spoken turn (measured: 107 gaps → 11)
 
 LIVE_DEFAULTS = {
     "model": "gpt-live-1",
     "voice": "marin",
     "summary_command": [],
     "echo_cancel": False,
-    "idle_minutes": 5,          # close after this long with no speech either way and nothing pending
+    "input_device": "",         # PipeWire source to listen on; default input when empty
+    "output_device": "",        # PipeWire sink to speak on; default output when empty
+    # Close after this long with no speech either way and nothing pending, and after this long in total.
+    "idle_minutes": 5,
     "max_minutes": 60,   # PipeWire echo cancellation for speakers; headphones need none
 }
 
@@ -120,8 +126,10 @@ def in_daemon_thread(function, *args):
     def work():
         try:
             outcome, failed = function(*args), False
-        except BaseException as error:  # handed to the awaiting coroutine, never lost
+        except Exception as error:  # handed to the awaiting coroutine, never lost
             outcome, failed = error, True
+        except BaseException as error:  # e.g. SystemExit: report it as a failure, never end the session here
+            outcome, failed = RuntimeError(type(error).__name__), True
         try:
             loop.call_soon_threadsafe(settle, outcome, failed)
         except RuntimeError:
@@ -154,6 +162,7 @@ class Bridge:
         self.heard = []             # (start_ms, end_ms, text, arrived) user transcript fragments
         self.said = []              # (start_ms, end_ms, text) GPT-Live's own speech
         self.boundaries = [-1]      # offsets of earlier delegations: each request starts at the last one
+        self.claimed = set()        # indexes of fragments already sent
         self.tasks = set()
         self.sequence = 0
         self.usage_seconds = 0
@@ -200,18 +209,27 @@ class Bridge:
         self.boundaries.append(offset_ms)
         return earlier, offset_ms   # transcript times share the session timeline with offset_ms
 
+    def covered(self, end):
+        """Speech reaching close to the delegation point has been transcribed."""
+        return any(e >= end - COVER_MS for s, e, _, _ in self.heard if s < end)
+
     async def settle(self, start, end):
-        """Wait until fragments spoken before the delegation stop arriving; late ones still belong here."""
+        """Wait for the request's transcript: until it reaches the delegation point and has gone
+        quiet, or SETTLE_MAX_SECONDS."""
         began = self.now()
         while self.now() - began < SETTLE_MAX_SECONDS:
-            arrived = [at for s, _, _, at in self.heard if start <= s < end]
-            if self.now() - max(arrived, default=began) >= SETTLE_SECONDS:
+            arrived = [at for s, _, _, at in self.heard if s < end]
+            quiet = self.now() - max(arrived, default=began) >= SETTLE_SECONDS
+            if quiet and (self.covered(end) or self.now() - began >= SETTLE_UNCOVERED_SECONDS):
                 return
             await asyncio.sleep(0.1)
 
-    def request_text(self, start, end):
-        fragments = sorted((s, text) for s, _, text, _ in self.heard if start <= s < end)
-        return "".join(text for _, text in fragments).strip()
+    def claim(self, end):
+        """Every not-yet-sent fragment spoken before the delegation point, each sent exactly once.
+        A straggler that missed its own request joins the next one instead of being lost."""
+        mine = sorted(i for i, (s, _, _, _) in enumerate(self.heard) if s < end and i not in self.claimed)
+        self.claimed.update(mine)
+        return "".join(self.heard[i][2] for i in mine).strip()
 
     def context(self, start, end):
         """What GPT-Live said just before, so a bare "yes" reaches the thread with its question."""
@@ -239,10 +257,12 @@ class Bridge:
     async def run_delegation(self, delegation_id, offset_ms):
         start, end = self.window(offset_ms)
         await self.settle(start, end)
-        text = self.request_text(start, end)
+        text = self.claim(end)
         log("delegation id=" + delegation_id + " chars=" + str(len(text)))
         if not text:
-            await self.append("commentary", delegation_id, "I didn't catch the request. Ask the user to repeat it.")
+            already = offset_ms is not None and self.boundaries.count(offset_ms) > 1
+            await self.append("commentary", delegation_id, "That request is already with " + self.label + "."
+                              if already else "I didn't catch the request. Ask the user to repeat it.")
             return
         try:
             record = await in_daemon_thread(self.submit, delegation_id, self.message(text, self.context(start, end)))
@@ -336,9 +356,15 @@ class EchoCancel:
 
 
 class Player(threading.Thread):
-    """Writes PCM to pw-cat off the event loop."""
+    """Writes PCM to pw-cat off the event loop, through a small jitter buffer.
 
-    def __init__(self, target=None):
+    GPT-Live sends 100 ms blocks at about real time with arrival gaps up to ~0.3 s.
+    Written as they arrive, every late block was an audible gap. Each turn (and any
+    underrun) now starts only once PREBUFFER_SECONDS is queued, or a short reply has
+    fully arrived.
+    """
+
+    def __init__(self, target=None, clock=time.monotonic):
         super().__init__(daemon=True)
         argv = ["pw-cat", "--playback", "--raw", "--format", "s16", "--rate", str(RATE), "--channels", "1"]
         if target:
@@ -346,18 +372,51 @@ class Player(threading.Thread):
         self.process = subprocess.Popen(argv + ["-"], stdin=subprocess.PIPE,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.audio = queue.Queue()
+        self.clock = clock
+        self.underruns = 0
+
+    def write(self, pcm):
+        self.process.stdin.write(pcm)
+        self.process.stdin.flush()
 
     def run(self):
-        while (block := self.audio.get()) is not None:
+        pending, first, plays_until = bytearray(), None, None
+        while True:
             try:
-                self.process.stdin.write(block)
-                self.process.stdin.flush()
+                block = self.audio.get(timeout=0.02)
+            except queue.Empty:
+                block = b""
+            if block is None:
+                break
+            now = self.clock()
+            if plays_until is not None and now > plays_until:   # ran dry: re-prime before resuming
+                if now - plays_until < 1.0:
+                    self.underruns += 1
+                plays_until = None
+            if block:
+                pending += block
+                first = first if first is not None else now
+            if not pending:
+                continue
+            seconds = len(pending) / (RATE * 2)
+            if plays_until is None and seconds < PREBUFFER_SECONDS and now - first < PREBUFFER_SECONDS + 0.2:
+                continue
+            try:
+                self.write(bytes(pending))
             except BrokenPipeError:
                 return
+            plays_until = (plays_until or now) + seconds
+            pending, first = bytearray(), None
+        if pending:
+            try:
+                self.write(bytes(pending))
+            except BrokenPipeError:
+                pass
 
     def close(self):
         self.audio.put(None)
         self.join(timeout=2)
+        log("player underruns=" + str(self.underruns))
         self.process.terminate()
 
 
@@ -373,6 +432,22 @@ def microphone(loop, chunks, target=None):
 
     threading.Thread(target=read, daemon=True).start()
     return process
+
+
+def limits(live):
+    """Idle and maximum session seconds; a bad value falls back to the default rather than disabling them."""
+    def minutes(key):
+        try:
+            value = float(live[key])
+        except (TypeError, ValueError):
+            value = 0
+        return (value if value > 0 else LIVE_DEFAULTS[key]) * 60
+    return minutes("idle_minutes"), minutes("max_minutes")
+
+
+def audioop_rms(pcm):
+    samples = memoryview(pcm).cast("h") if len(pcm) % 2 == 0 else memoryview(pcm[:-1]).cast("h")
+    return int((sum(x * x for x in samples) / max(1, len(samples))) ** 0.5)
 
 
 def notify_later(message):
@@ -398,7 +473,7 @@ async def run(config):
     try:
         pid_file.write_text(str(os.getpid()))
         echo = EchoCancel() if live["echo_cancel"] else None
-        devices = (echo.__enter__() if echo else None) or (None, None)
+        devices = (echo.__enter__() if echo else None) or (live["input_device"] or None, live["output_device"] or None)
         chunks = asyncio.Queue()
         player = Player(devices[1])
         player.start()
@@ -415,6 +490,9 @@ async def run(config):
             started = asyncio.Event()
             muted = False
             opened = time.monotonic()
+            idle_limit, max_limit = limits(live)
+            trace_path = os.environ.get("CANTRIP_T3_LIVE_TRACE")
+            trace = open(trace_path, "a", buffering=1) if trace_path else None
 
             async def pump_audio():
                 pending = b""
@@ -423,9 +501,10 @@ async def run(config):
                     block = pending + await chunks.get()
                     whole = len(block) - len(block) % 2
                     pending = block[whole:]
-                    if whole and not muted and not stopping.is_set():   # muted audio never leaves the machine
-                        await connection.session.input_audio.append(
-                            audio=base64.b64encode(block[:whole]).decode("ascii"))
+                    if whole and not stopping.is_set():
+                        # Muted: keep the input stream going with silence; the room's audio never leaves.
+                        audio = bytes(whole) if muted else block[:whole]
+                        await connection.session.input_audio.append(audio=base64.b64encode(audio).decode("ascii"))
 
             async def controls():
                 nonlocal muted
@@ -442,10 +521,15 @@ async def run(config):
 
             async def watchdog():
                 """Close a forgotten session: it bills every connected second."""
+                warned = False
                 while not stopping.is_set():
                     await asyncio.sleep(5)
-                    idle = time.monotonic() - bridge.active_at > live["idle_minutes"] * 60 and not bridge.tasks
-                    if idle or time.monotonic() - opened > live["max_minutes"] * 60:
+                    idle = time.monotonic() - bridge.active_at > idle_limit and not bridge.tasks
+                    if not warned and time.monotonic() - opened > max_limit - 60:
+                        warned = True
+                        await bridge.append("instructions", None, "The session ends in about a minute. "
+                                            "Tell the user briefly at the next natural pause.")
+                    if idle or time.monotonic() - opened > max_limit:
                         log("closing reason=" + ("idle" if idle else "max-duration"))
                         notify_later("Live session closing (" + ("idle" if idle else "time limit") + ")")
                         stopping.set()
@@ -469,7 +553,11 @@ async def run(config):
                         started.set()
                     elif data.get("type") == "session.output_audio.delta":
                         bridge.active_at = time.monotonic()
-                        player.audio.put(base64.b64decode(data["delta"]))
+                        pcm = base64.b64decode(data["delta"])
+                        if trace:
+                            level = audioop_rms(pcm)
+                            trace.write("%.4f %d %d\n" % (time.monotonic(), len(pcm), level))   # timing, size, level only
+                        player.audio.put(pcm)
                         continue
                     await bridge.handle(data)
                     if bridge.closed.is_set():
@@ -485,7 +573,7 @@ async def run(config):
             player.close()
         if echo:
             echo.__exit__(None, None, None)
-        notify_later("Live session ended")
+        t3.notify("Live session ended")   # synchronous: it is the sign that billing stopped
 
 
 def live_pid():

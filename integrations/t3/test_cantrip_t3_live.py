@@ -33,7 +33,8 @@ def delegation(item, offset):
 
 class BridgeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        settle = mock.patch.multiple(live, SETTLE_SECONDS=0.05, SETTLE_MAX_SECONDS=0.3)
+        settle = mock.patch.multiple(live, SETTLE_SECONDS=0.05, SETTLE_MAX_SECONDS=0.5,
+                                     SETTLE_UNCOVERED_SECONDS=0.3)
         settle.start()
         self.addCleanup(settle.stop)
         self.sent = []
@@ -84,6 +85,35 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(heard(400, 900, " docs PR."))   # transcribed after the delegation
         await self.finish()
         self.assertEqual(self.submitted, [("item_1", "[voice live] Merge the docs PR.")])
+
+    async def test_a_transcript_arriving_after_the_delegation_is_still_its_request(self):
+        await self.bridge.handle(delegation("item_1", 1500))
+        await asyncio.sleep(0.12)
+        await self.bridge.handle(heard(0, 700, "Merge the"))
+        await asyncio.sleep(0.12)
+        await self.bridge.handle(heard(700, 1400, " docs PR."))   # well after the first, still before the point
+        await self.finish()
+        self.assertEqual(self.submitted, [("item_1", "[voice live] Merge the docs PR.")])
+
+    async def test_a_straggler_joins_the_next_request_instead_of_vanishing(self):
+        await self.bridge.handle(heard(0, 400, "Merge the"))
+        await self.bridge.handle(heard(400, 850, " docs PR."))
+        await self.bridge.handle(delegation("item_1", 900))
+        await self.finish()
+        await self.bridge.handle(heard(850, 880, " Now."))     # arrives after item_1 was sent
+        await self.bridge.handle(heard(1000, 1400, " And ship it."))
+        await self.bridge.handle(delegation("item_2", 1500))
+        await self.finish()
+        self.assertEqual([m for _, m in self.submitted],
+                         ["[voice live] Merge the docs PR.", "[voice live] Now. And ship it."])
+
+    async def test_a_repeated_delegation_is_not_sent_twice(self):
+        await self.bridge.handle(heard(0, 400, "Ship it."))
+        await self.bridge.handle(delegation("item_1", 500))
+        await self.bridge.handle(delegation("item_2", 500))
+        await self.finish()
+        self.assertEqual(len(self.submitted), 1)
+        self.assertIn("already", self.commentary()[-1] + self.commentary()[0])
 
     async def test_a_short_reply_carries_the_question_it_answers(self):
         await self.bridge.handle(said(0, 2000, "Should I merge the docs PR now?"))
@@ -214,6 +244,31 @@ class HomeCallsTest(unittest.TestCase):
         self.addCleanup(other.kill)
         (live.t3.runtime_dir() / "live.pid").write_text(str(other.pid))
         self.assertIsNone(live.live_pid())
+
+
+class PlayerTest(unittest.TestCase):
+    def test_turns_start_only_after_the_jitter_buffer_fills(self):
+        writes, clock = [], [0.0]
+        with mock.patch.object(live.subprocess, "Popen"):
+            player = live.Player(clock=lambda: clock[0])
+        player.write = lambda pcm: writes.append((clock[0], len(pcm)))
+        block = bytes(live.RATE * 2 // 10)   # 100 ms
+        player.start()
+        for n in range(6):
+            clock[0] = n * 0.1
+            player.audio.put(block)
+            time.sleep(0.06)
+        player.audio.put(None)
+        player.join(2)
+        self.assertGreaterEqual(writes[0][0], live.PREBUFFER_SECONDS - 0.11)   # held until ~0.4 s queued
+        self.assertGreaterEqual(writes[0][1], len(block) * 4)
+        self.assertEqual(sum(size for _, size in writes), len(block) * 6)
+
+
+class LimitsTest(unittest.TestCase):
+    def test_bad_limits_fall_back_to_defaults(self):
+        self.assertEqual(live.limits({"idle_minutes": "x", "max_minutes": 0}), (300, 3600))
+        self.assertEqual(live.limits({"idle_minutes": 2, "max_minutes": 30}), (120, 1800))
 
 
 class SessionTest(unittest.TestCase):
