@@ -330,6 +330,43 @@ class PlayerTest(unittest.TestCase):
         self.assertGreaterEqual(sum(written), 5 * len(loud))   # speech is never dropped
 
 
+    def test_speech_after_gpt_lives_slow_silent_stream_plays_without_gaps(self):
+        """Review at 4498a1d: silence at 0.9x real time must not leave speech on a thin buffer."""
+        import random
+        clock = [0.0]
+        with mock.patch.object(live.subprocess, "Popen"):
+            player = live.Player(clock=lambda: clock[0])
+        writes = []
+        player.write = lambda pcm: writes.append((clock[0], len(pcm)))
+        silent = bytes(live.RATE * 2 // 10)
+        loud = b"\x00\x10" * (live.RATE // 10)
+        player.start()
+
+        def at(seconds, data):
+            clock[0] = seconds
+            player.audio.put(data)
+            time.sleep(0.004)
+
+        for n in range(60):                          # 6 s of audio over 6.7 s: GPT-Live's silent stream
+            at(n / 0.9 * 0.1, silent)
+        rng, t0, last = random.Random(1), 7.0, 0.0
+        writes.clear()
+        for k in range(60):                          # speech at 1.0x with network jitter up to 0.32 s
+            delay = rng.uniform(0.15, 0.32) if rng.random() < 1 / 15 else rng.uniform(0, 0.06)
+            last = max(last, t0 + 0.1 * k + delay)
+            at(last, loud)
+        for tick in range(30):                       # let the tail play out
+            clock[0] = last + 0.1 * (tick + 1)
+            time.sleep(0.004)
+        player.audio.put(None)
+        player.join(2)
+        end, gaps = None, []
+        for when, size in writes:
+            if end is not None and when > end + 0.002:
+                gaps.append(when - end)
+            end = max(when, end or when) + size / (live.RATE * 2)
+        self.assertEqual(gaps, [])
+
     def test_silence_dropouts_do_not_grow_the_buffer_and_a_heard_one_resumes_quickly(self):
         clock = [0.0]
         with mock.patch.object(live.subprocess, "Popen"):

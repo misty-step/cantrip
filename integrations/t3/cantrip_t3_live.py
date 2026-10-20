@@ -51,7 +51,7 @@ SPEECH_LEVEL = 300             # output RMS above this is GPT-Live speaking, for
 SUMMARY_SECONDS = 20           # deadline for the end-of-session summary, within the unit's stop timeout
 PREBUFFER_SECONDS = 0.4        # jitter buffer before each turn; grows 0.2 s per dropout heard next to speech
 MAX_PREBUFFER_SECONDS = 1.0
-REPRIME_SECONDS = 0.1          # after a short dropout inside a turn
+REPRIME_SECONDS = 0.2          # after a dropout inside speech
 CATCH_UP_SECONDS = 0.6         # behind by more than prebuffer + this: drop silent blocks
 SILENT_LEVEL = 100             # output RMS below this is silence (measured: 0.4 s buffer cut 107 gaps to 11)
 
@@ -453,9 +453,11 @@ class Player(threading.Thread):
         self.process.stdin.flush()
 
     def run(self):
-        """Start each turn once `prebuffer` is queued; after a short dropout inside a turn, resume
-        after only REPRIME_SECONDS. A dropout heard next to speech raises `prebuffer` for later turns."""
-        pending, first, plays_until, dry_since, target, last_loud = bytearray(), None, None, None, self.prebuffer, False
+        """Start each turn, and resume after any dry spell in silence, once `prebuffer` is queued
+        (waiting costs nothing in silence). After a dropout inside speech, resume once
+        REPRIME_SECONDS is queued, and raise `prebuffer` for later turns at most once per turn."""
+        pending, first, plays_until, dry_since = bytearray(), None, None, None
+        target, last_loud, grown = self.prebuffer, False, False
         while True:
             try:
                 block = self.audio.get(timeout=0.02)
@@ -468,13 +470,18 @@ class Player(threading.Thread):
                 dry_since, plays_until = plays_until, None
             level = audioop_rms(block) if block else 0
             if block and dry_since is not None:
-                if now - dry_since < 0.6:
-                    target = REPRIME_SECONDS          # mid-turn: resume quickly, keep the sentence going
-                    if last_loud or level > SPEECH_LEVEL:   # heard: buffer more from the next turn
+                gap = now - dry_since
+                if gap < 0.6 and last_loud:            # a dropout inside speech: keep the sentence going
+                    target = REPRIME_SECONDS
+                    if gap > 0.05:
                         self.underruns += 1
-                        self.prebuffer = min(MAX_PREBUFFER_SECONDS, self.prebuffer + 0.2)
-                else:
-                    target = self.prebuffer           # a new turn
+                        if not grown:
+                            self.prebuffer = min(MAX_PREBUFFER_SECONDS, self.prebuffer + 0.2)
+                            grown = True
+                else:                                   # silence ran dry, or a new turn: rebuild the lead
+                    target = self.prebuffer
+                    if gap >= 0.6:
+                        grown = False
                 dry_since = None
             elif block and plays_until is None and first is None:
                 target = self.prebuffer
@@ -485,7 +492,10 @@ class Player(threading.Thread):
             if block:
                 pending += block
                 first = first if first is not None else now
-                last_loud = level > SPEECH_LEVEL
+                if level > SPEECH_LEVEL:
+                    last_loud = True
+                elif level < SILENT_LEVEL:
+                    last_loud, grown = False, False     # a pause between turns
             if not pending:
                 continue
             seconds = len(pending) / (RATE * 2)
