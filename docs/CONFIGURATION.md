@@ -352,6 +352,8 @@ does not retry or fall back to desktop delivery; `cantrip status` shows
 command exists and is executable; it does not prove the target processes a take.
 Treat the executable as trusted code with access to the transcript. See
 [ADR 0027](decisions/0027-named-handoff-targets.md).
+[`integrations/t3`](../integrations/t3/README.md) is a ready receiver that sends
+takes to a T3 agent thread and speaks its replies.
 
 Set `local_only = true` on a target whose takes must never leave this computer:
 

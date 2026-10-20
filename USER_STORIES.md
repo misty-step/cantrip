@@ -212,6 +212,23 @@ No-gos: no transcript or child output in logs or telemetry; no desktop fallback;
 
 Evidence: `crates/engine/src/engine.rs`, `crates/engine/src/config.rs`, `crates/engine/src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/decisions/0027-named-handoff-targets.md`, `docs/decisions/historical/0028-handoff-destination-tint.md`, `docs/decisions/0030-local-only-handoff-targets.md`
 
+## US-015 Talk to a T3 agent thread and hear its reply
+
+Statement: When I want my coordinating agent, I want to press a key, speak, and
+hear its answer, without opening its thread or touching my clipboard or focused window.
+
+Criteria:
+1. WHEN a take is handed to the T3 handoff command, THE SYSTEM SHALL queue exactly one message on the configured thread, keyed by `CANTRIP_TAKE_ID`, so a retried or recovered take never posts a second message.
+2. WHEN T3 acknowledges the message, THE SYSTEM SHALL exit the handoff without waiting for the reply.
+3. WHEN that message's run completes, THE SYSTEM SHALL speak its final assistant message once, as plain sentences, and SHALL NOT speak it again after a restart.
+4. WHILE reply speech is muted, THE SYSTEM SHALL record replies without speaking them; muting or stopping SHALL silence current speech at once, and unmuting SHALL let later or repeated replies speak.
+5. WHILE Cantrip is recording, THE SYSTEM SHALL hold reply speech, and SHALL stop speech when a take starts.
+6. IF the remote voice fails or stalls, THEN THE SYSTEM SHALL finish the reply with local speech; IF the run fails, THEN THE SYSTEM SHALL say so.
+
+No-gos: no transcript or reply text in logs or local state; no secrets in files; no speech of replies that finished long before the collector saw them.
+
+Evidence: `integrations/t3/cantrip_t3.py`, `integrations/t3/test_cantrip_t3.py`, `integrations/t3/README.md`
+
 ## Capability: Native macOS Clipboard Dictation
 
 ## US-013 Dictate on Mac and deliberately paste into my editor
