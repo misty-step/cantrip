@@ -144,6 +144,17 @@ class ConversationTest(unittest.TestCase):
         conversation.pending = lambda: False
         return conversation
 
+    def test_bar_state_shows_hearing_while_the_user_speaks(self):
+        import json
+        conversation = self.conversation()
+        path = converse.t3.runtime_dir() / "session-hands-free.json"
+        self.speak(conversation, quiet(20) + speech(20))
+        self.assertEqual(json.loads(path.read_text())["phase"], "hearing")
+        self.speak(conversation, speech(10) + quiet(40))
+        self.assertEqual(json.loads(path.read_text())["phase"], "listening")
+        conversation.clear_state()
+        self.assertFalse(path.exists())
+
     def test_speech_in_progress_holds_the_reply(self):
         conversation = self.conversation()
         self.speak(conversation, quiet(20) + speech(20))

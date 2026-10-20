@@ -257,6 +257,7 @@ class Conversation:
             return
         event = self.endpointer.feed(frame)
         self.mark_speaking(self.endpointer.started)
+        self.show_state(self.endpointer.started)
         if not event:
             return
         if event[0] == "noise":
@@ -282,6 +283,18 @@ class Conversation:
                 self.work.put(event[1])
             else:
                 self.utterance(event[1])
+
+    def show_state(self, hearing):
+        """$XDG_RUNTIME_DIR/cantrip-t3/session-hands-free.json for the desktop bar (`cantrip-t3 state`).
+        The bar works out thinking and speaking from the pending takes and the player."""
+        state = {"mode": "hands-free", "pid": os.getpid(), "phase": "hearing" if hearing else "listening",
+                 "muted": False}
+        if state != getattr(self, "shown", None):
+            t3.write_json(t3.runtime_dir() / "session-hands-free.json", state)
+            self.shown = state
+
+    def clear_state(self):
+        (t3.runtime_dir() / "session-hands-free.json").unlink(missing_ok=True)
 
     def mark_speaking(self, speaking):
         """Tell the collector the user is mid-utterance, so a reply never starts over them."""
@@ -381,6 +394,7 @@ def run(config):
                                  "--channels", "1", "-"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     t3.notify("Listening for " + label)
     log("listening model=" + conversation.settings["stt_model"])
+    conversation.show_state(False)
     try:
         while not stopping and not conversation.idle() and not conversation.refused:
             frame = recorder.stdout.read(FRAME_BYTES)
@@ -389,6 +403,7 @@ def run(config):
             conversation.feed(frame)
     finally:
         conversation.mark_speaking(False)
+        conversation.clear_state()
         recorder.stdout.close()   # a recorder blocked on a full pipe can then exit
         recorder.terminate()
         try:
