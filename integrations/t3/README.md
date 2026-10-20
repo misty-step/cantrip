@@ -160,10 +160,11 @@ the thread and what it is doing:
 
 Nothing shows at rest except a dim `replies muted` while replies are muted.
 Left click ends a live or hands-free session. Middle click stops speech, or
-mutes the microphone during a live session (GPT-Live plays its own audio).
+mutes or unmutes the microphone during a live session (GPT-Live plays its own
+audio).
 
 `cantrip-t3 state` prints the one-line JSON the widget polls every second while
-shown and every 3 s at rest. A reply owed for more than 10 minutes is no longer
+a session or take is active and every 3 s otherwise. A reply owed for more than 10 minutes is no longer
 shown as thinking. It
 reads `cantrip status --json` for push-to-talk, the pending takes and player,
 and each session's `$XDG_RUNTIME_DIR/cantrip-t3/session-<mode>.json`, trusted
