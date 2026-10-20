@@ -155,6 +155,16 @@ class ConversationTest(unittest.TestCase):
         self.speak(conversation, quiet(40) + speech(20))
         self.assertTrue(converse.t3.user_speaking())
 
+    def test_going_deaf_clears_a_provisional_speaking_mark(self):
+        conversation = self.conversation()
+        playing = [False]
+        conversation.speaking = lambda: playing[0]
+        self.speak(conversation, quiet(20) + speech(3))   # a loud frame or two: provisionally speaking
+        self.assertTrue(converse.t3.user_speaking())
+        playing[0] = True                                  # the reply becomes audible at that moment
+        self.speak(conversation, quiet(2))
+        self.assertFalse(converse.t3.user_speaking())      # the reply is not held for 30 s
+
     def test_bar_state_shows_hearing_while_the_user_speaks(self):
         import json
         conversation = self.conversation()
