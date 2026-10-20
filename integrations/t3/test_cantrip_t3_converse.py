@@ -284,6 +284,16 @@ class ConversationTest(unittest.TestCase):
         (converse.t3.runtime_dir() / "player.pid").write_text(str(os.getpid()))
         self.assertFalse(converse.speaking())
 
+    def test_a_reply_still_being_fetched_does_not_deafen_the_session(self):
+        import subprocess
+        player = subprocess.Popen(["sleep", "5"])   # stands in for pw-cat by name below
+        self.addCleanup(player.kill)
+        (converse.t3.runtime_dir() / "player.pid").write_text(str(player.pid))
+        with mock.patch.object(converse.t3, "PLAYERS", ("sleep",)):
+            self.assertFalse(converse.speaking())   # no audio written yet
+            (converse.t3.runtime_dir() / "playing").touch()
+            self.assertTrue(converse.speaking())
+
     def test_threaded_capture_keeps_listening_while_a_turn_is_processed(self):
         import threading
         gate = threading.Event()

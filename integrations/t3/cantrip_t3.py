@@ -709,6 +709,7 @@ class Speaker:
             pass
         process.wait()
         (runtime_dir() / "player.pid").unlink(missing_ok=True)
+        (runtime_dir() / "playing").unlink(missing_ok=True)
 
     def fetch(self, parts, key, audio, cancelled):
         """Producer thread: request each chunk in turn and queue its PCM blocks."""
@@ -755,8 +756,11 @@ class Speaker:
                 if block is None:
                     played = index + 1
                 else:
-                    while user_speaking() and not self.stopped(started):   # never talk over hands-free speech
+                    while user_speaking() and not self.interrupted(started):   # never talk over hands-free speech
                         time.sleep(0.1)
+                    if self.interrupted(started):
+                        break
+                    (runtime_dir() / "playing").touch()   # audible from now: hands-free stops listening
                     process.stdin.write(block)
                     process.stdin.flush()   # unflushed PCM would sit in the pipe buffer as a gap
         except BrokenPipeError:
@@ -768,6 +772,7 @@ class Speaker:
 
     def local(self, text, started):
         process = self.player(["espeak-ng", "-v", self.config["speech"]["local_voice"], "-s", "170"])
+        (runtime_dir() / "playing").touch()
         try:
             process.stdin.write(text.encode())
             process.stdin.close()

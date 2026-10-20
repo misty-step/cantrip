@@ -112,6 +112,10 @@ leaves the machine only for detected speech; nothing is retained.
   a notice. Speech must be about three times louder than the background, and
   on a typical mic a moderate fan can cost a third or more of the words, so use
   push-to-talk or headphones near one.
+- The microphone is ignored only once a reply is audible: speech that starts
+  while a reply is still being fetched is heard, and the reply waits for it.
+- Hands-free writes `$XDG_RUNTIME_DIR/cantrip-t3/session-hands-free.json`
+  (`listening` or `hearing`) for status readers such as the desktop bar.
 - While a Cantrip take records (push-to-talk), hands-free ignores the
   microphone, so nothing is sent twice.
 - A transient transcription failure asks you to say it again. A refused key
