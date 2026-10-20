@@ -12,8 +12,8 @@ BarWidget {
     id: root
     moduleName: "cantrip.home-voice"
 
-    property var state: null
-    readonly property var segments: state && state.visible && Array.isArray(state.segments) ? state.segments : []
+    property var voice: null
+    readonly property var segments: voice && voice.visible && Array.isArray(voice.segments) ? voice.segments : []
     readonly property color textColor: bar ? bar.barForeground : Color.bar.text
 
     visible: segments.length > 0
@@ -33,14 +33,15 @@ BarWidget {
             if (exitCode === 0) {
                 try { parsed = JSON.parse(stateOut.text) } catch (_) { parsed = null }
             }
-            root.state = parsed
+            root.voice = parsed
             if (parsed) expiry.restart()
         }
     }
 
     // A state older than this is not trusted: hide rather than claim a session that ended.
-    Timer { id: expiry; interval: 5000; onTriggered: root.state = null }
-    Timer { interval: 1000; running: true; repeat: true; onTriggered: root.refresh() }
+    Timer { id: expiry; interval: 8000; onTriggered: root.voice = null }
+    // Each poll starts Python; poll every second while something is shown, every 3 s at rest.
+    Timer { interval: root.visible ? 1000 : 3000; running: true; repeat: true; onTriggered: root.refresh() }
 
     Row {
         id: row
@@ -78,17 +79,18 @@ BarWidget {
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton
         cursorShape: Qt.PointingHandCursor
-        readonly property string tip: root.state && root.state.tooltip ? root.state.tooltip : ""
+        readonly property string tip: root.voice && root.voice.tooltip ? root.voice.tooltip : ""
         onTipChanged: if (containsMouse && root.bar) root.bar.showTooltip(root, tip)
         onEntered: if (root.bar && tip) root.bar.showTooltip(root, tip)
         onExited: if (root.bar) root.bar.hideTooltip(root)
         onClicked: function(event) {
-            if (!root.state) return
+            if (!root.voice) return
             if (event.button === Qt.MiddleButton) {
-                Quickshell.execDetached(["cantrip-t3", "stop"])
-            } else if (root.state.mode === "live") {
+                // GPT-Live plays its own audio: there, middle click mutes the microphone instead.
+                Quickshell.execDetached(root.voice.mode === "live" ? ["cantrip-t3-live", "mute"] : ["cantrip-t3", "stop"])
+            } else if (root.voice.mode === "live") {
                 Quickshell.execDetached(["systemctl", "--user", "stop", "cantrip-t3-live.service"])
-            } else if (root.state.mode === "hands-free") {
+            } else if (root.voice.mode === "hands-free") {
                 Quickshell.execDetached(["systemctl", "--user", "stop", "cantrip-t3-converse.service"])
             }
             root.refresh()
@@ -97,5 +99,5 @@ BarWidget {
 
     Accessible.role: Accessible.Button
     Accessible.name: "Home voice"
-    Accessible.description: root.state && root.state.tooltip ? root.state.tooltip : ""
+    Accessible.description: root.voice && root.voice.tooltip ? root.voice.tooltip : ""
 }

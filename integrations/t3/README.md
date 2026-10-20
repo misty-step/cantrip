@@ -156,12 +156,15 @@ the thread and what it is doing:
 | `Live · listening` / `· Home thinking` / `· Home speaking` | a GPT-Live session |
 | `Hands-free · listening` / `· hearing you` / `· Home thinking` / `· Home speaking` | a hands-free session |
 | `Home · recording` / `· transcribing` / `· thinking` / `· speaking` | a push-to-talk take |
-| `muted` (dim) | the live microphone or spoken replies are muted |
+| `mic muted` / `replies muted` (dim) | the live microphone, or spoken replies, are muted |
 
 Nothing shows at rest except a dim `replies muted` while replies are muted.
-Left click ends a live or hands-free session; middle click stops speech.
+Left click ends a live or hands-free session. Middle click stops speech, or
+mutes the microphone during a live session (GPT-Live plays its own audio).
 
-`cantrip-t3 state` prints the one-line JSON the widget polls each second. It
+`cantrip-t3 state` prints the one-line JSON the widget polls every second while
+shown and every 3 s at rest. A reply owed for more than 10 minutes is no longer
+shown as thinking. It
 reads `cantrip status --json` for push-to-talk, the pending takes and player,
 and each session's `$XDG_RUNTIME_DIR/cantrip-t3/session-<mode>.json`, trusted
 only while that session's process is alive. It carries no transcript or reply
