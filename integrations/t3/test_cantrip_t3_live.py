@@ -127,6 +127,17 @@ class BridgeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m for _, m in self.submitted],
                          ["[voice live] Give me one link to a source.", "[voice live] Also ship it."])
 
+    async def test_a_delegation_whose_speech_an_earlier_request_took_says_so(self):
+        await self.bridge.handle(heard(0, 900, "Pause Tach until"))
+        await self.bridge.handle(delegation("item_1", 950))
+        await asyncio.sleep(0.05)
+        await self.bridge.handle(heard(1000, 1600, " Thursday please."))
+        await self.finish()
+        await self.bridge.handle(delegation("item_2", 1700))   # arrives after item_1 took the run-on words
+        await self.finish()
+        self.assertEqual(len(self.submitted), 1)
+        self.assertIn("already with", self.commentary()[-1])
+
     async def test_a_short_reply_carries_the_question_it_answers(self):
         await self.bridge.handle(said(0, 2000, "Should I merge the docs PR now?"))
         await self.bridge.handle(heard(2500, 2800, "Yes."))
@@ -319,12 +330,47 @@ class PlayerTest(unittest.TestCase):
         self.assertGreaterEqual(sum(written), 5 * len(loud))   # speech is never dropped
 
 
+    def test_silence_dropouts_do_not_grow_the_buffer_and_a_heard_one_resumes_quickly(self):
+        clock = [0.0]
+        with mock.patch.object(live.subprocess, "Popen"):
+            player = live.Player(clock=lambda: clock[0])
+        writes = []
+        player.write = lambda pcm: writes.append((clock[0], len(pcm)))
+        silent = bytes(live.RATE * 2 // 10)
+        loud = b"\x00\x10" * (live.RATE // 10)
+        player.start()
+
+        def at(seconds, data):
+            clock[0] = seconds
+            player.audio.put(data)
+            time.sleep(0.06)
+
+        for n in range(5):
+            at(n * 0.1, silent)            # silence plays until ~0.9 s
+        clock[0] = 1.1
+        time.sleep(0.06)
+        at(1.2, silent)                    # a silent dropout: not counted
+        self.assertEqual((player.underruns, player.prebuffer), (0, live.PREBUFFER_SECONDS))
+        for n in range(5):
+            at(2.0 + n * 0.1, loud)        # speech plays until ~2.9 s
+        clock[0] = 3.1
+        time.sleep(0.06)
+        before = len(writes)
+        at(3.2, loud)                      # a heard dropout mid-sentence
+        at(3.3, loud)
+        player.audio.put(None)
+        player.join(2)
+        self.assertEqual(player.underruns, 1)
+        self.assertGreater(player.prebuffer, live.PREBUFFER_SECONDS)
+        resumed = writes[before][0]
+        self.assertLessEqual(resumed, 3.3)  # resumed after ~0.1 s, not the whole enlarged buffer
+
     def test_a_real_dropout_is_counted_and_a_turn_end_is_not(self):
         clock = [0.0]
         with mock.patch.object(live.subprocess, "Popen"):
             player = live.Player(clock=lambda: clock[0])
         player.write = lambda pcm: None
-        block = bytes(live.RATE * 2 // 10)   # 100 ms
+        block = b"\x00\x10" * (live.RATE // 10)   # 100 ms of audible speech
         player.start()
 
         def at(seconds, data=block):

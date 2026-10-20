@@ -49,8 +49,9 @@ PROGRESS_SECONDS = 45
 CLOSE_SECONDS = 15
 SPEECH_LEVEL = 300             # output RMS above this is GPT-Live speaking, for the bar
 SUMMARY_SECONDS = 20           # deadline for the end-of-session summary, within the unit's stop timeout
-PREBUFFER_SECONDS = 0.4        # jitter buffer before each turn; grows by 0.2 s per heard dropout
+PREBUFFER_SECONDS = 0.4        # jitter buffer before each turn; grows 0.2 s per dropout heard next to speech
 MAX_PREBUFFER_SECONDS = 1.0
+REPRIME_SECONDS = 0.1          # after a short dropout inside a turn
 CATCH_UP_SECONDS = 0.6         # behind by more than prebuffer + this: drop silent blocks
 SILENT_LEVEL = 100             # output RMS below this is silence (measured: 0.4 s buffer cut 107 gaps to 11)
 
@@ -326,7 +327,8 @@ class Bridge:
         text = self.claim(self.reach(end), delegation_id)
         log("delegation id=" + delegation_id + " chars=" + str(len(text)))
         if not text:
-            already = offset_ms is not None and self.boundaries.count(offset_ms) > 1
+            already = (offset_ms is not None and self.boundaries.count(offset_ms) > 1) or any(
+                i in self.claimed for i, (s, _, _, _) in enumerate(self.heard) if start <= s < end)
             await self.append("commentary", delegation_id, "That request is already with " + self.label + "."
                               if already else "I didn't catch the request. Ask the user to repeat it.")
             return
@@ -451,7 +453,9 @@ class Player(threading.Thread):
         self.process.stdin.flush()
 
     def run(self):
-        pending, first, plays_until, dry_since = bytearray(), None, None, None
+        """Start each turn once `prebuffer` is queued; after a short dropout inside a turn, resume
+        after only REPRIME_SECONDS. A dropout heard next to speech raises `prebuffer` for later turns."""
+        pending, first, plays_until, dry_since, target, last_loud = bytearray(), None, None, None, self.prebuffer, False
         while True:
             try:
                 block = self.audio.get(timeout=0.02)
@@ -460,25 +464,32 @@ class Player(threading.Thread):
             if block is None:
                 break
             now = self.clock()
-            if plays_until is not None and now > plays_until:   # ran dry: re-prime before resuming
+            if plays_until is not None and now > plays_until:   # ran dry
                 dry_since, plays_until = plays_until, None
+            level = audioop_rms(block) if block else 0
             if block and dry_since is not None:
-                if now - dry_since < 0.6:   # audio came back quickly: a dropout heard, not the end of a turn
-                    self.underruns += 1
-                    # This connection stalls longer than the buffer covers: buffer more from now on.
-                    self.prebuffer = min(MAX_PREBUFFER_SECONDS, self.prebuffer + 0.2)
+                if now - dry_since < 0.6:
+                    target = REPRIME_SECONDS          # mid-turn: resume quickly, keep the sentence going
+                    if last_loud or level > SPEECH_LEVEL:   # heard: buffer more from the next turn
+                        self.underruns += 1
+                        self.prebuffer = min(MAX_PREBUFFER_SECONDS, self.prebuffer + 0.2)
+                else:
+                    target = self.prebuffer           # a new turn
                 dry_since = None
+            elif block and plays_until is None and first is None:
+                target = self.prebuffer
             lead = (plays_until - now if plays_until is not None else 0) + len(pending) / (RATE * 2)
-            if block and lead > self.prebuffer + CATCH_UP_SECONDS and audioop_rms(block) < SILENT_LEVEL:
+            if block and lead > self.prebuffer + CATCH_UP_SECONDS and level < SILENT_LEVEL:
                 self.skipped += 1   # running behind after a burst: drop a silent block to catch up
                 continue
             if block:
                 pending += block
                 first = first if first is not None else now
+                last_loud = level > SPEECH_LEVEL
             if not pending:
                 continue
             seconds = len(pending) / (RATE * 2)
-            if plays_until is None and seconds < self.prebuffer and now - first < self.prebuffer + 0.2:
+            if plays_until is None and seconds < target and now - first < target + 0.2:
                 continue
             try:
                 self.write(bytes(pending))
