@@ -951,7 +951,7 @@ def voice_status(config, snapshot=None, now=time.time):
                  "tone": "active" if phase in ("listening", "hearing", "recording") else "normal"}] + muted_segments
     about = {"live": "Live conversation with " + label, "hands-free": "Hands-free conversation with " + label,
              "push-to-talk": "Push-to-talk to " + label}[mode]
-    clicks = {"live": "Left click ends the session; middle click mutes the microphone.",
+    clicks = {"live": "Left click ends the session; middle click mutes or unmutes the microphone.",
               "hands-free": "Left click ends hands-free; middle click stops speech.",
               "push-to-talk": "Middle click stops speech."}[mode]
     flags = "".join(", " + segment["text"] for segment in muted_segments)

@@ -40,8 +40,8 @@ BarWidget {
 
     // A state older than this is not trusted: hide rather than claim a session that ended.
     Timer { id: expiry; interval: 8000; onTriggered: root.voice = null }
-    // Each poll starts Python; poll every second while something is shown, every 3 s at rest.
-    Timer { interval: root.visible ? 1000 : 3000; running: true; repeat: true; onTriggered: root.refresh() }
+    // Each poll starts Python; poll every second while a session or take is active, every 3 s otherwise.
+    Timer { interval: root.voice && root.voice.mode ? 1000 : 3000; running: true; repeat: true; onTriggered: root.refresh() }
 
     Row {
         id: row
