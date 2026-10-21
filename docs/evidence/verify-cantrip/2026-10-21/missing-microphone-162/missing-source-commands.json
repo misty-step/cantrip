@@ -1,0 +1,20 @@
+[
+  {
+    "argv": [
+      "cantrip",
+      "doctor"
+    ],
+    "exit": 0,
+    "stdout": "config: ready\ncapture: blocked \u2014 configured microphone `cantrip_verify_absent_source` not found \u2014 reconnect it or select an input in Settings\nstt: local ready (model=parakeet-tdt-0.6b-v3-int8)\ncleanup: disabled (raw transcript is delivered)\ntelemetry: disabled (set [telemetry] enabled = true to opt in)\ninjection: backends available (mode=clipboard; order=clipboard); automatic keys still require verified Hyprland focus and logind lock/suspend history at delivery\nhud: Wayland session detected; layer-shell support is checked when the HUD starts\ndaemon: reachable (idle)\n",
+    "stderr": ""
+  },
+  {
+    "argv": [
+      "cantrip",
+      "start"
+    ],
+    "exit": 1,
+    "stdout": "state: idle\nmessage: configured microphone `cantrip_verify_absent_source` not found \u2014 reconnect it or select an input in Settings\nlast: configured microphone `cantrip_verify_absent_source` not found \u2014 reconnect it or select an input in Settings\nevent: 8\ncompleteness: failed\ndelivery: none\ncleanup: off\ndismissed: false\nerror: capture-source-missing\n",
+    "stderr": "error: capture-source-missing\n"
+  }
+]

@@ -1,0 +1,218 @@
+{
+  "journeys": [
+    "transcribe",
+    "dictate",
+    "recover",
+    "breaks",
+    "windows"
+  ],
+  "binary": "target/release/cantrip",
+  "binary_version": "cantrip 0.1.9",
+  "binary_sha256": "3ad8a15f3cdfcf536fc647aa606c12002024a67a0a370cfd9007831c268e6f98",
+  "isolation": "headless sway (pixman), private HOME/XDG/runtime/clipboard, private PipeWire null sink + remapped source as the microphone, inherited audio routing dropped, node.dont-fallback set, capture links checked",
+  "fixture": "samples/jfk.wav (public speech)",
+  "results": [
+    {
+      "check": "transcribe --local prints the JFK sentence on stdout",
+      "ok": true
+    },
+    {
+      "check": "one-shot transcript saved to private history",
+      "ok": true
+    },
+    {
+      "check": "doctor exits 0 reporting the private capture source ready",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_3495272_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_3495272'])",
+      "ok": true
+    },
+    {
+      "check": "take completeness is complete (got complete)",
+      "ok": true
+    },
+    {
+      "check": "delivery is copied (got copied)",
+      "ok": true
+    },
+    {
+      "check": "real clipboard holds the spoken JFK sentence (108 chars)",
+      "ok": true
+    },
+    {
+      "check": "transcript archived owner-only in history",
+      "ok": true
+    },
+    {
+      "check": "recordings lists the take with text and audio",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_3495272_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_3495272'])",
+      "ok": true
+    },
+    {
+      "check": "take completeness is complete (got complete)",
+      "ok": true
+    },
+    {
+      "check": "delivery is copied (got copied)",
+      "ok": true
+    },
+    {
+      "check": "real clipboard holds the spoken JFK sentence (98 chars)",
+      "ok": true
+    },
+    {
+      "check": "transcript archived owner-only in history",
+      "ok": true
+    },
+    {
+      "check": "recordings lists the take with text and audio",
+      "ok": true
+    },
+    {
+      "check": "copy ID accepted (exit 0)",
+      "ok": true
+    },
+    {
+      "check": "copy ID restored the saved transcript to the clipboard",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_3495272_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_3495272'])",
+      "ok": true
+    },
+    {
+      "check": "cancel settles as cancelled (got cancelled)",
+      "ok": true
+    },
+    {
+      "check": "cancel delivered nothing to the clipboard",
+      "ok": true
+    },
+    {
+      "check": "cancelled take keeps its audio on disk",
+      "ok": true
+    },
+    {
+      "check": "recover --local --clipboard accepted (exit 0)",
+      "ok": true
+    },
+    {
+      "check": "recover --local --clipboard completes and copies (got complete/copied)",
+      "ok": true
+    },
+    {
+      "check": "recovered transcript is on the clipboard",
+      "ok": true
+    },
+    {
+      "check": "forget without --yes is refused and keeps the audio",
+      "ok": true
+    },
+    {
+      "check": "forget --yes accepted (exit 0)",
+      "ok": true
+    },
+    {
+      "check": "confirmed Forget deleted the take's audio file",
+      "ok": true
+    },
+    {
+      "check": "recordings shows the forgotten take without audio",
+      "ok": true
+    },
+    {
+      "check": "complete archived text remains unchanged after Forget",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_3495272_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_3495272'])",
+      "ok": true
+    },
+    {
+      "check": "silence settles empty with audio kept (got empty)",
+      "ok": true
+    },
+    {
+      "check": "a second daemon for the same runtime is refused as already running",
+      "ok": true
+    },
+    {
+      "check": "original daemon still answers ping",
+      "ok": true
+    },
+    {
+      "check": "missing model refuses transcription and downloads nothing",
+      "ok": true
+    },
+    {
+      "check": "doctor reports the missing configured microphone",
+      "ok": true
+    },
+    {
+      "check": "start refuses the missing microphone with its ID and an actionable error",
+      "ok": true
+    },
+    {
+      "check": "missing source is refused before pw-record launches",
+      "ok": true
+    },
+    {
+      "check": "missing microphone never records another device",
+      "ok": true
+    },
+    {
+      "check": "missing-source refusal leaves accepted takes unchanged and creates no audio",
+      "ok": true
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_3495272_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_3495272'])",
+      "ok": true
+    },
+    {
+      "check": "auto on an unverified desktop copies or defers, and the clipboard agrees (got copied)",
+      "ok": true
+    },
+    {
+      "check": "ping with no daemon fails fast with a start hint",
+      "ok": true
+    },
+    {
+      "check": "settings window shows ('Past transcripts', '\\\\b[1-9]\\\\d* saved transcripts?\\\\b') (missing [])",
+      "ok": true
+    },
+    {
+      "check": "actions window shows ('Recordings', 'Recover locally') (missing [])",
+      "ok": true
+    },
+    {
+      "check": "HUD renders the copied state",
+      "ok": true
+    }
+  ],
+  "passed": true,
+  "known_failures": []
+}

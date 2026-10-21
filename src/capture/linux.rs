@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use cantrip_engine::audio::{verify_wav, InputSignal, SignalMonitor};
+use cantrip_engine::ports::MissingMicrophone;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -30,9 +31,25 @@ pub struct Recorder {
 impl Recorder {
     /// Start a 16 kHz, mono, signed 16-bit WAV recording.
     pub fn start(wav_path: &Path, source: Option<&str>) -> Result<Self> {
-        let args = pw_record_args(wav_path, source);
-        let child = Command::new("pw-record")
-            .args(&args)
+        let source = source.map(check_source).transpose()?;
+        let mut command = Command::new("pw-record");
+        if let Some(source) = &source {
+            // libpipewire applies PIPEWIRE_PROPS after CLI properties. Let
+            // pw-record parse the inherited SPA syntax first, then enforce our
+            // routing safeguards, so unrelated properties survive unchanged.
+            if let Some(inherited) = std::env::var_os("PIPEWIRE_PROPS") {
+                command.arg("--properties").arg(inherited);
+            }
+            command
+                .args([
+                    "--properties",
+                    "{ node.dont-fallback = true node.dont-reconnect = true }",
+                ])
+                .env_remove("PIPEWIRE_PROPS")
+                .env("PIPEWIRE_NODE", source);
+        }
+        let child = command
+            .args(pw_record_args(wav_path, source.as_deref()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -120,6 +137,70 @@ impl Recorder {
         );
         Ok(std::mem::take(&mut self.wav_path))
     }
+}
+
+/// Resolve the same node name/object serial accepted by pw-record. The serial
+/// pins this take to this device instance even if a node name is later reused.
+pub fn check_source(source: &str) -> Result<String> {
+    let mut child = Command::new("pw-dump")
+        .arg("--no-colors")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("cannot inspect PipeWire microphones; check pw-dump and the PipeWire session")?;
+    let mut stdout = child.stdout.take().expect("piped pw-dump stdout");
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break match result {
+                    Err(error) => Err(anyhow!(error)),
+                    _ => Err(anyhow!("PipeWire microphone query timed out")),
+                };
+            }
+        }
+    };
+    let bytes = reader
+        .join()
+        .map_err(|_| anyhow!("PipeWire microphone query reader failed"))??;
+    if !status?.success() {
+        bail!("cannot inspect PipeWire microphones; check the PipeWire session");
+    }
+    source_serial(
+        source,
+        &serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)?,
+    )
+}
+
+fn source_serial(source: &str, nodes: &[serde_json::Value]) -> Result<String> {
+    for node in nodes {
+        if node["type"] != "PipeWire:Interface:Node" {
+            continue;
+        }
+        let props = &node["info"]["props"];
+        if !props["media.class"]
+            .as_str()
+            .is_some_and(|class| class.starts_with("Audio/Source"))
+        {
+            continue;
+        }
+        if let Some(serial) = props["object.serial"].as_u64() {
+            let serial = serial.to_string();
+            if props["node.name"].as_str() == Some(source) || serial == source {
+                return Ok(serial);
+            }
+        }
+    }
+    Err(MissingMicrophone(source.to_owned()).into())
 }
 
 impl Drop for Recorder {
@@ -256,6 +337,31 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn selected_microphone_matches_name_or_serial_but_not_reusable_node_id() {
+        let nodes = serde_json::json!([
+            {"id": 11, "type": "PipeWire:Interface:Node", "info": {"props": {
+                "media.class": "Audio/Source/Virtual", "node.name": "private_mic", "object.serial": 90
+            }}},
+            {"id": 12, "type": "PipeWire:Interface:Node", "info": {"props": {
+                "media.class": "Audio/Sink", "node.name": "speaker", "object.serial": 91
+            }}}
+        ]);
+        let nodes = nodes.as_array().unwrap();
+        assert_eq!(super::source_serial("private_mic", nodes).unwrap(), "90");
+        assert_eq!(super::source_serial("90", nodes).unwrap(), "90");
+        for missing in ["11", "speaker", "91", "unplugged"] {
+            let error = super::source_serial(missing, nodes).unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<cantrip_engine::ports::MissingMicrophone>()
+                    .unwrap()
+                    .0,
+                missing
+            );
+        }
+    }
 
     fn wav_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

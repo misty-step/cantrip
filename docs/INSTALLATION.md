@@ -26,7 +26,8 @@ release has been published.
   Ubuntu 22.04 are outside this binary's supported baseline.
 - Run as the intended ordinary user with readable Linux `/proc`, **not through
   sudo**. The installer uses Bash and GNU coreutils without networking.
-- Microphone dictation needs a working PipeWire user session and `pw-record`.
+- Microphone dictation needs a working PipeWire user session and `pw-record`;
+  selecting a specific microphone also needs `pw-dump` from PipeWire.
   Clipboard/paste delivery needs Wayland and `wl-copy` from `wl-clipboard`.
   On Ubuntu 24.04, the tools are provided by `pipewire-bin` and `wl-clipboard`;
   installing tools alone does not configure a working microphone/session.

@@ -8,6 +8,23 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+/// A selected microphone is absent. Safe to show in command/status feedback;
+/// other native errors remain private and use the generic capture failure.
+#[derive(Debug)]
+pub struct MissingMicrophone(pub String);
+
+impl std::fmt::Display for MissingMicrophone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "configured microphone `{}` not found — reconnect it or select an input in Settings",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for MissingMicrophone {}
+
 /// An owned live capture. Stop transfers its finalized WAV; failures retain the
 /// original path for the engine's durability/recovery path.
 pub trait Recorder: Send {

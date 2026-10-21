@@ -1,0 +1,43 @@
+{
+  "binary": "target/release/cantrip",
+  "binary_sha256": "3ad8a15f3cdfcf536fc647aa606c12002024a67a0a370cfd9007831c268e6f98",
+  "method": "pw-dump stream properties and graph links during real daemon capture; public JFK speech, private sinks/sources, real clipboard and retained WAV checked",
+  "results": [
+    {
+      "syntax": "object",
+      "inherited": "{ node.dont-fallback = false node.dont-reconnect = false node.name = \"cantrip_162_props_probe\" node.description = \"private {fixture} microphone\" resample.quality = 6 test.nested = { enabled = true } target.object = \"cantrip_verify_3189811_mic\" }",
+      "observed_properties": {
+        "node.dont-fallback": true,
+        "node.dont-reconnect": true,
+        "target.object": 3888738,
+        "node.description": "private {fixture} microphone",
+        "resample.quality": 6,
+        "test.nested": "{ enabled = true }"
+      },
+      "capture_links": [
+        "cantrip_verify_3236209_mic"
+      ],
+      "expected_source": "cantrip_verify_3236209_mic",
+      "passed": true,
+      "public_speech_clipboard_and_retained_audio": true
+    },
+    {
+      "syntax": "bare",
+      "inherited": "node.dont-fallback = false node.dont-reconnect = false node.name = \"cantrip_162_props_probe\" node.description = \"private {fixture} microphone\" resample.quality = 6 test.nested = { enabled = true } target.object = \"cantrip_verify_3189811_mic\"",
+      "observed_properties": {
+        "node.dont-fallback": true,
+        "node.dont-reconnect": true,
+        "target.object": 3888738,
+        "node.description": "private {fixture} microphone",
+        "resample.quality": 6,
+        "test.nested": "{ enabled = true }"
+      },
+      "capture_links": [
+        "cantrip_verify_3236209_mic"
+      ],
+      "expected_source": "cantrip_verify_3236209_mic",
+      "passed": true,
+      "public_speech_clipboard_and_retained_audio": true
+    }
+  ]
+}
