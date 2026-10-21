@@ -6,9 +6,9 @@
     "breaks",
     "windows"
   ],
-  "binary": "/home/phaedrus/.cache/tmp/vc/f174206/prefix/bin/cantrip",
-  "binary_version": "cantrip 0.1.8",
-  "binary_sha256": "f2025db2b115e6d0699d2d8370a86f80b8126d382028d7b5b77dd2682a060163",
+  "binary": "/home/phaedrus/.cache/tmp/vc/1020201712/prefix/bin/cantrip",
+  "binary_version": "cantrip 0.1.9",
+  "binary_sha256": "ed4cae736cfa3ba3fea4763212875e653df1299634ab707b4fca0831fe55cac6",
   "isolation": "headless sway (pixman), private HOME/XDG/runtime/clipboard, private PipeWire null sink + remapped source as the microphone, inherited audio routing dropped, node.dont-fallback set, capture links checked",
   "fixture": "samples/jfk.wav (public speech)",
   "results": [
@@ -21,11 +21,15 @@
       "ok": true
     },
     {
-      "check": "doctor reports capture ready against the private source",
+      "check": "doctor exits 0 reporting capture ready (it does not check the source exists; see #162)",
       "ok": true
     },
     {
-      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])",
       "ok": true
     },
     {
@@ -49,7 +53,11 @@
       "ok": true
     },
     {
-      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])",
       "ok": true
     },
     {
@@ -61,7 +69,7 @@
       "ok": true
     },
     {
-      "check": "real clipboard holds the spoken JFK sentence (105 chars)",
+      "check": "real clipboard holds the spoken JFK sentence (97 chars)",
       "ok": true
     },
     {
@@ -81,7 +89,11 @@
       "ok": true
     },
     {
-      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])",
       "ok": true
     },
     {
@@ -125,11 +137,15 @@
       "ok": true
     },
     {
-      "check": "complete archived text remains after Forget",
+      "check": "complete archived text remains unchanged after Forget",
       "ok": true
     },
     {
-      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])",
       "ok": true
     },
     {
@@ -137,7 +153,7 @@
       "ok": true
     },
     {
-      "check": "a second daemon for the same runtime exits non-zero",
+      "check": "a second daemon for the same runtime is refused as already running",
       "ok": true
     },
     {
@@ -162,7 +178,11 @@
       "known_issue": "https://github.com/misty-step/cantrip/issues/162"
     },
     {
-      "check": "daemon records only the private microphone (links: ['cantrip_verify_1582973_mic'])",
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])",
       "ok": true
     },
     {
@@ -174,7 +194,7 @@
       "ok": true
     },
     {
-      "check": "settings window shows ('Past transcripts', 'Copy') (missing [])",
+      "check": "settings window shows ('Past transcripts', '\\\\b[1-9]\\\\d* saved transcripts?\\\\b') (missing [])",
       "ok": true
     },
     {

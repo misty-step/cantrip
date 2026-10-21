@@ -1,43 +1,35 @@
 Cantrip Settings  dication: idle
 
-Conig: /home/shasdus/ cache/rp/uc/17420/sesstn/c/cantr o/ confg. o
+Contla: /hone/phacdrus/cache/tap/vc/ 1020201712/ sess on/c/cantr o/ conta tonl.
 
 Past transcripts
-
-oI o e G o ik
-5 saved transcripts Refresh
-2026-10-20 17:44:49 local om 11s Copy
-And so, my fellow, ask not what your country can do for you. ..
-2026-10-20 17:44:01 local om 11s Copy
-And so, my fellow Americans, ask not what your country can do..
-2026-10-20 17:43:26 local om 11s Copy
-And so, my fellow Americans, ask not what your tree can do fo.
-2026-10-20 17:42:54 local om 10s Copy
-And so, my fellow Americans, ask not what your country can do..
-2026-10-20 17:42:48 local om 11s Copy
-
-And so, my fellow Americans, ask not what your country can do..
-
-General
-
-Injection, varn-up, audio, vocabulary
-
-Injection
-
-eep STT model warm (faster dictation)
-Audio source (empty = default)
-
-Vocabulary (comma-separated)
-
-clipboard ¥
-
-cantrip_verify_1582073_mic
-
-PipeWire, Parakeet
-
-HUD
+Soved on this conputer, neest firs, Copy reptaces you Cligboar,
 
 Qe by default; captions vhen neoded
 
 ways show state labels
+
+5 saved transcripts Refresh
+2026-10-20 20:19:23 local Om 10s Copy
+And so, my Americans, ask not what your country can do for yo..
+2026-10-20 20:18:42 local Om 10s Copy
+And so, my fellow Americans, ask not what your country can do..
+2026-10-20 20:18:20 local 8m 89s Copy
+And so, my fellow Americans, if not country can do for you, a-
+2026-10-20 20:17:53 local @m 89s [
+My fellow Americans, ask not what your country can do for you.
+2026-10-20 20:17:40 local Om 11s Copy
+And so, my fellow Americans, ask not what your country can do..
+
+General
+
+Injection, varn-p, aulio, vocaulary
+LB clipboard v,
+
+eep STT model warm (faster dictation)
+
+Audio source (empty = default) cantrip_verify 2251692 mic
+Vocabulary (comma-separated) PipeWire, Parakeet
+
+HUD
 

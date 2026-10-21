@@ -41,9 +41,10 @@ Preconditions:
   then **falls back to the default microphone** and Cantrip records it. That is
   the bug in https://github.com/misty-step/cantrip/issues/162. The session sets
   `node.dont-fallback = true`, so this probe never records the operator's
-  microphone; here the recorder stays unlinked and the take settles `failed`.
-  Because the safety net hides the real-desktop behavior, the journey also reads
-  the daemon's own `pw-record` command line and reports `KNOWN` (#162) until
+  microphone; here `pw-record` exits at once ("target not found") and the take
+  settles `failed`. Because the safety net hides the real-desktop behavior, the
+  journey reads how the daemon launched `pw-record` (its arguments and its own
+  `PIPEWIRE_PROPS`, logged by the session's transparent `pw-record` shim), and reports `KNOWN` (#162) until
   Cantrip refuses the absent source or disables fallback itself. Never rerun
   this probe without `dont-fallback`.
 - The daemon-down check uses a private empty runtime dir, so it never touches

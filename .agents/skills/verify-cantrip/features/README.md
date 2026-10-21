@@ -3,7 +3,7 @@
 This directory is the maintained source for verifying Cantrip's user-facing
 behavior on Linux. Read this index, then use the matching feature file as the
 recipe. `V` is `.agents/skills/verify-cantrip/bin/verify-cantrip`; `RUN` is a
-fresh directory under `~/.cache/tmp/verify-cantrip/`.
+fresh, short directory such as `~/.cache/tmp/vc/$(date +%m%d%H%M%S)`.
 
 ## Baseline preconditions
 

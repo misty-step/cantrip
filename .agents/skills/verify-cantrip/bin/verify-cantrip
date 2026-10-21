@@ -269,7 +269,9 @@ def write_config(binary, env, source, injection):
 def unload_own_modules(state):
     """Unload only modules whose arguments name this run's private nodes (module ids are reused)."""
     code, out, _ = run_cmd(None, ["pactl", "list", "short", "modules"], audio_env(), quiet=True)
-    mine = {line.split("\t")[0] for line in out.splitlines() if state["sink"] in line}
+    own_args = {f"sink_name={state['sink']}", f"source_name={state['source']}"}
+    mine = {line.split("\t")[0] for line in out.splitlines()
+            if own_args & set(line.split("\t", 2)[-1].split())}
     result = {}
     for module in reversed(state.get("modules", [])):
         if module in mine:
@@ -307,6 +309,20 @@ def cmd_up(args):
                      WLR_BACKENDS="headless", WLR_RENDERER="pixman", WLR_LIBINPUT_NO_DEVICES="1",
                      LIBGL_ALWAYS_SOFTWARE="1", XDG_SESSION_TYPE="wayland", XDG_CURRENT_DESKTOP="sway",
                      BROWSER="none", EDITOR="true", VISUAL="true", NO_COLOR="1")
+    # Transparent observation shim: Cantrip finds pw-record on PATH. The shim
+    # appends the daemon's exact arguments and PIPEWIRE_PROPS to a log, then
+    # execs the real pw-record unchanged, so how Cantrip launches capture is
+    # observable even when pw-record exits at once.
+    real = shutil.which("pw-record")
+    shim_dir = run.session / "bin"
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    shim = shim_dir / "pw-record"
+    shim.write_text("#!/usr/bin/env python3\nimport json, os, sys\n"
+                    f"with open({str(run.session / 'pw-record.jsonl')!r}, 'a') as log:\n"
+                    "    log.write(json.dumps({'argv': sys.argv[1:], 'pipewire_props': os.environ.get('PIPEWIRE_PROPS')}) + '\\n')\n"
+                    f"os.execv({real!r}, [{real!r}] + sys.argv[1:])\n")
+    shim.chmod(0o755)
+    overrides["PATH"] = f"{shim_dir}:{os.environ.get('PATH', '')}"
     state = {"binary": binary, "sink": sink, "source": f"{sink}_mic", "overrides": overrides, "procs": {}, "modules": [],
              "started": time.time()}
 
@@ -403,6 +419,9 @@ def teardown(run):
                 result[name] = f"stop failed: {error}"
     result["modules"] = unload_own_modules(state)
     run.log({"teardown": result})
+    launches = run.session / "pw-record.jsonl"
+    if launches.exists():
+        shutil.copy(launches, run.evidence / "pw-record-launches.jsonl")
     shutil.rmtree(run.session, ignore_errors=True)
     run.state_file.unlink()
     print(json.dumps({"teardown": result, "evidence_kept": str(run.evidence)}, indent=2))
@@ -514,22 +533,36 @@ def capture_links(run):
     if not children:
         return None
     dump = json.loads(subprocess.run(["pw-dump"], env=audio_env(), capture_output=True, text=True, timeout=20).stdout)
-    names = {obj["id"]: obj["info"]["props"].get("node.name") for obj in dump
-             if obj.get("type") == "PipeWire:Interface:Node" and obj.get("info")}
     clients = {obj["id"] for obj in dump if obj.get("type") == "PipeWire:Interface:Client" and obj.get("info")
                and str(obj["info"]["props"].get("application.process.id")) in children}
     recorders = {obj["id"] for obj in dump if obj.get("type") == "PipeWire:Interface:Node" and obj.get("info")
                  and obj["info"]["props"].get("client.id") in clients}
+    return feeders(dump, recorders)
+
+
+def feeders(dump, node_ids):
+    names = {obj["id"]: obj["info"]["props"].get("node.name") for obj in dump
+             if obj.get("type") == "PipeWire:Interface:Node" and obj.get("info")}
     return sorted({names.get(obj["info"]["output-node-id"]) for obj in dump
                    if obj.get("type") == "PipeWire:Interface:Link" and obj.get("info")
-                   and obj["info"].get("input-node-id") in recorders})
+                   and obj["info"].get("input-node-id") in node_ids})
+
+
+def remap_links(run):
+    """Names of the nodes feeding the private _mic's own capture stream (must be only the private sink)."""
+    state = run.state()
+    dump = json.loads(subprocess.run(["pw-dump"], env=audio_env(), capture_output=True, text=True, timeout=20).stdout)
+    inputs = {obj["id"] for obj in dump if obj.get("type") == "PipeWire:Interface:Node" and obj.get("info")
+              and obj["info"]["props"].get("node.name") == f"input.{state['source']}"}
+    return feeders(dump, inputs)
 
 
 def cmd_links(args):
     run = Run(args.run)
-    links = capture_links(run)
-    run.log({"capture_links": links})
-    print(json.dumps({"recording_from": links, "private_microphone": run.state()["source"]}))
+    links, remap = capture_links(run), remap_links(run)
+    run.log({"capture_links": links, "remap_links": remap})
+    print(json.dumps({"recording_from": links, "private_microphone": run.state()["source"],
+                      "private_microphone_fed_by": remap, "private_speaker": run.state()["sink"]}))
 
 
 def shot(run, name):
@@ -546,7 +579,7 @@ def cmd_shot(args):
     print(f"{path}\nOCR: {text[:400]}")
 
 
-def open_window(run, window, name, doctor=False, settle=4):
+def open_window(run, window, name, doctor=False, settle=4, expect=()):
     """Open a native window (settings/actions) in the headless compositor, screenshot it, close it."""
     state = run.state()
     log = (run.evidence / f"{name}.log").open("ab")
@@ -555,8 +588,12 @@ def open_window(run, window, name, doctor=False, settle=4):
     try:
         time.sleep(settle)
         path, text = shot(run, name)
-        deadline = time.monotonic() + 15
-        while "Connecting" in text and process.poll() is None and time.monotonic() < deadline:
+        # OCR of a single frame can come back empty; re-shoot until the window has
+        # finished connecting and shows the expected text, or 20 s pass.
+        def ready(text):
+            return "Connecting" not in text and all(re.search(pattern, text, re.I) for pattern in expect)
+        deadline = time.monotonic() + 20
+        while not ready(text) and process.poll() is None and time.monotonic() < deadline:
             time.sleep(1)
             path, text = shot(run, name)
         alive = process.poll() is None
@@ -595,12 +632,13 @@ def jfk_coverage(text):
 
 
 def jfk_match(text, run=None, where=""):
-    """Recognition varies by a word or two per take: require >= 80% of the sentence's words, in order.
+    """Recognition varies by a word or two per take: require >= 80% of the sentence's words, in order,
+    and the closing "for your country" so a lost second clause cannot pass.
     Only fixture-derived text is ever compared, so it is safe to log."""
     coverage = jfk_coverage(text)
     if run:
         run.log({"jfk_coverage": round(coverage, 3), "where": where, "text": text[:300]})
-    return coverage >= 0.8
+    return coverage >= 0.8 and "for your country" in " ".join(words(text))
 
 
 def check(condition, message, results, known_issue=None):
@@ -644,6 +682,9 @@ def record_take(run, wav, results, name=None):
         links = capture_links(run)
         run.log({"capture_links": links})
         check(links == [run.state()["source"]], f"daemon records only the private microphone (links: {links})", results)
+        remap = remap_links(run)
+        run.log({"remap_links": remap})
+        check(remap == [run.state()["sink"]], f"private microphone is fed only by the private speaker sink (links: {remap})", results)
         if name:
             shot(run, name)
         voice.wait(timeout=60)
@@ -705,12 +746,15 @@ def journey_recover(run, results, take=None):
     # Forget requires confirmation and removes audio only.
     code, _, err = cantrip(run, "forget", cancelled_id)
     check(code != 0 and "--yes" in err and audio.is_file(), "forget without --yes is refused and keeps the audio", results)
+    archive = history_dir(run) / f"{cancelled_id}.json"
+    text_before = json.loads(archive.read_text()).get("raw_transcript")
     act(run, results, "forget --yes", "forget", cancelled_id, "--yes")
     check(not audio.exists(), "confirmed Forget deleted the take's audio file", results)
     code, out, _ = cantrip(run, "recordings", "--json")
     rows = [row for row in json.loads(out) if row["id"] == cancelled_id] if code == 0 else []
     check(rows and rows[0]["audio_available"] is False, "recordings shows the forgotten take without audio", results)
-    check((history_dir(run) / f"{cancelled_id}.json").is_file(), "complete archived text remains after Forget", results)
+    check(archive.is_file() and json.loads(archive.read_text()).get("raw_transcript") == text_before and text_before,
+          "complete archived text remains unchanged after Forget", results)
 
 
 def journey_breaks(run, results):
@@ -735,7 +779,7 @@ def journey_breaks(run, results):
               f"silence settles empty with audio kept (got {snap['outcome']['completeness']})", results)
         # Second daemon in the same runtime dir is refused; the first keeps running.
         code, _, err = run_cmd(run, [state["binary"], "daemon"], env, label="cantrip", timeout=20)
-        check(code != 0, "a second daemon for the same runtime exits non-zero", results)
+        check(code != 0 and "already running" in err, "a second daemon for the same runtime is refused as already running", results)
         check(subprocess.run([state["binary"], "ping"], env=env, capture_output=True, timeout=15).returncode == 0, "original daemon still answers ping", results)
         # Missing model: transcribe refuses without an implicit download.
         bare = dict(env)
@@ -749,17 +793,28 @@ def journey_breaks(run, results):
         config.write_text(original.replace(f'audio_source = "{state["source"]}"', 'audio_source = "cantrip_verify_absent_source"'))
         cantrip(run, "reload")
         before = last_event(run)
+        launches = run.session / "pw-record.jsonl"
+        seen = len(launches.read_text().splitlines()) if launches.exists() else 0
         code, out, err = cantrip(run, "start")
         refused_at_start = code != 0
         product_guard = refused_at_start
         if not refused_at_start:
-            time.sleep(3)
+            # The session's dont-fallback hides what a real desktop does, and
+            # pw-record exits at once ("target not found"), so read how Cantrip
+            # launched it from the session shim's log: Cantrip itself must disable
+            # fallback (argument or its own PIPEWIRE_PROPS) for an explicit source.
+            def launched():
+                lines = launches.read_text().splitlines() if launches.exists() else []
+                return [json.loads(line) for line in lines[seen:]] if len(lines) > seen else None
+            new = until(launched, "the daemon's pw-record launch (via the session shim)", timeout=10, interval=0.1)
+            run.log({"recorder_launch": new})
+            if not any("cantrip_verify_absent_source" in item["argv"] for item in new):
+                die(f"observed pw-record launch does not target the absent source: {new}")
+            product_guard = any(any("dont-fallback" in arg for arg in item["argv"])
+                                or (item["pipewire_props"] != NO_FALLBACK and "dont-fallback" in (item["pipewire_props"] or ""))
+                                for item in new)
+            time.sleep(2)
             check(capture_links(run) in (None, []), "absent microphone is not substituted by another device here (links empty)", results)
-            # The session's dont-fallback hides what a real desktop does. Cantrip
-            # itself must refuse or disable fallback for an explicit source.
-            argv = [Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace") for pid in recorder_pids(run)]
-            run.log({"recorder_cmdlines": argv})
-            product_guard = any("dont-fallback" in line for line in argv)
             cantrip(run, "stop")
         snap = wait_settled(run, before) if not refused_at_start else None
         shot(run, "breaks-2-absent-mic")
@@ -785,7 +840,10 @@ def journey_breaks(run, results):
         check(consistent, f"auto on an unverified desktop copies or defers, and the clipboard agrees (got {delivery})", results)
     finally:
         config.write_text(original)
-        cantrip(run, "reload")
+        try:
+            cantrip(run, "reload")
+        except Exception as error:  # noqa: BLE001 - never mask the original failure
+            run.log({"restore_reload_failed": f"{type(error).__name__}: {error}"})
     # Daemon down: client commands fail clearly instead of hanging.
     down_env = dict(env)
     down_env["XDG_RUNTIME_DIR"] = str(run.session / "nd")
@@ -796,9 +854,10 @@ def journey_breaks(run, results):
 
 
 def journey_windows(run, results):
-    for window, expected in (("settings", ("Past transcripts", "Copy")), ("actions", ("Recordings", "Recover locally"))):
-        _, text = open_window(run, window, f"windows-{window}")
-        missing = [phrase for phrase in expected if phrase.lower() not in text.lower()]
+    for window, expected in (("settings", (r"Past transcripts", r"\b[1-9]\d* saved transcripts?\b")),
+                             ("actions", (r"Recordings", r"Recover locally"))):
+        _, text = open_window(run, window, f"windows-{window}", expect=expected)
+        missing = [pattern for pattern in expected if not re.search(pattern, text, re.I)]
         check(not missing, f"{window} window shows {expected} (missing {missing})", results)
     hud = run.evidence / "windows-hud-copied.png"
     code, _, _ = cantrip(run, "hud", "--screenshot", str(hud), "--state", "copied")
@@ -812,7 +871,7 @@ def journey_transcribe(run, results):
     check(any(item.get("source") == "transcribe" and jfk_match(item.get("raw_transcript") or "") for item in saved),
           "one-shot transcript saved to private history", results)
     code, out, _ = cantrip(run, "doctor")
-    check(code == 0 and "capture: ready" in out, "doctor reports capture ready against the private source", results)
+    check(code == 0 and "capture: ready" in out, "doctor exits 0 reporting capture ready (it does not check the source exists; see #162)", results)
 
 
 JOURNEYS = {"transcribe": journey_transcribe, "dictate": journey_dictate, "recover": journey_recover,
@@ -936,7 +995,7 @@ def main():
     p.add_argument("--version", help="X.Y.Z without v; default latest release")
     p.set_defaults(func=cmd_install)
     p = sub.add_parser("up", help="start headless sway, a private microphone, and an isolated daemon")
-    p.add_argument("--run", required=True, help="short path, e.g. ~/.cache/tmp/vc/$(date +%%H%%M%%S)")
+    p.add_argument("--run", required=True, help="new short path, e.g. ~/.cache/tmp/vc/$(date +%%m%%d%%H%%M%%S)")
     p.add_argument("--binary", required=True)
     p.add_argument("--injection", default="clipboard", choices=["clipboard", "auto", "paste", "type"])
     p.add_argument("--pull-model", action="store_true", help="download the model instead of reflink-copying the operator's")

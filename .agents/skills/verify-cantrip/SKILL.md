@@ -20,7 +20,12 @@ the session config selects as `audio_source`. Inherited audio routing
 sandboxes set) is dropped from the session and from every PipeWire command the
 helper runs, and `node.dont-fallback = true` is set so no stream can fall back
 to the operator's default microphone or speakers. Every journey take checks
-with `pw-dump` that the daemon's recorder is linked **only** to its own `_mic`.
+with `pw-dump` that the daemon's recorder is linked **only** to its own `_mic`,
+and that the `_mic` is fed **only** by its own sink.
+The session's `PATH` starts with a transparent `pw-record` shim that appends
+the daemon's exact arguments and `PIPEWIRE_PROPS` to `session/pw-record.jsonl`
+and then execs the real `pw-record`, so how Cantrip launches capture is
+observable without changing it.
 The session has no D-Bus session bus, so the OS keyring is unreachable from it.
 The operator's daemon, clipboard, configuration, keyring, model directory
 (read-only reflink copy), and transcript history are never touched. Two runs
@@ -30,7 +35,7 @@ Paths below are relative to the repository root. `V` is the helper:
 
 ```sh
 V=.agents/skills/verify-cantrip/bin/verify-cantrip
-RUN=~/.cache/tmp/vc/$(date +%H%M%S)   # keep it short: socket paths must fit 107 bytes; never /tmp (RAM)
+RUN=~/.cache/tmp/vc/$(date +%m%d%H%M%S)   # new per run; short (socket paths fit 107 bytes); never /tmp (RAM)
 ```
 
 ## Account and sign-in
@@ -60,7 +65,7 @@ grim wtype wl-clipboard tesseract tesseract-data-eng` covers the session tools.
 2. **Start the session:** `$V up --run "$RUN" --binary "$RUN/prefix/bin/cantrip"`.
    It creates the private sink and `_mic` source, starts headless Sway,
    writes a fresh config (`config init`, then `injection = "clipboard"`,
-   `audio_source = <sink>`, `[hud] labels = true`), reflink-copies the
+   `audio_source = <sink>_mic`, `[hud] labels = true`), reflink-copies the
    operator's Parakeet model if present (`--pull-model` downloads ~640 MB
    instead, which is the real first-run step), and starts `cantrip daemon`.
    **Ready** = `up` printed its JSON and `doctor --run` shows `session daemon

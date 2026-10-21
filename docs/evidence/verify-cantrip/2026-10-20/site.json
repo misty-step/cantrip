@@ -1,20 +1,20 @@
 {
   "feature": "website",
   "url": "https://cantrip.mistystep.io",
-  "deployed_revision": "476093a928389426fad8b790e8385d7eba1e2f02",
-  "master": "9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c",
-  "release": "v0.1.8",
+  "deployed_revision": "9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c",
+  "master": "68a6ac236eca69da8f6bfc3741f77c0f5cc1df5a",
+  "release": "v0.1.9",
   "results": [
     {
       "check": "health.json reports ok/production",
       "ok": true
     },
     {
-      "check": "deployed revision 476093a92838 is master 9bc7ac3d02bf or an ancestor (behind)",
+      "check": "deployed revision 9bc7ac3d02bf is master 68a6ac236eca or an ancestor (behind)",
       "ok": true
     },
     {
-      "check": "/ renders (HTTP 200) with ['Speak.', 'Download for Linux x86-64', 'v0.1.8']",
+      "check": "/ renders (HTTP 200) with ['Speak.', 'Download for Linux x86-64', 'v0.1.9']",
       "ok": true
     },
     {
@@ -26,11 +26,11 @@
       "ok": true
     },
     {
-      "check": "/changelog renders (HTTP 200) with ['v0.1.8']",
+      "check": "/changelog renders (HTTP 200) with ['v0.1.9']",
       "ok": true
     },
     {
-      "check": "/releases renders (HTTP 200) with ['v0.1.8']",
+      "check": "/releases renders (HTTP 200) with ['v0.1.9']",
       "ok": true
     },
     {
@@ -38,11 +38,11 @@
       "ok": true
     },
     {
-      "check": "home page links the v0.1.8 release download",
+      "check": "home page links the v0.1.9 release download",
       "ok": true
     },
     {
-      "check": "download link https://github.com/misty-step/cantrip/releases/download/v0.1.8/cantrip-v0.1.8-x86_64-unknown-linux-gnu.tar.gz resolves (HTTP 200)",
+      "check": "download link https://github.com/misty-step/cantrip/releases/download/v0.1.9/cantrip-v0.1.9-x86_64-unknown-linux-gnu.tar.gz resolves (HTTP 200)",
       "ok": true
     },
     {
