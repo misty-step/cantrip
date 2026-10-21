@@ -89,66 +89,7 @@ with your launcher and entries, then run
 
 ## Live conversation (GPT-Live)
 
-`cantrip_t3_live.py` holds a full-duplex, interruptible conversation through
-[GPT-Live](https://developers.openai.com/api/docs/guides/live) in client
-delegation mode, with the same thread as its only backend. It talks to the
-thread directly; Cantrip is not involved.
-
-- At connect, `[live] summary_command` output seeds the session as developer
-  context, for example the agent's `NOW.md`.
-- GPT-Live is told to delegate every request, decision and status question.
-  Each `session.delegation.created` sends the user's speech since the previous
-  delegation to the thread as `[voice live] …`, idempotent on the delegation
-  ID. A quiet `session.thinking.append` follows; the run's final reply returns
-  as `session.commentary.append` pieces of at most 1,500 characters, for
-  GPT-Live to say. Long runs add a progress note every 45 seconds, and a failed
-  run or unreachable thread is reported honestly.
-- SIGTERM or SIGINT closes the session gracefully and logs billed seconds.
-  The thread then gets one `[voice live] session summary` message: start and
-  end time, how many requests were handed off, and, verbatim and in order,
-  everything said that never went out in a request, so nothing said live is
-  lost to the agent's memory. It is idempotent on the session.
-  `cantrip-t3-live mute` toggles the microphone.
-- Use headphones, or set `echo_cancel = true` to route the session through a
-  PipeWire echo-cancel source and sink that are removed afterwards.
-- Playback goes through a jitter buffer. GPT-Live streams 100 ms blocks at
-  about real time, with arrival gaps that are usually under 0.3 s but have
-  reached 1.3 s. Each turn starts once 0.4 s is queued. An audible dropout
-  inside speech resumes after 0.2 s and grows the buffer by 0.2 s (in practice
-  about once a session). When playback runs more than 0.6 s behind after a
-  burst, silent blocks are dropped to catch up; speech never is.
-- Words that run on without a pause past the point where GPT-Live
-  delegates stay with that request.
-- The bridge writes `$XDG_RUNTIME_DIR/cantrip-t3/session-live.json`
-  (`listening`, `thinking`, `speaking`, `muted`) for status readers such as
-  the desktop bar, and removes it on exit.
-- The session closes after `idle_minutes` (default 5) with no speech in either
-  direction and no request pending (GPT-Live's continuous silent audio does not
-  count as speech), and after `max_minutes` (default 60), with
-  a spoken one-minute warning. While muted, silence is streamed in place of
-  the microphone.
-- `input_device` and `output_device` pick PipeWire nodes. Set
-  `CANTRIP_T3_LIVE_TRACE=<file>` to log each received block's arrival time,
-  size and level (never audio or text) when diagnosing playback.
-
-```toml
-[live]                # in t3.toml
-model = "gpt-live-1"
-voice = "marin"
-summary_command = ["ssh", "host", "cat ~/home/NOW.md"]
-echo_cancel = false
-idle_minutes = 5
-max_minutes = 60
-input_device = ""      # PipeWire source; default input when empty
-output_device = ""     # PipeWire sink; default output when empty
-```
-
-It needs `OPENAI_API_KEY` with GPT-Live access and runs with
-`uv run --script`, which installs its one dependency (`openai[realtime]`).
-`cantrip-t3-live session` prints the session configuration without
-connecting. Install [`cantrip-t3-live.service`](cantrip-t3-live.service) and
-bind keys to start/stop it and to `cantrip-t3-live mute`; GPT-Live
-bills per connected second, so stop the session when you are done.
+Live GPT-Live conversation moved to https://github.com/misty-step/live-voice
 
 ## Hands-free turn-taking (OpenRouter)
 
@@ -216,15 +157,12 @@ the thread and what it is doing:
 
 | Shown | When |
 |---|---|
-| `Live · listening` / `· Home thinking` / `· Home speaking` | a GPT-Live session |
 | `Hands-free · listening` / `· hearing you` / `· Home thinking` / `· Home speaking` | a hands-free session |
 | `Home · recording` / `· transcribing` / `· thinking` / `· speaking` | a push-to-talk take |
-| `mic muted` / `replies muted` (dim) | the live microphone, or spoken replies, are muted |
+| `replies muted` (dim) | spoken replies are muted |
 
 Nothing shows at rest except a dim `replies muted` while replies are muted.
-Left click ends a live or hands-free session. Middle click stops speech, or
-mutes or unmutes the microphone during a live session (GPT-Live plays its own
-audio).
+Left click ends a hands-free session. Middle click stops speech.
 
 `cantrip-t3 state` prints the one-line JSON the widget polls every second while
 a session or take is active and every 3 s otherwise. A reply owed for more than 10 minutes is no longer
