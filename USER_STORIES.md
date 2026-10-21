@@ -229,6 +229,20 @@ No-gos: no transcript or reply text in logs or local state; no secrets in files;
 
 Evidence: `integrations/t3/cantrip_t3.py`, `integrations/t3/test_cantrip_t3.py`, `integrations/t3/README.md`
 
+## US-016 Hold a live, interruptible conversation backed by my agent thread
+
+Statement: When I want to think out loud with my coordinating agent, I want a live voice conversation I can interrupt, while every real request still goes through that agent.
+
+Criteria:
+1. WHEN a live session starts, THE SYSTEM SHALL use client delegation and seed it with the configured summary as developer context.
+2. WHEN the voice model delegates, THE SYSTEM SHALL send the user's speech since the previous delegation to the configured thread exactly once per delegation, and SHALL NOT send an empty request.
+3. WHEN that run completes, THE SYSTEM SHALL return its final reply as plain-speech commentary in pieces within the append limit; IF it fails or the thread is unreachable, THEN THE SYSTEM SHALL say so without claiming success.
+4. WHEN the session is stopped, THE SYSTEM SHALL close it gracefully and record billed seconds; the microphone toggle SHALL mute input without ending the session.
+
+No-gos: no transcript or reply text in logs; the voice model never acts or decides on its own.
+
+Evidence: `integrations/t3/cantrip_t3_live.py`, `integrations/t3/test_cantrip_t3_live.py`, `integrations/t3/README.md`
+
 ## US-017 Talk with my agent thread hands-free, turn by turn
 
 Statement: When I am talking things through with my coordinating agent, I want to just speak and hear its answers, without pressing a key for every sentence.
