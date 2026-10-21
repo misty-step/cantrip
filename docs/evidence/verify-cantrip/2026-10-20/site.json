@@ -1,0 +1,66 @@
+{
+  "feature": "website",
+  "url": "https://cantrip.mistystep.io",
+  "deployed_revision": "9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c",
+  "master": "68a6ac236eca69da8f6bfc3741f77c0f5cc1df5a",
+  "release": "v0.1.9",
+  "results": [
+    {
+      "check": "health.json reports ok/production",
+      "ok": true
+    },
+    {
+      "check": "deployed revision 9bc7ac3d02bf is master 68a6ac236eca or an ancestor (behind)",
+      "ok": true
+    },
+    {
+      "check": "/ renders (HTTP 200) with ['Speak.', 'Download for Linux x86-64', 'v0.1.9']",
+      "ok": true
+    },
+    {
+      "check": "/docs/install renders (HTTP 200) with ['Install Cantrip']",
+      "ok": true
+    },
+    {
+      "check": "/docs/use renders (HTTP 200) with ['First dictation']",
+      "ok": true
+    },
+    {
+      "check": "/changelog renders (HTTP 200) with ['v0.1.9']",
+      "ok": true
+    },
+    {
+      "check": "/releases renders (HTTP 200) with ['v0.1.9']",
+      "ok": true
+    },
+    {
+      "check": "/evals renders (HTTP 200) with ['speech']",
+      "ok": true
+    },
+    {
+      "check": "home page links the v0.1.9 release download",
+      "ok": true
+    },
+    {
+      "check": "download link https://github.com/misty-step/cantrip/releases/download/v0.1.9/cantrip-v0.1.9-x86_64-unknown-linux-gnu.tar.gz resolves (HTTP 200)",
+      "ok": true
+    },
+    {
+      "check": "all 15 internal links on / return 200 (broken: [])",
+      "ok": true
+    },
+    {
+      "check": "unknown route returns 404 (got 404)",
+      "ok": true
+    },
+    {
+      "check": "site-desktop screenshot at 1440,900",
+      "ok": true
+    },
+    {
+      "check": "site-mobile screenshot at 390,844",
+      "ok": true
+    }
+  ],
+  "passed": true
+}

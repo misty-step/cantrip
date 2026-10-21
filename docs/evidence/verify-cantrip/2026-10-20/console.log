@@ -1,0 +1,352 @@
+[ok] tool sway
+[ok] tool grim
+[ok] tool wtype
+[ok] tool wl-copy
+[ok] tool wl-paste
+[ok] tool tesseract
+[ok] tool pw-record
+[ok] tool pw-play
+[ok] tool pw-dump
+[ok] tool pactl
+[ok] tool gh
+[ok] tool jq
+[ok] tool curl
+[ok] tool playwright
+[ok] public speech fixture samples/jfk.wav
+[warn] host load 45.1 on 32 CPUs; audio xruns and slow pw-record stops (#164) get likelier
+[info] inherited audio routing vars ['PIPEWIRE_NODE', 'PIPEWIRE_PROPS', 'PULSE_PROP', 'PULSE_SINK', 'PULSE_SOURCE']; the session and its PipeWire commands drop them
+[ok] reusable local model present
+[info] operator daemon socket /run/user/1000/cantrip/cantrip.sock: present — never drive it
+[ok] website https://cantrip.mistystep.io/health.json HTTP 200 status ok revision 9bc7ac3d02bf
+$ gh release view --repo misty-step/cantrip --json tagName -q .tagName  -> exit 0
+v0.1.9
+$ gh release download v0.1.9 --repo misty-step/cantrip --dir /home/phaedrus/.cache/tmp/vc/1020201712/download --pattern cantrip-v0.1.9-x86_64-unknown-linux-gnu.tar.gz --pattern release.json --pattern SHA256SUMS --pattern provenance.json  -> exit 0
+$ sha256sum --check --strict --ignore-missing SHA256SUMS  -> exit 0
+cantrip-v0.1.9-x86_64-unknown-linux-gnu.tar.gz: OK
+release.json: OK
+$ gh attestation verify release.json --repo misty-step/cantrip --bundle provenance.json --source-digest 9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c --signer-workflow misty-step/cantrip/.github/workflows/release.yml --deny-self-hosted-runners  -> exit 0
+$ gh attestation verify cantrip-v0.1.9-x86_64-unknown-linux-gnu.tar.gz --repo misty-step/cantrip --bundle provenance.json --source-digest 9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c --signer-workflow misty-step/cantrip/.github/workflows/release.yml --deny-self-hosted-runners  -> exit 0
+$ tar -xzf cantrip-v0.1.9-x86_64-unknown-linux-gnu.tar.gz  -> exit 0
+$ sha256sum --check --strict checksums.txt  -> exit 0
+CONFIGURATION.md: OK
+DESKTOP.md: OK
+INSTALLATION.md: OK
+LICENSE: OK
+PRIVACY.md: OK
+USAGE.md: OK
+cantrip: OK
+cantrip.service: OK
+install.sh: OK
+manifest.json: OK
+sample.wav: OK
+$ install.sh install --prefix /home/phaedrus/.cache/tmp/vc/1020201712/prefix  -> exit 0
+install complete: /home/phaedrus/.cache/tmp/vc/1020201712/prefix/bin/cantrip
+No daemon or startup owner was started or changed.
+$ cantrip --version  -> exit 0
+cantrip 0.1.9
+$ install.sh install --prefix /home/phaedrus/.cache/tmp/vc/1020201712/prefix  -> exit 1
+[stderr] cantrip installer: Target already exists: /home/phaedrus/.cache/tmp/vc/1020201712/prefix/bin/cantrip; inspect its owner, then use update with a new backup path.
+{
+  "feature": "install",
+  "version": "0.1.9",
+  "source_revision": "9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c",
+  "binary": "/home/phaedrus/.cache/tmp/vc/1020201712/prefix/bin/cantrip",
+  "binary_sha256": "ed4cae736cfa3ba3fea4763212875e653df1299634ab707b4fca0831fe55cac6",
+  "attestation": "verified (release.json + archive)",
+  "repeat_install_refused": true
+}
+$ pactl load-module module-null-sink sink_name=cantrip_verify_2251692 sink_properties=device.description=cantrip_verify_2251692  -> exit 0
+536870916
+$ pactl load-module module-remap-source master=cantrip_verify_2251692.monitor source_name=cantrip_verify_2251692_mic source_properties=device.description=cantrip_verify_2251692_mic  -> exit 0
+536870917
+$ cantrip models status  -> exit 0
+installed: /home/phaedrus/.cache/tmp/vc/1020201712/session/d/cantrip/models/parakeet-tdt-0.6b-v3-int8
+{
+  "run": "/home/phaedrus/.cache/tmp/vc/1020201712",
+  "binary": "/home/phaedrus/.cache/tmp/vc/1020201712/prefix/bin/cantrip",
+  "microphone": "cantrip_verify_2251692_mic",
+  "speaker": "cantrip_verify_2251692",
+  "wayland": "wayland-1",
+  "evidence": "/home/phaedrus/.cache/tmp/vc/1020201712/evidence"
+}
+[ok] tool sway
+[ok] tool grim
+[ok] tool wtype
+[ok] tool wl-copy
+[ok] tool wl-paste
+[ok] tool tesseract
+[ok] tool pw-record
+[ok] tool pw-play
+[ok] tool pw-dump
+[ok] tool pactl
+[ok] tool gh
+[ok] tool jq
+[ok] tool curl
+[ok] tool playwright
+[ok] public speech fixture samples/jfk.wav
+[warn] host load 44.7 on 32 CPUs; audio xruns and slow pw-record stops (#164) get likelier
+[info] inherited audio routing vars ['PIPEWIRE_NODE', 'PIPEWIRE_PROPS', 'PULSE_PROP', 'PULSE_SINK', 'PULSE_SOURCE']; the session and its PipeWire commands drop them
+[ok] reusable local model present
+[info] operator daemon socket /run/user/1000/cantrip/cantrip.sock: present — never drive it
+[ok] website https://cantrip.mistystep.io/health.json HTTP 200 status ok revision 9bc7ac3d02bf
+[ok] session compositor pid 2251738 still the process `up` started
+[ok] session keyboard pid 2251763 still the process `up` started
+[ok] session daemon pid 2251772 still the process `up` started
+[ok] private microphone source cantrip_verify_2251692_mic
+[ok] session daemon ping: state: idle message: pong
+== journey transcribe
+$ cantrip transcribe --local /home/phaedrus/.t3/worktrees/cantrip/verify-verification-skill/samples/jfk.wav  -> exit 0
+And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country.
+[stderr] 2026-10-21T01:17:36.722693Z  INFO cantrip_engine::stt: [STT] model loaded in 933 ms
+[stderr] 2026-10-21T01:17:36.724417Z  INFO cantrip_engine::stt: [STT] chunk=1/1 start_s=0.00 duration_s=11.00
+[stderr] 2026-10-21T01:17:37.054847Z  INFO cantrip_engine::stt: [STT] audio_seconds=11.000 inference_ms=330 output_char_count=108 partial=false
+[ok] transcribe --local prints the JFK sentence on stdout
+[ok] one-shot transcript saved to private history
+$ cantrip doctor  -> exit 0
+config: ready
+capture: ready (pw-record; configured source)
+stt: local ready (model=parakeet-tdt-0.6b-v3-int8)
+cleanup: disabled (raw transcript is delivered)
+telemetry: disabled (set [telemetry] enabled = true to opt in)
+injection: backends available (mode=clipboard; order=clipboard); automatic keys still require verified Hyprland focus and logind lock/suspend history at delivery
+hud: Wayland session detected; layer-shell support is checked when the HUD starts
+daemon: reachable (idle)
+[ok] doctor exits 0 reporting capture ready (it does not check the source exists; see #162)
+== journey dictate
+$ cantrip start  -> exit 0
+state: recording
+message: recording
+[ok] daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])
+[ok] private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])
+$ cantrip stop  -> exit 0
+state: processing
+message: processing
+stage: finalizing audio
+[ok] take completeness is complete (got complete)
+[ok] delivery is copied (got copied)
+[ok] real clipboard holds the spoken JFK sentence (100 chars)
+$ cantrip status  -> exit 0
+state: idle
+last: Copied. Paste when ready.
+event: 1
+completeness: complete
+delivery: copied
+cleanup: off
+dismissed: false
+recording: 01792545460925545844-2251772-1
+hint: cantrip recordings   # inspect saved recording metadata
+pending-recordings: 0
+[ok] transcript archived owner-only in history
+$ cantrip recordings --json  -> exit 0
+[{"id":"01792545460925545844-2251772-1","created_at_unix_ms":1792545473734,"duration_ms":9640,"text_available":true,"audio_available":true,"partial":false,"unresolved":false},{"id":"01792545460646395264-2252859-0","created_at_unix_ms":1792545460646,"duration_ms":11000,"text_available":true,"audio_available":false,"partial":false,"unresolved":false}]
+[ok] recordings lists the take with text and audio
+== journey recover
+$ cantrip start  -> exit 0
+state: recording
+message: recording
+[ok] daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])
+[ok] private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])
+$ cantrip stop  -> exit 0
+state: processing
+message: processing
+stage: finalizing audio
+[ok] take completeness is complete (got complete)
+[ok] delivery is copied (got copied)
+[ok] real clipboard holds the spoken JFK sentence (97 chars)
+$ cantrip status  -> exit 0
+state: idle
+last: Copied. Paste when ready.
+event: 2
+completeness: complete
+delivery: copied
+cleanup: off
+dismissed: false
+recording: 01792545487247482262-2251772-7
+hint: cantrip recordings   # inspect saved recording metadata
+pending-recordings: 0
+[ok] transcript archived owner-only in history
+$ cantrip recordings --json  -> exit 0
+[{"id":"01792545487247482262-2251772-7","created_at_unix_ms":1792545500663,"duration_ms":9960,"text_available":true,"audio_available":true,"partial":false,"unresolved":false},{"id":"01792545460925545844-2251772-1","created_at_unix_ms":1792545473734,"duration_ms":9640,"text_available":true,"audio_available":true,"partial":false,"unresolved":false},{"id":"01792545460646395264-2252859-0","created_at_unix_ms":1792545460646,"duration_ms":11000,"text_available":true,"audio_available":false,"partial":false,"unresolved":false}]
+[ok] recordings lists the take with text and audio
+$ cantrip copy 01792545487247482262-2251772-7  -> exit 0
+state: processing
+message: delivering
+stage: delivering
+[ok] copy ID accepted (exit 0)
+[ok] copy ID restored the saved transcript to the clipboard
+$ cantrip start  -> exit 0
+state: recording
+message: recording
+[ok] daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])
+[ok] private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])
+$ cantrip cancel  -> exit 0
+state: processing
+message: cancelling
+stage: cancelling
+[ok] cancel settles as cancelled (got cancelled)
+[ok] cancel delivered nothing to the clipboard
+[ok] cancelled take keeps its audio on disk
+$ cantrip recover --id 01792545507932873013-2251772-13 --local --clipboard  -> exit 0
+state: processing
+message: recovering
+stage: transcribing
+[ok] recover --local --clipboard accepted (exit 0)
+[ok] recover --local --clipboard completes and copies (got complete/copied)
+[ok] recovered transcript is on the clipboard
+$ cantrip forget 01792545507932873013-2251772-13  -> exit 1
+[stderr] error: forget deletes retained audio; confirm with --yes, or use cantrip actions
+[ok] forget without --yes is refused and keeps the audio
+$ cantrip forget 01792545507932873013-2251772-13 --yes  -> exit 0
+state: processing
+message: forgetting
+stage: removing recording
+[ok] forget --yes accepted (exit 0)
+[ok] confirmed Forget deleted the take's audio file
+$ cantrip recordings --json  -> exit 0
+[{"id":"01792545507932873013-2251772-13","created_at_unix_ms":1792545522867,"duration_ms":10707,"text_available":true,"audio_available":false,"partial":false,"unresolved":false},{"id":"01792545487247482262-2251772-7","created_at_unix_ms":1792545500663,"duration_ms":9960,"text_available":true,"audio_available":true,"partial":false,"unresolved":false},{"id":"01792545460925545844-2251772-1","created_at_unix_ms":1792545473734,"duration_ms":9640,"text_available":true,"audio_available":true,"partial":false,"unresolved":false},{"id":"01792545460646395264-2252859-0","created_at_unix_ms":1792545460646,"duration_ms":11000,"text_available":true,"audio_available":false,"partial":false,"unresolved":false}]
+[ok] recordings shows the forgotten take without audio
+[ok] complete archived text remains unchanged after Forget
+== journey breaks
+$ cantrip start  -> exit 0
+state: recording
+message: recording
+[ok] daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])
+[ok] private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])
+$ cantrip stop  -> exit 0
+state: processing
+message: processing
+stage: finalizing audio
+[ok] silence settles empty with audio kept (got empty)
+$ cantrip daemon  -> exit 1
+[stderr] 2026-10-21T01:19:03.658623Z  INFO cantrip_engine::engine: [Daemon] starting cantrip 0.1.9
+[stderr] error: cantrip daemon already running
+[ok] a second daemon for the same runtime is refused as already running
+[ok] original daemon still answers ping
+$ cantrip transcribe --local /home/phaedrus/.t3/worktrees/cantrip/verify-verification-skill/samples/jfk.wav  -> exit 1
+[stderr] error: local model not installed at /home/phaedrus/.cache/tmp/vc/1020201712/session/no-model-data/cantrip/models/parakeet-tdt-0.6b-v3-int8 — run: cantrip models pull
+[ok] missing model refuses transcription and downloads nothing
+$ cantrip reload  -> exit 0
+state: idle
+message: reloaded
+last: No text returned. Saved audio is available.
+event: 7
+completeness: empty
+delivery: none
+cleanup: off
+dismissed: false
+recording: 01792545534491390793-2251772-21
+hint: cantrip recordings   # inspect saved recording metadata
+hint: cantrip recover --id 01792545534491390793-2251772-21 --local --clipboard
+$ cantrip start  -> exit 0
+state: recording
+message: recording
+[ok] absent microphone is not substituted by another device here (links empty)
+$ cantrip stop  -> exit 0
+state: processing
+message: processing
+stage: finalizing audio
+[ok] absent microphone never yields a complete take (got failed)
+[KNOWN] Cantrip itself refuses an absent microphone or disables PipeWire fallback for it (otherwise a real desktop records the default microphone) (https://github.com/misty-step/cantrip/issues/162)
+$ cantrip reload  -> exit 0
+state: idle
+message: reloaded
+last: Recording could not be finalized. Recording storage is incomplete; check storage before recording again.
+event: 8
+completeness: failed
+delivery: none
+cleanup: off
+dismissed: false
+error: storage-failed
+recording: 01792545543721547987-2251772-26
+hint: cantrip recordings   # inspect saved recording metadata
+$ cantrip reload  -> exit 0
+state: idle
+message: reloaded
+last: Recording could not be finalized. Recording storage is incomplete; check storage before recording again.
+event: 8
+completeness: failed
+delivery: none
+cleanup: off
+dismissed: false
+error: storage-failed
+recording: 01792545543721547987-2251772-26
+hint: cantrip recordings   # inspect saved recording metadata
+$ cantrip start  -> exit 0
+state: recording
+message: recording
+[ok] daemon records only the private microphone (links: ['cantrip_verify_2251692_mic'])
+[ok] private microphone is fed only by the private speaker sink (links: ['cantrip_verify_2251692'])
+$ cantrip stop  -> exit 0
+state: processing
+message: processing
+stage: finalizing audio
+[ok] auto on an unverified desktop copies or defers, and the clipboard agrees (got copied)
+$ cantrip reload  -> exit 0
+state: idle
+message: reloaded
+last: Copied instead. Paste when ready.
+event: 9
+completeness: complete
+delivery: copied
+cleanup: off
+dismissed: false
+recording: 01792545548415227359-2251772-29
+hint: cantrip recordings   # inspect saved recording metadata
+$ cantrip ping  -> exit 1
+[stderr] error: cannot connect to cantrip daemon at /home/phaedrus/.cache/tmp/vc/1020201712/session/nd/cantrip/cantrip.sock; start it with: cantrip daemon: connecting to daemon socket: No such file or directory (os error 2)
+[ok] ping with no daemon fails fast with a start hint
+== journey windows
+[ok] settings window shows ('Past transcripts', '\\b[1-9]\\d* saved transcripts?\\b') (missing [])
+[ok] actions window shows ('Recordings', 'Recover locally') (missing [])
+$ cantrip hud --screenshot /home/phaedrus/.cache/tmp/vc/1020201712/evidence/windows-hud-copied.png --state copied  -> exit 0
+[stderr] saved HUD screenshot to /home/phaedrus/.cache/tmp/vc/1020201712/evidence/windows-hud-copied.png
+[ok] HUD renders the copied state
+{
+  "passed": true,
+  "failed": [],
+  "known_failures": [
+    "Cantrip itself refuses an absent microphone or disables PipeWire fallback for it (otherwise a real desktop records the default microphone) -> https://github.com/misty-step/cantrip/issues/162"
+  ]
+}
+journey exit=0
+[ok] health.json reports ok/production
+[ok] deployed revision 9bc7ac3d02bf is master 68a6ac236eca or an ancestor (behind)
+[ok] / renders (HTTP 200) with ['Speak.', 'Download for Linux x86-64', 'v0.1.9']
+[ok] /docs/install renders (HTTP 200) with ['Install Cantrip']
+[ok] /docs/use renders (HTTP 200) with ['First dictation']
+[ok] /changelog renders (HTTP 200) with ['v0.1.9']
+[ok] /releases renders (HTTP 200) with ['v0.1.9']
+[ok] /evals renders (HTTP 200) with ['speech']
+[ok] home page links the v0.1.9 release download
+[ok] download link https://github.com/misty-step/cantrip/releases/download/v0.1.9/cantrip-v0.1.9-x86_64-unknown-linux-gnu.tar.gz resolves (HTTP 200)
+[ok] all 15 internal links on / return 200 (broken: [])
+[ok] unknown route returns 404 (got 404)
+$ playwright screenshot --viewport-size=1440,900 --full-page --wait-for-timeout=1500 https://cantrip.mistystep.io/ /home/phaedrus/.cache/tmp/vc/1020201712/evidence/site-desktop.png  -> exit 0
+Navigating to https://cantrip.mistystep.io/
+Waiting for timeout 1500...
+Capturing screenshot into /home/phaedrus/.cache/tmp/vc/1020201712/evidence/site-desktop.png
+[ok] site-desktop screenshot at 1440,900
+$ playwright screenshot --viewport-size=390,844 --full-page --wait-for-timeout=1500 https://cantrip.mistystep.io/ /home/phaedrus/.cache/tmp/vc/1020201712/evidence/site-mobile.png  -> exit 0
+Navigating to https://cantrip.mistystep.io/
+Waiting for timeout 1500...
+Capturing screenshot into /home/phaedrus/.cache/tmp/vc/1020201712/evidence/site-mobile.png
+[ok] site-mobile screenshot at 390,844
+{
+  "passed": true,
+  "failed": []
+}
+site exit=0
+{
+  "teardown": {
+    "daemon": "exited",
+    "keyboard": "exited",
+    "compositor": "exited",
+    "modules": {
+      "536870917": "unloaded",
+      "536870916": "unloaded"
+    }
+  },
+  "evidence_kept": "/home/phaedrus/.cache/tmp/vc/1020201712/evidence"
+}
+verify sinks left: 0
+operator history files before/after: 1775/1775

@@ -1,0 +1,9 @@
+{
+  "feature": "install",
+  "version": "0.1.9",
+  "source_revision": "9bc7ac3d02bf6cf88b93b7ba0a13dc4890b4666c",
+  "binary": "/home/phaedrus/.cache/tmp/vc/1020201712/prefix/bin/cantrip",
+  "binary_sha256": "ed4cae736cfa3ba3fea4763212875e653df1299634ab707b4fca0831fe55cac6",
+  "attestation": "verified (release.json + archive)",
+  "repeat_install_refused": true
+}

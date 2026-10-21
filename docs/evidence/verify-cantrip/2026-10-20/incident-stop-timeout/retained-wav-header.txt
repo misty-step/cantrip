@@ -1,0 +1,3 @@
+retained file: 334496 bytes
+first 64 bytes:
+RIFF True True
