@@ -13,7 +13,6 @@ Secrets come from the environment (T3_MCP_TOKEN, CANTRIP_T3_SPEECH_KEY) so a
 launcher such as pass-env owns credential lookup.
 """
 
-import argparse
 from datetime import datetime
 import fcntl
 import json
@@ -28,8 +27,23 @@ import sys
 import threading
 import time
 import tomllib
+import importlib.util
 import urllib.error
-import urllib.request
+
+
+def lazy_module(name):
+    """Import on first attribute use: the bar polls `state` every few seconds and never needs HTTP."""
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.find_spec(name)
+    spec.loader = importlib.util.LazyLoader(spec.loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+urllib.request = lazy_module("urllib.request")
 
 PROTOCOL = "2025-06-18"
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "rolled_back"}
@@ -112,14 +126,21 @@ def take_name(take):
     return take
 
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse redirects so a bearer token never follows one to another host."""
+def no_redirect():
+    """A handler that refuses redirects, so a bearer token never follows one to another host."""
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+    return NoRedirect()
 
-    def redirect_request(self, *args, **kwargs):
-        return None
+
+_opener = []
 
 
-OPEN = urllib.request.build_opener(NoRedirect).open
+def OPEN(request, timeout):
+    if not _opener:
+        _opener.append(urllib.request.build_opener(no_redirect()).open)
+    return _opener[0](request, timeout=timeout)
 
 
 class McpError(RuntimeError):
@@ -836,7 +857,114 @@ def set_mute(action):
     return target
 
 
+# ── voice status for the desktop bar ──────────────────────────────────────
+
+SESSION_MODES = {"live": "cantrip_t3_live", "hands-free": "cantrip_t3_converse"}
+SESSION_PHASES = ("listening", "hearing", "thinking", "speaking")
+
+
+def session_state(mode):
+    """A running session's state file, trusted only while its process lives.
+
+    Sessions write $XDG_RUNTIME_DIR/cantrip-t3/session-<mode>.json:
+    {"mode", "pid", "phase": listening|hearing|thinking|speaking, "muted": bool}.
+    """
+    path = runtime_dir() / ("session-" + mode + ".json")
+    try:
+        state = json.loads(path.read_text())
+        argv = Path("/proc", str(int(state["pid"])), "cmdline").read_bytes().decode(errors="replace")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    names = {Path(arg).name.replace("-", "_").removesuffix(".py") for arg in argv.split("\0") if arg}
+    if SESSION_MODES[mode] not in names or state.get("phase") not in SESSION_PHASES:
+        return None
+    return state
+
+
+def player_live():
+    try:
+        pid = int((runtime_dir() / "player.pid").read_text())
+        argv0 = Path("/proc", str(pid), "cmdline").read_bytes().split(b"\0")[0].decode()
+    except (OSError, ValueError):
+        return False
+    return Path(argv0).name in PLAYERS
+
+
+def cantrip_snapshot():
+    try:
+        result = subprocess.run(["cantrip", "status", "--json"], capture_output=True, text=True, timeout=3)
+        return json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+PHASE_WORDS = {"listening": "listening", "hearing": "hearing you", "thinking": "{label} thinking",
+               "speaking": "{label} speaking", "recording": "recording", "transcribing": "transcribing"}
+PTT_WORDS = {"recording": "recording", "transcribing": "transcribing", "thinking": "thinking", "speaking": "speaking"}
+GLYPHS = {"listening": "\U000f036c", "hearing": "\U000f036c", "recording": "\U000f036c",   # nf-md-microphone
+          "transcribing": "\U000f0150", "thinking": "\U000f0150",                            # nf-md-clock_outline
+          "speaking": "\U000f057e",                                                           # nf-md-volume_high
+          "mic-muted": "\U000f036d", "replies-muted": "\U000f0581"}                          # microphone_off, volume_off
+OWED_SECONDS = 10 * 60   # a reply owed longer than this is no longer shown as "thinking"
+
+
+def voice_status(config, snapshot=None, now=time.time):
+    """One transcript-free line for the bar: which voice mode is active and what it is doing."""
+    label = config.get("label", "Home")
+    pending = [readable(p) for p in (state_dir() / "pending").glob("*.json")]
+    pending = [record for record in pending if record and now() - (record.get("sent_at") or 0) < OWED_SECONDS]
+    speaking = player_live()
+    replies_muted = is_muted()
+    mic_muted = False
+    mode = phase = None
+    live = session_state("live")
+    hands_free = session_state("hands-free")
+    if live:
+        mode, phase = "live", live["phase"]
+        mic_muted = bool(live.get("muted"))
+        replies_muted = False   # live speech is GPT-Live's own; reply muting doesn't apply
+    elif hands_free:
+        mode = "hands-free"
+        phase = hands_free["phase"]
+        if phase == "listening":
+            phase = "speaking" if speaking else "thinking" if any(
+                r["take"].startswith("converse-") for r in pending) else "listening"
+    else:
+        snapshot = snapshot if snapshot is not None else cantrip_snapshot()
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        handoff = snapshot.get("handoff") if isinstance(snapshot.get("handoff"), dict) else {}
+        if handoff.get("name") == config.get("handoff", "home") and snapshot.get("state") in ("recording", "processing"):
+            mode, phase = "push-to-talk", "recording" if snapshot["state"] == "recording" else "transcribing"
+        elif speaking:
+            mode, phase = "push-to-talk", "speaking"
+        elif pending:
+            mode, phase = "push-to-talk", "thinking"
+    names = {"live": "Live", "hands-free": "Hands-free", "push-to-talk": label}
+    muted_segments = ([{"glyph": GLYPHS["mic-muted"], "text": "mic muted", "tone": "dim"}] if mic_muted else []) + (
+        [{"glyph": GLYPHS["replies-muted"], "text": "replies muted", "tone": "dim"}] if replies_muted else [])
+    if not mode:
+        return {"visible": bool(muted_segments), "mode": None, "phase": None, "mic_muted": False,
+                "replies_muted": replies_muted, "segments": muted_segments,
+                "tooltip": label + "'s spoken replies are muted." if replies_muted else ""}
+    words = PTT_WORDS[phase] if mode == "push-to-talk" else PHASE_WORDS[phase].format(label=label)
+    segments = [{"glyph": GLYPHS[phase], "text": names[mode] + " · " + words,
+                 "tone": "active" if phase in ("listening", "hearing", "recording") else "normal"}] + muted_segments
+    about = {"live": "Live conversation with " + label, "hands-free": "Hands-free conversation with " + label,
+             "push-to-talk": "Push-to-talk to " + label}[mode]
+    clicks = {"live": "Left click ends the session; middle click mutes or unmutes the microphone.",
+              "hands-free": "Left click ends hands-free; middle click stops speech.",
+              "push-to-talk": "Middle click stops speech."}[mode]
+    flags = "".join(", " + segment["text"] for segment in muted_segments)
+    return {"visible": True, "mode": mode, "phase": phase, "mic_muted": mic_muted, "replies_muted": replies_muted,
+            "segments": segments, "tooltip": about + ": " + words + flags + ". " + clicks}
+
+
 def main(argv=None):
+    raw = sys.argv[1:] if argv is None else argv
+    if raw == ["state"]:   # the bar polls this; skip argparse's import cost
+        print(json.dumps(voice_status(load_config()), ensure_ascii=False))
+        return 0
+    import argparse
     parser = argparse.ArgumentParser(prog="cantrip-t3", description=__doc__.split("\n\n")[0])
     parser.add_argument("--config", type=Path)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -849,6 +977,7 @@ def main(argv=None):
     commands.add_parser("repeat", help="speak the most recent reply again")
     commands.add_parser("talk", help="stop speech, then toggle a Cantrip take to this handoff")
     commands.add_parser("status", help="print mute state and pending take count")
+    commands.add_parser("state", help="one JSON line for the desktop bar: active voice mode and phase")
     args = parser.parse_args(argv)
 
     if args.command == "stop":
@@ -866,6 +995,9 @@ def main(argv=None):
         print(json.dumps({"muted": is_muted(), "pending": pending, "last_error": error}))
         return 0
     config = load_config(args.config)
+    if args.command == "state":
+        print(json.dumps(voice_status(config), ensure_ascii=False))
+        return 0
     if args.command == "talk":
         stop_speaking()
         os.execvp("cantrip", ["cantrip", "toggle", "--handoff", config["handoff"]])

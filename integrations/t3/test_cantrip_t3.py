@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -518,12 +519,98 @@ class ReviewRegressionTest(Base):
         self.assertFalse(marker.exists())         # cleared when the reply ends
 
     def test_redirects_are_refused(self):
-        handler = t3.NoRedirect()
+        handler = t3.no_redirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere.example/"))
 
     def test_identifiers_keep_their_underscores(self):
         self.assertEqual(t3.speakable("Run foo_bar_baz with **care** and _style_."),
                          "Run foo_bar_baz with care and style.")
+
+
+class VoiceStatusTest(Base):
+    """The desktop bar's line: which voice mode is active and what it is doing."""
+
+    def session(self, mode, phase, muted=False):
+        import subprocess
+        name = {"live": "cantrip_t3_live", "hands-free": "cantrip_t3_converse"}[mode]
+        process = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)", name])
+        self.addCleanup(process.kill)
+        t3.write_json(t3.runtime_dir() / ("session-" + mode + ".json"),
+                      {"mode": mode, "pid": process.pid, "phase": phase, "muted": muted})
+        return process
+
+    def status(self, snapshot=None):
+        return t3.voice_status(CONFIG, snapshot=snapshot or {"state": "idle"})
+
+    def test_hidden_at_rest_and_a_dim_marker_while_muted(self):
+        self.assertEqual(self.status()["visible"], False)
+        t3.set_mute("on")
+        state = self.status()
+        self.assertTrue(state["visible"])
+        self.assertEqual(state["segments"][0]["text"], "replies muted")
+        self.assertEqual(state["segments"][0]["tone"], "dim")
+        self.assertEqual(state["segments"][0]["glyph"], t3.GLYPHS["replies-muted"])
+
+    def test_live_session_phases(self):
+        for phase, words in (("listening", "Live · listening"), ("thinking", "Live · Home thinking"),
+                             ("speaking", "Live · Home speaking")):
+            self.session("live", phase)
+            state = self.status()
+            self.assertEqual((state["mode"], state["segments"][0]["text"]), ("live", words))
+        self.session("live", "listening", muted=True)
+        self.assertEqual(self.status()["segments"][-1]["text"], "mic muted")
+        self.assertEqual(self.status()["segments"][-1]["glyph"], t3.GLYPHS["mic-muted"])
+
+    def test_muted_replies_never_look_like_a_muted_microphone(self):
+        t3.set_mute("on")
+        self.session("hands-free", "listening")
+        last = self.status()["segments"][-1]
+        self.assertEqual((last["text"], last["glyph"]), ("replies muted", t3.GLYPHS["replies-muted"]))
+        self.assertNotEqual(t3.GLYPHS["replies-muted"], t3.GLYPHS["mic-muted"])
+
+    def test_a_stale_pending_take_is_not_shown_as_thinking(self):
+        t3.write_json(t3.state_dir() / "pending" / "take-1.json",
+                      {"take": "take-1", "thread_id": THREAD, "request_id": "r", "status": "sent", "sent_at": 0})
+        self.assertFalse(self.status()["visible"])
+
+    def test_unexpected_cantrip_output_is_harmless(self):
+        self.assertFalse(t3.voice_status(CONFIG, snapshot=["not", "a", "dict"])["visible"])
+
+    def test_the_state_command_does_not_load_http(self):
+        import subprocess
+        code = "import sys; sys.argv=['x']; import cantrip_t3; print('http.client' in sys.modules)"
+        out = subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, %r); " % str(Path(__file__).parent) + code],
+                             capture_output=True, text=True).stdout.strip()
+        self.assertEqual(out, "False")
+
+    def test_a_dead_sessions_file_is_ignored(self):
+        process = self.session("live", "listening")
+        process.kill()
+        process.wait()
+        self.assertFalse(self.status()["visible"])
+
+    def test_hands_free_works_out_thinking_and_speaking(self):
+        self.session("hands-free", "listening")
+        self.assertEqual(self.status()["segments"][0]["text"], "Hands-free · listening")
+        t3.write_json(t3.state_dir() / "pending" / "converse-1.json",
+                      {"take": "converse-1", "thread_id": THREAD, "request_id": "r", "status": "sent",
+                       "sent_at": __import__("time").time()})
+        self.assertEqual(self.status()["segments"][0]["text"], "Hands-free · Home thinking")
+        self.session("hands-free", "hearing")
+        self.assertEqual(self.status()["segments"][0]["text"], "Hands-free · hearing you")
+
+    def test_push_to_talk_recording_thinking_and_speaking(self):
+        recording = {"state": "recording", "handoff": {"name": "home", "label": "Home", "color": "#336699"}}
+        self.assertEqual(self.status(recording)["segments"][0]["text"], "Home · recording")
+        self.assertNotIn("Home with Home", self.status(recording)["tooltip"])
+        other = {"state": "recording", "handoff": {"name": "maren", "label": "Home", "color": "#336699"}}
+        self.assertFalse(self.status(other)["visible"])
+        t3.send(CONFIG, "status?", "take-1", mcp=self.t3)
+        self.assertEqual(self.status()["segments"][0]["text"], "Home · thinking")
+
+    def test_status_carries_no_transcript_or_reply_text(self):
+        t3.send(CONFIG, "a very private sentence", "take-1", mcp=self.t3)
+        self.assertNotIn("private", json.dumps(self.status()))
 
 
 class SpeechTest(Base):

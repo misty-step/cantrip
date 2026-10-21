@@ -207,3 +207,35 @@ adds its queue and run time, which dominated QA's 15–83 s measurements. OpenRo
 this is turn-taking, not a live conversation. Install
 [`cantrip-t3-converse.service`](cantrip-t3-converse.service) with the same
 speech key entry as `cantrip-t3.service`, and bind a key to start and stop it.
+
+## Desktop bar indicator (Omarchy)
+
+[`omarchy/cantrip.home-voice`](omarchy/cantrip.home-voice) is a bar widget
+that says, in plain text and the bar's own colors, when you are talking with
+the thread and what it is doing:
+
+| Shown | When |
+|---|---|
+| `Live · listening` / `· Home thinking` / `· Home speaking` | a GPT-Live session |
+| `Hands-free · listening` / `· hearing you` / `· Home thinking` / `· Home speaking` | a hands-free session |
+| `Home · recording` / `· transcribing` / `· thinking` / `· speaking` | a push-to-talk take |
+| `mic muted` / `replies muted` (dim) | the live microphone, or spoken replies, are muted |
+
+Nothing shows at rest except a dim `replies muted` while replies are muted.
+Left click ends a live or hands-free session. Middle click stops speech, or
+mutes or unmutes the microphone during a live session (GPT-Live plays its own
+audio).
+
+`cantrip-t3 state` prints the one-line JSON the widget polls every second while
+a session or take is active and every 3 s otherwise. A reply owed for more than 10 minutes is no longer
+shown as thinking. It
+reads `cantrip status --json` for push-to-talk, the pending takes and player,
+and each session's `$XDG_RUNTIME_DIR/cantrip-t3/session-<mode>.json`, trusted
+only while that session's process is alive. It carries no transcript or reply
+text. Install it with:
+
+```sh
+cp -r integrations/t3/omarchy/cantrip.home-voice ~/.config/omarchy/plugins/
+omarchy-shell shell rescanPlugins
+omarchy plugin enable cantrip.home-voice --section center
+```
