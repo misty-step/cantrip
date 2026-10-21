@@ -680,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "cantrip"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "cantrip-engine"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "base64",
