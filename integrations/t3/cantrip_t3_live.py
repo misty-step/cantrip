@@ -25,6 +25,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -404,14 +405,18 @@ def collect_reply(mcp, record, progress, now=time.monotonic, sleep=time.sleep):
 class EchoCancel:
     """A PipeWire echo-cancel source/sink pair for the session, removed afterwards."""
 
-    def __init__(self):
+    def __init__(self, source=None, sink=None):
         self.module = None
+        self.source, self.sink = source, sink
 
     def __enter__(self):
         arguments = ["aec_method=webrtc", "source_name=cantrip_live_mic", "sink_name=cantrip_live_out"]
-        for variable, key in (("PULSE_SOURCE", "source_master"), ("PULSE_SINK", "sink_master")):
-            if os.environ.get(variable):
-                arguments.append(key + "=" + os.environ[variable])
+        # The configured devices are the echo canceller's masters; the environment is the fallback.
+        for chosen, variable, key in ((self.source, "PULSE_SOURCE", "source_master"),
+                                      (self.sink, "PULSE_SINK", "sink_master")):
+            master = chosen or os.environ.get(variable)
+            if master:
+                arguments.append(key + "=" + master)
         try:
             self.module = subprocess.run(["pactl", "load-module", "module-echo-cancel", *arguments],
                                          capture_output=True, text=True, timeout=10, check=True).stdout.strip()
@@ -581,6 +586,7 @@ async def run(config):
 
     live = live_config(config)
     t3.connect(config)  # fail before connecting if T3 is unreachable or the token is refused
+    resend_summaries(config)
     context = summary(live["summary_command"])
     log("connecting model=" + live["model"] + " summary_chars=" + str(len(context)))
     loop = asyncio.get_running_loop()
@@ -595,7 +601,7 @@ async def run(config):
     echo = player = recorder = None
     try:
         pid_file.write_text(str(os.getpid()))
-        echo = EchoCancel() if live["echo_cancel"] else None
+        echo = EchoCancel(live["input_device"] or None, live["output_device"] or None) if live["echo_cancel"] else None
         devices = (echo.__enter__() if echo else None) or (live["input_device"] or None, live["output_device"] or None)
         chunks = asyncio.Queue()
         player = Player(devices[1])
@@ -725,15 +731,42 @@ async def run(config):
                 t3.notify("The live session summary may not have reached " + bridge_ref[0].label + ".")
 
 
+def summary_outbox():
+    """Owner-only outbox (verbatim speech, like transcript history): a summary is written here
+    before it is sent and removed once the thread has it, so a failed send is retried next start."""
+    path = t3.state_dir() / "live-summaries"
+    path.mkdir(exist_ok=True, mode=0o700)
+    return path
+
+
 def send_summary(config, bridge, session_id, started, ended):
     """Hand the thread one end-of-session summary; idempotent on the session."""
     message = bridge.summary_message(started, ended, bridge.handed)
-    try:
-        submit_request(config, t3.connect(config, timeout=t3.SEND_STEP_SECONDS), "summary-" + session_id, message)
+    saved = summary_outbox() / ("summary-" + re.sub(r"[^A-Za-z0-9._-]", "_", session_id) + ".json")
+    t3.write_json(saved, {"delegation": "summary-" + session_id, "message": message})
+    os.chmod(saved, 0o600)
+    if deliver_summary(config, saved):
         log("summary sent unsent_utterances=" + str(len(bridge.unsent_utterances())))
-    except Exception as error:  # never block exit; the summary is reported as lost
+    else:
+        t3.notify("The live session summary didn't reach " + bridge.label + "; it will be sent next session.")
+
+
+def deliver_summary(config, saved):
+    try:
+        record = json.loads(saved.read_text())
+        submit_request(config, t3.connect(config, timeout=t3.SEND_STEP_SECONDS), record["delegation"], record["message"])
+    except Exception as error:  # kept for the next start; idempotent on the session
         log("summary failed code=" + t3.describe(error))
-        t3.notify("The live session summary didn't reach " + bridge.label + ".")
+        return False
+    saved.unlink(missing_ok=True)
+    return True
+
+
+def resend_summaries(config):
+    """Send summaries a previous session could not deliver."""
+    for saved in sorted(summary_outbox().glob("summary-*.json")):
+        if deliver_summary(config, saved):
+            log("earlier summary delivered")
 
 
 def live_pid():

@@ -483,6 +483,58 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(live.limits({"idle_minutes": 2, "max_minutes": 30}), (120, 1800))
 
 
+class SummaryOutboxTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        patch = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.tmp.name, "XDG_RUNTIME_DIR": self.tmp.name})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.tmp.cleanup)
+        notify = mock.patch.object(live.t3, "notify")
+        self.notified = notify.start()
+        self.addCleanup(notify.stop)
+
+    def bridge(self):
+        async def send(event):
+            pass
+        bridge = live.Bridge(CONFIG, send, None, None)
+        bridge.heard.append((0, 500, "I prefer short answers.", 0))
+        return bridge
+
+    def test_a_failed_summary_is_kept_owner_only_and_sent_next_start(self):
+        fake = FakeT3()
+        fake.refuse["t3_thread_send"] = "http-502"
+        with mock.patch.object(live.t3, "connect", return_value=fake):
+            live.send_summary(CONFIG, self.bridge(), "live_s1", 0, 60)
+        kept = list(live.summary_outbox().glob("*.json"))
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(oct(kept[0].stat().st_mode & 0o777), "0o600")
+        self.assertIn("next session", self.notified.call_args.args[0])
+        del fake.refuse["t3_thread_send"]
+        with mock.patch.object(live.t3, "connect", return_value=fake):
+            live.resend_summaries(CONFIG)
+        self.assertEqual(list(live.summary_outbox().glob("*.json")), [])
+        self.assertEqual(fake.sends[-1]["clientRequestId"], "cantrip-live-summary-live_s1")
+        self.assertIn("I prefer short answers.", fake.sends[-1]["message"])
+
+    def test_a_delivered_summary_leaves_nothing_behind(self):
+        fake = FakeT3()
+        with mock.patch.object(live.t3, "connect", return_value=fake):
+            live.send_summary(CONFIG, self.bridge(), "live_s2", 0, 60)
+        self.assertEqual(list(live.summary_outbox().glob("*.json")), [])
+
+
+class EchoCancelTest(unittest.TestCase):
+    def test_configured_devices_are_the_echo_cancellers_masters(self):
+        ran = []
+        with mock.patch.object(live.subprocess, "run", side_effect=lambda argv, **kw: ran.append(argv) or
+                               mock.Mock(stdout="42")), mock.patch.object(live.time, "sleep"), \
+                mock.patch.dict(os.environ, {"PULSE_SOURCE": "env-mic", "PULSE_SINK": "env-out"}):
+            live.EchoCancel("my-mic", "my-out").__enter__()
+        self.assertIn("source_master=my-mic", ran[0])
+        self.assertIn("sink_master=my-out", ran[0])
+
+
 class SessionTest(unittest.TestCase):
     def test_client_delegation_session_seeds_summary_as_developer_context(self):
         session = live.session_config(CONFIG, "NOW: three lanes.")
