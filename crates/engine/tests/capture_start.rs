@@ -15,7 +15,11 @@ use std::time::Duration;
 struct FailedNativeStart;
 
 impl Platform for FailedNativeStart {
-    fn start_recording(&self, path: &Path, _: Option<&str>) -> anyhow::Result<Box<dyn Recorder>> {
+    fn start_recording(
+        &self,
+        path: &Path,
+        source: Option<&str>,
+    ) -> anyhow::Result<Box<dyn Recorder>> {
         let file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -25,6 +29,9 @@ impl Platform for FailedNativeStart {
         writer.write_samples(&[22; 1_600])?;
         writer.finish()?;
         writer.get_ref().sync_all()?;
+        if let Some(source) = source {
+            return Err(cantrip_engine::ports::MissingMicrophone(source.to_owned()).into());
+        }
         anyhow::bail!("injected native startup failure after finalized PCM")
     }
 
@@ -43,11 +50,14 @@ impl Platform for FailedNativeStart {
     }
 }
 
-fn exercise_failed_start() {
+fn exercise_failed_start(missing_source: bool) {
     let mut config = Config::default();
     // Bypass local-model admission without contacting a provider: capture fails
     // before any work can be submitted to the transcription worker.
     config.stt.endpoint = Some("http://127.0.0.1:1/v1".to_owned());
+    if missing_source {
+        config.audio_source = Some("unplugged-microphone".to_owned());
+    }
     let (ready, receiver) = mpsc::channel();
     let daemon = std::thread::spawn(move || {
         engine::run(config, false, Arc::new(FailedNativeStart), || {
@@ -66,8 +76,24 @@ fn exercise_failed_start() {
     daemon.join().unwrap().unwrap();
 
     assert!(!reply.ok);
-    assert_eq!(reply.error.as_deref(), Some("capture-failed"));
+    assert_eq!(
+        reply.error.as_deref(),
+        Some(if missing_source {
+            "capture-source-missing"
+        } else {
+            "capture-failed"
+        })
+    );
     let outcome = snapshot.outcome.unwrap();
+    let message = reply.message.as_deref().unwrap();
+    assert!(outcome.message.starts_with(message));
+    assert!(outcome.message.contains("Saved audio is available."));
+    if missing_source {
+        assert!(message.contains("configured microphone `unplugged-microphone` not found"));
+        assert!(message.contains("Settings"));
+    } else {
+        assert_eq!(message, "Starting recording failed");
+    }
     assert_eq!(outcome.delivery, Delivery::None);
     assert!(outcome.artifacts.audio);
     assert!(!outcome.artifacts.text);
@@ -95,9 +121,18 @@ fn exercise_failed_start() {
 
 #[test]
 fn failed_capture_start_retains_actual_pcm() {
+    isolated_failed_start("failed_capture_start_retains_actual_pcm", false);
+}
+
+#[test]
+fn missing_microphone_notice_keeps_any_accepted_pcm() {
+    isolated_failed_start("missing_microphone_notice_keeps_any_accepted_pcm", true);
+}
+
+fn isolated_failed_start(test_name: &str, missing_source: bool) {
     const CHILD: &str = "CANTRIP_CAPTURE_START_TEST_CHILD";
     if std::env::var_os(CHILD).is_some() {
-        exercise_failed_start();
+        exercise_failed_start(missing_source);
         return;
     }
     // Native Darwin sockets need a short pathname; no app-owned or operator
@@ -110,11 +145,7 @@ fn failed_capture_start_retains_actual_pcm() {
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let child = Process::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "failed_capture_start_retains_actual_pcm",
-            "--nocapture",
-        ])
+        .args(["--exact", test_name, "--nocapture"])
         .env(CHILD, "1")
         .env("XDG_CONFIG_HOME", root.join("c"))
         .env("XDG_DATA_HOME", root.join("d"))

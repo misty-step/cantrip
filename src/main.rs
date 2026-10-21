@@ -973,6 +973,11 @@ fn capture_diagnosis(config: Option<&Config>, tools: DoctorTools) -> String {
         None => "source unknown until config is valid",
     };
     if tools.pw_record {
+        if let Some(source) = config.and_then(|config| config.audio_source.as_deref()) {
+            if let Err(error) = cantrip::capture::check_source(source) {
+                return format!("capture: blocked — {error}");
+            }
+        }
         format!("capture: ready (pw-record; {source})")
     } else {
         format!("capture: blocked (pw-record missing; {source}) — install PipeWire")

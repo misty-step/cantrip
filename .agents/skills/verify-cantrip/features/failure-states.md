@@ -7,7 +7,7 @@ where the destination cannot be verified (US-003, US-004, US-005).
 ## Sub-features
 
 - `fail-silence` a silent take settles `empty` with its WAV retained, not invented text.
-- `fail-absent-mic` an `audio_source` that does not exist is refused, never substituted (known bug #162).
+- `fail-absent-mic` an `audio_source` that does not exist is refused, never substituted; `doctor` identifies the missing source.
 - `fail-second-daemon` a second `daemon` on the same runtime exits non-zero; the first keeps answering.
 - `fail-no-model` `transcribe --local` without a model exits non-zero and downloads nothing.
 - `fail-unverified-desktop` `injection = "auto"` outside verified Hyprland/logind copies or defers, never pastes or types; the clipboard agrees with the reported delivery.
@@ -30,22 +30,15 @@ Preconditions:
   `breaks-1-silence.png`, `breaks-2-absent-mic.png`,
   `breaks-3-auto-unverified-desktop.png`.
 - **By hand (absent mic).** Edit `audio_source` in the session config
-  (`$V cantrip --run "$RUN" -- config path`), `reload`, `start`, wait 3 s,
-  `stop`, `$V wait`; restore and `reload`.
+  (`$V cantrip --run "$RUN" -- config path`), `reload`, then `doctor` and `start`. Expect `capture: blocked` and a refused
+  start naming the missing microphone. Restore and `reload`.
 
 ## Gotchas
 
-- Absent microphone (Linux, v0.1.8): `doctor` still prints `capture: ready
-  (pw-record; configured source)`, and capture runs `pw-record --target
-  <missing>` with PipeWire fallback allowed. On an ordinary desktop WirePlumber
-  then **falls back to the default microphone** and Cantrip records it. That is
-  the bug in https://github.com/misty-step/cantrip/issues/162. The session sets
-  `node.dont-fallback = true`, so this probe never records the operator's
-  microphone; here `pw-record` exits at once ("target not found") and the take
-  settles `failed`. Because the safety net hides the real-desktop behavior, the
-  journey reads how the daemon launched `pw-record` (its arguments and its own
-  `PIPEWIRE_PROPS`, logged by the session's transparent `pw-record` shim), and reports `KNOWN` (#162) until
-  Cantrip refuses the absent source or disables fallback itself. Never rerun
-  this probe without `dont-fallback`.
+- The session keeps `node.dont-fallback = true` as a safety net when probing
+  absent microphones, including older binaries. The journey requires refusal
+  before launching `pw-record`, a clear error in `doctor` and `start`, and
+  byte-for-byte unchanged accepted takes. Never remove that safety net when
+  checking older binaries (https://github.com/misty-step/cantrip/issues/162).
 - The daemon-down check uses a private empty runtime dir, so it never touches
   the operator's socket.

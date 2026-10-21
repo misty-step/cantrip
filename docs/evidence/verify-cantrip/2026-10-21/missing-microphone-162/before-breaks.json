@@ -1,0 +1,74 @@
+{
+  "journeys": [
+    "breaks"
+  ],
+  "binary": "installed cantrip 0.1.8 (baseline)",
+  "binary_version": "cantrip 0.1.8",
+  "binary_sha256": "43837c772ef48ccab51f90c22c63a4239aec5dcf06eb9624af5e4e140304e53a",
+  "isolation": "headless sway (pixman), private HOME/XDG/runtime/clipboard, private PipeWire null sink + remapped source as the microphone, inherited audio routing dropped, node.dont-fallback set, capture links checked",
+  "fixture": "samples/jfk.wav (public speech)",
+  "results": [
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_3081565_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_3081565'])",
+      "ok": true
+    },
+    {
+      "check": "silence settles empty with audio kept (got empty)",
+      "ok": true
+    },
+    {
+      "check": "a second daemon for the same runtime is refused as already running",
+      "ok": true
+    },
+    {
+      "check": "original daemon still answers ping",
+      "ok": true
+    },
+    {
+      "check": "missing model refuses transcription and downloads nothing",
+      "ok": true
+    },
+    {
+      "check": "doctor reports the missing configured microphone",
+      "ok": false
+    },
+    {
+      "check": "start refuses the missing microphone with its ID and an actionable error",
+      "ok": false
+    },
+    {
+      "check": "missing source is refused before pw-record launches",
+      "ok": true
+    },
+    {
+      "check": "missing microphone never records another device",
+      "ok": true
+    },
+    {
+      "check": "missing-source refusal leaves accepted takes unchanged and creates no audio",
+      "ok": false
+    },
+    {
+      "check": "daemon records only the private microphone (links: ['cantrip_verify_3081565_mic'])",
+      "ok": true
+    },
+    {
+      "check": "private microphone is fed only by the private speaker sink (links: ['cantrip_verify_3081565'])",
+      "ok": true
+    },
+    {
+      "check": "auto on an unverified desktop copies or defers, and the clipboard agrees (got copied)",
+      "ok": true
+    },
+    {
+      "check": "ping with no daemon fails fast with a start hint",
+      "ok": true
+    }
+  ],
+  "passed": false,
+  "known_failures": []
+}

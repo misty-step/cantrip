@@ -788,41 +788,28 @@ def journey_breaks(run, results):
         bare["XDG_DATA_HOME"] = str(empty)
         code, out, err = run_cmd(run, [state["binary"], "transcribe", "--local", str(JFK)], bare, label="cantrip", timeout=60)
         check(code != 0 and not out.strip() and not any(empty.rglob("*")), "missing model refuses transcription and downloads nothing", results)
-        # Missing microphone: expected to be refused, like macOS. The session's
-        # node.dont-fallback keeps this probe from recording the operator's mic.
+        # The inherited no-fallback remains a safety net even when testing old binaries.
         config.write_text(original.replace(f'audio_source = "{state["source"]}"', 'audio_source = "cantrip_verify_absent_source"'))
         cantrip(run, "reload")
+        saved = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in history_dir(run).glob("*") if p.is_file()}
+        code, out, _ = cantrip(run, "doctor")
+        check(code == 0 and "capture: blocked" in out and "configured microphone `cantrip_verify_absent_source` not found" in out,
+              "doctor reports the missing configured microphone", results)
         before = last_event(run)
         launches = run.session / "pw-record.jsonl"
-        seen = len(launches.read_text().splitlines()) if launches.exists() else 0
+        seen = launches.read_text() if launches.exists() else ""
         code, out, err = cantrip(run, "start")
-        refused_at_start = code != 0
-        product_guard = refused_at_start
-        if not refused_at_start:
-            # The session's dont-fallback hides what a real desktop does, and
-            # pw-record exits at once ("target not found"), so read how Cantrip
-            # launched it from the session shim's log: Cantrip itself must disable
-            # fallback (argument or its own PIPEWIRE_PROPS) for an explicit source.
-            def launched():
-                lines = launches.read_text().splitlines() if launches.exists() else []
-                return [json.loads(line) for line in lines[seen:]] if len(lines) > seen else None
-            new = until(launched, "the daemon's pw-record launch (via the session shim)", timeout=10, interval=0.1)
-            run.log({"recorder_launch": new})
-            if not any("cantrip_verify_absent_source" in item["argv"] for item in new):
-                die(f"observed pw-record launch does not target the absent source: {new}")
-            product_guard = any(any("dont-fallback" in arg for arg in item["argv"])
-                                or (item["pipewire_props"] != NO_FALLBACK and "dont-fallback" in (item["pipewire_props"] or ""))
-                                for item in new)
-            time.sleep(2)
-            check(capture_links(run) in (None, []), "absent microphone is not substituted by another device here (links empty)", results)
+        check(code != 0 and "configured microphone `cantrip_verify_absent_source` not found" in out + err,
+              "start refuses the missing microphone with its ID and an actionable error", results)
+        if code == 0:  # Safely settle old binaries; no fallback is allowed by the session.
             cantrip(run, "stop")
-        snap = wait_settled(run, before) if not refused_at_start else None
+            wait_settled(run, before)
+        check((launches.read_text() if launches.exists() else "") == seen,
+              "missing source is refused before pw-record launches", results)
+        check(capture_links(run) in (None, []), "missing microphone never records another device", results)
+        after = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in history_dir(run).glob("*") if p.is_file()}
+        check(after == saved, "missing-source refusal leaves accepted takes unchanged and creates no audio", results)
         shot(run, "breaks-2-absent-mic")
-        outcome = snap["outcome"] if snap else {}
-        check(outcome.get("completeness") != "complete", f"absent microphone never yields a complete take (got {outcome.get('completeness') or 'refused'})", results)
-        check(product_guard, "Cantrip itself refuses an absent microphone or disables PipeWire fallback for it "
-              "(otherwise a real desktop records the default microphone)", results,
-              known_issue="https://github.com/misty-step/cantrip/issues/162")
         config.write_text(original)
         cantrip(run, "reload")
         # Automatic delivery on an unverified (non-Hyprland) desktop must not send keys.
@@ -871,7 +858,7 @@ def journey_transcribe(run, results):
     check(any(item.get("source") == "transcribe" and jfk_match(item.get("raw_transcript") or "") for item in saved),
           "one-shot transcript saved to private history", results)
     code, out, _ = cantrip(run, "doctor")
-    check(code == 0 and "capture: ready" in out, "doctor exits 0 reporting capture ready (it does not check the source exists; see #162)", results)
+    check(code == 0 and "capture: ready" in out, "doctor exits 0 reporting the private capture source ready", results)
 
 
 JOURNEYS = {"transcribe": journey_transcribe, "dictate": journey_dictate, "recover": journey_recover,

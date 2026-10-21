@@ -6,7 +6,7 @@ mod linux;
 mod macos;
 
 #[cfg(target_os = "linux")]
-pub use linux::Recorder;
+pub use linux::{check_source, Recorder};
 #[cfg(target_os = "macos")]
 pub use macos::{
     diagnosis, input_devices, microphone_permission, request_microphone_permission,

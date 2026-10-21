@@ -1060,9 +1060,13 @@ fn start_recording(
             tracing::info!("[Daemon] state idle -> recording");
             daemon.reply(true, "recording", None)
         }
-        Err(_) => {
+        Err(error) => {
             tracing::warn!("[Capture] starting recording failed class=capture-failed");
-            let mut outcome = setup_failure("Starting recording failed", "capture-failed");
+            let (message, class) = match error.downcast_ref::<crate::ports::MissingMicrophone>() {
+                Some(missing) => (missing.to_string(), "capture-source-missing"),
+                None => ("Starting recording failed".to_owned(), "capture-failed"),
+            };
+            let mut outcome = setup_failure(&message, class);
             match wav.try_exists() {
                 Ok(true) => {
                     let duration_ms = stt::wav_duration_ms(&wav).unwrap_or(0);
@@ -1084,7 +1088,7 @@ fn start_recording(
             }
             outcome.event_id = daemon.event_id();
             daemon.outcome = Some(outcome);
-            daemon.reply(false, "Starting recording failed", Some("capture-failed"))
+            daemon.reply(false, message, Some(class))
         }
     }
 }

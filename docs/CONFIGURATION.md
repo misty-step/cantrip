@@ -75,10 +75,13 @@ Monitoring grant is needed or requested.
 ## Capture and model preload
 
 On Linux, omit `audio_source` to use the default PipeWire input. Set it to a
-specific PipeWire node only when you intend to select that microphone; it applies
-on the next capture. A `doctor` report that finds `pw-record` is not proof that
-the selected input records sound. Make an [attended trial](USAGE.md#first-dictation)
-after changing it.
+specific PipeWire node name or object serial only when you intend to select that
+microphone; it applies on the next capture. A missing selected microphone blocks
+capture and is reported by `doctor`; Cantrip never substitutes the default input.
+Inherited PipeWire properties are preserved except for the selected target and
+the no-fallback/no-reconnect safeguards. A ready `doctor` report confirms that
+the source exists, not that it records sound. Make an
+[attended trial](USAGE.md#first-dictation) after changing it.
 
 On Mac, `audio_source` stores the stable **CoreAudio input UID**, not its
 display name or a transient numeric device index. Settings lists microphones
