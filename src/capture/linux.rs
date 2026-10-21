@@ -4,13 +4,16 @@ use anyhow::{anyhow, bail, Context, Result};
 use cantrip_engine::audio::{verify_wav, InputSignal, SignalMonitor};
 use cantrip_engine::ports::MissingMicrophone;
 use std::ffi::OsString;
-use std::io::Read;
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+// One budget from the first SIGINT, including time spent queued for the worker.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const KILL_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A running `pw-record` process and its output path.
@@ -25,7 +28,7 @@ pub struct Recorder {
     signal_monitor: SignalMonitor,
     signal_monitor_warned: bool,
     disarmed: bool,
-    stop_requested: bool,
+    stop_requested: Option<Instant>,
 }
 
 impl Recorder {
@@ -52,7 +55,7 @@ impl Recorder {
             .args(pw_record_args(wav_path, source.as_deref()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .with_context(|| format!("starting pw-record for recording {}", wav_path.display()))?;
         let started_at = Instant::now();
@@ -65,7 +68,7 @@ impl Recorder {
             signal_monitor: SignalMonitor::new(started_at),
             signal_monitor_warned: false,
             disarmed: false,
-            stop_requested: false,
+            stop_requested: None,
         })
     }
     /// Measure the newest PCM appended by `pw-record`.
@@ -93,7 +96,7 @@ impl Recorder {
     }
 
     fn signal_stop(&mut self) -> Result<()> {
-        if self.stop_requested {
+        if self.stop_requested.is_some() {
             return Ok(());
         }
         if self
@@ -115,13 +118,22 @@ impl Recorder {
                 }
             })?;
         }
-        self.stop_requested = true;
+        self.stop_requested = Some(Instant::now());
         Ok(())
     }
 
     fn finish_stop(&mut self) -> Result<()> {
         self.signal_stop()?;
-        stop_child(&mut self.child)
+        let deadline = self.stop_requested.expect("stop was requested") + STOP_TIMEOUT;
+        let exit = stop_child(&mut self.child, deadline)?;
+        // The child has been reaped. Never signal it again, even if repair fails.
+        self.disarmed = true;
+        if matches!(exit, RecorderExit::Forced) {
+            finalize_wav_prefix(&self.wav_path)
+                .context("finalizing interrupted pw-record audio")?;
+            bail!("pw-record exceeded its stop budget; saved the accepted WAV prefix");
+        }
+        Ok(())
     }
 
     /// Stop the process cleanly and return the completed WAV path.
@@ -209,9 +221,8 @@ impl Drop for Recorder {
             return;
         }
         tracing::warn!("[Capture] recorder dropped while running; stopping pw-record");
-        if self.finish_stop().is_err() {
-            let _ = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGKILL) };
-            let _ = self.child.wait();
+        if let Err(error) = self.finish_stop() {
+            tracing::warn!("[Capture] abandoned recording stop failed: {error:#}");
         }
     }
 }
@@ -247,44 +258,83 @@ fn pw_record_args(wav_path: &Path, source: Option<&str>) -> Vec<OsString> {
     args
 }
 
-fn stop_child(child: &mut Child) -> Result<()> {
-    if let Some(status) = wait_for_exit(child)? {
-        // pw-record exits with status 1 on SIGINT by design (verified against
-        // PipeWire 1.5.85); the WAV is still finalized. Exit status is not a
-        // success signal here — verify_wav() on the produced file is.
-        if !status.success() {
-            let stderr = read_stderr(child)?;
-            tracing::debug!(
-                "[Capture] pw-record exit after SIGINT: {status}; stderr: {}",
-                display_stderr(&stderr)
-            );
-        }
-        return Ok(());
-    }
+enum RecorderExit {
+    Graceful,
+    Forced,
+}
 
-    let pid = child.id();
-    let kill_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    let kill_error = if kill_result == -1 {
-        Some(std::io::Error::last_os_error())
-    } else {
-        None
-    };
-    let status = child
-        .wait()
-        .context("waiting for pw-record after SIGKILL")?;
-    let stderr = read_stderr(child)?;
-    if let Some(error) = kill_error {
-        bail!(
-            "pw-record did not stop within {} seconds; SIGKILL failed: {error}; status {status}; stderr: {}",
-            STOP_TIMEOUT.as_secs(),
-            display_stderr(&stderr)
-        );
+fn stop_child(child: &mut Child, deadline: Instant) -> Result<RecorderExit> {
+    if let Some(status) = wait_for_exit(child, deadline)? {
+        // pw-record exits with status 1 on SIGINT even after finalizing its WAV.
+        tracing::debug!("[Capture] pw-record exited after SIGINT: {status}");
+        return Ok(RecorderExit::Graceful);
     }
-    bail!(
-        "pw-record did not stop within {} seconds; sent SIGKILL; status {status}; stderr: {}",
-        STOP_TIMEOUT.as_secs(),
-        display_stderr(&stderr)
+    tracing::warn!(
+        "[Capture] pw-record exceeded {} second stop budget; terminating and retaining accepted audio",
+        STOP_TIMEOUT.as_secs()
     );
+    child.kill().context("terminating stalled pw-record")?;
+    wait_for_exit(child, Instant::now() + KILL_TIMEOUT)?
+        .context("pw-record still running after SIGKILL; runtime audio left untouched")?;
+    Ok(RecorderExit::Forced)
+}
+
+/// Repair only the known pw-record PCM format, after the producer is reaped.
+/// Chunk offsets come from the file, never a presumed 44-byte header or RIFF
+/// size (libsndfile leaves that size stale until close). Keep complete frames.
+fn finalize_wav_prefix(path: &Path) -> Result<()> {
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let len = file.metadata()?.len();
+    let mut header = [0_u8; 12];
+    file.read_exact(&mut header)?;
+    if &header[..4] != b"RIFF" || &header[8..] != b"WAVE" {
+        bail!("interrupted recording is not RIFF/WAVE");
+    }
+    let mut position = 12_u64;
+    let mut pcm = false;
+    let data_offset = loop {
+        if position + 8 > len || position > 65_536 {
+            bail!("interrupted recording has no supported PCM data header");
+        }
+        file.seek(SeekFrom::Start(position))?;
+        let mut chunk = [0_u8; 8];
+        file.read_exact(&mut chunk)?;
+        let size = u64::from(u32::from_le_bytes(chunk[4..].try_into()?));
+        if &chunk[..4] == b"data" {
+            if !pcm {
+                bail!("interrupted recording is not 16 kHz mono PCM16");
+            }
+            break position + 8;
+        }
+        if &chunk[..4] == b"fmt " {
+            if size < 16 || position + 8 + size > len {
+                bail!("interrupted recording has an incomplete format header");
+            }
+            let mut format = [0_u8; 16];
+            file.read_exact(&mut format)?;
+            pcm = u16::from_le_bytes(format[0..2].try_into()?) == 1
+                && u16::from_le_bytes(format[2..4].try_into()?) == 1
+                && u32::from_le_bytes(format[4..8].try_into()?) == 16_000
+                && u32::from_le_bytes(format[8..12].try_into()?) == 32_000
+                && u16::from_le_bytes(format[12..14].try_into()?) == 2
+                && u16::from_le_bytes(format[14..16].try_into()?) == 16;
+        }
+        position += 8 + size + (size & 1);
+    };
+    let data_len = (len - data_offset) & !1;
+    let end = data_offset + data_len;
+    let riff_len =
+        u32::try_from(end - 8).context("interrupted recording exceeds RIFF size limit")?;
+    let data_len = u32::try_from(data_len)?;
+    // All validation precedes mutation. Never truncate an unfamiliar header.
+    file.set_len(end)?;
+    file.seek(SeekFrom::Start(data_offset - 4))?;
+    file.write_all(&data_len.to_le_bytes())?;
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(&riff_len.to_le_bytes())?;
+    file.sync_all()?;
+    tracing::warn!("[Capture] finalized interrupted recording PCM bytes={data_len}");
+    Ok(())
 }
 
 fn send_sigint(child: &Child) -> Result<()> {
@@ -298,8 +348,7 @@ fn send_sigint(child: &Child) -> Result<()> {
 }
 
 /// Return `Some(status)` when the process exits before the timeout.
-fn wait_for_exit(child: &mut Child) -> Result<Option<ExitStatus>> {
-    let deadline = Instant::now() + STOP_TIMEOUT;
+fn wait_for_exit(child: &mut Child, deadline: Instant) -> Result<Option<ExitStatus>> {
     loop {
         if let Some(status) = child.try_wait().context("waiting for pw-record")? {
             return Ok(Some(status));
@@ -311,25 +360,6 @@ fn wait_for_exit(child: &mut Child) -> Result<Option<ExitStatus>> {
     }
 }
 
-fn read_stderr(child: &mut Child) -> Result<String> {
-    let Some(mut stderr) = child.stderr.take() else {
-        return Ok(String::new());
-    };
-    let mut output = String::new();
-    stderr
-        .read_to_string(&mut output)
-        .context("reading pw-record stderr")?;
-    Ok(output.trim().to_owned())
-}
-
-fn display_stderr(stderr: &str) -> &str {
-    if stderr.is_empty() {
-        "(no stderr output)"
-    } else {
-        stderr
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use cantrip_engine::audio::SignalMonitor;
@@ -337,6 +367,139 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    fn slow_recorder(name: &str, delay: &str) -> super::Recorder {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let path = wav_path(name);
+        let mut audio = wav(&[1000, -1000, 2000, -2000]);
+        // libsndfile's live RIFF header excludes the not-yet-finalized chunks.
+        audio[4..8].copy_from_slice(&8_u32.to_le_bytes());
+        audio[40..44].copy_from_slice(&0_u32.to_le_bytes());
+        fs::write(&path, audio).unwrap();
+        let mut child = Command::new("python3")
+            .args([
+                "-c",
+                r#"
+import os, signal, struct, sys, time
+path, delay = sys.argv[1], float(sys.argv[2])
+def finish(signum, frame):
+    time.sleep(delay)
+    with open(path, 'r+b') as wav:
+        size = os.fstat(wav.fileno()).st_size
+        wav.seek(4); wav.write(struct.pack('<I', size - 8))
+        wav.seek(40); wav.write(struct.pack('<I', size - 44))
+    sys.exit(0)
+signal.signal(signal.SIGINT, finish)
+print('ready', flush=True)
+signal.pause()
+"#,
+            ])
+            .arg(&path)
+            .arg(delay)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready, "ready\n");
+        let mut recorder = recorder_for_test(path);
+        recorder.child.wait().unwrap();
+        recorder.child = child;
+        recorder
+    }
+
+    fn assert_retained_pcm(path: &std::path::Path) {
+        let mut reader = hound::WavReader::open(path).expect("retained WAV is recoverable");
+        assert_eq!(reader.spec().sample_rate, 16000);
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(
+            reader
+                .samples::<i16>()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>(),
+            [1000, -1000, 2000, -2000]
+        );
+    }
+
+    #[test]
+    fn slow_recorder_finishes_after_old_stop_timeout() {
+        let recorder = slow_recorder("slow-stop", "3.3");
+        let path = recorder.wav_path.clone();
+        assert_eq!(
+            recorder.stop().expect("wait for slow SIGINT finalization"),
+            path
+        );
+        assert_retained_pcm(&path);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn timed_out_recorder_retains_recoverable_pcm() {
+        let recorder = slow_recorder("forced-stop", "60");
+        let path = recorder.wav_path.clone();
+        assert!(recorder.stop().is_err(), "forced capture remains a failure");
+        assert_retained_pcm(&path);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn interrupted_wav_repair_scans_chunks_and_keeps_complete_frames() {
+        let path = wav_path("repair-chunks");
+        let mut audio = wav(&[1000, -1000, 2000, -2000]);
+        // An ancillary chunk puts PCM beyond byte 44.
+        audio.splice(36..36, *b"JUNK\x02\x00\x00\x00x\x00");
+        audio[4..8].copy_from_slice(&8_u32.to_le_bytes());
+        audio[50..54].copy_from_slice(&0_u32.to_le_bytes());
+        audio.push(123); // A torn frame is not accepted PCM.
+        fs::write(&path, audio).unwrap();
+        super::finalize_wav_prefix(&path).unwrap();
+        assert_retained_pcm(&path);
+        let finalized = fs::read(&path).unwrap();
+        super::finalize_wav_prefix(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), finalized, "repair is idempotent");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn interrupted_wav_repair_leaves_unknown_or_incomplete_headers_untouched() {
+        let path = wav_path("repair-invalid");
+        let original = wav(&[1000, -1000]);
+        let mut unknown_format = original.clone();
+        unknown_format[20] = 3; // Float, not pw-record's signed PCM16.
+        let mut missing_format = original.clone();
+        missing_format[12..16].copy_from_slice(b"JUNK");
+        let mut oversized_chunk = original.clone();
+        oversized_chunk[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        for audio in [
+            original[..30].to_vec(),
+            unknown_format,
+            missing_format,
+            oversized_chunk,
+        ] {
+            fs::write(&path, &audio).unwrap();
+            assert!(super::finalize_wav_prefix(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), audio);
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn abandoned_slow_recorder_repairs_prefix_without_restarting_stop_budget() {
+        let mut recorder = slow_recorder("abandoned-slow-stop", "60");
+        let path = recorder.wav_path.clone();
+        recorder.request_stop().unwrap();
+        // Model a worker queue that consumed the entire grace period.
+        recorder.stop_requested = Some(Instant::now() - super::STOP_TIMEOUT);
+        let requested = recorder.stop_requested;
+        recorder.request_stop().unwrap();
+        assert_eq!(recorder.stop_requested, requested);
+        drop(recorder);
+        assert_retained_pcm(&path);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn selected_microphone_matches_name_or_serial_but_not_reusable_node_id() {
@@ -401,7 +564,7 @@ mod tests {
             signal_monitor: SignalMonitor::new(started),
             signal_monitor_warned: false,
             disarmed: false,
-            stop_requested: false,
+            stop_requested: None,
         }
     }
 
@@ -456,7 +619,7 @@ mod tests {
             signal_monitor: SignalMonitor::new(started_at),
             signal_monitor_warned: false,
             disarmed: false,
-            stop_requested: false,
+            stop_requested: None,
         };
         assert_eq!(
             receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -520,7 +683,7 @@ mod tests {
             signal_monitor: SignalMonitor::new(started_at),
             signal_monitor_warned: false,
             disarmed: false,
-            stop_requested: false,
+            stop_requested: None,
         };
         assert_eq!(
             receiver

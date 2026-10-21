@@ -1754,7 +1754,7 @@ fn run_job(
                 let saved =
                     persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
                 let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
-                outcome.message = "Recording could not be finalized.".to_owned();
+                outcome.message = "Recording did not finish normally.".to_owned();
                 outcome.error = Some("capture-failed".to_owned());
                 outcome.artifacts = saved.artifacts;
                 describe_artifacts(&mut outcome);
