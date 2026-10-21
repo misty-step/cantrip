@@ -263,6 +263,9 @@ class Conversation:
             playing or self.now() - self.played_until < PLAYBACK_TAIL_S)
         if deaf or self.cantrip_take():
             self.endpointer.reset()   # on speakers, never hear the reply; keep the floor
+            # A provisional mark from a sound that never became speech must not hold the reply.
+            self.mark_speaking(False)
+            self.show_state(False)
             return
         event = self.endpointer.feed(frame)
         # Provisionally from the first loud frame, so a reply never starts over speech still being
