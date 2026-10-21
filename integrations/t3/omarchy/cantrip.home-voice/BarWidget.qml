@@ -5,7 +5,7 @@ import qs.Ui
 import qs.Commons
 
 // Shows when a voice conversation with the agent thread is active, and what it is doing:
-// "Live · listening", "Hands-free · Home thinking", "Home · recording". Plain text with one
+// "Hands-free · Home thinking", "Home · recording". Plain text with one
 // glyph, in the bar's own colors; nothing at rest except a dim marker while replies are muted.
 // `cantrip-t3 state` decides what it says (transcript-free JSON, one line).
 BarWidget {
@@ -86,10 +86,7 @@ BarWidget {
         onClicked: function(event) {
             if (!root.voice) return
             if (event.button === Qt.MiddleButton) {
-                // GPT-Live plays its own audio: there, middle click mutes the microphone instead.
-                Quickshell.execDetached(root.voice.mode === "live" ? ["cantrip-t3-live", "mute"] : ["cantrip-t3", "stop"])
-            } else if (root.voice.mode === "live") {
-                Quickshell.execDetached(["systemctl", "--user", "stop", "cantrip-t3-live.service"])
+                Quickshell.execDetached(["cantrip-t3", "stop"])
             } else if (root.voice.mode === "hands-free") {
                 Quickshell.execDetached(["systemctl", "--user", "stop", "cantrip-t3-converse.service"])
             }

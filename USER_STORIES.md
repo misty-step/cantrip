@@ -231,17 +231,7 @@ Evidence: `integrations/t3/cantrip_t3.py`, `integrations/t3/test_cantrip_t3.py`,
 
 ## US-016 Hold a live, interruptible conversation backed by my agent thread
 
-Statement: When I want to think out loud with my coordinating agent, I want a live voice conversation I can interrupt, while every real request still goes through that agent.
-
-Criteria:
-1. WHEN a live session starts, THE SYSTEM SHALL use client delegation and seed it with the configured summary as developer context.
-2. WHEN the voice model delegates, THE SYSTEM SHALL send the user's speech since the previous delegation to the configured thread exactly once per delegation, and SHALL NOT send an empty request.
-3. WHEN that run completes, THE SYSTEM SHALL return its final reply as plain-speech commentary in pieces within the append limit; IF it fails or the thread is unreachable, THEN THE SYSTEM SHALL say so without claiming success.
-4. WHEN the session is stopped, THE SYSTEM SHALL close it gracefully and record billed seconds; the microphone toggle SHALL mute input without ending the session.
-
-No-gos: no transcript or reply text in logs; the voice model never acts or decides on its own.
-
-Evidence: `integrations/t3/cantrip_t3_live.py`, `integrations/t3/test_cantrip_t3_live.py`, `integrations/t3/README.md`
+Live GPT-Live conversation moved to https://github.com/misty-step/live-voice
 
 ## US-017 Talk with my agent thread hands-free, turn by turn
 
@@ -259,13 +249,13 @@ Evidence: `integrations/t3/cantrip_t3_converse.py`, `integrations/t3/test_cantri
 
 ## US-018 See at a glance when I am talking with my agent
 
-Statement: When a voice conversation with my coordinating agent is running, I want my desktop bar to say so plainly, and what it is doing, so I never wonder whether it is listening or billing.
+Statement: When a voice conversation with my coordinating agent is running, I want my desktop bar to say so plainly, and what it is doing, so I never wonder whether it is listening.
 
 Criteria:
-1. WHILE a live, hands-free or push-to-talk exchange is active, THE SYSTEM SHALL show its mode and phase in the bar (listening, hearing you, recording, transcribing, thinking, speaking) and whether the microphone or replies are muted.
+1. WHILE a hands-free or push-to-talk exchange is active, THE SYSTEM SHALL show its mode and phase in the bar (listening, hearing you, recording, transcribing, thinking, speaking) and whether replies are muted.
 2. WHEN nothing is active, THE SYSTEM SHALL show nothing, except a dim marker while spoken replies are muted.
 3. IF a session's process has ended, THEN THE SYSTEM SHALL NOT show it, whatever its state file says.
-4. WHEN a live or hands-free session starts or ends, THE SYSTEM SHALL show a desktop notification.
+4. WHEN a hands-free session starts or ends, THE SYSTEM SHALL show a desktop notification.
 
 No-gos: no transcript or reply text in the bar or its status; no new colors beyond the bar's own.
 

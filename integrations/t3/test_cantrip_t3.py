@@ -530,13 +530,13 @@ class ReviewRegressionTest(Base):
 class VoiceStatusTest(Base):
     """The desktop bar's line: which voice mode is active and what it is doing."""
 
-    def session(self, mode, phase, muted=False):
+    def session(self, mode, phase):
         import subprocess
-        name = {"live": "cantrip_t3_live", "hands-free": "cantrip_t3_converse"}[mode]
+        name = {"hands-free": "cantrip_t3_converse"}[mode]
         process = subprocess.Popen(["python3", "-c", "import time; time.sleep(30)", name])
         self.addCleanup(process.kill)
         t3.write_json(t3.runtime_dir() / ("session-" + mode + ".json"),
-                      {"mode": mode, "pid": process.pid, "phase": phase, "muted": muted})
+                      {"mode": mode, "pid": process.pid, "phase": phase, "muted": False})
         return process
 
     def status(self, snapshot=None):
@@ -551,22 +551,12 @@ class VoiceStatusTest(Base):
         self.assertEqual(state["segments"][0]["tone"], "dim")
         self.assertEqual(state["segments"][0]["glyph"], t3.GLYPHS["replies-muted"])
 
-    def test_live_session_phases(self):
-        for phase, words in (("listening", "Live · listening"), ("thinking", "Live · Home thinking"),
-                             ("speaking", "Live · Home speaking")):
-            self.session("live", phase)
-            state = self.status()
-            self.assertEqual((state["mode"], state["segments"][0]["text"]), ("live", words))
-        self.session("live", "listening", muted=True)
-        self.assertEqual(self.status()["segments"][-1]["text"], "mic muted")
-        self.assertEqual(self.status()["segments"][-1]["glyph"], t3.GLYPHS["mic-muted"])
-
     def test_muted_replies_never_look_like_a_muted_microphone(self):
         t3.set_mute("on")
         self.session("hands-free", "listening")
         last = self.status()["segments"][-1]
         self.assertEqual((last["text"], last["glyph"]), ("replies muted", t3.GLYPHS["replies-muted"]))
-        self.assertNotEqual(t3.GLYPHS["replies-muted"], t3.GLYPHS["mic-muted"])
+        self.assertFalse(self.status()["mic_muted"])
 
     def test_a_stale_pending_take_is_not_shown_as_thinking(self):
         t3.write_json(t3.state_dir() / "pending" / "take-1.json",
@@ -584,7 +574,7 @@ class VoiceStatusTest(Base):
         self.assertEqual(out, "False")
 
     def test_a_dead_sessions_file_is_ignored(self):
-        process = self.session("live", "listening")
+        process = self.session("hands-free", "listening")
         process.kill()
         process.wait()
         self.assertFalse(self.status()["visible"])

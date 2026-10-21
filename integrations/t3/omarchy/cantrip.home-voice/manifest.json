@@ -4,7 +4,7 @@
   "name": "Cantrip Home Voice",
   "version": "1.0.0",
   "author": "Cantrip contributors",
-  "description": "Shows when you are talking with your agent thread: live, hands-free or push-to-talk, and whether it is listening, thinking or speaking",
+  "description": "Shows when you are talking with your agent thread: hands-free or push-to-talk, and whether it is listening, thinking or speaking",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Cantrip Home Voice",
-    "description": "Hidden at rest; left click ends a live or hands-free session; middle click stops speech, or toggles the mic in a live session",
+    "description": "Hidden at rest; left click ends a hands-free session; middle click stops speech",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "center"

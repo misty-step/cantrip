@@ -859,7 +859,7 @@ def set_mute(action):
 
 # ── voice status for the desktop bar ──────────────────────────────────────
 
-SESSION_MODES = {"live": "cantrip_t3_live", "hands-free": "cantrip_t3_converse"}
+SESSION_MODES = {"hands-free": "cantrip_t3_converse"}
 SESSION_PHASES = ("listening", "hearing", "thinking", "speaking")
 
 
@@ -904,7 +904,7 @@ PTT_WORDS = {"recording": "recording", "transcribing": "transcribing", "thinking
 GLYPHS = {"listening": "\U000f036c", "hearing": "\U000f036c", "recording": "\U000f036c",   # nf-md-microphone
           "transcribing": "\U000f0150", "thinking": "\U000f0150",                            # nf-md-clock_outline
           "speaking": "\U000f057e",                                                           # nf-md-volume_high
-          "mic-muted": "\U000f036d", "replies-muted": "\U000f0581"}                          # microphone_off, volume_off
+          "replies-muted": "\U000f0581"}                                                    # volume_off
 OWED_SECONDS = 10 * 60   # a reply owed longer than this is no longer shown as "thinking"
 
 
@@ -915,15 +915,9 @@ def voice_status(config, snapshot=None, now=time.time):
     pending = [record for record in pending if record and now() - (record.get("sent_at") or 0) < OWED_SECONDS]
     speaking = player_live()
     replies_muted = is_muted()
-    mic_muted = False
     mode = phase = None
-    live = session_state("live")
     hands_free = session_state("hands-free")
-    if live:
-        mode, phase = "live", live["phase"]
-        mic_muted = bool(live.get("muted"))
-        replies_muted = False   # live speech is GPT-Live's own; reply muting doesn't apply
-    elif hands_free:
+    if hands_free:
         mode = "hands-free"
         phase = hands_free["phase"]
         if phase == "listening":
@@ -939,9 +933,9 @@ def voice_status(config, snapshot=None, now=time.time):
             mode, phase = "push-to-talk", "speaking"
         elif pending:
             mode, phase = "push-to-talk", "thinking"
-    names = {"live": "Live", "hands-free": "Hands-free", "push-to-talk": label}
-    muted_segments = ([{"glyph": GLYPHS["mic-muted"], "text": "mic muted", "tone": "dim"}] if mic_muted else []) + (
-        [{"glyph": GLYPHS["replies-muted"], "text": "replies muted", "tone": "dim"}] if replies_muted else [])
+    names = {"hands-free": "Hands-free", "push-to-talk": label}
+    muted_segments = ([{"glyph": GLYPHS["replies-muted"], "text": "replies muted", "tone": "dim"}]
+                      if replies_muted else [])
     if not mode:
         return {"visible": bool(muted_segments), "mode": None, "phase": None, "mic_muted": False,
                 "replies_muted": replies_muted, "segments": muted_segments,
@@ -949,13 +943,12 @@ def voice_status(config, snapshot=None, now=time.time):
     words = PTT_WORDS[phase] if mode == "push-to-talk" else PHASE_WORDS[phase].format(label=label)
     segments = [{"glyph": GLYPHS[phase], "text": names[mode] + " · " + words,
                  "tone": "active" if phase in ("listening", "hearing", "recording") else "normal"}] + muted_segments
-    about = {"live": "Live conversation with " + label, "hands-free": "Hands-free conversation with " + label,
+    about = {"hands-free": "Hands-free conversation with " + label,
              "push-to-talk": "Push-to-talk to " + label}[mode]
-    clicks = {"live": "Left click ends the session; middle click mutes or unmutes the microphone.",
-              "hands-free": "Left click ends hands-free; middle click stops speech.",
+    clicks = {"hands-free": "Left click ends hands-free; middle click stops speech.",
               "push-to-talk": "Middle click stops speech."}[mode]
     flags = "".join(", " + segment["text"] for segment in muted_segments)
-    return {"visible": True, "mode": mode, "phase": phase, "mic_muted": mic_muted, "replies_muted": replies_muted,
+    return {"visible": True, "mode": mode, "phase": phase, "mic_muted": False, "replies_muted": replies_muted,
             "segments": segments, "tooltip": about + ": " + words + flags + ". " + clicks}
 
 
