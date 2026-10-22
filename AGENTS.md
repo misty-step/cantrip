@@ -41,3 +41,7 @@ work before starting. Link the result and sanitized verification evidence from
 the existing work record when available and from the PR/session.
 Historical issues are context, not an intake queue. Never commit secrets.
 Run `upkeep where <task-kind>` before dispatching.
+
+## No fallbacks
+
+No fallbacks, backup paths or masking safety nets. Write the one best solution: direct, clean, simple, elegant. If it fails, it must fail loudly and visibly so we can fix it. Security checks (auth, signatures, schema validation) stay, but fail loudly, never silently.
