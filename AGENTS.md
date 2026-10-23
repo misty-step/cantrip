@@ -40,3 +40,4 @@ Work from the operator's current request. Check current code and overlapping
 work before starting. Link the result and sanitized verification evidence from
 the existing work record when available and from the PR/session.
 Historical issues are context, not an intake queue. Never commit secrets.
+Run `upkeep where <task-kind>` before dispatching.
