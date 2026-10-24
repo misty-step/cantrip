@@ -69,8 +69,6 @@ keys. Verify them only on an explicit request, with the owner's chosen provider.
 - Opt-in cleanup and cloud STT (US-007 to US-010, US-014): need a configured
   endpoint; local cleanup through an OpenAI-compatible localhost server is the
   free route.
-- Handoff targets and the T3 voice integration (US-011, US-015,
-  `integrations/t3/`; it uses a T3 MCP token and a speech provider key from
-  `pass`, which are integration credentials, not a Cantrip sign-in), Omarchy
-  bar (US-012, `integrations/omarchy/`).
+- Handoff targets (US-011) and the Omarchy bar (US-012,
+  `integrations/omarchy/`).
 - macOS app (US-013): `scripts/verify-macos` on a Mac.

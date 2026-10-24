@@ -212,55 +212,6 @@ No-gos: no transcript or child output in logs or telemetry; no desktop fallback;
 
 Evidence: `crates/engine/src/engine.rs`, `crates/engine/src/config.rs`, `crates/engine/src/ipc.rs`, `src/hud.rs`, `src/theme.rs`, `docs/decisions/0027-named-handoff-targets.md`, `docs/decisions/historical/0028-handoff-destination-tint.md`, `docs/decisions/0030-local-only-handoff-targets.md`
 
-## US-015 Talk to a T3 agent thread and hear its reply
-
-Statement: When I want my coordinating agent, I want to press a key, speak, and
-hear its answer, without opening its thread or touching my clipboard or focused window.
-
-Criteria:
-1. WHEN a take is handed to the T3 handoff command, THE SYSTEM SHALL queue exactly one message on the configured thread, keyed by `CANTRIP_TAKE_ID`, so a retried or recovered take never posts a second message.
-2. WHEN T3 acknowledges the message, THE SYSTEM SHALL exit the handoff without waiting for the reply.
-3. WHEN that message's run completes, THE SYSTEM SHALL speak its final assistant message once, as plain sentences, and SHALL NOT speak it again after a restart.
-4. WHILE reply speech is muted, THE SYSTEM SHALL record replies without speaking them; muting or stopping SHALL silence current speech at once, and unmuting SHALL let later or repeated replies speak.
-5. WHILE Cantrip is recording, THE SYSTEM SHALL hold reply speech, and SHALL stop speech when a take starts.
-6. IF the remote voice fails or stalls, THEN THE SYSTEM SHALL finish the reply with local speech; IF the run fails, THEN THE SYSTEM SHALL say so.
-
-No-gos: no transcript or reply text in logs or local state; no secrets in files; no speech of replies that finished long before the collector saw them.
-
-Evidence: `integrations/t3/cantrip_t3.py`, `integrations/t3/test_cantrip_t3.py`, `integrations/t3/README.md`
-
-## US-016 Hold a live, interruptible conversation backed by my agent thread
-
-Live GPT-Live conversation moved to https://github.com/misty-step/live-voice
-
-## US-017 Talk with my agent thread hands-free, turn by turn
-
-Statement: When I am talking things through with my coordinating agent, I want to just speak and hear its answers, without pressing a key for every sentence.
-
-Criteria:
-1. WHILE a hands-free session runs, THE SYSTEM SHALL end an utterance after configured silence, ignore bursts shorter than the configured minimum, and send each transcribed utterance to the configured thread as its own take.
-2. THE SYSTEM SHALL send no audio off the machine except detected speech, and SHALL send nothing for an empty transcript.
-3. WHILE a reply is playing on speakers, THE SYSTEM SHALL NOT treat microphone input as speech; WITH headphones configured, speaking SHALL stop the reply.
-4. IF transcription or sending fails, THEN THE SYSTEM SHALL ask the user to repeat; the session SHALL end after the configured idle time or when stopped.
-
-No-gos: no transcript or audio in logs or retained files; no automatic fallback to another provider.
-
-Evidence: `integrations/t3/cantrip_t3_converse.py`, `integrations/t3/test_cantrip_t3_converse.py`, `integrations/t3/README.md`
-
-## US-018 See at a glance when I am talking with my agent
-
-Statement: When a voice conversation with my coordinating agent is running, I want my desktop bar to say so plainly, and what it is doing, so I never wonder whether it is listening.
-
-Criteria:
-1. WHILE a hands-free or push-to-talk exchange is active, THE SYSTEM SHALL show its mode and phase in the bar (listening, hearing you, recording, transcribing, thinking, speaking) and whether replies are muted.
-2. WHEN nothing is active, THE SYSTEM SHALL show nothing, except a dim marker while spoken replies are muted.
-3. IF a session's process has ended, THEN THE SYSTEM SHALL NOT show it, whatever its state file says.
-4. WHEN a hands-free session starts or ends, THE SYSTEM SHALL show a desktop notification.
-
-No-gos: no transcript or reply text in the bar or its status; no new colors beyond the bar's own.
-
-Evidence: `integrations/t3/cantrip_t3.py`, `integrations/t3/omarchy/cantrip.home-voice/BarWidget.qml`, `integrations/t3/test_cantrip_t3.py`
-
 ## Capability: Native macOS Clipboard Dictation
 
 ## US-013 Dictate on Mac and deliberately paste into my editor

@@ -859,7 +859,7 @@ fn transcribe_remote_preserves_float_samples_across_chunks() {
         sample_format: hound::SampleFormat::Float,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 31 * 8_000, true, Duration::ZERO);
+    assert_bounded_transcription(spec, 310 * 8_000, true, Duration::ZERO);
 }
 
 #[test]
@@ -869,7 +869,7 @@ fn transcribe_remote_pads_odd_sized_pcm_chunks_without_adding_samples() {
         bits_per_sample: 8,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 31 * 8_001, true, Duration::ZERO);
+    assert_bounded_transcription(spec, 310 * 8_001, true, Duration::ZERO);
 }
 
 #[derive(Clone)]
@@ -891,8 +891,8 @@ impl Write for LogCapture {
 #[test]
 fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_body() {
     let spec = native_spec();
-    let fixture = WavFixture::new(spec, 70 * 16_000).with_oversized_metadata();
-    let (endpoint, server) = transcription_server(spec, 70 * 16_000, Some(2), Duration::ZERO);
+    let fixture = WavFixture::new(spec, 12 * 60 * 16_000).with_oversized_metadata();
+    let (endpoint, server) = transcription_server(spec, 12 * 60 * 16_000, Some(2), Duration::ZERO);
     let (log_tx, log_rx) = mpsc::channel();
     let capture = LogCapture(log_tx);
     let subscriber = tracing_subscriber::fmt()
@@ -999,7 +999,7 @@ fn transcribe_remote_accepts_valid_slow_response_body() {
 
 #[test]
 fn transcribe_remote_failure_without_earlier_text_remains_an_error() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
+    let fixture = WavFixture::new(native_spec(), 310 * 16_000).with_oversized_metadata();
     let (endpoint, server) = mock_server_multi(vec![ok_json(r#"{"text":" "}"#), upload_error()]);
     let error = stt::transcribe_remote(
         &fixture.path,
@@ -1080,7 +1080,7 @@ fn cloud_payment_and_unknown_connection_do_not_invent_budget_evidence() {
 
 #[test]
 fn transcribe_cli_keeps_cloud_partial_when_the_local_fallback_model_is_missing() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
+    let fixture = WavFixture::new(native_spec(), 310 * 16_000).with_oversized_metadata();
     let (endpoint, server) = mock_server_multi(vec![
         ok_json(r#"{"text":"usable cloud prefix"}"#),
         "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1285,7 +1285,7 @@ fn remote_progress_completes_only_after_the_backend_response() {
 
 #[test]
 fn cancelling_a_blocked_remote_chunk_keeps_its_text_and_stops_later_uploads() {
-    let fixture = WavFixture::new(native_spec(), 70 * 16_000).with_oversized_metadata();
+    let fixture = WavFixture::new(native_spec(), 310 * 16_000).with_oversized_metadata();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server_listener = listener.try_clone().unwrap();
