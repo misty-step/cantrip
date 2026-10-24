@@ -1,0 +1,17 @@
+2026-10-20T22:27:06.659181Z  INFO cantrip_engine::engine: [Daemon] starting cantrip 0.1.8
+2026-10-20T22:27:09.601401Z  INFO cantrip_engine::engine: [Daemon] listening
+2026-10-20T22:27:09.602267Z  INFO cantrip_engine::engine: [Daemon] command=ping sender=pid=1044773 exe=/home/phaedrus/.cache/tmp/vc/p172325/prefix/bin/cantrip parents=python3:1044665<-bash:1044641<-claude:3441636
+2026-10-20T22:27:09.604159Z  INFO cantrip::daemon: [Daemon] HUD not running; spawned it
+2026-10-20T22:27:09.782965Z  INFO cantrip_engine::engine: [Daemon] command=start handoff=none sender=pid=1046233 exe=/home/phaedrus/.cache/tmp/vc/p172325/prefix/bin/cantrip parents=python3:1046083<-bash:1044641<-claude:3441636
+2026-10-20T22:27:09.783405Z  INFO cantrip::capture::linux: [Capture] recording started
+2026-10-20T22:27:09.783431Z  INFO cantrip_engine::engine: [Daemon] state idle -> recording
+2026-10-20T22:27:12.195119Z  INFO cantrip_engine::stt: [STT] model loaded in 2593 ms
+2026-10-20T22:27:22.563696Z  INFO cantrip_engine::engine: [Daemon] command=stop sender=pid=1051829 exe=/home/phaedrus/.cache/tmp/vc/p172325/prefix/bin/cantrip parents=python3:1046083<-bash:1044641<-claude:3441636
+2026-10-20T22:27:22.563776Z  INFO cantrip_engine::engine: [Daemon] state recording -> processing reason=stop
+2026-10-20T22:27:25.567937Z  WARN cantrip::capture::linux: [Capture] recorder dropped while running; stopping pw-record
+2026-10-20T22:27:30.060696Z  WARN cantrip_engine::engine: [Daemon] artifact persistence failed class=storage-failed
+2026-10-20T22:27:32.433300Z  INFO cantrip_engine::engine: [Daemon] operation settled completeness=Failed delivery=None cleanup=Off
+2026-10-20T22:27:35.756609Z  INFO cantrip_engine::engine: [Daemon] command=copy sender=pid=1057130 exe=/home/phaedrus/.cache/tmp/vc/p172325/prefix/bin/cantrip parents=python3:1046083<-bash:1044641<-claude:3441636
+2026-10-20T22:27:35.756647Z  INFO cantrip_engine::engine: [Daemon] command rejected class=no-transcript
+2026-10-20T22:39:12.763370Z  INFO cantrip_engine::engine: [Daemon] command=recover sender=pid=1466427 exe=/home/phaedrus/.cache/tmp/vc/p172325/prefix/bin/cantrip parents=python3:1466407<-bash:1466346<-claude:3441636
+2026-10-20T22:39:12.763464Z  INFO cantrip_engine::engine: [Daemon] command rejected class=no-recording

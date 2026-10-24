@@ -1,0 +1,40 @@
+Cantrip Settings
+
+Saved speech, deliberate actions.
+
+Ready
+Stop recording Cancel — do not deliver
+
+Copied instead. Paste when ready.
+
+Dismiss outcome
+
+Recordings
+
+Only recording details are shown here. Copying replaces your
+clipboard; nothing is typed into another app.
+
+Refresh recordings
+
+1.0 MiB of retained audio. Kept until recovery or explicit Forget;
+never automatically deleted.
+
+[|Include completed history
+
+2026- 20:19:00 local  Om 03s
+no transcript saved; audio saved; pending
+
+2026-10-20 20:19:06 local
+
+Duration: 6m 025
+
+Transcript: no transcript saved
+Audio: not retained
+
+Recording T0: OUTO2SASSIST2ISATORT 25177226
+
+Copy this transcript
+
+Recover locally to clipboard
+
+Uses tnstalled Parakeet. Audlo stays here; o clowd cleanp.
