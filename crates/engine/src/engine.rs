@@ -3281,7 +3281,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let target = crate::config::HandoffTarget {
             command: vec![executable.to_str().unwrap().to_owned()],
-            timeout_seconds: 1,
+            timeout_seconds: 10,
             label: None,
             local_only: false,
         };
@@ -3406,10 +3406,18 @@ mod tests {
             let target = crate::config::HandoffTarget {
                 command: vec![target.command[0].clone(), seen.display().to_string()],
                 local_only,
+                // The receiver only writes one short string; a one-second budget
+                // is flaky on a busy host and does not test timeout behavior here.
+                timeout_seconds: 10,
                 ..target.clone()
             };
             let report = deliver_handoff("words", &target, "take", false, &AtomicBool::new(false));
-            assert_eq!(report.delivery, Delivery::HandedOff);
+            assert_eq!(
+                report.delivery,
+                Delivery::HandedOff,
+                "delivery error: {:?}",
+                report.error
+            );
             assert_eq!(fs::read_to_string(&seen).unwrap(), expected);
         }
         fs::remove_dir_all(root).unwrap();
@@ -3590,6 +3598,7 @@ mod tests {
         let (root, mut target) = handoff_fixture("printf '%s' \"$$\" > \"$1\"\nexec sleep 30");
         let pid_file = root.join("pid");
         target.command.push(pid_file.display().to_string());
+        target.timeout_seconds = 5;
         let report = deliver_handoff(
             "private words",
             &target,
@@ -3610,6 +3619,7 @@ mod tests {
         let (root, mut target) = handoff_fixture("sleep 30 &\nprintf '%s' \"$!\" > \"$1\"\nwait");
         let pid_file = root.join("pid");
         target.command.push(pid_file.display().to_string());
+        target.timeout_seconds = 5;
         let report = deliver_handoff(
             "private words",
             &target,
