@@ -951,18 +951,91 @@ fn doctor() -> Result<()> {
     Ok(())
 }
 
-fn handoff_diagnosis(name: &str, target: &cantrip_engine::config::HandoffTarget) -> String {
-    let executable = &target.command[0];
-    let ready = fs::metadata(executable)
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
-    format!(
-        "handoff.{name}: {} (command={executable})",
-        if ready {
-            "ready"
-        } else {
-            "blocked — executable missing or not executable"
+fn executable_ready(command: &str) -> bool {
+    let is_executable = |path: &Path| {
+        fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
+    if command.contains('/') {
+        return is_executable(Path::new(command));
+    }
+    env::var_os("PATH")
+        .is_some_and(|paths| env::split_paths(&paths).any(|dir| is_executable(&dir.join(command))))
+}
+
+/// Only `pass-env` uses `--` to separate its options from the command it runs.
+/// A directly spawned executable keeps its own `--` arguments untouched.
+const HANDOFF_LAUNCHER: &str = "pass-env";
+
+fn handoff_target_index(command: &[String]) -> Option<usize> {
+    let launcher = command.first()?;
+    let name = Path::new(launcher).file_name()?.to_str()?;
+    if name == HANDOFF_LAUNCHER {
+        let separator = command.iter().position(|arg| arg == "--")?;
+        (separator + 1 < command.len()).then_some(separator + 1)
+    } else {
+        Some(0)
+    }
+}
+
+/// A handoff may run `python3 /path/script.py`; the interpreter is not the
+/// whole story. Return the first absolute script operand, ignoring modes that
+/// consume code or a module instead of a file.
+fn interpreter_script(command: &[String], executable_index: usize) -> Option<&str> {
+    let executable = command.get(executable_index)?;
+    let name = Path::new(executable).file_name()?.to_str()?;
+    if !matches!(
+        name,
+        "python" | "python3" | "sh" | "bash" | "node" | "perl" | "ruby" | "php"
+    ) {
+        return None;
+    }
+    for arg in command.iter().skip(executable_index + 1) {
+        if matches!(
+            arg.as_str(),
+            "-c" | "-m" | "-e" | "-s" | "--eval" | "--execute"
+        ) {
+            return None;
         }
-    )
+        if arg.starts_with('-') {
+            continue;
+        }
+        return arg.starts_with('/').then_some(arg.as_str());
+    }
+    None
+}
+
+fn handoff_diagnosis(name: &str, target: &cantrip_engine::config::HandoffTarget) -> String {
+    let launcher = target
+        .command
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default();
+    let target_index = handoff_target_index(&target.command);
+    let executable = target_index
+        .and_then(|index| target.command.get(index))
+        .map(String::as_str);
+    let missing_script = target_index
+        .and_then(|index| interpreter_script(&target.command, index))
+        .filter(|path| !Path::new(path).is_file());
+    let missing = match target_index {
+        None => Some(""),
+        Some(_) if !executable_ready(launcher) => Some(launcher),
+        Some(_) if !executable_ready(executable.unwrap_or_default()) => {
+            Some(executable.unwrap_or_default())
+        }
+        Some(_) => missing_script,
+    };
+    let status = match missing {
+        Some("") => "blocked — required command or script missing".to_owned(),
+        Some(path) => format!("blocked — required command or script missing: {path}"),
+        None => "ready".to_owned(),
+    };
+    let command = match executable {
+        Some(executable) if executable != launcher => format!("{launcher} -> {executable}"),
+        _ => launcher.to_owned(),
+    };
+    format!("handoff.{name}: {status} (command={command})")
 }
 
 #[cfg(target_os = "linux")]
@@ -1182,6 +1255,136 @@ mod tests {
         assert!(handoff_diagnosis("pepper", &target).contains("handoff.pepper: ready"));
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(handoff_diagnosis("pepper", &target).contains("blocked"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn doctor_checks_an_interpreters_script_after_a_launcher() {
+        let root = PathBuf::from(env::var_os("HOME").unwrap())
+            .join(".cache/tmp")
+            .join(format!("cantrip-doctor-script-{}", recovery::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let launcher = root.join("pass-env");
+        let python = root.join("python3");
+        for executable in [&launcher, &python] {
+            fs::write(executable, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let missing = root.join("missing-script.py");
+        let target = cantrip_engine::config::HandoffTarget {
+            command: vec![
+                launcher.display().to_string(),
+                "--".to_owned(),
+                python.display().to_string(),
+                missing.display().to_string(),
+            ],
+            timeout_seconds: 15,
+            label: None,
+            local_only: false,
+        };
+        let line = handoff_diagnosis("maren", &target);
+        assert!(line.contains("blocked"), "{line}");
+        assert!(line.contains("missing-script.py"), "{line}");
+        fs::write(&missing, "# script\n").unwrap();
+        assert!(handoff_diagnosis("maren", &target).contains("ready"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn doctor_checks_the_handoff_target_after_a_launcher() {
+        let root = PathBuf::from(env::var_os("HOME").unwrap())
+            .join(".cache/tmp")
+            .join(format!("cantrip-doctor-target-{}", recovery::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let launcher = root.join("pass-env");
+        fs::write(&launcher, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+        let missing = root.join("missing-target");
+        let target = cantrip_engine::config::HandoffTarget {
+            command: vec![
+                launcher.display().to_string(),
+                "--".to_owned(),
+                missing.display().to_string(),
+            ],
+            timeout_seconds: 15,
+            label: None,
+            local_only: false,
+        };
+        let line = handoff_diagnosis("home", &target);
+        assert!(line.contains("blocked"), "{line}");
+        assert!(line.contains("missing-target"), "{line}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn doctor_does_not_reinterpret_a_direct_commands_double_dash() {
+        let root = PathBuf::from(env::var_os("HOME").unwrap())
+            .join(".cache/tmp")
+            .join(format!("cantrip-doctor-direct-{}", recovery::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("receiver");
+        fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = cantrip_engine::config::HandoffTarget {
+            command: vec![
+                executable.display().to_string(),
+                "--".to_owned(),
+                "argument".to_owned(),
+            ],
+            timeout_seconds: 15,
+            label: None,
+            local_only: false,
+        };
+        assert!(handoff_diagnosis("direct", &target).contains("ready"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn doctor_skips_interpreter_code_and_module_modes() {
+        let root = PathBuf::from(env::var_os("HOME").unwrap())
+            .join(".cache/tmp")
+            .join(format!("cantrip-doctor-inline-{}", recovery::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let launcher = root.join("pass-env");
+        let python = root.join("python3");
+        for executable in [&launcher, &python] {
+            fs::write(executable, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let target = cantrip_engine::config::HandoffTarget {
+            command: vec![
+                launcher.display().to_string(),
+                "--".to_owned(),
+                python.display().to_string(),
+                "-c".to_owned(),
+                "print(1)".to_owned(),
+                "/not/a/script".to_owned(),
+            ],
+            timeout_seconds: 15,
+            label: None,
+            local_only: false,
+        };
+        assert!(handoff_diagnosis("inline", &target).contains("ready"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn doctor_blocks_a_launcher_without_a_target() {
+        let root = PathBuf::from(env::var_os("HOME").unwrap())
+            .join(".cache/tmp")
+            .join(format!("cantrip-doctor-empty-{}", recovery::new_id()));
+        fs::create_dir_all(&root).unwrap();
+        let launcher = root.join("pass-env");
+        fs::write(&launcher, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = cantrip_engine::config::HandoffTarget {
+            command: vec![launcher.display().to_string(), "--".to_owned()],
+            timeout_seconds: 15,
+            label: None,
+            local_only: false,
+        };
+        let line = handoff_diagnosis("empty", &target);
+        assert!(line.contains("blocked"), "{line}");
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -21,6 +21,17 @@ const SAMPLE_RATE: f32 = 16_000.0;
 /// crashed the ONNX encoder (~400s failed; ~180s previously worked). Stay
 /// well under that cliff with energy-based splits near this target.
 const LOCAL_CHUNK_SECS: f32 = 30.0;
+/// Target chunk length for over-cap cloud uploads. A WAV that fits the upload
+/// cap is sent unchanged; only larger files split. Multi-minute chunks keep
+/// the request count low, while local suffix inference re-splits at its own
+/// 30-second target.
+const PRODUCTION_REMOTE_CHUNK_SECS: f32 = 300.0;
+#[cfg(not(test))]
+const REMOTE_CHUNK_SECS: f32 = PRODUCTION_REMOTE_CHUNK_SECS;
+// Unit fixtures stay small and fast; integration tests exercise the
+// production multi-minute plan with real long WAVs.
+#[cfg(test)]
+const REMOTE_CHUNK_SECS: f32 = LOCAL_CHUNK_SECS;
 /// Search window around the target for a low-energy split point.
 const LOCAL_CHUNK_SEARCH_SECS: f32 = 3.0;
 /// Minimum residual kept as its own chunk.
@@ -457,11 +468,15 @@ pub(crate) fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
 
 /// Plan inclusive-exclusive sample ranges for energy-adaptive chunks.
 fn plan_chunks(samples: &[f32]) -> Vec<(usize, usize)> {
-    plan_chunks_with_limit(samples, usize::MAX)
+    plan_chunks_with_limit(samples, usize::MAX, LOCAL_CHUNK_SECS)
 }
 
-fn plan_chunks_with_limit(samples: &[f32], max_frames: usize) -> Vec<(usize, usize)> {
-    let chunk_len = ((LOCAL_CHUNK_SECS * SAMPLE_RATE) as usize).min(max_frames);
+fn plan_chunks_with_limit(
+    samples: &[f32],
+    max_frames: usize,
+    chunk_secs: f32,
+) -> Vec<(usize, usize)> {
+    let chunk_len = ((chunk_secs * SAMPLE_RATE) as usize).min(max_frames);
     let min_len = ((LOCAL_MIN_CHUNK_SECS * SAMPLE_RATE) as usize).min(chunk_len);
     if samples.is_empty() {
         return Vec::new();
@@ -750,9 +765,10 @@ fn transcribe_remote_attempt(
         "WAV frame exceeds the remote upload size limit"
     );
 
-    let short_frames = source.sample_rate as usize * LOCAL_CHUNK_SECS as usize;
+    let remote_chunk_frames = source.sample_rate as usize * REMOTE_CHUNK_SECS as usize;
     // The local encoder limit must not multiply cloud HTTP round trips.
-    // Over-cap native uploads retain the bounded plan for local suffix inference.
+    // Over-cap uploads use a multi-minute target; local suffix inference
+    // re-splits its range at the local encoder's own limit.
     let unchanged = source.file_len <= wav_budget as u64;
     let mut native_samples = None;
     let ranges = if unchanged {
@@ -769,13 +785,13 @@ fn transcribe_remote_attempt(
                 total: 0,
             }));
         }
-        let ranges = plan_chunks_with_limit(&samples, max_frames);
+        let ranges = plan_chunks_with_limit(&samples, max_frames, REMOTE_CHUNK_SECS);
         if retain_suffix {
             native_samples = Some(samples);
         }
         ranges
     } else {
-        let chunk_frames = short_frames.min(max_frames);
+        let chunk_frames = remote_chunk_frames.min(max_frames);
         (0..source.frames)
             .step_by(chunk_frames)
             .map(|start| (start, (start + chunk_frames).min(source.frames)))
@@ -1344,6 +1360,25 @@ mod tests {
             "whole-take local fallback must stay below the encoder cliff"
         );
         // Contiguous coverage with no gaps.
+        for window in ranges.windows(2) {
+            assert_eq!(window[0].1, window[1].0);
+        }
+    }
+
+    #[test]
+    fn remote_plan_uses_multi_minute_chunks_for_long_audio() {
+        let twelve_minutes = vec![0.1_f32; 12 * 60 * 16_000];
+        let ranges =
+            plan_chunks_with_limit(&twelve_minutes, usize::MAX, PRODUCTION_REMOTE_CHUNK_SECS);
+        assert_eq!(ranges.len(), 3, "expected three five-minute chunks");
+        assert_eq!(ranges.first().map(|r| r.0), Some(0));
+        assert_eq!(ranges.last().map(|r| r.1), Some(twelve_minutes.len()));
+        assert!(
+            ranges
+                .iter()
+                .all(|&(start, end)| end - start <= 303 * 16_000),
+            "cloud chunks must stay near the five-minute target"
+        );
         for window in ranges.windows(2) {
             assert_eq!(window[0].1, window[1].0);
         }

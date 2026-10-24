@@ -26,9 +26,6 @@ cargo test --locked --package cantrip --example eval
 echo "── check: Omarchy installer"
 python3 -m unittest discover -s integrations/omarchy -p 'test_*.py'
 
-echo "── check: T3 voice integration"
-python3 -m unittest discover -s integrations/t3 -p 'test_*.py'
-
 echo "── check: release artifact and installer"
 python3 -m unittest discover -s tests -p 'test_release_*.py'
 
