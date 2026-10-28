@@ -8,8 +8,7 @@ description: "Drive Cantrip, the local-first Linux dictation app, the way a user
 Cantrip's user surface is a native Linux CLI/daemon with a Wayland HUD and
 native windows, plus a static website at <https://cantrip.mistystep.io>.
 The helper `bin/verify-cantrip` (Python 3, stdlib only) drives all of it from a
-shell. It works the same for Claude Code and Codex; T3 preview tools are never
-required.
+shell. It works the same for Claude Code and Codex.
 
 Every Cantrip process it starts runs with **private HOME/XDG directories**, a
 **headless Sway** compositor (own clipboard, own layer-shell HUD), and a
