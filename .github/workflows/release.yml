@@ -62,8 +62,10 @@ jobs:
           python-version: "3.12"
       - name: Install baseline build dependencies and the exact Rust toolchain
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libdbus-1-dev libssl-dev pkg-config
+          if ! dpkg -s libdbus-1-dev libssl-dev pkg-config >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libdbus-1-dev libssl-dev pkg-config
+          fi
           rustup install
           rustc --version --verbose
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
