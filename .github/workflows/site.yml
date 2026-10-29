@@ -28,7 +28,7 @@ jobs:
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event != 'pull_request' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, hetzner-ci, cantrip-ci]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -38,6 +38,8 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: site/package-lock.json
+      - name: Install GitHub CLI
+        run: sudo apt-get update && sudo apt-get install -y gh
       - name: Refresh published release inputs
         if: github.event_name != 'pull_request'
         env:
