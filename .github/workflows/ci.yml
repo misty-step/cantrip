@@ -15,7 +15,7 @@ env:
 jobs:
   pr-title:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, hetzner]
     steps:
       - name: Require a Conventional Commit title (the squash commit input)
         env:
@@ -27,7 +27,7 @@ jobs:
     # Runner image stays a mutable label on purpose: GitHub publishes patched
     # images under ubuntu-latest and does not provide per-run SHA-pinned
     # images. Third-party actions below are pinned to full commit SHAs.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, hetzner]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -44,7 +44,7 @@ jobs:
         run: ./scripts/check
 
   secret-scan:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, hetzner]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

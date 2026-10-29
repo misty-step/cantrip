@@ -16,7 +16,7 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, hetzner]
     timeout-minutes: 15
     permissions:
       contents: write
@@ -43,7 +43,7 @@ jobs:
   build:
     needs: plan
     if: needs.plan.outputs.mode == 'publish'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, hetzner]
     timeout-minutes: 30
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
@@ -91,7 +91,7 @@ jobs:
 
   verify:
     needs: [plan, build]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, hetzner]
     timeout-minutes: 45
     outputs:
       proof_id: ${{ steps.proof.outputs.artifact-id }}
@@ -139,7 +139,7 @@ jobs:
 
   publish:
     needs: [build, verify]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, Linux, X64, hetzner]
     timeout-minutes: 15
     permissions:
       contents: write
