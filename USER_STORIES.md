@@ -32,10 +32,11 @@ Criteria:
 4. THE SYSTEM SHALL present HUD feedback without stealing window keyboard focus from the active client.
 5. WHILE recording, THE SYSTEM SHALL keep capturing through silence and at any take length until a toggle, stop, cancel, or daemon shutdown ends the take.
 6. WHEN a take stops recording, THE SYSTEM SHALL log which of those ended it, as a reason class without transcript text.
+7. WHEN an outcome needs attention, THE SYSTEM SHALL show bounded HUD feedback according to [HUD timing](docs/CONFIGURATION.md#hud--passive-status), then hide it without dismissing the outcome, clearing menu/status-bar attention, or removing recordings.
 
 No-gos: no interactive notification popups or chatty notification daemon alerts.
 
-Evidence: `src/hud/wayland.rs`, `crates/engine/src/engine.rs`
+Evidence: `src/hud.rs`, `src/hud/wayland.rs`, `crates/engine/src/engine.rs`
 
 ## US-012 See Cantrip's state in the Omarchy bar at a glance
 

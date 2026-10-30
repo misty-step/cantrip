@@ -459,6 +459,22 @@ pending handoffs immediately. Routine success holds for 1.2 seconds after its gr
 has settled. That feedback acknowledges the delivery mechanism, not receipt by the
 destination application.
 
+Failed and partial outcomes, including capture-start failures, and complete
+outcomes with failed, uncertain, or deferred delivery hold on the HUD for
+8 seconds, then fade over 140 ms. Routine success uses the same fade after its
+hold. Reduced motion preserves the holds and hides without fading. Other results
+(Copied, cleanup-unavailable, cancelled, and empty) keep their 4-second lifetime;
+interaction notices last 2 seconds.
+
+HUD auto-hide does not dismiss the engine outcome or delete recordings. The
+menu-bar/status-bar attention mark and undismissed message remain available with
+Copy/recovery and Dismiss actions; Recordings and Recovery remains available
+independently. Dismiss removes the matching HUD feedback immediately. Repeated
+status polls never extend or replay an event; a newer event presents again.
+Attaching the HUD or changing daemon epoch presents an existing undismissed
+failure/attention outcome once for the same bounded duration; cached routine
+results are not replayed.
+
 A take started with `--handoff NAME` adds an upper-left "to LABEL" row and uses
 that target's color for the border, a light surface wash and the active field;
 failures keep their yellow rail and cancellation its neutral field. Default takes

@@ -15,8 +15,8 @@ use eframe::egui;
 
 use super::{
     layout_height, present_outcome, preview_snapshot, screenshot_model, Canvas, Model, RenderKey,
-    ScreenshotState, Visibility, CONTAINER_WIDTH, FRAME_INTERVAL, MAX_PRESENTATION_LAG,
-    NOTICE_HOLD, RESULT_FADE, SURFACE_WIDTH,
+    ScreenshotState, CONTAINER_WIDTH, FRAME_INTERVAL, MAX_PRESENTATION_LAG, NOTICE_HOLD,
+    RESULT_FADE, SURFACE_WIDTH,
 };
 use crate::{
     settings::{apply_theme, color},
@@ -67,7 +67,7 @@ impl Journey {
             Self::Raw => "Single chunk, raw text",
             Self::Cancellation => "Cancel during transcription",
             Self::Interruption => "Next take interrupts success",
-            Self::Failure => "Failure and dismissal",
+            Self::Failure => "Failure and auto-hide",
             Self::Uncertain => "Uncertain delivery",
             Self::Deferred => "Deferred delivery",
             Self::Reconnect => "Disconnect and reconnect",
@@ -82,9 +82,9 @@ impl Journey {
             Self::Raw => "One backend chunk stays indeterminate. Its completion goes directly to delivery without cleanup, then success fades to idle.",
             Self::Cancellation => "A cancellation request waits for current work, then a cancelled outcome expires. No backend work runs here.",
             Self::Interruption => "A new operation arrives during the success transition. The next take owns the instrument immediately and completes independently.",
-            Self::Failure => "A failed take remains actionable until its fixture outcome is dismissed. Dismissal does not remove the saved-recording metadata.",
-            Self::Uncertain => "Delivery cannot be confirmed. The production outcome remains visible until the fixture dismisses it; no retry or insertion is attempted.",
-            Self::Deferred => "Text was not inserted. Review the persistent recovery guidance and its dismissal without touching any real clipboard or recording.",
+            Self::Failure => "A failed take gets a bounded HUD presentation, then hides without dismissing the outcome or removing saved-recording metadata.",
+            Self::Uncertain => "Delivery cannot be confirmed. The HUD fades while the outcome remains undismissed; no retry or insertion is attempted.",
+            Self::Deferred => "Text was not inserted. Recovery guidance fades from the HUD without acknowledging the outcome or touching any real clipboard or recording.",
             Self::Reconnect => "A brief outage is coalesced, a longer one becomes visible, then the same epoch returns idle with the previous take's result unknown.",
             Self::Restart => "Recording loses its connection. An idle snapshot from a new epoch clears stale event history and presents the production restart notice.",
         }
@@ -276,32 +276,19 @@ impl TimelineBuilder {
             .outcome
             .as_ref()
             .expect("terminal fixture contains an outcome");
-        let visibility =
-            present_outcome(outcome, &snapshot, self.origin + at, self.reduced_motion).visibility;
-        self.status(at, snapshot.clone(), label);
-        match visibility {
-            Visibility::Persistent => {
-                let dismissed_at = at + NOTICE_HOLD;
-                snapshot
-                    .outcome
-                    .as_mut()
-                    .expect("terminal fixture contains an outcome")
-                    .dismissed = true;
-                self.status(dismissed_at, snapshot, "Dismiss outcome; idle");
-                dismissed_at
+        let until = present_outcome(outcome, &snapshot, self.origin + at, self.reduced_motion)
+            .visibility
+            .0;
+        self.status(at, snapshot, label);
+        // Backend receipt does not start the visual success hold: normal
+        // handoffs may finish first. Leave room for that bounded lag, and
+        // keep checkpoints about input events rather than predicted frames.
+        until.duration_since(self.origin)
+            + if self.reduced_motion {
+                Duration::ZERO
+            } else {
+                MAX_PRESENTATION_LAG
             }
-            Visibility::Until(until) => {
-                // Backend receipt does not start the visual success hold: normal
-                // handoffs may finish first. Leave room for that bounded lag, and
-                // keep checkpoints about input events rather than predicted frames.
-                until.duration_since(self.origin)
-                    + if self.reduced_motion {
-                        Duration::ZERO
-                    } else {
-                        MAX_PRESENTATION_LAG
-                    }
-            }
-        }
     }
 
     fn finish(mut self, end: Duration, focus: Duration) -> Timeline {
@@ -1289,6 +1276,45 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attention_gallery_journeys_finish_without_dismissing_the_outcome() {
+        let origin = Instant::now();
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        for reduced_motion in [false, true] {
+            for state in [
+                ScreenshotState::Failed,
+                ScreenshotState::DeliveryUncertain,
+                ScreenshotState::Deferred,
+            ] {
+                let mut replay =
+                    Replay::new(origin, catalog_timeline(state, origin, reduced_motion));
+                let mut preview = Preview::default();
+                replay.seek(
+                    replay.timeline.end,
+                    ViewOptions {
+                        reduced_motion,
+                        ..ViewOptions::default()
+                    },
+                    &mut preview,
+                    &font,
+                    Palette::default(),
+                );
+                assert!(preview.bytes.iter().all(|byte| *byte == 0), "{state:?}");
+                assert!(
+                    !replay
+                        .model
+                        .snapshot
+                        .as_ref()
+                        .unwrap()
+                        .outcome
+                        .as_ref()
+                        .unwrap()
+                        .dismissed
+                );
+            }
+        }
+    }
 
     #[test]
     fn backward_seek_restores_expired_epoch_notice_and_dismissed_outcome() {
