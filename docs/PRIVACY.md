@@ -100,10 +100,14 @@ other software running as you. Application Support does not imply encryption.
 ## Recording lifecycle
 
 Before transcription, every stopped microphone take is retained under its own
-recording ID with recovery audio. This includes successful, cancelled, empty,
+recording ID with its captured WAV. This includes successful, cancelled, empty,
 partial, failed, and undelivered takes. A later failure or an unrelated success
 cannot replace another recording. Successful delivery or recovery marks a take
 resolved without deleting its audio. There is no silent expiry.
+
+An empty take remains in history but has no audio available for transcription or
+recovery. Cancelling it is still a cancellation; stopping it without cancelling
+reports that the microphone supplied no audio, not a storage failure.
 
 Native 16 kHz mono PCM16 audio uses about **1.92 MB per minute (115 MB per hour)**.
 The Actions window shows retained recordings; use its **Include completed

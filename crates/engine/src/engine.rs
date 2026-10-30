@@ -1749,13 +1749,25 @@ fn run_job(
                 duration_ms,
                 pipeline::Source::Dictation,
             ),
-            Err(_) => {
-                // Finalization failure never authorizes deleting available audio.
+            Err(error) => {
+                // Empty finalized takes are retained too, but cancellation is
+                // not a capture failure merely because no frames arrived.
+                let empty = error.is::<audio::EmptyRecording>();
                 let saved =
                     persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
-                let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
-                outcome.message = "Recording did not finish normally.".to_owned();
-                outcome.error = Some("capture-failed".to_owned());
+                let mut outcome = if empty && context.cancelled() {
+                    context.outcome(Completeness::Cancelled, Delivery::Cancelled)
+                } else {
+                    let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
+                    outcome.message = if empty {
+                        "The microphone supplied no audio."
+                    } else {
+                        "Recording did not finish normally."
+                    }
+                    .to_owned();
+                    outcome.error = Some("capture-failed".to_owned());
+                    outcome
+                };
                 outcome.artifacts = saved.artifacts;
                 describe_artifacts(&mut outcome);
                 storage_warning(&mut outcome, saved.warning);
@@ -1838,56 +1850,56 @@ fn persist_attempt(
     unresolved: bool,
 ) -> SavedArtifacts {
     let saved = recovery::persist(take_id, duration_ms, text, wav, partial, unresolved);
-    let (take, durable, mut audio_conflict) = match saved {
+    let mut saved = match saved {
         Ok(take) => {
             let artifacts = artifacts_for(take_id, Some(&take));
-            return SavedArtifacts {
-                durable_audio: artifacts.audio,
+            SavedArtifacts {
+                durable_audio: false,
                 // A successful complete persist publishes exactly this text.
                 durable_text: !partial
                     && text.is_some_and(|text| !text.trim().is_empty())
                     && artifacts.text,
                 audio_conflict: false,
-                warning: wav.is_some() && !artifacts.audio,
+                warning: false,
                 artifacts,
-            };
+            }
         }
         Err(error) => {
             let audio_conflict = error.is::<recovery::AudioMismatch>();
             tracing::warn!("[Daemon] artifact persistence failed class=storage-failed");
             // Read attempted writes even if the subsequent confirmation fails.
             let present = recovery::get(take_id).ok();
-            match recovery::confirm(take_id) {
-                Ok(take) => (Some(take), true, audio_conflict),
-                Err(_) => (present, false, audio_conflict),
-            }
+            let (take, durable) = match recovery::confirm(take_id) {
+                Ok(take) => (Some(take), true),
+                Err(_) => (present, false),
+            };
+            let mut saved = saved_artifacts(
+                take_id,
+                take.as_ref(),
+                durable,
+                text,
+                wav.is_some(),
+                partial,
+            );
+            saved.audio_conflict = audio_conflict;
+            saved
         }
     };
-    let mut saved = saved_artifacts(
-        take_id,
-        take.as_ref(),
-        durable,
-        text,
-        wav.is_some(),
-        partial,
-    );
     if let Some(wav) = wav {
         match recovery::confirm_audio(take_id, wav) {
-            Ok(take) => {
-                saved.durable_audio = take.audio_available;
-                saved.warning |= !take.audio_available;
-            }
+            // Confirmation validates the finalized container, byte identity,
+            // and durability even when there are no transcribable frames.
+            Ok(_) => saved.durable_audio = true,
             Err(error) => {
-                audio_conflict |= error.is::<recovery::AudioMismatch>();
+                saved.audio_conflict |= error.is::<recovery::AudioMismatch>();
                 saved.durable_audio = false;
                 saved.warning = true;
             }
         }
     }
-    saved.audio_conflict = audio_conflict;
-    saved.durable_audio &= !audio_conflict;
-    saved.durable_text &= !audio_conflict;
-    saved.warning |= audio_conflict;
+    saved.durable_audio &= !saved.audio_conflict;
+    saved.durable_text &= !saved.audio_conflict;
+    saved.warning |= saved.audio_conflict;
     saved
 }
 
@@ -1905,7 +1917,8 @@ fn saved_artifacts(
             .filter(|text| !text.trim().is_empty())
             .is_some_and(|text| recovery::read_text(take_id).is_ok_and(|saved| saved == text));
     SavedArtifacts {
-        durable_audio: durable && artifacts.audio,
+        // Only source-matching confirm_audio may authorize source deletion.
+        durable_audio: false,
         durable_text: durable && matching_text,
         audio_conflict: false,
         warning: !durable
@@ -2026,7 +2039,7 @@ fn finish_audio(
         {
             let resolved = recovery::resolve(context.id()).is_ok();
             // Re-confirm durability after updating the take's resolution.
-            let confirmed = recovery::confirm(context.id());
+            let confirmed = recovery::confirm_audio(context.id(), wav);
             saved = saved_artifacts(
                 context.id(),
                 confirmed.as_ref().ok(),
@@ -2035,6 +2048,7 @@ fn finish_audio(
                 false,
                 false,
             );
+            saved.durable_audio = confirmed.is_ok();
             if confirmed.is_err() {
                 saved.artifacts = facts(context.id());
             }
