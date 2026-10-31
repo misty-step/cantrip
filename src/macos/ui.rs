@@ -211,6 +211,20 @@ pub(crate) fn form(
     grid
 }
 
+/// Show or hide `view`, and its whole row when it sits in a form, so a hidden
+/// line leaves no gap.
+pub(crate) fn show_in_form(view: &NSView, shown: bool) {
+    view.setHidden(!shown);
+    // SAFETY: an attached view's superview outlives this call.
+    let grid = unsafe { view.superview() }.and_then(|view| view.downcast::<NSGridView>().ok());
+    if let Some(row) = grid
+        .and_then(|grid| grid.cellForView(view))
+        .and_then(|cell| cell.row())
+    {
+        row.setHidden(!shown);
+    }
+}
+
 pub(crate) fn fixed_width(view: &NSView, width: f64) {
     view.widthAnchor()
         .constraintEqualToConstant(width)
@@ -270,16 +284,7 @@ impl Message {
     /// Show `text`, or hide the line when there is none. A line inside a form
     /// hides its whole row, so the form keeps its spacing.
     pub(crate) fn show(&self, text: Option<&str>, attention: bool) {
-        self.view.setHidden(text.is_none());
-        // SAFETY: an attached view's superview outlives this call.
-        let grid =
-            unsafe { self.view.superview() }.and_then(|view| view.downcast::<NSGridView>().ok());
-        if let Some(row) = grid
-            .and_then(|grid| grid.cellForView(&self.view))
-            .and_then(|cell| cell.row())
-        {
-            row.setHidden(text.is_none());
-        }
+        show_in_form(&self.view, text.is_some());
         let Some(text) = text else {
             return;
         };

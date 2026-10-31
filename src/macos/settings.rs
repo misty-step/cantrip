@@ -150,6 +150,8 @@ struct Views {
     microphone: Retained<NSPopUpButton>,
     microphone_problem: Message,
     access: Retained<NSTextField>,
+    /// Allow or Open Privacy Settings, on their own row so a long app name fits.
+    access_actions: Retained<NSStackView>,
     allow: Retained<NSButton>,
     privacy: Retained<NSButton>,
     access_note: Message,
@@ -867,6 +869,7 @@ impl SettingsWindow {
         }
         views.allow.setHidden(view.allow.is_none());
         views.privacy.setHidden(!view.privacy);
+        ui::show_in_form(&views.access_actions, view.allow.is_some() || view.privacy);
         views.access_note.show(view.note.as_deref(), true);
         views
             .access_problem
@@ -1021,7 +1024,9 @@ impl SettingsWindow {
         ui::fixed_width(&microphone, CONTROL);
         let microphone_problem = Message::new(mtm, CONTROL);
         let access_note = Message::new(mtm, CONTROL);
-        let access = ui::label(mtm, "");
+        // Wraps rather than widening the form when it names another app.
+        let access = NSTextField::wrappingLabelWithString(&NSString::new(), mtm);
+        access.setPreferredMaxLayoutWidth(CONTROL + 60.0);
         let allow = ui::button(
             mtm,
             "Allow Microphone Access…",
@@ -1034,7 +1039,7 @@ impl SettingsWindow {
             target,
             sel!(openPrivacySettings:),
         );
-        let access_row = ui::row(mtm, &[&access, &allow, &privacy], 8.0);
+        let access_actions = ui::row(mtm, &[&allow, &privacy], 8.0);
         let access_problem = Message::new(mtm, CONTROL);
         let shortcut = ui::field(mtm, crate::macos::shortcut::DEFAULT, CONTROL);
         // SAFETY: the window clears this delegate before it is released.
@@ -1059,7 +1064,8 @@ impl SettingsWindow {
             &[
                 (Some("Microphone:"), &microphone),
                 (None, &microphone_problem.view),
-                (Some("Microphone access:"), &access_row),
+                (Some("Microphone access:"), &access),
+                (None, &access_actions),
                 (None, &access_note.view),
                 (None, &access_problem.view),
                 (Some("Dictation shortcut:"), &shortcut),
@@ -1283,6 +1289,7 @@ impl SettingsWindow {
             microphone,
             microphone_problem,
             access,
+            access_actions,
             allow,
             privacy,
             access_note,
