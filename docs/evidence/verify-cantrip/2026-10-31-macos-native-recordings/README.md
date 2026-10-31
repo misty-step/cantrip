@@ -43,6 +43,18 @@ history. No speech, private audio or personal text is recorded here.
    through LaunchServices (new pid 993), which showed the window
    (`1-cli-opened-window.jpg`).
 
+## Re-run at `5cdd005` (rebased onto #211's `f9ce972`)
+
+A fresh guest with the same fixtures and a packaged build of `5cdd005`.
+
+8. With Terminal in front (`lsappinfo front` named Terminal), typing
+   `cantrip actions` in it brought the window forward as the key window:
+   `lsappinfo front` then named Cantrip, and the selected row showed the
+   active highlight. One `cantrip` process.
+9. **All Recordings** showed all five columns at the default window size,
+   with complete capture times and **Waiting** in Recovery for the two
+   unresolved takes (`6-terminal-request-focused-all-recordings.jpg`).
+
 ## Not verified here
 
 - Dark appearance in the live guest. Both views were rendered offscreen in a
@@ -52,9 +64,10 @@ history. No speech, private audio or personal text is recorded here.
 - The toolbar's Recordings/Setup switch: a system notification covered it in
   every guest capture; offscreen renders draw its selected segment without a
   label, which needs a live look.
-- Keyboard focus after `cantrip actions`: in this run the window came forward
-  inactive, as with Settings. `6da8f90` forces activation in the shared
-  `ui::present` for both windows; that build has not been run in a guest.
-- In **All Recordings** this run's Recovery column sat past the table's
-  visible width. `6da8f90` sizes the columns to fit and lets the last visible
-  column take the rest; that build has not been run in a guest.
+- Keyboard focus in the first run: the window came forward inactive. Fixed
+  in `5cdd005`; see step 8.
+- In the first run, **All Recordings** pushed the Recovery column past the
+  table's visible width. Fixed in `5cdd005`; see step 9.
+- Dark appearance in a live guest: `defaults write -g AppleInterfaceStyle
+  Dark` and relaunching Cantrip left the window light, so no live dark
+  capture exists.
