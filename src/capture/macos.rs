@@ -983,9 +983,12 @@ fn capture_to_wav(
             if drain_packets(&transport, format, &mut converter, &mut writer, control)? {
                 writer.checkpoint()?;
             }
-            if control.failure.load(Ordering::Acquire) == FAILURE_CONFIGURATION
-                && restarts < ROUTE_RESTARTS
-            {
+            let polling = Instant::now() >= next_device_poll;
+            // AVAudioEngine reports a route change by posting a configuration
+            // change, by stopping itself, or both, in either order.
+            let route_changed = control.failure.load(Ordering::Acquire) == FAILURE_CONFIGURATION
+                || (polling && !unsafe { native.engine.isRunning() });
+            if route_changed && restarts < ROUTE_RESTARTS {
                 // A Bluetooth headset switching to its microphone profile (or
                 // another route change) stops the engine just after start.
                 // Before any audio arrived nothing is lost: rebind and restart.
@@ -1030,7 +1033,7 @@ fn capture_to_wav(
                     "microphone stopped supplying audio; retained take is incomplete",
                 ));
             }
-            if now >= next_device_poll {
+            if polling {
                 if microphone_permission() != MicrophoneAuthorization::Authorized {
                     return Err(ended(
                         "permission-revoked",
