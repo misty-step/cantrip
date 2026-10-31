@@ -52,7 +52,9 @@ history. No speech, private audio or personal text is recorded here.
 - The toolbar's Recordings/Setup switch: a system notification covered it in
   every guest capture; offscreen renders draw its selected segment without a
   label, which needs a live look.
-- Keyboard focus after `cantrip actions`: the window came forward inactive, as
-  with Settings.
-- Known defect: in **All Recordings** the Recovery column is pushed past the
-  table's visible width.
+- Keyboard focus after `cantrip actions`: in this run the window came forward
+  inactive, as with Settings. `6da8f90` forces activation in the shared
+  `ui::present` for both windows; that build has not been run in a guest.
+- In **All Recordings** this run's Recovery column sat past the table's
+  visible width. `6da8f90` sizes the columns to fit and lets the last visible
+  column take the rest; that build has not been run in a guest.
