@@ -496,7 +496,7 @@ impl Recordings {
     }
 
     pub(crate) fn save_key(&mut self, id: String, secret: String) -> Option<Job> {
-        if !self.can_save_key(&id, &secret) {
+        if !self.can_save_key(&id, !secret.is_empty()) {
             return None;
         }
         self.submit(Action::StoreKey { id, secret })
@@ -732,8 +732,10 @@ impl Recordings {
             .and_then(|observation| observation.key_id.as_deref())
     }
 
-    pub(crate) fn can_save_key(&self, id: &str, secret: &str) -> bool {
-        !id.trim().is_empty() && !secret.is_empty() && self.setup_free()
+    /// Saving needs a key ID, an entered key and a free setup lane. The key
+    /// itself is never needed to decide this.
+    pub(crate) fn can_save_key(&self, id: &str, key_entered: bool) -> bool {
+        !id.trim().is_empty() && key_entered && self.setup_free()
     }
 
     /// The latest setup check's report.

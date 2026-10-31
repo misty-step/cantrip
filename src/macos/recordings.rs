@@ -1057,12 +1057,9 @@ impl RecordingsWindow {
     fn show_key_sheet_state(&self) {
         let sheet = &self.views().key_sheet;
         let id = ui::text_of(&sheet.id);
+        // Only the key's length is read; its text stays in the field.
         let entered = sheet.secret.stringValue().length() > 0;
-        let state = self.state();
-        // The secret's own text is never copied out to decide this.
-        let allowed = state
-            .recordings
-            .can_save_key(&id, if entered { "set" } else { "" });
+        let allowed = self.state().recordings.can_save_key(&id, entered);
         sheet.save.setEnabled(allowed);
     }
 

@@ -583,7 +583,7 @@ impl ActionsApp {
                         save = ui
                             .add_enabled(
                                 self.recordings
-                                    .can_save_key(&credentials.id, &credentials.secret),
+                                    .can_save_key(&credentials.id, !credentials.secret.is_empty()),
                                 egui::Button::new("Save in keyring"),
                             )
                             .clicked();
