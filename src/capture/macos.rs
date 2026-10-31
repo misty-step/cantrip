@@ -56,6 +56,7 @@ const DEVICE_SETTLE_POLL: Duration = Duration::from_millis(5);
 /// Engine restarts allowed when the route changes before any audio arrived,
 /// e.g. a Bluetooth headset switching from playback to its microphone profile.
 const ROUTE_RESTARTS: u32 = 3;
+const ROUTE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const FAILURE_NONE: u8 = 0;
 const FAILURE_OVERRUN: u8 = 1;
 const FAILURE_FORMAT: u8 = 2;
@@ -480,9 +481,15 @@ impl Control {
         );
     }
 
-    /// Forget a route change that stopped the engine before any audio arrived.
+    /// Forget a route change that stopped the engine before any audio arrived;
+    /// any other latched failure stays terminal.
     fn rearm(&self) {
-        self.failure.store(FAILURE_NONE, Ordering::Release);
+        let _ = self.failure.compare_exchange(
+            FAILURE_CONFIGURATION,
+            FAILURE_NONE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         self.next_sample_time
             .store(FIRST_SAMPLE_TIME, Ordering::Release);
     }
@@ -669,30 +676,35 @@ impl NativeCapture {
         let settled = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&settled);
         self.observe(move || signal.store(true, Ordering::Release));
-        let selected = unsafe {
-            AudioUnitSetProperty(
-                self.input.audioUnit(),
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                ptr::from_ref(&device).cast(),
-                size_of::<AudioObjectID>() as u32,
-            )
-        };
-        if selected != 0 {
-            tracing::warn!("[Capture] selecting microphone failed status={selected}");
-        }
-        check_status(selected, "selecting configured microphone")?;
-        if self.current_device()? != device {
-            bail!("AVAudioEngine did not select the requested microphone");
-        }
-        if hardware_shape(&self.input) != previous {
-            let deadline = Instant::now() + DEVICE_SETTLE;
-            while !settled.load(Ordering::Acquire) && Instant::now() < deadline {
-                thread::sleep(DEVICE_SETTLE_POLL);
+        let selection = (|| -> Result<()> {
+            let selected = unsafe {
+                AudioUnitSetProperty(
+                    self.input.audioUnit(),
+                    kAudioOutputUnitProperty_CurrentDevice,
+                    kAudioUnitScope_Global,
+                    0,
+                    ptr::from_ref(&device).cast(),
+                    size_of::<AudioObjectID>() as u32,
+                )
+            };
+            if selected != 0 {
+                tracing::warn!("[Capture] selecting microphone failed status={selected}");
             }
-        }
-        self.unobserve()
+            check_status(selected, "selecting configured microphone")?;
+            if self.current_device()? != device {
+                bail!("AVAudioEngine did not select the requested microphone");
+            }
+            if hardware_shape(&self.input) != previous {
+                let deadline = Instant::now() + DEVICE_SETTLE;
+                while !settled.load(Ordering::Acquire) && Instant::now() < deadline {
+                    thread::sleep(DEVICE_SETTLE_POLL);
+                }
+            }
+            Ok(())
+        })();
+        // The settle observer never outlives selection, even when it fails.
+        let unobserved = self.unobserve();
+        selection.and(unobserved)
     }
 
     fn observe(&mut self, changed: impl Fn() + 'static) {
@@ -933,6 +945,66 @@ fn ended(class: &'static str, message: &'static str) -> anyhow::Error {
     anyhow!(message)
 }
 
+struct Restarted {
+    native: NativeCapture,
+    format: PcmFormat,
+    tap_format: Retained<AVAudioFormat>,
+    transport: Arc<Transport>,
+    converter: Pcm16Converter,
+}
+
+/// Restart capture of `device` on a fresh engine after a route change before
+/// any audio. A fresh engine is essential: the replaced engine can still post
+/// its notification for the same change, and that must never stop this one.
+fn restart_capture(
+    device: AudioObjectID,
+    control: &Arc<Control>,
+    restarts: &mut u32,
+) -> Result<Restarted> {
+    loop {
+        *restarts += 1;
+        tracing::info!(
+            "[Capture] microphone route changed before audio; restarting attempt={restarts}"
+        );
+        let attempt = (|| -> Result<Restarted> {
+            let mut native = audio_call(|| NativeCapture::new(device))?;
+            let (format, tap_format) = audio_call(|| native.format())?;
+            let transport = Arc::new(Transport::new(format));
+            let converter = Pcm16Converter::new(format)?;
+            control.rearm();
+            audio_call(|| {
+                native.start(
+                    &tap_format,
+                    format,
+                    Arc::clone(&transport),
+                    Arc::clone(control),
+                )
+            })?;
+            Ok(Restarted {
+                native,
+                format,
+                tap_format,
+                transport,
+                converter,
+            })
+        })();
+        match attempt {
+            Ok(restarted) => return Ok(restarted),
+            // The route may still be settling; retry within the same budget.
+            Err(_)
+                if *restarts < ROUTE_RESTARTS
+                    && !control.stop_requested.load(Ordering::Acquire) =>
+            {
+                thread::sleep(ROUTE_RETRY_DELAY);
+            }
+            Err(error) => {
+                tracing::warn!("[Capture] microphone capture failed class=restart-failed");
+                return Err(error);
+            }
+        }
+    }
+}
+
 fn capture_to_wav(
     path: &Path,
     source: Option<&str>,
@@ -985,32 +1057,36 @@ fn capture_to_wav(
             }
             let polling = Instant::now() >= next_device_poll;
             // AVAudioEngine reports a route change by posting a configuration
-            // change, by stopping itself, or both, in either order.
-            let route_changed = control.failure.load(Ordering::Acquire) == FAILURE_CONFIGURATION
-                || (polling && !unsafe { native.engine.isRunning() });
+            // change, by stopping itself, or both, in either order. Any other
+            // latched failure is terminal.
+            let failure = control.failure.load(Ordering::Acquire);
+            let route_changed = failure == FAILURE_CONFIGURATION
+                || (failure == FAILURE_NONE && polling && !unsafe { native.engine.isRunning() });
             if route_changed && restarts < ROUTE_RESTARTS {
                 // A Bluetooth headset switching to its microphone profile (or
                 // another route change) stops the engine just after start.
-                // Before any audio arrived nothing is lost: rebind and restart.
+                // Before any audio arrived nothing is lost: restart capture.
                 audio_call(|| native.stop())?;
                 if control.frames_seen.load(Ordering::Acquire) == 0 {
-                    restarts += 1;
-                    tracing::info!(
-                        "[Capture] microphone route changed before audio; restarting attempt={restarts}"
-                    );
-                    audio_call(|| native.select(selected.id))?;
-                    (format, tap_format) = audio_call(|| native.format())?;
-                    transport = Arc::new(Transport::new(format));
-                    converter = Pcm16Converter::new(format)?;
-                    control.rearm();
-                    audio_call(|| {
-                        native.start(
-                            &tap_format,
-                            format,
-                            Arc::clone(&transport),
-                            Arc::clone(control),
+                    let alive = unsafe {
+                        property::<u32>(
+                            selected.id,
+                            kAudioDevicePropertyDeviceIsAlive,
+                            kAudioObjectPropertyScopeGlobal,
                         )
-                    })?;
+                    };
+                    if !matches!(alive, Ok(alive) if alive != 0) {
+                        return Err(ended(
+                            "device-changed",
+                            "selected microphone disconnected or changed during capture",
+                        ));
+                    }
+                    let restarted = restart_capture(selected.id, control, &mut restarts)?;
+                    native = restarted.native;
+                    format = restarted.format;
+                    tap_format = restarted.tap_format;
+                    transport = restarted.transport;
+                    converter = restarted.converter;
                     last_audio = Instant::now();
                     continue;
                 }
