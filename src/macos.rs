@@ -3,15 +3,19 @@
 //!
 //! The engine runs on its own std thread through the same `daemon::run` host as
 //! Linux, and this process reaches it only through its IPC contract: the menu,
-//! the shortcut and the HUD hold no second dictation state, and microphone
-//! access is read from and requested by whichever process owns the engine.
-//! Settings and Recordings and recovery are the shared windows, opened as
-//! their own processes, so closing one never stops dictation. macOS delivery
-//! is explicit clipboard copy and manual paste; nothing here requests
-//! Accessibility, Input Monitoring or Screen Recording access.
+//! the shortcut, the HUD and the windows hold no second dictation state, and
+//! microphone access is read from and requested by whichever process owns the
+//! engine. Settings is an AppKit window in this process, opened from the menu
+//! or by `cantrip settings` through [`requests`]; it closes with the app and
+//! closing it never stops dictation. Recordings and recovery is still its own
+//! process. macOS delivery is explicit clipboard copy and manual paste; nothing
+//! here requests Accessibility, Input Monitoring or Screen Recording access.
 
 mod mark;
+pub(crate) mod requests;
+pub(crate) mod settings;
 pub(crate) mod shortcut;
+pub(crate) mod ui;
 
 use crate::hud::macos::{runtime_dir, LiveHud};
 use anyhow::{anyhow, Context, Result};
@@ -41,6 +45,8 @@ use objc2_foundation::{
     NSRunLoopCommonModes, NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
+use requests::{Listener, Show};
+use settings::{Live, Pane, SettingsWindow};
 use shortcut::Registration;
 use std::{
     cell::RefCell,
@@ -299,6 +305,28 @@ fn toggle_login() -> Result<()> {
     })
 }
 
+/// Dictation as the menu's first line and the windows name it, from one
+/// live snapshot: "Ready", "Recording · 0:05", a stage, or a handoff target.
+pub(crate) fn status_line(status: &ipc::StatusSnapshot) -> String {
+    let mut line = match &status.state {
+        StateKind::Idle => "Ready".to_owned(),
+        StateKind::Recording if status.signal.is_none() => "Starting microphone…".to_owned(),
+        StateKind::Recording => {
+            format!("Recording · {}", crate::hud::format_elapsed(status.elapsed))
+        }
+        StateKind::Processing => status.stage.as_ref().map_or_else(
+            || "Working…".to_owned(),
+            |stage| sentence(&stage.to_string()),
+        ),
+        StateKind::Unknown(_) => "Cantrip status unavailable".to_owned(),
+    };
+    if let Some(handoff) = &status.handoff {
+        line.push_str(" · to ");
+        line.push_str(&handoff.label);
+    }
+    line
+}
+
 fn sentence(text: &str) -> String {
     let mut characters = text.chars();
     characters.next().map_or_else(String::new, |first| {
@@ -358,8 +386,11 @@ struct Host {
     problem: Option<String>,
     /// What the open menu's items do, by tag.
     choices: Vec<Choice>,
-    /// The shared Settings and Actions windows, one process each.
-    settings: Option<Child>,
+    /// The Settings window while it is open.
+    settings: Option<Retained<SettingsWindow>>,
+    /// `cantrip settings` asks through this to show a window.
+    requests: Option<Listener>,
+    /// The Actions window, its own process.
     actions: Option<Child>,
     timer: Option<(Retained<NSTimer>, Duration)>,
     /// When the shortcut was last re-read.
@@ -390,6 +421,10 @@ impl Host {
             .button(mtm)
             .context("the menu bar did not provide a status item button")?;
         button.setAccessibilityLabel(Some(ns_string!("Cantrip")));
+        ui::install_main_menu(mtm);
+        let requests = Listener::bind()
+            .inspect_err(|error| tracing::warn!("[Daemon] window requests unavailable: {error:#}"))
+            .ok();
         let (commands, replies) = spawn_commands()?;
         let toggles = commands.clone();
         let now = Instant::now();
@@ -412,6 +447,7 @@ impl Host {
             problem: None,
             choices: Vec::new(),
             settings: None,
+            requests,
             actions: None,
             timer: None,
             refreshed: now,
@@ -499,13 +535,14 @@ impl Host {
                 }
             };
         }
+        self.serve_requests();
+        self.tick_settings(now);
         if now.duration_since(self.refreshed) >= REFRESH_INTERVAL {
             self.refreshed = now;
             self.shortcut.refresh();
-            // Reap closed windows; dictation continues regardless.
-            for window in [&mut self.settings, &mut self.actions] {
-                window.take_if(|child| !matches!(child.try_wait(), Ok(None)));
-            }
+            // Reap a closed Actions process; dictation continues regardless.
+            self.actions
+                .take_if(|child| !matches!(child.try_wait(), Ok(None)));
         }
         self.show_mark(now);
         self.schedule(interval, target);
@@ -515,6 +552,71 @@ impl Host {
             After::Quit
         } else {
             After::Continue
+        }
+    }
+
+    /// Show the windows that `cantrip` commands ask for, answering each one.
+    fn serve_requests(&mut self) {
+        let requests = match &mut self.requests {
+            Some(listener) => listener.poll(),
+            None => return,
+        };
+        for (show, responder) in requests {
+            let shown = if self.quitting {
+                Err(anyhow!("Cantrip is quitting."))
+            } else {
+                match show {
+                    Show::Settings => self.show_settings(),
+                }
+            };
+            responder.reply(shown);
+        }
+    }
+
+    /// Bring the Settings window forward, or open a new one on past transcripts.
+    fn show_settings(&mut self) -> Result<()> {
+        // A window closed since the last tick is released, never shown again.
+        if self.settings.as_ref().is_some_and(|window| window.closed()) {
+            self.close_windows();
+        }
+        if self.settings.is_none() {
+            // Each new window opens on past transcripts, as the story asks.
+            let window = SettingsWindow::new(self.button.mtm(), Pane::Transcripts)
+                .context("Opening Settings")?;
+            self.settings = Some(window);
+            self.tick_settings(Instant::now());
+        }
+        if let Some(window) = &self.settings {
+            window.show();
+        }
+        Ok(())
+    }
+
+    /// Hand the open Settings window live status, and release it once closed.
+    fn tick_settings(&mut self, now: Instant) {
+        if self.settings.as_ref().is_some_and(|window| window.closed()) {
+            self.close_windows();
+            return;
+        }
+        let Some(window) = &self.settings else {
+            return;
+        };
+        let line = self.describe(now).0;
+        let status = self.hud.status();
+        window.tick(&Live {
+            line: &line,
+            online: status.is_some(),
+            microphone: status.and_then(|status| status.microphone.as_ref()),
+        });
+    }
+
+    /// Close and release the in-process windows, as quitting does.
+    fn close_windows(&mut self) {
+        if let Some(window) = self.settings.take() {
+            if !window.closed() {
+                window.close();
+            }
+            window.teardown();
         }
     }
 
@@ -601,25 +703,9 @@ impl Host {
                 Engine::Stopped(None) => ("Cantrip is not running".to_owned(), None),
             };
         };
-        let mut state = match &status.state {
-            StateKind::Idle => "Ready".to_owned(),
-            StateKind::Recording if status.signal.is_none() => "Starting microphone…".to_owned(),
-            StateKind::Recording => {
-                format!("Recording · {}", crate::hud::format_elapsed(status.elapsed))
-            }
-            StateKind::Processing => status.stage.as_ref().map_or_else(
-                || "Working…".to_owned(),
-                |stage| sentence(&stage.to_string()),
-            ),
-            StateKind::Unknown(_) => "Cantrip status unavailable".to_owned(),
-        };
-        if let Some(handoff) = &status.handoff {
-            state.push_str(" · to ");
-            state.push_str(&handoff.label);
-        }
         let detail = matches!(self.engine, Engine::External)
             .then_some("Dictation runs in a Cantrip process started outside this app.");
-        (state, detail)
+        (status_line(status), detail)
     }
 
     /// Rebuild the menu from live status as it opens.
@@ -777,7 +863,7 @@ impl Host {
         self.problem = None;
         let done = match choice {
             Choice::Send(command) => self.send(command),
-            Choice::Settings => open_window(&mut self.settings, &["settings"]),
+            Choice::Settings => self.show_settings(),
             Choice::Recordings => open_window(&mut self.actions, &["actions"]),
             Choice::CheckSetup => open_window(&mut self.actions, &["actions", "--doctor"]),
             Choice::MicrophoneSettings => open_microphone_settings(),
@@ -833,6 +919,8 @@ define_class!(
             let Some(host) = host.as_mut() else {
                 return NSApplicationTerminateReply::TerminateNow;
             };
+            // The windows belong to this process and close with it.
+            host.close_windows();
             if !matches!(host.engine, Engine::Owned { .. }) {
                 return NSApplicationTerminateReply::TerminateNow;
             }
