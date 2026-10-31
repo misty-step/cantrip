@@ -2,7 +2,7 @@
 
 use crate::audio::InputSignal;
 use crate::delivery::{ClipboardFallback, InjectionFailure, InjectionMode, InjectionOutcome};
-use crate::ipc::MicrophoneAuthorization;
+use crate::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
 use anyhow::Result;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -78,6 +78,12 @@ pub trait Platform: Send + Sync {
     /// the capture owner; `Requesting` while its explicit request awaits the
     /// operator. The default, None, means capture needs no per-app authorization.
     fn microphone_authorization(&self) -> Option<MicrophoneAuthorization> {
+        None
+    }
+    /// Who macOS asks and grants for this process: Cantrip itself, or the app
+    /// that started it. Fixed for the process lifetime, so the engine reads it
+    /// once; None wherever `microphone_authorization` is None.
+    fn microphone_grantee(&self) -> Option<MicrophoneGrantee> {
         None
     }
     /// Start the operator's explicit microphone request in this process and

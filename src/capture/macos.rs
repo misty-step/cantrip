@@ -9,7 +9,7 @@ use block2::RcBlock;
 use cantrip_engine::audio::{
     verify_wav, InputSignal, Pcm16Converter, Pcm16WavWriter, PcmEncoding, PcmFormat, SignalMonitor,
 };
-use cantrip_engine::ipc::MicrophoneAuthorization;
+use cantrip_engine::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
 use cantrip_engine::ports::MicrophoneAccessUnsupported;
 use crossbeam_queue::ArrayQueue;
 use objc2::rc::{autoreleasepool, Retained};
@@ -33,8 +33,10 @@ use objc2_core_audio::{
 use objc2_core_audio_types::AudioBuffer;
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_foundation::{ns_string, NSBundle, NSNotification, NSNotificationCenter};
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::mem::{size_of, MaybeUninit};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
@@ -67,21 +69,6 @@ fn pcm_encoding(format: AVAudioCommonFormat) -> Option<PcmEncoding> {
     }
 }
 
-/// What the operator should know or do about a microphone authorization.
-pub fn guidance(authorization: MicrophoneAuthorization) -> &'static str {
-    match authorization {
-        MicrophoneAuthorization::Authorized => "authorized",
-        MicrophoneAuthorization::NotDetermined => {
-            "not requested; choose Allow Microphone Access in the Cantrip menu or Settings"
-        }
-        MicrophoneAuthorization::Requesting => "waiting for your answer to the macOS prompt",
-        MicrophoneAuthorization::Denied => {
-            "denied; enable Cantrip in System Settings > Privacy & Security > Microphone"
-        }
-        MicrophoneAuthorization::Restricted => "restricted by macOS policy",
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDevice {
     /// Stable CoreAudio UID: the value to store in config.audio_source.
@@ -109,18 +96,41 @@ pub fn microphone_permission() -> MicrophoneAuthorization {
 /// The capture owner's authorization and its one explicit request at a time.
 /// The request awaits the operator's answer on its own thread, never the
 /// engine's, and the authorization reads `Requesting` until it arrives.
-#[derive(Default)]
-pub struct MicrophoneAccess {
+pub struct MicrophonePrompt {
     request: Mutex<Option<JoinHandle<()>>>,
+    grantee: MicrophoneGrantee,
 }
 
-impl MicrophoneAccess {
+impl Default for MicrophonePrompt {
+    /// Finds who macOS grants for this process while its parents still run.
+    fn default() -> Self {
+        let grantee = find_grantee();
+        tracing::info!(
+            "[Capture] microphone grantee={}",
+            match &grantee {
+                MicrophoneGrantee::Cantrip => "cantrip",
+                MicrophoneGrantee::Launcher(Some(_)) => "launcher",
+                MicrophoneGrantee::Launcher(None) => "launcher-unknown",
+            }
+        );
+        Self {
+            request: Mutex::new(None),
+            grantee,
+        }
+    }
+}
+
+impl MicrophonePrompt {
     pub fn authorization(&self) -> MicrophoneAuthorization {
         if self.requesting() {
             MicrophoneAuthorization::Requesting
         } else {
             microphone_permission()
         }
+    }
+
+    pub fn grantee(&self) -> &MicrophoneGrantee {
+        &self.grantee
     }
 
     /// Ask macOS for the operator's explicit action and return at once. Only an
@@ -162,6 +172,77 @@ impl MicrophoneAccess {
             .as_ref()
             .is_some_and(|thread| !thread.is_finished())
     }
+}
+
+/// Most ancestors walked looking for the app that started this process.
+const MAX_ANCESTORS: usize = 32;
+
+/// Who macOS asks and grants for this process. launchd starts Cantrip.app,
+/// which then answers for itself. Any other process answers through the app
+/// that started it, such as Terminal for a `cantrip daemon` run there. macOS
+/// has no public call for that responsible app, so walk the parent processes
+/// to the first app bundle.
+fn find_grantee() -> MicrophoneGrantee {
+    let mut pid = unsafe { libc::getppid() };
+    if pid <= 1 {
+        return MicrophoneGrantee::Cantrip;
+    }
+    let own = autoreleasepool(|_| PathBuf::from(NSBundle::mainBundle().bundlePath().to_string()));
+    for _ in 0..MAX_ANCESTORS {
+        let Some(path) = process_path(pid) else {
+            break;
+        };
+        if let Some(app) = enclosing_app(&path) {
+            return if app == own {
+                MicrophoneGrantee::Cantrip
+            } else {
+                MicrophoneGrantee::Launcher(app_name(app))
+            };
+        }
+        match parent_pid(pid) {
+            Some(parent) if parent > 1 => pid = parent,
+            _ => break,
+        }
+    }
+    MicrophoneGrantee::Launcher(None)
+}
+
+fn process_path(pid: libc::pid_t) -> Option<PathBuf> {
+    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
+    buffer.truncate(length);
+    Some(PathBuf::from(OsString::from_vec(buffer)))
+}
+
+/// The short BSD record needs no same-user check, so `login`'s root-owned
+/// process between Terminal and its shell does not end the walk.
+fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+    let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let size = size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    (filled == size).then(|| unsafe { info.assume_init() }.pbsi_ppid as libc::pid_t)
+}
+
+/// The outermost app bundle containing `path`, so a nested helper app counts
+/// as the app that ships it.
+fn enclosing_app(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .filter(|ancestor| ancestor.extension() == Some(OsStr::new("app")))
+        .last()
+}
+
+fn app_name(app: &Path) -> Option<String> {
+    app.file_stem()?.to_str().map(str::to_owned)
 }
 
 /// Block this request thread, never the engine's, until the operator answers.
@@ -782,7 +863,7 @@ fn capture_to_wav(
 ) -> Result<()> {
     let permission = microphone_permission();
     if permission != MicrophoneAuthorization::Authorized {
-        bail!("microphone access {}", guidance(permission));
+        bail!("microphone access is not authorized: {permission:?}");
     }
     let selected = select_device(source)?;
     let mut native = audio_call(|| NativeCapture::new(selected.id))?;
@@ -889,7 +970,7 @@ impl Recorder {
     pub fn start(wav_path: &Path, source: Option<&str>) -> Result<Self> {
         let permission = microphone_permission();
         if permission != MicrophoneAuthorization::Authorized {
-            bail!("microphone access {}", guidance(permission));
+            bail!("microphone access is not authorized: {permission:?}");
         }
         let started_at = Instant::now();
         let control = Arc::new(Control::new());
@@ -1039,6 +1120,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn the_launching_app_is_the_outermost_bundle_on_its_executable_path() {
+        let app = |path: &str| enclosing_app(Path::new(path)).and_then(app_name);
+        assert_eq!(
+            app("/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal").as_deref(),
+            Some("Terminal")
+        );
+        assert_eq!(
+            app("/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper")
+                .as_deref(),
+            Some("Visual Studio Code")
+        );
+        assert_eq!(app("/bin/zsh"), None);
+        assert_eq!(app("/usr/bin/login"), None);
     }
 
     #[test]

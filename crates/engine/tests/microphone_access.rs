@@ -3,7 +3,7 @@
 
 use cantrip_engine::config::Config;
 use cantrip_engine::engine;
-use cantrip_engine::ipc::{self, Command, MicrophoneAuthorization};
+use cantrip_engine::ipc::{self, Command, MicrophoneAuthorization, MicrophoneGrantee};
 use cantrip_engine::ports::{DeliveryPermit, Platform, Recorder};
 use cantrip_engine::recovery;
 use parking_lot::Mutex;
@@ -58,6 +58,10 @@ impl Platform for PromptingOwner {
         Some(*self.authorization.lock())
     }
 
+    fn microphone_grantee(&self) -> Option<MicrophoneGrantee> {
+        Some(MicrophoneGrantee::Cantrip)
+    }
+
     fn request_microphone_access(&self) -> anyhow::Result<MicrophoneAuthorization> {
         self.requests.fetch_add(1, Ordering::SeqCst);
         let mut authorization = self.authorization.lock();
@@ -83,9 +87,14 @@ fn exercise_owner_authorization() {
     });
     started.recv_timeout(Duration::from_secs(10)).unwrap();
 
-    let status = ipc::status().unwrap();
+    let authorization = || {
+        ipc::status()
+            .unwrap()
+            .microphone
+            .map(|access| access.authorization)
+    };
     assert_eq!(
-        status.microphone,
+        authorization(),
         Some(MicrophoneAuthorization::NotDetermined)
     );
     // Neither status nor a refused start asks for access.
@@ -100,14 +109,11 @@ fn exercise_owner_authorization() {
     let allow = ipc::command(Command::AllowMicrophone).unwrap();
     assert!(allow.ok, "{allow:?}");
     assert_eq!(owner.requests(), 1);
-    assert_eq!(
-        ipc::status().unwrap().microphone,
-        Some(MicrophoneAuthorization::Requesting)
-    );
+    assert_eq!(authorization(), Some(MicrophoneAuthorization::Requesting));
 
     owner.answer(MicrophoneAuthorization::Authorized);
     let deadline = Instant::now() + Duration::from_secs(10);
-    while ipc::status().unwrap().microphone != Some(MicrophoneAuthorization::Authorized) {
+    while authorization() != Some(MicrophoneAuthorization::Authorized) {
         assert!(
             Instant::now() < deadline,
             "status never reported the owner's answer"

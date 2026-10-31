@@ -925,6 +925,10 @@ impl SettingsApp {
                 ui.end_row();
             });
         #[cfg(target_os = "macos")]
+        if let Some(note) = access_note(self.daemon_online, self.mac.microphone.as_ref()) {
+            ui.colored_label(color(self.palette.attention), note);
+        }
+        #[cfg(target_os = "macos")]
         self.delivery_note(ui);
     }
 
@@ -1233,7 +1237,7 @@ impl SettingsApp {
 struct MacInput {
     devices: Result<Vec<crate::capture::InputDevice>, String>,
     /// What the running Cantrip last reported; None when it did not.
-    microphone: Option<ipc::MicrophoneAuthorization>,
+    microphone: Option<ipc::MicrophoneAccess>,
     /// The Allow command on its way to the running Cantrip.
     allow: Option<Receiver<Result<ipc::CommandReply>>>,
     access_problem: Option<String>,
@@ -1274,6 +1278,16 @@ fn access_row(
         Some(Access::Denied) => AccessRow::Denied,
         Some(Access::Restricted) => AccessRow::Restricted,
     }
+}
+
+/// Before the operator answers for another app, such as the terminal that
+/// started an outside daemon: who macOS grants and what that grant covers.
+#[cfg(target_os = "macos")]
+fn access_note(online: bool, reported: Option<&ipc::MicrophoneAccess>) -> Option<String> {
+    let access = reported.filter(|_| online)?;
+    (access.authorization != ipc::MicrophoneAuthorization::Authorized)
+        .then(|| access.grantee.disclosure())
+        .flatten()
 }
 
 #[cfg(target_os = "macos")]
@@ -1388,7 +1402,11 @@ impl MacInput {
         }
 
         ui.label(egui::RichText::new("Microphone access").weak());
-        let row = access_row(online, self.microphone, self.allow.is_some());
+        let row = access_row(
+            online,
+            self.microphone.as_ref().map(|access| access.authorization),
+            self.allow.is_some(),
+        );
         ui.horizontal(|ui| match row {
             AccessRow::Unknown => {
                 ui.label("Unknown while Cantrip is not running");
@@ -1723,10 +1741,6 @@ impl eframe::App for SettingsApp {
             match result {
                 Ok(status) => {
                     self.daemon_online = true;
-                    #[cfg(target_os = "macos")]
-                    {
-                        self.mac.microphone = status.microphone;
-                    }
                     self.daemon_state = status.stage.as_ref().map_or_else(
                         || {
                             if status.state == ipc::StateKind::Recording && status.signal.is_none()
@@ -1738,6 +1752,10 @@ impl eframe::App for SettingsApp {
                         },
                         ToString::to_string,
                     );
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.mac.microphone = status.microphone;
+                    }
                 }
                 Err(_) => {
                     self.daemon_online = false;
@@ -2206,6 +2224,32 @@ mod tests {
                 assert_eq!(access_row(false, reported, sending), AccessRow::Unknown);
                 let asks = access_row(true, reported, sending) == AccessRow::Ask;
                 assert_eq!(asks, reported == Some(Access::NotDetermined) && !sending);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn microphone_access_names_another_app_before_its_allow() {
+        use ipc::{MicrophoneAccess, MicrophoneAuthorization as Access, MicrophoneGrantee};
+        let terminal = MicrophoneGrantee::Launcher(Some("Terminal".to_owned()));
+        for grantee in [MicrophoneGrantee::Cantrip, terminal] {
+            let launched = grantee != MicrophoneGrantee::Cantrip;
+            for authorization in [
+                Access::NotDetermined,
+                Access::Requesting,
+                Access::Denied,
+                Access::Restricted,
+            ] {
+                let reported = MicrophoneAccess {
+                    authorization,
+                    grantee: grantee.clone(),
+                };
+                let note = access_note(true, Some(&reported));
+                assert_eq!(note.is_some(), launched);
+                assert!(note.is_none_or(|note| note.contains("Terminal")));
+                // Without a running Cantrip, no grantee is known.
+                assert_eq!(access_note(false, Some(&reported)), None);
             }
         }
     }

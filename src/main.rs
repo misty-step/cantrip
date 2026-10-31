@@ -192,6 +192,8 @@ enum KeyCommand {
 #[derive(Debug, Subcommand)]
 enum MicrophoneCommand {
     /// Ask the running Cantrip to request macOS microphone access; you answer the prompt.
+    /// For a `cantrip daemon` started from a terminal, macOS asks for and grants that
+    /// terminal app, and everything it runs, instead of Cantrip.
     Allow,
 }
 
@@ -597,8 +599,11 @@ fn print_status(json: bool) -> Result<()> {
         println!("notice: {} (event {})", notice.message, notice.event_id);
     }
     print_outcome(status.outcome.as_ref());
-    if let Some(microphone) = &status.microphone {
-        println!("microphone: {}", enum_label(microphone));
+    if let Some(access) = &status.microphone {
+        println!("microphone: {}", enum_label(&access.authorization));
+        if let Some(disclosure) = access.grantee.disclosure() {
+            println!("microphone-grantee: {disclosure}");
+        }
     }
     let pending = status.pending_recordings;
     println!("pending-recordings: {pending}");
@@ -936,7 +941,7 @@ fn doctor() -> Result<()> {
     println!(
         "{}",
         microphone_diagnosis(
-            status.as_ref().map(|status| status.microphone),
+            status.as_ref().map(|status| status.microphone.clone()),
             cantrip::capture::microphone_permission,
         )
     );
@@ -982,21 +987,27 @@ fn doctor() -> Result<()> {
 /// answers each process separately.
 #[cfg(target_os = "macos")]
 fn microphone_diagnosis(
-    owner: Option<Option<ipc::MicrophoneAuthorization>>,
+    owner: Option<Option<ipc::MicrophoneAccess>>,
     this_process: impl FnOnce() -> ipc::MicrophoneAuthorization,
 ) -> String {
     match owner {
-        Some(Some(authorization)) => format!(
+        Some(Some(access)) => format!(
             "microphone: {} — reported by the running Cantrip",
-            cantrip::capture::guidance(authorization)
+            access.guidance()
         ),
         Some(None) => {
             "microphone: not reported by the running Cantrip; restart Cantrip from this version"
                 .to_owned()
         }
+        // With no capture owner there is no grantee to name; this advice is
+        // what Cantrip.app's own process would need.
         None => format!(
             "microphone: {} — this process only; Cantrip is not running and may differ",
-            cantrip::capture::guidance(this_process())
+            ipc::MicrophoneAccess {
+                authorization: this_process(),
+                grantee: ipc::MicrophoneGrantee::Cantrip,
+            }
+            .guidance()
         ),
     }
 }
@@ -1251,15 +1262,28 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn doctor_reports_the_capture_owners_microphone_access_and_labels_its_own() {
-        use ipc::MicrophoneAuthorization as Access;
+        use ipc::{MicrophoneAccess, MicrophoneAuthorization as Access, MicrophoneGrantee};
         let running = |reported| {
             microphone_diagnosis(Some(reported), || {
                 panic!("a running Cantrip answers for itself")
             })
         };
         let own = microphone_diagnosis(None, || Access::Authorized);
-        assert_ne!(running(Some(Access::Authorized)), own);
+        let owner = |authorization, grantee| {
+            running(Some(MicrophoneAccess {
+                authorization,
+                grantee,
+            }))
+        };
+        assert_ne!(owner(Access::Authorized, MicrophoneGrantee::Cantrip), own);
         assert_ne!(running(None), own);
+        // An outside daemon's answer names the app macOS grants, never Cantrip's row.
+        for authorization in [Access::NotDetermined, Access::Denied, Access::Restricted] {
+            let terminal = MicrophoneGrantee::Launcher(Some("Terminal".to_owned()));
+            let launched = owner(authorization, terminal);
+            assert!(launched.contains("Terminal"), "{launched}");
+            assert!(!owner(authorization, MicrophoneGrantee::Cantrip).contains("Terminal"));
+        }
     }
 
     #[test]

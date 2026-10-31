@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 #[cfg(target_os = "macos")]
-use cantrip_engine::ipc::MicrophoneAuthorization;
+use cantrip_engine::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
 use cantrip_engine::ports::{DeliveryPermit, Platform, Recorder};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 pub(crate) struct NativePlatform {
     /// macOS authorizes this process, the capture owner, and no other.
     #[cfg(target_os = "macos")]
-    microphone: crate::capture::MicrophoneAccess,
+    microphone: crate::capture::MicrophonePrompt,
 }
 
 impl Platform for NativePlatform {
@@ -41,6 +41,11 @@ impl Platform for NativePlatform {
     #[cfg(target_os = "macos")]
     fn microphone_authorization(&self) -> Option<MicrophoneAuthorization> {
         Some(self.microphone.authorization())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn microphone_grantee(&self) -> Option<MicrophoneGrantee> {
+        Some(self.microphone.grantee().clone())
     }
 
     #[cfg(target_os = "macos")]
@@ -101,6 +106,7 @@ mod tests {
     fn linux_reports_no_microphone_authorization_and_refuses_requests_explicitly() {
         let platform = NativePlatform::default();
         assert_eq!(platform.microphone_authorization(), None);
+        assert_eq!(platform.microphone_grantee(), None);
         let refused = platform.request_microphone_access().unwrap_err();
         assert!(refused.is::<MicrophoneAccessUnsupported>());
     }

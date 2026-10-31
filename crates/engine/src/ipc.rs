@@ -389,6 +389,75 @@ pub enum MicrophoneAuthorization {
     Restricted,
 }
 
+/// Who macOS asks, lists under Privacy & Security → Microphone and grants for
+/// the capture owner. macOS answers for the app responsible for a process:
+/// Cantrip for Cantrip.app, but for an outside `cantrip daemon` the app that
+/// started it, such as Terminal, whose grant covers everything that app runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MicrophoneGrantee {
+    Cantrip,
+    /// The app that started the capture owner, by name when it was found.
+    Launcher(Option<String>),
+}
+
+impl MicrophoneGrantee {
+    /// The name macOS shows in its prompt and in Privacy & Security.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Cantrip => "Cantrip",
+            Self::Launcher(Some(app)) => app,
+            Self::Launcher(None) => "the app that started this daemon",
+        }
+    }
+
+    /// Said before an Allow that macOS answers for another app; None for Cantrip.
+    pub fn disclosure(&self) -> Option<String> {
+        match self {
+            Self::Cantrip => None,
+            Self::Launcher(Some(app)) => Some(format!(
+                "{app} and everything it runs share this microphone access; {app} started this daemon."
+            )),
+            Self::Launcher(None) => Some(
+                "The app that started this daemon, and everything it runs, share this microphone access."
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
+/// The capture owner's microphone access, as macOS reports it to that process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MicrophoneAccess {
+    pub authorization: MicrophoneAuthorization,
+    pub grantee: MicrophoneGrantee,
+}
+
+impl MicrophoneAccess {
+    /// What the operator should know or do, naming the app macOS grants.
+    pub fn guidance(&self) -> String {
+        let state = match self.authorization {
+            MicrophoneAuthorization::Authorized => "authorized".to_owned(),
+            MicrophoneAuthorization::NotDetermined => {
+                "not requested; choose Allow Microphone Access in the Cantrip menu or Settings"
+                    .to_owned()
+            }
+            MicrophoneAuthorization::Requesting => {
+                "waiting for your answer to the macOS prompt".to_owned()
+            }
+            MicrophoneAuthorization::Denied => format!(
+                "denied; enable {} in System Settings > Privacy & Security > Microphone",
+                self.grantee.name()
+            ),
+            MicrophoneAuthorization::Restricted => "restricted by macOS policy".to_owned(),
+        };
+        match self.grantee.disclosure() {
+            Some(disclosure) => format!("{state}. {disclosure}"),
+            None => state,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusSnapshot {
     pub epoch: String,
@@ -410,10 +479,10 @@ pub struct StatusSnapshot {
     /// The active take's non-default target; None for the default flow and when idle.
     #[serde(default)]
     pub handoff: Option<Handoff>,
-    /// The capture owner's microphone authorization; None where the platform has
-    /// none (Linux) or the owner predates this field.
+    /// The capture owner's microphone access; None where the platform has none
+    /// (Linux) or the owner predates this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub microphone: Option<MicrophoneAuthorization>,
+    pub microphone: Option<MicrophoneAccess>,
 }
 
 impl StatusSnapshot {
@@ -1090,5 +1159,38 @@ mod tests {
             "\"handed-off\""
         );
         assert!(outcome(Completeness::Complete, Delivery::HandedOff).is_success());
+    }
+
+    #[test]
+    fn microphone_guidance_names_the_app_macos_grants_for_an_outside_daemon() {
+        use MicrophoneAuthorization::*;
+        let terminal = MicrophoneGrantee::Launcher(Some("Terminal".to_owned()));
+        assert_eq!(MicrophoneGrantee::Cantrip.disclosure(), None);
+        for authorization in [NotDetermined, Requesting, Authorized, Denied, Restricted] {
+            let guidance = |grantee| {
+                MicrophoneAccess {
+                    authorization,
+                    grantee,
+                }
+                .guidance()
+            };
+            let own = guidance(MicrophoneGrantee::Cantrip);
+            let launched = guidance(terminal.clone());
+            let unnamed = guidance(MicrophoneGrantee::Launcher(None));
+            assert!(launched.contains("Terminal"), "{launched}");
+            assert!(!own.contains("Terminal"), "{own}");
+            // An unnamed launcher is still disclosed, never presented as Cantrip's own.
+            assert_ne!(unnamed, own);
+            // Only Cantrip.app's own grant is a Cantrip row in System Settings.
+            assert!(!launched.contains("enable Cantrip"), "{launched}");
+            assert!(!unnamed.contains("enable Cantrip"), "{unnamed}");
+        }
+        let wire = serde_json::to_value(MicrophoneAccess {
+            authorization: Denied,
+            grantee: terminal.clone(),
+        })
+        .unwrap();
+        let back: MicrophoneAccess = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.grantee, terminal);
     }
 }

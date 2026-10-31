@@ -18,7 +18,10 @@ use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{
     config::Config,
     engine::{request_shutdown, shutdown_requested},
-    ipc::{self, Command, Completeness, MicrophoneAuthorization, StateKind},
+    ipc::{
+        self, Command, Completeness, MicrophoneAccess, MicrophoneAuthorization, MicrophoneGrantee,
+        StateKind,
+    },
 };
 use mark::{Tone, CHASE_STEP};
 use objc2::{
@@ -303,29 +306,38 @@ fn sentence(text: &str) -> String {
     })
 }
 
-/// The menu's microphone line, from the authorization the capture owner
-/// reports: Allow asks that process, never this one, and an unknown
-/// authorization shows nothing.
+/// The menu's microphone item, from the access the capture owner reports:
+/// Allow asks that process, never this one, and an unknown access shows
+/// nothing. When macOS would grant another app, such as the terminal that
+/// started an outside daemon, the item names it and a disabled line beneath
+/// says what that grant covers, before Allow is chosen.
 fn microphone_item(
-    authorization: Option<MicrophoneAuthorization>,
-) -> Option<(&'static str, Option<Choice>)> {
-    match authorization? {
-        MicrophoneAuthorization::Authorized => None,
-        MicrophoneAuthorization::NotDetermined => Some((
-            "Allow Microphone Access…",
+    access: Option<&MicrophoneAccess>,
+) -> Option<(String, Option<Choice>, Option<String>)> {
+    let access = access?;
+    let target = match access.grantee {
+        MicrophoneGrantee::Cantrip => String::new(),
+        MicrophoneGrantee::Launcher(_) => format!(" for {}", access.grantee.name()),
+    };
+    let (title, choice) = match access.authorization {
+        MicrophoneAuthorization::Authorized => return None,
+        MicrophoneAuthorization::NotDetermined => (
+            format!("Allow Microphone Access{target}…"),
             Some(Choice::Send(Command::AllowMicrophone)),
-        )),
+        ),
         MicrophoneAuthorization::Requesting => {
-            Some(("Waiting for your microphone decision…", None))
+            ("Waiting for your microphone decision…".to_owned(), None)
         }
-        MicrophoneAuthorization::Denied => Some((
-            "Microphone Access Denied — Open Privacy Settings…",
+        MicrophoneAuthorization::Denied => (
+            format!("Microphone Access Denied{target} — Open Privacy Settings…"),
             Some(Choice::MicrophoneSettings),
-        )),
-        MicrophoneAuthorization::Restricted => {
-            Some(("Microphone access is restricted on this Mac", None))
-        }
-    }
+        ),
+        MicrophoneAuthorization::Restricted => (
+            format!("Microphone access{target} is restricted on this Mac"),
+            None,
+        ),
+    };
+    Some((title, choice, access.grantee.disclosure()))
 }
 
 /// Every piece of app state the AppKit thread owns, created at launch.
@@ -542,9 +554,9 @@ impl Host {
             .map_or(palette.accent, |handoff| handoff.color);
         let needs_operator = status.is_some_and(|status| {
             status.attention
-                || status
-                    .microphone
-                    .is_some_and(|microphone| microphone != MicrophoneAuthorization::Authorized)
+                || status.microphone.as_ref().is_some_and(|access| {
+                    access.authorization != MicrophoneAuthorization::Authorized
+                })
         }) || self.shortcut.active().is_none();
         let tone = match status.map(|status| &status.state) {
             None | Some(StateKind::Unknown(_)) => Tone::Unknown,
@@ -713,9 +725,11 @@ impl Host {
             .item("Settings…", Choice::Settings)
             .setKeyEquivalent(ns_string!(","));
         items.separator();
-        if let Some((title, choice)) = microphone_item(status.and_then(|status| status.microphone))
+        if let Some((title, choice, disclosure)) =
+            microphone_item(status.and_then(|status| status.microphone.as_ref()))
         {
-            items.add(title, choice);
+            items.add(&title, choice);
+            items.line(disclosure.as_deref());
         }
         if status.is_none() && !self.quitting && !matches!(self.engine, Engine::Owned { .. }) {
             items.item("Start Cantrip", Choice::StartEngine);
@@ -906,27 +920,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn microphone_actions_reach_the_capture_owner_or_system_settings() {
-        let choice = |authorization| microphone_item(authorization).and_then(|(_, choice)| choice);
+    fn microphone_actions_reach_the_capture_owner_and_name_another_grantee() {
+        use MicrophoneAuthorization::*;
         assert_eq!(microphone_item(None), None);
-        assert_eq!(
-            microphone_item(Some(MicrophoneAuthorization::Authorized)),
-            None
-        );
-        assert_eq!(
-            choice(Some(MicrophoneAuthorization::NotDetermined)),
-            Some(Choice::Send(Command::AllowMicrophone))
-        );
-        assert_eq!(
-            choice(Some(MicrophoneAuthorization::Denied)),
-            Some(Choice::MicrophoneSettings)
-        );
-        for informational in [
-            MicrophoneAuthorization::Requesting,
-            MicrophoneAuthorization::Restricted,
-        ] {
-            let item = microphone_item(Some(informational));
-            assert!(item.is_some_and(|(_, choice)| choice.is_none()));
+        let terminal = MicrophoneGrantee::Launcher(Some("Terminal".to_owned()));
+        for grantee in [MicrophoneGrantee::Cantrip, terminal] {
+            let launched = grantee != MicrophoneGrantee::Cantrip;
+            let item = |authorization| {
+                microphone_item(Some(&MicrophoneAccess {
+                    authorization,
+                    grantee: grantee.clone(),
+                }))
+            };
+            let choice = |authorization| item(authorization).and_then(|(_, choice, _)| choice);
+            assert_eq!(item(Authorized), None);
+            assert_eq!(
+                choice(NotDetermined),
+                Some(Choice::Send(Command::AllowMicrophone))
+            );
+            assert_eq!(choice(Denied), Some(Choice::MicrophoneSettings));
+            assert_eq!(choice(Requesting), None);
+            assert_eq!(choice(Restricted), None);
+            // Before Allow, an outside daemon's menu names the app macOS grants.
+            for authorization in [NotDetermined, Requesting, Denied, Restricted] {
+                let (title, _, disclosure) = item(authorization).unwrap();
+                assert_eq!(disclosure.is_some(), launched);
+                let shown = format!("{title} {}", disclosure.unwrap_or_default());
+                assert_eq!(shown.contains("Terminal"), launched, "{shown}");
+            }
         }
     }
 }

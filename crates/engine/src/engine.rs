@@ -7,8 +7,8 @@ use crate::delivery::{
 };
 use crate::ipc::{
     self, Artifacts, AudioSignal, Capabilities, Cleanup, Command, CommandReply, Completeness,
-    Delivery, InteractionNotice, MicrophoneAuthorization, OperationKind, Request, StateKind,
-    StatusSnapshot, TerminalOutcome,
+    Delivery, InteractionNotice, MicrophoneAccess, MicrophoneAuthorization, OperationKind, Request,
+    StateKind, StatusSnapshot, TerminalOutcome,
 };
 use crate::models;
 use crate::paths;
@@ -212,9 +212,10 @@ struct Daemon {
     has_text: bool,
     history_revision: u64,
     local_model: bool,
-    /// The platform's microphone authorization for this process, re-read on a
-    /// cadence and after an explicit request; status clients share this cache.
-    microphone: Option<MicrophoneAuthorization>,
+    /// The platform's microphone access for this process: its authorization is
+    /// re-read on a cadence and after an explicit request, and who macOS grants
+    /// is fixed at start. Status clients share this cache.
+    microphone: Option<MicrophoneAccess>,
     worker_available: bool,
     retainer: Option<JoinHandle<WorkerResult>>,
 }
@@ -226,7 +227,13 @@ impl Daemon {
         local_model: bool,
         platform: Arc<dyn Platform>,
     ) -> Self {
-        let microphone = platform.microphone_authorization();
+        let microphone = platform
+            .microphone_authorization()
+            .zip(platform.microphone_grantee())
+            .map(|(authorization, grantee)| MicrophoneAccess {
+                authorization,
+                grantee,
+            });
         Self {
             config,
             platform,
@@ -416,7 +423,7 @@ impl Daemon {
                 .state
                 .operation()
                 .and_then(|operation| operation.handoff.clone()),
-            microphone: self.microphone,
+            microphone: self.microphone.clone(),
         }
     }
 }
@@ -631,7 +638,12 @@ fn serve(
             next_capability_refresh = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
         }
         if Instant::now() >= next_microphone_refresh {
-            daemon.microphone = daemon.platform.microphone_authorization();
+            if let (Some(access), Some(authorization)) = (
+                daemon.microphone.as_mut(),
+                daemon.platform.microphone_authorization(),
+            ) {
+                access.authorization = authorization;
+            }
             next_microphone_refresh = Instant::now() + MICROPHONE_REFRESH_INTERVAL;
         }
         if let Ok((revision, refreshed)) = history.results.try_recv() {
@@ -1430,28 +1442,50 @@ fn allow_microphone(daemon: &mut Daemon) -> CommandReply {
             };
         }
     };
-    daemon.microphone = Some(authorization);
-    match authorization {
-        MicrophoneAuthorization::Requesting => daemon.reply(
-            true,
-            "Waiting for your answer to the microphone prompt.",
-            None,
-        ),
-        MicrophoneAuthorization::Authorized => {
-            daemon.reply(true, "Microphone access is allowed.", None)
-        }
-        MicrophoneAuthorization::Denied => daemon.reject(
-            "Microphone access is denied; enable Cantrip in System Settings > Privacy & Security > Microphone.",
-            "microphone-denied",
-        ),
-        MicrophoneAuthorization::Restricted => daemon.reject(
-            "Microphone access is restricted by system policy.",
-            "microphone-restricted",
-        ),
-        MicrophoneAuthorization::NotDetermined => daemon.reject(
+    let Some(access) = daemon.microphone.as_mut() else {
+        return daemon.reject(
             "Microphone access could not be requested.",
             "microphone-request-failed",
+        );
+    };
+    access.authorization = authorization;
+    let (message, error) = allow_reply(access);
+    match error {
+        None => daemon.reply(true, message, None),
+        Some(class) => daemon.reject(&message, class),
+    }
+}
+
+/// The answer to Allow and its error class. When macOS asks for the app that
+/// started this process rather than for Cantrip, the answer names that app.
+fn allow_reply(access: &MicrophoneAccess) -> (String, Option<&'static str>) {
+    let (message, error) = match access.authorization {
+        MicrophoneAuthorization::Requesting => (
+            "Waiting for your answer to the microphone prompt.".to_owned(),
+            None,
         ),
+        MicrophoneAuthorization::Authorized => ("Microphone access is allowed.".to_owned(), None),
+        MicrophoneAuthorization::Denied => (
+            format!(
+                "Microphone access is denied; enable {} in System Settings > Privacy & Security > Microphone.",
+                access.grantee.name()
+            ),
+            Some("microphone-denied"),
+        ),
+        MicrophoneAuthorization::Restricted => (
+            "Microphone access is restricted by system policy.".to_owned(),
+            Some("microphone-restricted"),
+        ),
+        MicrophoneAuthorization::NotDetermined => {
+            return (
+                "Microphone access could not be requested.".to_owned(),
+                Some("microphone-request-failed"),
+            );
+        }
+    };
+    match access.grantee.disclosure() {
+        Some(disclosure) => (format!("{message} {disclosure}"), error),
+        None => (message, error),
     }
 }
 
@@ -2630,6 +2664,7 @@ fn milliseconds(ms: u128) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::MicrophoneGrantee;
 
     #[test]
     fn uncertain_cloud_outcomes_require_inspection_not_recovery_advice() {
@@ -2740,8 +2775,8 @@ mod tests {
         (daemon, operation)
     }
 
-    /// A capture owner that reports a microphone authorization, as macOS does.
-    struct ReportingPlatform(MicrophoneAuthorization);
+    /// A capture owner that reports, and requests, microphone access as macOS does.
+    struct ReportingPlatform(MicrophoneAuthorization, MicrophoneGrantee);
 
     impl Platform for ReportingPlatform {
         fn start_recording(&self, _: &Path, _: Option<&str>) -> Result<Box<dyn Recorder>> {
@@ -2765,6 +2800,14 @@ mod tests {
         fn microphone_authorization(&self) -> Option<MicrophoneAuthorization> {
             Some(self.0)
         }
+
+        fn microphone_grantee(&self) -> Option<MicrophoneGrantee> {
+            Some(self.1.clone())
+        }
+
+        fn request_microphone_access(&self) -> Result<MicrophoneAuthorization> {
+            Ok(self.0)
+        }
     }
 
     #[test]
@@ -2783,13 +2826,17 @@ mod tests {
             Config::default(),
             Vec::new(),
             false,
-            Arc::new(ReportingPlatform(MicrophoneAuthorization::NotDetermined)),
+            Arc::new(ReportingPlatform(
+                MicrophoneAuthorization::NotDetermined,
+                MicrophoneGrantee::Cantrip,
+            )),
         );
         let reported = wire(&owner);
-        assert_eq!(reported["microphone"], "not-determined");
+        assert_eq!(reported["microphone"]["authorization"], "not-determined");
+        assert_eq!(reported["microphone"]["grantee"], "cantrip");
         let reported: StatusSnapshot = serde_json::from_value(reported).unwrap();
         assert_eq!(
-            reported.microphone,
+            reported.microphone.map(|access| access.authorization),
             Some(MicrophoneAuthorization::NotDetermined)
         );
     }
@@ -2808,6 +2855,45 @@ mod tests {
         assert_eq!(reply.error.as_deref(), Some("microphone-unsupported"));
         assert_eq!(daemon.snapshot().microphone, None);
         assert!(job_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn allow_replies_name_the_app_macos_grants_for_an_outside_daemon() {
+        let reply = |authorization, grantee| {
+            let mut daemon = Daemon::new(
+                Config::default(),
+                Vec::new(),
+                false,
+                Arc::new(ReportingPlatform(authorization, grantee)),
+            );
+            let (job_tx, _) = mpsc::channel();
+            let reply = execute(
+                Command::AllowMicrophone,
+                &mut daemon,
+                Path::new("/tmp"),
+                &job_tx,
+            );
+            let snapshot = daemon.snapshot().microphone.unwrap();
+            assert_eq!(snapshot.authorization, authorization);
+            reply
+        };
+        for authorization in [
+            MicrophoneAuthorization::Requesting,
+            MicrophoneAuthorization::Authorized,
+            MicrophoneAuthorization::Denied,
+            MicrophoneAuthorization::Restricted,
+        ] {
+            let own = reply(authorization, MicrophoneGrantee::Cantrip);
+            let launched = reply(
+                authorization,
+                MicrophoneGrantee::Launcher(Some("Terminal".to_owned())),
+            );
+            assert_eq!((own.ok, &own.error), (launched.ok, &launched.error));
+            let (own, launched) = (own.message.unwrap(), launched.message.unwrap());
+            assert!(launched.contains("Terminal"), "{launched}");
+            assert!(!own.contains("Terminal"), "{own}");
+            assert!(!launched.contains("enable Cantrip"), "{launched}");
+        }
     }
 
     #[test]

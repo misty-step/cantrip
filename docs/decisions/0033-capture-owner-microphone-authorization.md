@@ -28,10 +28,21 @@ and reports `requesting` until the operator answers. Platforms without per-app
 authorization (Linux) report none and refuse the command as
 `microphone-unsupported`.
 
+macOS attributes a request to the app responsible for the process. Cantrip.app,
+started by launchd, answers for itself. An outside `cantrip daemon` answers
+through the app that started it, such as Terminal: the prompt, the Privacy &
+Security row and the grant belong to that app and cover everything it runs.
+The owner finds that app once at start by walking its parent processes to the
+first app bundle, because macOS has no public call for the responsible app,
+and reports it in status. Every surface names it before an Allow it would
+answer and in its not-requested, denied and restricted guidance. Such a daemon
+keeps its request, because macOS offers no other way to grant a process
+started from a terminal.
+
 ## Consequences
 
 Settings, the menu and capture agree, including when the app is attached to an
-external daemon; `cantrip microphone allow` covers terminal setup. No surface can
+external daemon, whose grant goes to the app that started it. No surface can
 show or change access while no engine runs, and `doctor` then labels its own
 answer as this process only. The request stays an explicit operator action:
 start, status and polling never ask, and Recorder start keeps its own check.
