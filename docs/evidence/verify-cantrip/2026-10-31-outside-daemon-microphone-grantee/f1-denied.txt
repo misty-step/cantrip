@@ -1,0 +1,21 @@
+== status --json (microphone)
+{"authorization": "denied", "grantee": {"launcher": "Terminal"}}
+== status
+microphone: denied
+microphone-grantee: Terminal and everything it runs share this microphone access; Terminal started this daemon.
+== doctor
+microphone: denied; enable Terminal in System Settings > Privacy & Security > Microphone. Terminal and everything it runs share this microphone access; Terminal started this daemon. — reported by the running Cantrip
+daemon: reachable (idle)
+== daemon processes
+  934     1 /Applications/Cantrip.app/Contents/MacOS/cantrip
+  864   800 /Applications/Cantrip.app/Contents/MacOS/cantrip daemon
+== daemon.log
+[2m2026-10-31T04:40:34.825775Z[0m [32m INFO[0m [2mcantrip::capture::macos[0m[2m:[0m [Capture] microphone grantee=launcher
+[2m2026-10-31T04:41:36.935678Z[0m [32m INFO[0m [2mcantrip_engine::engine[0m[2m:[0m [Daemon] command=allow-microphone sender=pid=1057
+[2m2026-10-31T04:41:36.955998Z[0m [32m INFO[0m [2mcantrip::capture::macos[0m[2m:[0m [Capture] microphone access requested
+[2m2026-10-31T04:41:49.687883Z[0m [32m INFO[0m [2mcantrip::capture::macos[0m[2m:[0m [Capture] microphone access answered state=Denied
+== allow after deny
+error: microphone-denied
+state: idle
+message: Microphone access is denied; enable Terminal in System Settings > Privacy & Security > Microphone. Terminal and everything it runs share this microphone access; Terminal started this daemon.
+exit=1
