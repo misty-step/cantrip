@@ -638,7 +638,7 @@ impl Host {
         let requests = window.tick(&Live {
             line: &line,
             online: status.is_some(),
-            microphone: status.and_then(|status| status.microphone),
+            microphone: status.and_then(|status| status.microphone.as_ref()),
         });
         for request in requests {
             match request {

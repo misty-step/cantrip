@@ -33,11 +33,11 @@ use objc2_app_kit::{
     NSGridCellPlacement, NSGridRowAlignment, NSGridView, NSImageView, NSModalResponse,
     NSModalResponseCancel, NSProgressIndicator, NSProgressIndicatorStyle, NSScrollView,
     NSSecureTextField, NSSegmentSwitchTracking, NSSegmentedControl, NSStackView,
-    NSStackViewGravity, NSTableCellView, NSTableColumn, NSTableView, NSTableViewDataSource,
-    NSTableViewDelegate, NSTableViewStyle, NSTextField, NSTextFieldDelegate, NSTextView,
-    NSTitlePosition, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
-    NSToolbarFlexibleSpaceItemIdentifier, NSToolbarItem, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowToolbarStyle,
+    NSStackViewGravity, NSTableCellView, NSTableColumn, NSTableColumnResizingOptions, NSTableView,
+    NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewStyle, NSTextField, NSTextFieldDelegate, NSTextView, NSTitlePosition, NSToolbar,
+    NSToolbarDelegate, NSToolbarDisplayMode, NSToolbarFlexibleSpaceItemIdentifier, NSToolbarItem,
+    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSIndexSet, NSInteger, NSNotification, NSPoint, NSRect, NSSize, NSString,
@@ -61,13 +61,14 @@ const REPORT_HEIGHT: f64 = 240.0;
 const PANES: &str = "panes";
 const REFRESH: &str = "refresh";
 
-/// The recording table's columns: identifier, title, width.
+/// The recording table's columns: identifier, title, width. Together they fit
+/// the table beside a legacy scroller; the last visible column takes the rest.
 const COLUMNS: [(&str, &str, f64); 5] = [
-    ("recorded", "Recorded", 190.0),
-    ("duration", "Duration", 80.0),
-    ("transcript", "Transcript", 150.0),
+    ("recorded", "Recorded", 170.0),
+    ("duration", "Duration", 70.0),
+    ("transcript", "Transcript", 140.0),
     ("audio", "Audio", 90.0),
-    ("waiting", "Recovery", 70.0),
+    ("waiting", "Recovery", 80.0),
 ];
 
 /// Where the window opens when it is asked to show.
@@ -334,6 +335,7 @@ define_class!(
         fn filter(&self, sender: &NSSegmentedControl) {
             let all = sender.selectedSegment() == 1;
             self.state_mut().recordings.show_all(all);
+            self.layout_columns(all);
             self.reload_table();
             self.render(None);
         }
@@ -486,6 +488,7 @@ impl RecordingsWindow {
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         let views = this.build(mtm);
         let _ = this.ivars().views.set(views);
+        this.layout_columns(false);
         this.show_pane(Pane::Recordings, false);
         this.render(None);
         this.views().window.center();
@@ -653,20 +656,26 @@ impl RecordingsWindow {
         window.setFrame_display_animate(window.frameRectForContentRect(content), true, animate);
     }
 
+    /// Show the Recovery column only with every recording listed, and give
+    /// each column its own width again so all of them fit.
+    fn layout_columns(&self, all: bool) {
+        let table = &self.views().table;
+        for (identifier, _, width) in COLUMNS {
+            if let Some(column) = table.tableColumnWithIdentifier(&ui::ns(identifier)) {
+                column.setWidth(width);
+                if identifier == "waiting" {
+                    column.setHidden(!all);
+                }
+            }
+        }
+        table.sizeLastColumnToFit();
+    }
+
     /// Reread the table, then select the selected take wherever it now is, or
     /// nothing: a row never stands in for a take that is gone.
     fn reload_table(&self) {
         let views = self.views();
-        let (row, all) = {
-            let state = self.state();
-            (
-                state.recordings.selected_row(),
-                state.recordings.showing_all(),
-            )
-        };
-        if let Some(column) = views.table.tableColumnWithIdentifier(&ui::ns("waiting")) {
-            column.setHidden(!all);
-        }
+        let row = self.state().recordings.selected_row();
         self.ivars().syncing.set(true);
         views.table.reloadData();
         let rows = match row {
@@ -1156,12 +1165,19 @@ impl RecordingsWindow {
             column.setTitle(&ui::ns(title));
             column.setWidth(width);
             column.setMinWidth(width * 0.6);
+            column.setResizingMask(
+                NSTableColumnResizingOptions::AutoresizingMask
+                    | NSTableColumnResizingOptions::UserResizingMask,
+            );
             table.addTableColumn(&column);
         }
         table.setRowHeight(ROW_HEIGHT);
         table.setStyle(NSTableViewStyle::FullWidth);
         table.setUsesAlternatingRowBackgroundColors(true);
         table.setAllowsColumnReordering(false);
+        table.setColumnAutoresizingStyle(
+            NSTableViewColumnAutoresizingStyle::LastColumnOnlyAutoresizingStyle,
+        );
         table.setAllowsEmptySelection(true);
         // SAFETY: the window clears these before it is released.
         unsafe {
