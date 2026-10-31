@@ -78,13 +78,17 @@ before relying on your microphone, shortcut, or destination.
 Open **Cantrip.app** from its installed location. No arguments (or `app`) run
 the native menu client; `daemon` runs only the shared engine. Keep one engine
 owner: the app starts one if absent and attaches to an existing engine instead
-of duplicating it. **Settings…** opens a native window inside the app: one
-window, brought forward if already open, which closes when the app quits.
-`cantrip settings` asks the running app to show that window, opening
-Cantrip first when it is not running, and exits; it starts no window process
-of its own. Recordings and recovery is a separate window. Closing either
-window does not quit the app or engine. Check Setup, selected-take Copy and
-recovery, dismiss, Start/Stop, and Cancel are available from the menu.
+of duplicating it. **Settings…** and **Recordings and Recovery…** open native
+windows inside the app: one of each, brought forward if already open, which
+close when the app quits. `cantrip settings` and `cantrip actions` ask the
+running app to show them, opening Cantrip first when it is not running, and
+exit; they start no window process of their own. **Check Setup…** and
+`cantrip actions --doctor` open Recordings and Recovery on its Setup view and
+run the read-only check there; **Install Local Model…** opens that view
+without downloading anything. Closing either window does not quit the app or
+engine; closing during a model download cancels it and removes its temporary
+files first. Selected-take Copy and recovery, dismiss, Start/Stop, and Cancel
+are also available from the menu.
 
 **Open at Login** is an explicit menu choice using macOS `SMAppService`, not a
 launch agent installed silently. It is available when running Cantrip.app.

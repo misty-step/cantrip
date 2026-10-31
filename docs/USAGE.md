@@ -249,7 +249,7 @@ Stopped audio and plaintext history are retained on Mac too; read
    content may remain. Use selected-take Copy/recovery if needed.
 
 Only a complete result plus the expected text in the intended editor establishes
-this attended trial. The menu also opens Settings, Recordings and recovery,
+this attended trial. The menu also opens Settings, Recordings and Recovery,
 Check Setup, and selected-outcome Copy/recovery/dismiss. Closing those windows
 does not stop the engine; Cancel prevents delivery without deleting retained
 audio. [Open at Login and graceful updates](DESKTOP.md#macos-app-ownership-login-and-updates)
@@ -343,10 +343,18 @@ Open the native recovery window:
 ```
 
 Select the recording by capture time and ID. Copy, recover, and confirmed Forget
-always target that selection, even if newer takes arrive. Use **Include
-completed history** for resolved recordings. Arrow keys, Page Up/Down, and
-Home/End navigate the list. Escape closes the window or confirmation without
-deleting a recording.
+always target that selection, even if newer takes arrive. On Linux, use
+**Include completed history** for resolved recordings. Arrow keys, Page
+Up/Down, and Home/End navigate the list. Escape closes the window or
+confirmation without deleting a recording.
+
+On Mac, `cantrip actions` and **Recordings and Recovery…** in the Cantrip menu
+show the app's own window. Choose **Waiting to Recover** or **All Recordings**
+above the list, select a recording, then use **Copy Transcript**, **Recover
+Locally**, **Recover with Provider**, or **Forget…**. Forget asks first in a
+sheet; Return never confirms it and **Cancel** (or Escape) keeps the recording.
+The **Setup** view installs the local model, starts or reloads Cantrip, runs
+**Check Setup**, and saves an API key in your keychain.
 
 For the CLI, list metadata and choose an exact ID:
 
@@ -410,7 +418,7 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 | `cantrip daemon [--preload]` | Run the dictation daemon; Mac engine-only, without menu/panel/shortcut |
 | `cantrip hud [--screenshot PATH]` | Linux passive layer-shell HUD (daemon normally spawns/watches it); Mac native panel/offscreen rendering (app normally owns the live panel) |
 | `cantrip settings [--screenshot PATH]` | Open configuration editing and reload; on Mac, show the running app's Settings window (`--pane NAME` selects the pane rendered with `--screenshot`) |
-| `cantrip actions [--doctor] [--screenshot PATH]` | Open recording recovery and setup |
+| `cantrip actions [--doctor] [--screenshot PATH]` | Open recording recovery and setup; on Mac, show the running app's Recordings and Recovery window (`--doctor` opens its Setup view and runs Check Setup) |
 | `cantrip toggle` / `start` / `stop` / `cancel` | Recording and processing transitions |
 | `cantrip status [--json]` / `ping` | State, progress, outcomes, and capabilities / daemon liveness |
 | `cantrip transcribe [--local] WAV` | One-shot file transcription; text stdout, diagnostics stderr |
