@@ -1,0 +1,72 @@
+# First-presentation draw logs (temporary HUDDBG logging builds; not shipped)
+
+Each line below summarises one fresh app launch whose first HUD was the refused-capture failure.
+presented = frames the HUD painted; drawn = those AppKit drew (drawRect); max_gap = longest pause
+between HUD events; final_drawn = when the final frame (centre row 140) was drawn after the panel was ordered front.
+
+## VM 1 (booted 04:02 UTC), PR placement (HUD view = NSGlassEffectView.contentView)
+    t03-base-light.log: presented=5 drawn=5 missing=[] max_gap_ms=1023 final_centre=140 final_drawn_after_order_ms=1921
+    t04-base-light.log: presented=4 drawn=4 missing=[] max_gap_ms=2021 final_centre=140 final_drawn_after_order_ms=2384
+    t05-base-light.log: presented=4 drawn=4 missing=[] max_gap_ms=2501 final_centre=140 final_drawn_after_order_ms=3142
+
+## VM 1, later (warmer), PR placement vs view above the glass vs layer contents (interleaved)
+    r1-base.log: presented=13 drawn=13 missing=[] max_gap_ms=56 final_centre=140 final_drawn_after_order_ms=357
+    r2-base.log: presented=23 drawn=23 missing=[] max_gap_ms=28 final_centre=140 final_drawn_after_order_ms=388
+    r3-base.log: presented=11 drawn=11 missing=[] max_gap_ms=134 final_centre=140 final_drawn_after_order_ms=384
+    r4-base.log: presented=14 drawn=14 missing=[] max_gap_ms=61 final_centre=140 final_drawn_after_order_ms=372
+    r5-base.log: presented=20 drawn=20 missing=[] max_gap_ms=49 final_centre=140 final_drawn_after_order_ms=383
+    r1-sibling.log: presented=11 drawn=11 missing=[] max_gap_ms=83 final_centre=140 final_drawn_after_order_ms=420
+    r2-sibling.log: presented=8 drawn=8 missing=[] max_gap_ms=221 final_centre=140 final_drawn_after_order_ms=424
+    r3-sibling.log: presented=12 drawn=12 missing=[] max_gap_ms=115 final_centre=140 final_drawn_after_order_ms=415
+    r4-sibling.log: presented=21 drawn=21 missing=[] max_gap_ms=43 final_centre=140 final_drawn_after_order_ms=377
+    r5-sibling.log: presented=13 drawn=13 missing=[] max_gap_ms=97 final_centre=140 final_drawn_after_order_ms=376
+    r1-contents.log: presented=14 drawn=14 missing=[] max_gap_ms=134 final_centre=140 final_drawn_after_order_ms=372
+    r2-contents.log: presented=17 drawn=17 missing=[] max_gap_ms=56 final_centre=140 final_drawn_after_order_ms=376
+    r3-contents.log: presented=16 drawn=16 missing=[] max_gap_ms=88 final_centre=140 final_drawn_after_order_ms=371
+    r4-contents.log: presented=24 drawn=24 missing=[] max_gap_ms=20 final_centre=140 final_drawn_after_order_ms=384
+    r5-contents.log: presented=24 drawn=24 missing=[] max_gap_ms=19 final_centre=140 final_drawn_after_order_ms=372
+
+## VM 2 (booted 04:34 UTC), interleaved: view above the glass ("fix") vs PR placement ("base")
+    c1-fix.log: presented=4 drawn=4 missing=[] max_gap_ms=253 final_centre=140 final_drawn_after_order_ms=516
+    c2-fix.log: presented=12 drawn=12 missing=[] max_gap_ms=81 final_centre=140 final_drawn_after_order_ms=378
+    c3-fix.log: presented=24 drawn=24 missing=[] max_gap_ms=27 final_centre=140 final_drawn_after_order_ms=387
+    c1-base.log: presented=19 drawn=19 missing=[] max_gap_ms=53 final_centre=140 final_drawn_after_order_ms=361
+    c2-base.log: presented=18 drawn=17 missing=[9] max_gap_ms=41 final_centre=140 final_drawn_after_order_ms=394
+    c3-base.log: presented=20 drawn=20 missing=[] max_gap_ms=47 final_centre=140 final_drawn_after_order_ms=397
+
+## VM 4 (booted 04:49 UTC), interleaved
+    v1-instr-2.log: presented=4 drawn=4 missing=[] max_gap_ms=582 final_centre=140 final_drawn_after_order_ms=679
+    v2-instr-2.log: presented=17 drawn=17 missing=[] max_gap_ms=60 final_centre=140 final_drawn_after_order_ms=371
+    v3-instr-2.log: presented=8 drawn=8 missing=[] max_gap_ms=164 final_centre=140 final_drawn_after_order_ms=411
+    v4-instr-2.log: presented=16 drawn=16 missing=[] max_gap_ms=74 final_centre=140 final_drawn_after_order_ms=376
+    v5-instr-2.log: presented=15 drawn=15 missing=[] max_gap_ms=111 final_centre=140 final_drawn_after_order_ms=373
+    v1-fixinstr-1.log: presented=10 drawn=10 missing=[] max_gap_ms=68 final_centre=140 final_drawn_after_order_ms=383
+    v2-fixinstr-1.log: presented=16 drawn=16 missing=[] max_gap_ms=63 final_centre=140 final_drawn_after_order_ms=389
+    v3-fixinstr-1.log: presented=19 drawn=19 missing=[] max_gap_ms=50 final_centre=140 final_drawn_after_order_ms=378
+    v4-fixinstr-1.log: presented=14 drawn=14 missing=[] max_gap_ms=80 final_centre=140 final_drawn_after_order_ms=373
+    v5-fixinstr-1.log: presented=12 drawn=12 missing=[] max_gap_ms=89 final_centre=140 final_drawn_after_order_ms=343
+
+## t04 (VM 1, PR placement): the final frames were drawn ~2.4 s after ordering front; the VNC shot at ~5 s still showed gen 2-3
+[2m2026-10-31T04:12:14.125592Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=1192.2 present gen=1 centre=26 ordered=false shown=false visible=false occlusion=NSWindowOcclusionState(8192) needsDisplay(before)=false layer=0x0 contents=no-layer drawn=0
+[2m2026-10-31T04:12:16.252306Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=3318.9 present gen=2 centre=26 ordered=false shown=true visible=false occlusion=NSWindowOcclusionState(8192) needsDisplay(before)=true layer=0x7b58e76cd0 contents=nil drawn=0
+[2m2026-10-31T04:12:16.271797Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=3338.0 ordered front window=39 visible=true
+[2m2026-10-31T04:12:16.274196Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=3340.8 drawRect gen=2 centre=26 drawn=1 dirty=CGRect { origin: CGPoint { x: -42.0, y: -6.0 }, size: CGSize { width: 420.0, height: 141.0 } } layer=0x7b58e76cd0 contents=nil inWindow=true
+[2m2026-10-31T04:12:16.459983Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=3526.6 present gen=3 centre=54 ordered=true shown=true visible=true occlusion=NSWindowOcclusionState(8192) needsDisplay(before)=false layer=0x7b58e76cd0 contents=NSViewBackingLayerContents@0x7b59155b00 drawn=1
+[2m2026-10-31T04:12:16.460745Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=3527.3 drawRect gen=3 centre=54 drawn=2 dirty=CGRect { origin: CGPoint { x: -42.0, y: -6.0 }, size: CGSize { width: 420.0, height: 141.0 } } layer=0x7b58e76cd0 contents=NSViewBackingLayerContents@0x7b59155b00 inWindow=true
+[2m2026-10-31T04:12:16.611338Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=3677.9 present gen=4 centre=139 ordered=true shown=true visible=true occlusion=NSWindowOcclusionState(8194) needsDisplay(before)=false layer=0x7b58e76cd0 contents=NSViewBackingLayerContents@0x7b59155b00 drawn=2
+[2m2026-10-31T04:12:18.632763Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=5699.3 drawRect gen=4 centre=139 drawn=3 dirty=CGRect { origin: CGPoint { x: -42.0, y: -6.0 }, size: CGSize { width: 420.0, height: 141.0 } } layer=0x7b58e76cd0 contents=NSViewBackingLayerContents@0x7b59155b00 inWindow=true
+[2m2026-10-31T04:12:18.650856Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=5717.4 present gen=5 centre=140 ordered=true shown=true visible=true occlusion=NSWindowOcclusionState(8194) needsDisplay(before)=false layer=0x7b58e76cd0 contents=NSViewBackingLayerContents@0x7b59155b00 drawn=3
+[2m2026-10-31T04:12:18.655548Z[0m [32m INFO[0m [2mcantrip::hud::macos[0m[2m:[0m [HUDDBG] t=5722.1 drawRect gen=5 centre=140 drawn=4 dirty=CGRect { origin: CGPoint { x: -42.0, y: -6.0 }, size: CGSize { width: 420.0, height: 141.0 } } layer=0x7b58e76cd0 contents=NSViewBackingLayerContents@0x7b59155b00 inWindow=true
+
+## t05 main thread during the first presentation (sample, 1 ms; 525 main-thread samples)
+    285 -[NSApplication run]  (in AppKit) + 396  
+    272 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  
+    8 CABackingStoreGetFrontTexture(CABackingStore*, CGColorSpace*)  (in QuartzCore) + 128  
+    1 CABackingStoreGetFrontTexture(CABackingStore*, CGColorSpace*)  (in QuartzCore) + 240  
+    1 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  
+    1 CABackingStoreGetFrontTexture(CABackingStore*, CGColorSpace*)  (in QuartzCore) + 128  
+    240 -[NSApplication run]  (in AppKit) + 476  
+    240 -[NSWindow _windowMoved:]  (in AppKit) + 340  
+    240 +[NSCGSDisplayConfiguration displaysWillChange]  (in AppKit) + 52  
+    240 SLSIsDisplayChangedSeedValid  (in SkyLight) + 156  
+    240 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  

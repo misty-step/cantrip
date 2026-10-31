@@ -331,8 +331,8 @@ mod native {
         palette
     }
 
-    /// The colors of one appearance, such as the one Liquid Glass gives the HUD
-    /// over content brighter or darker than the system appearance.
+    /// The colors of one appearance, such as the HUD view's effective
+    /// appearance.
     pub fn resolve(appearance: &NSAppearance) -> Palette {
         let resolved = Cell::new(None);
         appearance.performAsCurrentDrawingAppearance(&StackBlock::new(|| resolved.set(current())));

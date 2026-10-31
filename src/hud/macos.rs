@@ -341,8 +341,8 @@ impl Placement {
 
 /// What shows through the instrument's container.
 enum Backdrop {
-    /// Liquid Glass, macOS 26 and later. The instrument is its content view, so
-    /// AppKit keeps it legible as the glass adapts to what is behind the panel.
+    /// Liquid Glass, macOS 26 and later, with the instrument as its content
+    /// view.
     Glass(Retained<NSGlassEffectView>),
     /// The HUD window material on earlier releases, holding the instrument.
     Material(Retained<NSVisualEffectView>),
@@ -474,8 +474,8 @@ struct Panel {
     /// The handoff route color the backdrop carries.
     route: Option<[u8; 3]>,
     placement: Option<Placement>,
-    /// The colors of the instrument view's own appearance, which Liquid Glass
-    /// adapts to the brightness of what is behind the panel.
+    /// The colors of the instrument view's effective appearance, followed as
+    /// soon as AppKit changes it.
     palette: Palette,
 }
 
@@ -703,8 +703,8 @@ unsafe extern "C-unwind" fn release_pixels(
 struct HudState {
     pixels: RefCell<Pixels>,
     underlay: Cell<Underlay>,
-    /// AppKit changed the view's effective appearance, as Liquid Glass does
-    /// over content much brighter or darker than the system appearance.
+    /// AppKit changed the view's effective appearance, as switching between
+    /// Light and Dark does.
     appearance_changed: Cell<bool>,
 }
 
