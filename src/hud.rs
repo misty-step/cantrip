@@ -1860,6 +1860,7 @@ impl Instrument {
         width: u32,
         height: u32,
         scale: u32,
+        backing: Backing,
     ) {
         let mut canvas = Canvas {
             bytes,
@@ -1874,6 +1875,7 @@ impl Instrument {
             self.palette,
             &presentation.frame,
             presentation.container_width,
+            backing,
         );
         canvas.fade(presentation.alpha);
     }
@@ -1899,6 +1901,16 @@ impl Instrument {
     }
 }
 
+/// Who draws the container behind the field and captions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backing {
+    /// The painter, as the palette's surface inside a border.
+    Painted,
+    /// The native surface: the macOS panel's system material.
+    #[cfg(any(target_os = "macos", test))]
+    Native,
+}
+
 struct Canvas<'a> {
     bytes: &'a mut [u8],
     width: u32,
@@ -1915,15 +1927,18 @@ impl Canvas<'_> {
         palette: Palette,
         frame: &TrackFrame,
         container_width: f32,
+        backing: Backing,
     ) {
         self.bytes.fill(0);
         let Some(kind) = model.kind else {
             return;
         };
         let logical_width = self.width as f32 / self.scale;
-        let left = (logical_width - container_width) / 2.0;
-        let top = 6.0;
-        let body_height = self.height as f32 / self.scale - 12.0;
+        let [left, top, _, body_height] = container_rect(
+            logical_width,
+            self.height as f32 / self.scale,
+            container_width,
+        );
         // A non-default target owns the border, a surface wash and the active field;
         // the default flow keeps the theme's own colors.
         let route = model.route.as_ref();
@@ -1935,15 +1950,17 @@ impl Canvas<'_> {
             ),
             None => (palette.border, palette.surface, palette.accent),
         };
-        self.rect(left, top, container_width, body_height, border, 1.0);
-        self.rect(
-            left + 1.0,
-            top + 1.0,
-            container_width - 2.0,
-            body_height - 2.0,
-            surface,
-            1.0,
-        );
+        if backing == Backing::Painted {
+            self.rect(left, top, container_width, body_height, border, 1.0);
+            self.rect(
+                left + 1.0,
+                top + 1.0,
+                container_width - 2.0,
+                body_height - 2.0,
+                surface,
+                1.0,
+            );
+        }
         if kind == Kind::Attention {
             self.rect(left, top, 2.0, body_height, palette.attention, 1.0);
         }
@@ -2192,6 +2209,17 @@ fn wrap_line(text: &str, max_chars: usize) -> (&str, &str) {
         }
     }
     (text, "")
+}
+
+/// The container's logical `[left, top, width, height]` in a `width` × `height`
+/// surface: centered, 6 points inside the surface's top and bottom edges.
+fn container_rect(width: f32, height: f32, container_width: f32) -> [f32; 4] {
+    [
+        (width - container_width) / 2.0,
+        6.0,
+        container_width,
+        height - 12.0,
+    ]
 }
 
 fn layout_height(model: &Model, font: &FontRef<'_>, container_width: f32) -> u32 {
@@ -2768,7 +2796,13 @@ mod tests {
         ((front + FRONTIER_RADIUS).ceil() as usize).min(CELLS)
     }
 
-    fn raster_hud(model: &Model, now: Instant, width: u32, scale: f32) -> (Vec<u8>, u32) {
+    fn raster_hud(
+        model: &Model,
+        now: Instant,
+        width: u32,
+        scale: f32,
+        backing: Backing,
+    ) -> (Vec<u8>, u32) {
         let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
         let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
         let height = (layout_height(model, &font, container_width) as f32 * scale).round() as u32;
@@ -2793,6 +2827,7 @@ mod tests {
             },
             &model.frame(now),
             container_width,
+            backing,
         );
         (bytes, width)
     }
@@ -2808,7 +2843,7 @@ mod tests {
         };
         // Capsule top border at scale 1 (BGRA), right of any attention rail.
         let border = |model: &Model| {
-            let (bytes, width) = raster_hud(model, now, SURFACE_WIDTH, 1.0);
+            let (bytes, width) = raster_hud(model, now, SURFACE_WIDTH, 1.0, Backing::Painted);
             let x = (SURFACE_WIDTH - CONTAINER_WIDTH as u32) / 2 + 10;
             let index = ((6 * width + x) * 4) as usize;
             [bytes[index + 2], bytes[index + 1], bytes[index]]
@@ -2851,6 +2886,50 @@ mod tests {
         assert_eq!(border(&model), [0, 255, 0]);
     }
 
+    #[test]
+    fn a_native_backing_leaves_the_container_to_the_surface_and_keeps_its_content() {
+        let now = Instant::now();
+        let kaylee = ipc::Handoff {
+            name: "kaylee".to_owned(),
+            label: "Kaylee".to_owned(),
+            color: [0xe6, 0x8b, 0xd5],
+        };
+        for handoff in [None, Some(&kaylee)] {
+            for state in [ScreenshotState::Recording, ScreenshotState::DeliveryFailed] {
+                let model = screenshot_model(state, now, handoff);
+                let (painted, width) =
+                    raster_hud(&model, now, SURFACE_WIDTH, 2.0, Backing::Painted);
+                let (native, _) = raster_hud(&model, now, SURFACE_WIDTH, 2.0, Backing::Native);
+                let height = (native.len() / 4) as u32 / width;
+                let [left, top, container_width, body_height] =
+                    container_rect(SURFACE_WIDTH as f32, height as f32 / 2.0, CONTAINER_WIDTH);
+                let alpha = |bytes: &[u8], x: f32, y: f32| {
+                    bytes[(((y * 2.0) as u32 * width + (x * 2.0) as u32) * 4 + 3) as usize]
+                };
+                // The border and the surface beside the captions belong to the material.
+                for (x, y) in [
+                    (left + 10.0, top),
+                    (left + container_width - 4.0, top + body_height - 4.0),
+                ] {
+                    assert_eq!(alpha(&painted, x, y), 255, "{state:?} {handoff:?}");
+                    assert_eq!(alpha(&native, x, y), 0, "{state:?} {handoff:?}");
+                }
+                // Lit cells, the rail and glyphs cover their pixels exactly as before.
+                let covered: Vec<_> = native
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(painted.as_chunks::<4>().0)
+                    .filter(|(native, _)| native[3] == 255)
+                    .collect();
+                assert!(!covered.is_empty(), "{state:?} {handoff:?}");
+                for (native, painted) in covered {
+                    assert_eq!(native, painted, "{state:?} {handoff:?}");
+                }
+            }
+        }
+    }
+
     fn grid_bounds(bytes: &[u8], width: u32, scale: f32) -> [u32; 4] {
         let mut bounds = [width, u32::MAX, 0, 0];
         for (index, pixel) in bytes.as_chunks::<4>().0.iter().enumerate() {
@@ -2883,7 +2962,8 @@ mod tests {
             for width in [80, 240, SURFACE_WIDTH] {
                 for scale in [1.0, 1.25, 2.0] {
                     model.caption = unlabelled.clone();
-                    let (plain, physical_width) = raster_hud(&model, now, width, scale);
+                    let (plain, physical_width) =
+                        raster_hud(&model, now, width, scale, Backing::Painted);
                     let bounds = grid_bounds(&plain, physical_width, scale);
                     let container = CONTAINER_WIDTH.min(width as f32 - 12.0);
                     let left = ((width as f32 - container) / 2.0 + 6.0) * scale;
@@ -2899,7 +2979,7 @@ mod tests {
                     assert_eq!(bounds[1], (11.5 * scale).round() as u32);
                     assert_eq!(bounds[3], (44.5 * scale).round() as u32);
                     model.caption = Caption::title("Finishing text…");
-                    let (labelled, _) = raster_hud(&model, now, width, scale);
+                    let (labelled, _) = raster_hud(&model, now, width, scale, Backing::Painted);
                     let track_end = (45.5 * scale).floor() as usize * physical_width as usize * 4;
                     assert_eq!(
                         &plain[..track_end],

@@ -14,8 +14,8 @@ use clap::ValueEnum;
 use eframe::egui;
 
 use super::{
-    layout_height, present_outcome, preview_snapshot, screenshot_model, Canvas, Model, RenderKey,
-    ScreenshotState, CONTAINER_WIDTH, FRAME_INTERVAL, MAX_PRESENTATION_LAG, NOTICE_HOLD,
+    layout_height, present_outcome, preview_snapshot, screenshot_model, Backing, Canvas, Model,
+    RenderKey, ScreenshotState, CONTAINER_WIDTH, FRAME_INTERVAL, MAX_PRESENTATION_LAG, NOTICE_HOLD,
     RESULT_FADE, SURFACE_WIDTH,
 };
 use crate::{
@@ -722,7 +722,14 @@ impl Preview {
             scale: 1.0,
             alpha: 1.0,
         };
-        canvas.paint_hud(model, font, palette, &frame, CONTAINER_WIDTH);
+        canvas.paint_hud(
+            model,
+            font,
+            palette,
+            &frame,
+            CONTAINER_WIDTH,
+            Backing::Painted,
+        );
         canvas.fade(alpha);
         // Every simulated presentation is really painted, including frames crossed
         // during seeking. A later phase starts from this production appearance.

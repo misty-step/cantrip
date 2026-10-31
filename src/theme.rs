@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::{fs, path::Path};
 
 #[cfg(target_os = "macos")]
-pub use native::load;
+pub use native::{load, resolve};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
@@ -307,7 +307,7 @@ mod native {
     use super::{legible, Palette};
     use block2::StackBlock;
     use objc2::{rc::Retained, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSColor, NSColorSpace};
+    use objc2_app_kit::{NSAppearance, NSApplication, NSColor, NSColorSpace};
     use std::{cell::Cell, sync::Mutex};
 
     /// The latest main-thread resolution, for readers on other threads.
@@ -324,15 +324,19 @@ mod native {
                 .and_then(|resolved| *resolved)
                 .unwrap_or_default();
         };
-        let resolved = Cell::new(None);
-        NSApplication::sharedApplication(mtm)
-            .effectiveAppearance()
-            .performAsCurrentDrawingAppearance(&StackBlock::new(|| resolved.set(current())));
-        let palette = resolved.get().unwrap_or_default();
+        let palette = resolve(&NSApplication::sharedApplication(mtm).effectiveAppearance());
         if let Ok(mut latest) = RESOLVED.lock() {
             *latest = Some(palette);
         }
         palette
+    }
+
+    /// The colors of one appearance, such as the one Liquid Glass gives the HUD
+    /// over content brighter or darker than the system appearance.
+    pub fn resolve(appearance: &NSAppearance) -> Palette {
+        let resolved = Cell::new(None);
+        appearance.performAsCurrentDrawingAppearance(&StackBlock::new(|| resolved.set(current())));
+        resolved.get().unwrap_or_default()
     }
 
     /// One palette from one appearance; a color that cannot be expressed in sRGB

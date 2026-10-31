@@ -490,6 +490,16 @@ HUD, Actions, and Settings use the active Omarchy palette when available.
 See [ADR 0021](https://github.com/misty-step/cantrip/blob/master/docs/decisions/historical/0021-signed-pixel-waveform.md)
 for the rendering contract.
 
+On Mac the container behind the field and captions is a rounded system material
+([ADR 0034](decisions/0034-native-macos-presentation.md)): Liquid Glass on macOS
+26 and later and the HUD window material on earlier releases. Reduce
+Transparency or Increase Contrast replaces it with an opaque system background.
+The field and captions use the panel's own light or dark appearance, which
+Liquid Glass may adapt to what lies behind the panel. On Liquid Glass a handoff
+take tints the glass instead of drawing a colored border and wash.
+`hud --screenshot` draws the opaque background: the window server composites
+materials only on screen.
+
 ## Opt-in telemetry (`[telemetry]`)
 
 Telemetry is off by default. Opting in can export one Langfuse trace per

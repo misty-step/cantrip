@@ -4,8 +4,8 @@
 //! sizes the layer, attaches the instrument's pixels and follows its outputs.
 
 use super::{
-    acquire_instance_lock, save_screenshot, Instrument, Poller, ScreenshotState, CONTAINER_WIDTH,
-    FRAME_INTERVAL, POLL_INTERVAL, SURFACE_HEIGHT, SURFACE_WIDTH,
+    acquire_instance_lock, save_screenshot, Backing, Instrument, Poller, ScreenshotState,
+    CONTAINER_WIDTH, FRAME_INTERVAL, POLL_INTERVAL, SURFACE_HEIGHT, SURFACE_WIDTH,
 };
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
@@ -366,8 +366,14 @@ impl HudState {
                 wl_shm::Format::Argb8888,
             )
             .context("creating HUD frame")?;
-        self.instrument
-            .paint(&presentation, bytes, width, height, self.buffer_scale);
+        self.instrument.paint(
+            &presentation,
+            bytes,
+            width,
+            height,
+            self.buffer_scale,
+            Backing::Painted,
+        );
         let _ = layer.set_buffer_scale(self.buffer_scale);
         layer
             .wl_surface()
