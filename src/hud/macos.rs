@@ -7,8 +7,11 @@
 //!
 //! The instrument's container is a system material (ADR 0034): Liquid Glass on
 //! macOS 26 and later, the HUD window material before, and an opaque system
-//! background while Reduce Transparency or Increase Contrast is on. The shared
-//! painter draws only the field, rail and captions over it.
+//! background while Reduce Transparency or Increase Contrast is on. Over a
+//! material the container keeps most of the appearance's window background,
+//! and the palette is fitted to it, so captions stay legible whatever is
+//! behind the panel. The shared painter draws only the field, rail and
+//! captions over it.
 
 use super::{
     acquire_instance_lock, container_rect, save_screenshot, Backing, Instrument, Poller,
@@ -55,6 +58,12 @@ const BOTTOM_MARGIN: f64 = 36.0;
 /// The container's corner radius. The field's corner cells stay about four
 /// points inside the curve.
 const CORNER_RADIUS: f64 = 12.0;
+/// The opacity of the appearance's window background over a material. Liquid
+/// Glass does not flip the panel's appearance to suit what is behind it, so a
+/// dark panel's light captions over a white page would sit on light glass. At
+/// this opacity the material's rim and a fifth of what is behind still show,
+/// and the fitted palette reads at 4.5:1 even over pure black or white.
+const SCRIM: f32 = 0.8;
 
 /// The system Reduce Motion setting. NSWorkspace answers on any thread; the
 /// status reader's thread has no ambient autorelease pool.
@@ -416,18 +425,24 @@ impl Backdrop {
         }
     }
 
-    /// Carry a handoff route's color: Liquid Glass tints toward it; otherwise
-    /// the instrument's view washes and edges its container with it.
+    /// Wash the container with a handoff route's color, and edge it with that
+    /// color where no glass rim edges it.
     fn tint(&self, view: &HudView, route: Option<[u8; 3]>) {
         view.set_underlay(match self {
-            Self::Glass(glass) => {
-                let tint = route.map(|color| srgb(color, f64::from(ROUTE_WASH)));
-                glass.setTintColor(tint.as_deref());
-                Underlay::Glass
-            }
+            Self::Glass(_) => Underlay::Glass(route),
             Self::Material(_) => Underlay::Material(route),
             Self::Opaque => Underlay::Opaque(route),
         });
+    }
+
+    /// The colors of `view`'s appearance, fitted to what shows through the
+    /// container.
+    fn palette(&self, view: &HudView) -> Palette {
+        let palette = theme::resolve(&view.effectiveAppearance());
+        match self {
+            Self::Glass(_) | Self::Material(_) => palette.translucent(SCRIM),
+            Self::Opaque => palette,
+        }
     }
 }
 
@@ -474,8 +489,8 @@ struct Panel {
     /// The handoff route color the backdrop carries.
     route: Option<[u8; 3]>,
     placement: Option<Placement>,
-    /// The colors of the instrument view's effective appearance, followed as
-    /// soon as AppKit changes it.
+    /// The colors of the instrument view's effective appearance, fitted to the
+    /// backdrop and followed as soon as AppKit changes either.
     palette: Palette,
 }
 
@@ -515,7 +530,7 @@ impl Panel {
         let container = NSRect::ZERO;
         let backdrop = Backdrop::new(mtm, &root, &view, container);
         backdrop.tint(&view, None);
-        let palette = theme::resolve(&view.effectiveAppearance());
+        let palette = backdrop.palette(&view);
         Self {
             window,
             root,
@@ -536,7 +551,7 @@ impl Panel {
             self.backdrop = Backdrop::new(mtm, &self.root, &self.view, self.container);
             self.backdrop.tint(&self.view, self.route);
         }
-        self.palette = theme::resolve(&self.view.effectiveAppearance());
+        self.palette = self.backdrop.palette(&self.view);
     }
 
     fn present(&mut self, instrument: &mut Instrument, mtm: MainThreadMarker, now: Instant) {
@@ -550,7 +565,7 @@ impl Panel {
             return;
         };
         if self.view.ivars().appearance_changed.take() {
-            self.palette = theme::resolve(&self.view.effectiveAppearance());
+            self.palette = self.backdrop.palette(&self.view);
         }
         instrument.palette = self.palette;
         let route = route(instrument);
@@ -584,33 +599,38 @@ impl Panel {
 }
 
 /// What the instrument's view draws inside the container's rounded shape,
-/// beneath its pixels.
+/// beneath its pixels: the appearance's window background, any route's wash
+/// and, where no glass rim edges the container, a one-point edge. Wash and edge
+/// take the route's color when the take has one, as the painted container's
+/// border does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Underlay {
-    /// Nothing: Liquid Glass supplies the surface, its rim and the route's tint.
-    Glass,
-    /// Over a material, a one-point edge and any route's wash, both in the
-    /// route's color when the take has one, as the painted container's border.
+    /// Over Liquid Glass, whose rim edges the container.
+    Glass(Option<[u8; 3]>),
+    /// Over the HUD window material.
     Material(Option<[u8; 3]>),
-    /// The same over an opaque system background.
+    /// Opaque, for Reduce Transparency and Increase Contrast.
     Opaque(Option<[u8; 3]>),
 }
 
 impl Underlay {
     /// Draw into `bounds`, which `shape` rounds and clips.
     fn draw(self, bounds: NSRect, shape: &NSBezierPath) {
-        let route = match self {
-            Self::Glass => return,
-            Self::Material(route) => route,
-            Self::Opaque(route) => {
-                NSColor::windowBackgroundColor().setFill();
-                shape.fill();
-                route
-            }
+        let (opacity, route, edged) = match self {
+            Self::Glass(route) => (SCRIM, route, false),
+            Self::Material(route) => (SCRIM, route, true),
+            Self::Opaque(route) => (1.0, route, true),
         };
+        NSColor::windowBackgroundColor()
+            .colorWithAlphaComponent(f64::from(opacity))
+            .setFill();
+        shape.fill();
         if let Some(color) = route {
             srgb(color, f64::from(ROUTE_WASH)).setFill();
             shape.fill();
+        }
+        if !edged {
+            return;
         }
         let edge = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
             NSRect::new(
@@ -744,7 +764,7 @@ impl HudView {
                 // SAFETY: a framework constant, valid for the process lifetime.
                 space: CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })),
             }),
-            underlay: Cell::new(Underlay::Glass),
+            underlay: Cell::new(Underlay::Glass(None)),
             appearance_changed: Cell::new(true),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.

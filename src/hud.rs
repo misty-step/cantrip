@@ -1940,13 +1940,14 @@ impl Canvas<'_> {
             container_width,
         );
         // A non-default target owns the border, a surface wash and the active field;
-        // the default flow keeps the theme's own colors.
+        // the default flow keeps the theme's own colors. The field and label read
+        // on the palette's surfaces like the theme's own colors.
         let route = model.route.as_ref();
         let (border, surface, active) = match route {
             Some(route) => (
                 route.handoff.color,
                 mix(palette.surface, route.handoff.color, ROUTE_WASH),
-                route.handoff.color,
+                palette.legible(route.handoff.color),
             ),
             None => (palette.border, palette.surface, palette.accent),
         };
@@ -1979,7 +1980,11 @@ impl Canvas<'_> {
                     (container_width - 20.0).max(16.0),
                     ROUTE_LABEL_SIZE,
                     1,
-                    mix(route.handoff.color, palette.foreground, ROUTE_LABEL_LIFT),
+                    palette.legible(mix(
+                        route.handoff.color,
+                        palette.foreground,
+                        ROUTE_LABEL_LIFT,
+                    )),
                 );
                 top + ROUTE_HEADER
             }
@@ -2926,6 +2931,74 @@ mod tests {
                 for (native, painted) in covered {
                     assert_eq!(native, painted, "{state:?} {handoff:?}");
                 }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_handoff_field_and_label_read_on_the_palettes_surfaces() {
+        let now = Instant::now();
+        let kaylee = ipc::Handoff {
+            name: "kaylee".to_owned(),
+            label: "Kaylee".to_owned(),
+            color: [0xe6, 0x8b, 0xd5],
+        };
+        // Light glass, on which the theme's pink target is too faint as given.
+        let palette = Palette {
+            background: [255; 3],
+            surface: [255; 3],
+            foreground: [38; 3],
+            ..Palette::default()
+        }
+        .translucent(0.8);
+        let label = mix(kaylee.color, palette.foreground, ROUTE_LABEL_LIFT);
+        let (field, label_on_glass) = (palette.legible(kaylee.color), palette.legible(label));
+        assert_ne!(field, kaylee.color);
+        assert_ne!(label_on_glass, label);
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        for state in [ScreenshotState::Recording, ScreenshotState::Sent] {
+            let model = screenshot_model(state, now, Some(&kaylee));
+            let height = layout_height(&model, &font, CONTAINER_WIDTH);
+            let mut bytes = vec![0; (SURFACE_WIDTH * height * 4) as usize];
+            Canvas {
+                bytes: &mut bytes,
+                width: SURFACE_WIDTH,
+                height,
+                scale: 1.0,
+                alpha: 1.0,
+            }
+            .paint_hud(
+                &model,
+                &font,
+                palette,
+                &model.frame(now),
+                CONTAINER_WIDTH,
+                Backing::Native,
+            );
+            // Field cells and glyph edges are partly covered; their color is
+            // the premultiplied pixel over its coverage.
+            let drawn: Vec<[f32; 3]> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[3] >= 128)
+                .map(|pixel| {
+                    [pixel[2], pixel[1], pixel[0]]
+                        .map(|channel| f32::from(channel) * 255.0 / f32::from(pixel[3]))
+                })
+                .collect();
+            let shows = |color: [u8; 3]| {
+                drawn.iter().any(|pixel| {
+                    pixel
+                        .iter()
+                        .zip(color)
+                        .all(|(drawn, given)| (drawn - f32::from(given)).abs() <= 2.0)
+                })
+            };
+            for (fitted, given) in [(field, kaylee.color), (label_on_glass, label)] {
+                assert!(shows(fitted), "{state:?} {fitted:?}");
+                assert!(!shows(given), "{state:?} {given:?}");
             }
         }
     }
