@@ -51,7 +51,8 @@ without dismissing the outcome or clearing menu/status-bar attention.
 
 The native app requires macOS **13.3+** and a matching-architecture build. It uses
 AVAudioEngine/CoreAudio capture, local CPU Parakeet with explicitly installed
-weights, native NSPasteboard Copy, and a passive nonactivating NSPanel. The app
+weights, native NSPasteboard Copy, and a passive nonactivating NSPanel on a
+[system material](CONFIGURATION.md#hud--passive-status). The app
 owns the menu bar, panel, and editable Control+Option+Space global toggle shortcut.
 `daemon` is engine-only on Mac and does not supply those desktop surfaces.
 
@@ -68,7 +69,7 @@ combination. A refused replacement keeps the previous shortcut. While none is
 registered, Cantrip retries every two seconds so a released conflict can recover.
 
 Native arm64 headless/offscreen verification does not establish attended
-mic-to-editor success, panel positioning, or focus behavior. This guide does not
+mic-to-editor success, panel positioning, material, or focus behavior. This guide does not
 claim a published/notarized artifact or exercised Intel hardware. Perform the
 [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
 before relying on your microphone, shortcut, or destination.

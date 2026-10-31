@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::{fs, path::Path};
 
 #[cfg(target_os = "macos")]
-pub use native::load;
+pub use native::{load, resolve};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
@@ -99,9 +99,39 @@ impl Palette {
             };
             taken.push(hsl(chosen)[0]);
         }
+        self.legible(chosen)
+    }
+
+    /// `color` as drawn on this palette's background and surface: on macOS,
+    /// adjusted only in lightness to read at 4.5:1 on both; Omarchy's colors
+    /// are drawn as the theme gives them.
+    pub fn legible(&self, color: [u8; 3]) -> [u8; 3] {
         #[cfg(target_os = "macos")]
-        let chosen = legible(chosen, [self.background, self.surface]);
-        chosen
+        let color = legible(color, [self.background, self.surface]);
+        color
+    }
+
+    /// This palette for a container that shows its background at `opacity`
+    /// over whatever is behind it. Background and surface become that
+    /// container over black and over white, the darkest and lightest it can
+    /// look, and the text and field colors are refitted to read at 4.5:1 on
+    /// both.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn translucent(self, opacity: f32) -> Self {
+        let over = |behind: f32| {
+            self.background.map(|channel| {
+                (f32::from(channel) * opacity + behind * (1.0 - opacity)).round() as u8
+            })
+        };
+        let backgrounds = [over(0.0), over(255.0)];
+        Self {
+            background: backgrounds[0],
+            surface: backgrounds[1],
+            foreground: legible(self.foreground, backgrounds),
+            accent: legible(self.accent, backgrounds),
+            attention: legible(self.attention, backgrounds),
+            ..self
+        }
     }
 }
 
@@ -307,7 +337,7 @@ mod native {
     use super::{legible, Palette};
     use block2::StackBlock;
     use objc2::{rc::Retained, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSColor, NSColorSpace};
+    use objc2_app_kit::{NSAppearance, NSApplication, NSColor, NSColorSpace};
     use std::{cell::Cell, sync::Mutex};
 
     /// The latest main-thread resolution, for readers on other threads.
@@ -324,15 +354,19 @@ mod native {
                 .and_then(|resolved| *resolved)
                 .unwrap_or_default();
         };
-        let resolved = Cell::new(None);
-        NSApplication::sharedApplication(mtm)
-            .effectiveAppearance()
-            .performAsCurrentDrawingAppearance(&StackBlock::new(|| resolved.set(current())));
-        let palette = resolved.get().unwrap_or_default();
+        let palette = resolve(&NSApplication::sharedApplication(mtm).effectiveAppearance());
         if let Ok(mut latest) = RESOLVED.lock() {
             *latest = Some(palette);
         }
         palette
+    }
+
+    /// The colors of one appearance, such as the HUD view's effective
+    /// appearance.
+    pub fn resolve(appearance: &NSAppearance) -> Palette {
+        let resolved = Cell::new(None);
+        appearance.performAsCurrentDrawingAppearance(&StackBlock::new(|| resolved.set(current())));
+        resolved.get().unwrap_or_default()
     }
 
     /// One palette from one appearance; a color that cannot be expressed in sRGB
@@ -380,7 +414,7 @@ mod native {
 
 #[cfg(test)]
 mod contrast_tests {
-    use super::{contrast, hsl, hue_distance, legible, luminance};
+    use super::{contrast, hsl, hue_distance, legible, luminance, Palette};
 
     #[test]
     fn native_accents_remain_readable_on_light_and_dark_surfaces() {
@@ -403,6 +437,30 @@ mod contrast_tests {
                     .all(|&background| contrast(luminance(original), luminance(background)) >= 4.5)
                 {
                     assert_eq!(adjusted, original);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_translucent_container_keeps_its_text_readable_over_any_backdrop() {
+        // AppKit's Light and Dark window background and label color.
+        for (background, foreground) in [([255; 3], [38; 3]), ([30; 3], [221; 3])] {
+            let palette = Palette {
+                background,
+                surface: background,
+                foreground,
+                accent: legible([0, 122, 255], [background; 2]),
+                attention: legible([255, 141, 40], [background; 2]),
+                ..Palette::default()
+            }
+            .translucent(0.8);
+            for behind in (0..=255).step_by(15) {
+                let container = background
+                    .map(|channel| (f32::from(channel) * 0.8 + behind as f32 * 0.2).round() as u8);
+                for color in [palette.foreground, palette.accent, palette.attention] {
+                    let ratio = contrast(luminance(color), luminance(container));
+                    assert!(ratio >= 4.5, "{color:?} on {container:?}: {ratio}");
                 }
             }
         }
