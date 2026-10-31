@@ -49,7 +49,9 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -67,6 +69,13 @@ const MIN_SLICE_FRAMES: u32 = 8_192;
 /// e.g. a Bluetooth headset switching from playback to its microphone profile.
 const ROUTE_RESTARTS: u32 = 3;
 const ROUTE_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// A Bluetooth headset settles into its microphone profile shortly after
+/// capture opens it, sometimes after its first buffers. Route changes this
+/// early restart capture and keep the audio already captured; later changes
+/// end the take honestly.
+const ROUTE_SETTLE: Duration = Duration::from_secs(2);
+/// Longest skipped-I/O gap recorded as silence instead of failing the take.
+const MAX_SILENCE_GAP: Duration = Duration::from_millis(250);
 const FAILURE_NONE: u8 = 0;
 const FAILURE_OVERRUN: u8 = 1;
 const FAILURE_FORMAT: u8 = 2;
@@ -463,6 +472,9 @@ struct Control {
     next_sample_time: AtomicI64,
     /// First CoreAudio status of a failed render; an error code, never audio.
     render_status: AtomicI32,
+    /// Skipped-I/O gaps recorded as silence, and their total length.
+    gaps: AtomicU32,
+    gap_frames: AtomicU64,
 }
 
 impl Control {
@@ -473,6 +485,8 @@ impl Control {
             frames_seen: AtomicU64::new(0),
             next_sample_time: AtomicI64::new(FIRST_SAMPLE_TIME),
             render_status: AtomicI32::new(0),
+            gaps: AtomicU32::new(0),
+            gap_frames: AtomicU64::new(0),
         }
     }
 
@@ -492,8 +506,8 @@ impl Control {
         );
     }
 
-    /// Forget a route change or render failure that stopped capture before any
-    /// audio arrived; any other latched failure stays terminal.
+    /// Forget a route change or render failure that capture is restarting
+    /// from; any other latched failure stays terminal.
     fn rearm(&self) {
         let _ = self
             .failure
@@ -572,6 +586,31 @@ impl Transport {
             control.fail(FAILURE_OVERRUN);
             std::mem::forget(packet);
         }
+    }
+
+    /// Queue `frames` of silence where the HAL skipped I/O cycles. Realtime
+    /// safe: it only zeroes preallocated packets. False after a failure.
+    fn push_silence(&self, frames: usize, format: PcmFormat, control: &Control) -> bool {
+        let bytes_per_frame = format.bytes_per_frame();
+        let mut remaining = frames;
+        while remaining > 0 {
+            let Some(mut packet) = self.free.pop() else {
+                control.fail(FAILURE_OVERRUN);
+                return false;
+            };
+            packet.frames = remaining.min(PACKET_FRAMES);
+            packet.bytes[..packet.frames * bytes_per_frame].fill(0);
+            remaining -= packet.frames;
+            if let Err(packet) = self.ready.push(packet) {
+                control.fail(FAILURE_OVERRUN);
+                self.recycle(packet, control);
+                return false;
+            }
+        }
+        control
+            .frames_seen
+            .fetch_add(frames as u64, Ordering::Release);
+        true
     }
 
     /// The native buffer list is borrowed only for this call. Validation happens
@@ -660,6 +699,8 @@ struct InputContext {
     transport: Arc<Transport>,
     control: Arc<Control>,
     hardware_changed: AtomicBool,
+    /// Longest skipped-I/O gap, in device frames, recorded as silence.
+    max_gap: i64,
 }
 
 impl InputContext {
@@ -714,8 +755,22 @@ impl InputContext {
             };
             let expected = control.next_sample_time.swap(next, Ordering::AcqRel);
             if expected != FIRST_SAMPLE_TIME && expected != sample_time {
-                control.fail(FAILURE_DISCONTINUITY);
-                return;
+                // An overloaded HAL skips whole I/O cycles. Keep the take's
+                // timeline by recording a short skip as silence and counting
+                // it; anything longer or backwards is a real discontinuity.
+                let gap = sample_time.saturating_sub(expected);
+                if gap <= 0 || gap > self.max_gap {
+                    control.fail(FAILURE_DISCONTINUITY);
+                    return;
+                }
+                if !self
+                    .transport
+                    .push_silence(gap as usize, self.format, control)
+                {
+                    return;
+                }
+                control.gaps.fetch_add(1, Ordering::AcqRel);
+                control.gap_frames.fetch_add(gap as u64, Ordering::AcqRel);
             }
         }
         // SAFETY: the unit rendered into our own buffer, which stays valid
@@ -984,6 +1039,7 @@ impl NativeCapture {
             format,
             capacity,
             samples: UnsafeCell::new(vec![0.0; capacity * format.channels].into_boxed_slice()),
+            max_gap: (format.sample_rate * MAX_SILENCE_GAP.as_secs_f64()).round() as i64,
             transport,
             control,
             hardware_changed: AtomicBool::new(false),
@@ -1130,9 +1186,9 @@ struct Restarted {
     converter: Pcm16Converter,
 }
 
-/// Restart capture of `device` on a fresh input unit after a route change
-/// before any audio, reading the format the device settled on. `None` means
-/// stop or cancel arrived first; nothing was captured, so the take just ends.
+/// Restart capture of `device` on a fresh input unit while its route settles,
+/// reading the format the device settled on. `None` means stop or cancel
+/// arrived first; the audio already kept is the whole take.
 fn restart_capture(
     device: AudioObjectID,
     control: &Arc<Control>,
@@ -1140,13 +1196,13 @@ fn restart_capture(
 ) -> Result<Option<Restarted>> {
     loop {
         if control.stop_requested.load(Ordering::Acquire) {
-            // The route change cost no audio; this is an ordinary stop.
+            // The route change lost no kept audio; this is an ordinary stop.
             control.rearm();
             return Ok(None);
         }
         *restarts += 1;
         tracing::info!(
-            "[Capture] microphone route changed before audio; restarting attempt={restarts}"
+            "[Capture] microphone route changed while settling; restarting attempt={restarts}"
         );
         let attempt = (|| -> Result<Restarted> {
             let mut native = audio_call(|| NativeCapture::new(device))?;
@@ -1212,9 +1268,11 @@ fn capture_to_wav(
     let mut last_audio = Instant::now();
     let mut started = false;
     let mut restarts = 0;
+    let mut opened = Instant::now();
     let recording = (|| -> Result<()> {
         audio_call(|| native.start(format, Arc::clone(&transport), Arc::clone(control)))?;
         started = true;
+        opened = Instant::now();
         if ready.send(Ok(())).is_err() {
             control.stop_requested.store(true, Ordering::Release);
         }
@@ -1234,7 +1292,7 @@ fn capture_to_wav(
             if route_changed && restarts < ROUTE_RESTARTS {
                 // A Bluetooth headset switching to its microphone profile (or
                 // another route change) stops the engine just after start.
-                // Before any audio arrived nothing is lost: restart capture.
+                // While the route settles, restart capture and keep the WAV.
                 let stopped = audio_call(|| native.stop());
                 let alive = unsafe {
                     property::<u32>(
@@ -1253,16 +1311,23 @@ fn capture_to_wav(
                     tracing::warn!("[Capture] microphone capture failed class=stop-failed");
                     return Err(error);
                 }
-                if control.frames_seen.load(Ordering::Acquire) == 0 {
+                let captured = control.frames_seen.load(Ordering::Acquire);
+                if captured == 0 || opened.elapsed() < ROUTE_SETTLE {
                     let trigger = match failure {
                         FAILURE_CONFIGURATION => "configuration-changed",
                         FAILURE_RENDER => "render-failed",
                         _ => "engine-stopped",
                     };
                     tracing::info!(
-                        "[Capture] microphone route change detected trigger={trigger} status={}",
-                        control.render_status.load(Ordering::Acquire)
+                        "[Capture] microphone route change detected trigger={trigger} status={} captured_ms={}",
+                        control.render_status.load(Ordering::Acquire),
+                        (captured as f64 / format.sample_rate * 1_000.0).round()
                     );
+                    // Keep what the old route captured: the WAV stays 16 kHz
+                    // mono, and each hardware format gets its own converter.
+                    drain_packets(&transport, format, &mut converter, &mut writer, control)?;
+                    converter.finish(&mut writer)?;
+                    writer.checkpoint()?;
                     let Some(restarted) = restart_capture(selected.id, control, &mut restarts)?
                     else {
                         return Ok(());
@@ -1330,6 +1395,14 @@ fn capture_to_wav(
         }
         Ok(())
     })();
+    let gaps = control.gaps.load(Ordering::Acquire);
+    if gaps != 0 {
+        tracing::warn!(
+            "[Capture] microphone skipped audio recorded as silence gaps={gaps} silence_ms={}",
+            (control.gap_frames.load(Ordering::Acquire) as f64 / format.sample_rate * 1_000.0)
+                .round()
+        );
+    }
     // Stop/remove the native tap before draining the final bounded queue. No
     // callback can append after finalization, including on an abandoned take.
     let stopped = native.stop();
