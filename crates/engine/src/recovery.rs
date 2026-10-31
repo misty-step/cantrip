@@ -262,6 +262,7 @@ fn confirm_audio_in(store: &Store, id: &str, source: &Path) -> Result<Take> {
     let mut retained = store
         .open_file(&format!("{id}.wav"))?
         .context("recording audio is unavailable")?;
+    retained_audio_duration(&mut retained)?;
     let mut source = archive::open_source(source)?;
     if !same_audio(&mut retained, &mut source)? {
         return Err(AudioMismatch.into());
@@ -397,7 +398,7 @@ fn retain_audio(store: &Store, name: &str, source: &Path) -> Result<u64> {
     if let Some(mut existing) = store.open_file(name)? {
         existing.sync_all().context("syncing retained recording")?;
         store.sync()?;
-        return audio_duration(&mut existing);
+        return retained_audio_duration(&mut existing);
     }
     let mut input = archive::open_source(source)?;
     let before = input
@@ -417,7 +418,24 @@ fn retain_audio(store: &Store, name: &str, source: &Path) -> Result<u64> {
     let mut saved = store
         .open_file(name)?
         .context("retained recording disappeared")?;
-    audio_duration(&mut saved)
+    retained_audio_duration(&mut saved)
+}
+
+/// Retention accepts any valid WAV, including an accepted empty take and one
+/// whose finalization failed after a header checkpoint; transcription
+/// availability is decided separately by `audio_duration`.
+fn retained_audio_duration(file: &mut File) -> Result<u64> {
+    Ok(stt::wav_metadata_from(file)
+        .context("recording audio is corrupt")?
+        .duration_ms)
+}
+
+/// Startup imports only finalized leftovers: an unfinished one may still be
+/// written by its recorder.
+fn finalized_audio_duration(file: &mut File) -> Result<u64> {
+    Ok(crate::audio::finalized_wav_metadata(file)
+        .context("recording audio is corrupt")?
+        .duration_ms)
 }
 
 fn audio_duration(file: &mut File) -> Result<u64> {
@@ -546,15 +564,8 @@ fn import_runtime_in(runtime: &Path, history: &Path) -> Result<()> {
                 same_file_version(&metadata, &current.metadata()?),
                 "runtime recording changed before migration"
             );
-            let duration = audio_duration(&mut original)
-                .context("runtime recording is not a finalized nonempty WAV")?;
-            original.seek(SeekFrom::Start(4))?;
-            let mut riff_size = [0_u8; 4];
-            original.read_exact(&mut riff_size)?;
-            ensure!(
-                u64::from(u32::from_le_bytes(riff_size)) + 8 == metadata.len(),
-                "runtime recording has an unfinished WAV length"
-            );
+            let duration = finalized_audio_duration(&mut original)
+                .context("runtime recording is not a finalized WAV")?;
             if store.open_file(&format!("{id}.wav"))?.is_none() {
                 let unresolved = get_in(&store, id)
                     .map(|take| take.unresolved)
@@ -564,10 +575,7 @@ fn import_runtime_in(runtime: &Path, history: &Path) -> Result<()> {
             // Existing audio can be an interrupted import, or a successful
             // resolved take whose runtime unlink failed. Confirm it without
             // changing completion state or associating it with another ID.
-            ensure!(
-                confirm_audio_in(&store, id, &source)?.audio_available,
-                "runtime recording was not durably imported"
-            );
+            confirm_audio_in(&store, id, &source)?;
             let current = originals
                 .open_file(&name)?
                 .context("runtime recording disappeared")?;
@@ -1695,8 +1703,58 @@ mod tests {
             .finalize()
             .unwrap();
         let empty_id = new_id();
-        assert!(persist_in(&store, &empty_id, 0, None, Some(&empty), false, true).is_err());
+        let take = persist_in(&store, &empty_id, 0, None, Some(&empty), false, true).unwrap();
+        assert_eq!(take.duration_ms, Some(0));
+        assert!(!take.audio_available);
         assert!(!get_in(&store, &empty_id).unwrap().audio_available);
+    }
+
+    #[test]
+    fn invalid_audio_cannot_authorize_runtime_consumption() {
+        let fixture = Fixture::new();
+        for malformed in [vec![0; 44], {
+            let mut truncated = std::fs::read(&fixture.wav).unwrap();
+            truncated.truncate(44);
+            truncated
+        }] {
+            let id = new_id();
+            let source = fixture.root.join(format!("rec-{id}.wav"));
+            fs::write(&source, &malformed).unwrap();
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+            let store = fixture.store();
+            assert!(persist_in(&store, &id, 0, None, Some(&source), false, true).is_err());
+            assert_eq!(
+                fs::read(fixture.history.join(format!("{id}.wav"))).unwrap(),
+                malformed
+            );
+            assert!(confirm_audio_in(&store, &id, &source).is_err());
+            drop(store);
+            assert!(import_runtime_in(&fixture.root, &fixture.history).is_err());
+            assert_eq!(fs::read(&source).unwrap(), malformed);
+        }
+    }
+
+    #[test]
+    fn unfinished_audio_is_retained_but_never_imported_at_startup() {
+        let fixture = Fixture::new();
+        let id = new_id();
+        let source = fixture.root.join(format!("rec-{id}.wav"));
+        // A failed finalization leaves samples past the last header checkpoint.
+        let mut unfinished = std::fs::read(&fixture.wav).unwrap();
+        unfinished.extend_from_slice(&42_i16.to_le_bytes());
+        fs::write(&source, &unfinished).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        let store = fixture.store();
+        let take = persist_in(&store, &id, 0, None, Some(&source), false, true).unwrap();
+        assert!(
+            take.audio_available,
+            "the checkpointed prefix stays recoverable"
+        );
+        confirm_audio_in(&store, &id, &source).unwrap();
+        drop(store);
+        // Startup cannot tell an unfinished leftover from one still being written.
+        assert!(import_runtime_in(&fixture.root, &fixture.history).is_err());
+        assert_eq!(fs::read(&source).unwrap(), unfinished);
     }
 
     #[test]

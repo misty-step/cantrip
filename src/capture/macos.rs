@@ -21,7 +21,7 @@ use objc2_audio_toolbox::{
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 use objc2_avf_audio::{
     AVAudioCommonFormat, AVAudioEngine, AVAudioEngineConfigurationChangeNotification,
-    AVAudioInputNode, AVAudioPCMBuffer, AVAudioTime,
+    AVAudioFormat, AVAudioInputNode, AVAudioPCMBuffer, AVAudioTime,
 };
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyStreams,
@@ -49,6 +49,10 @@ const PACKET_FRAMES: usize = 1_024;
 const WRITER_POLL: Duration = Duration::from_millis(2);
 const DEVICE_POLL: Duration = Duration::from_millis(200);
 const INTERRUPTION_GRACE: Duration = Duration::from_secs(5);
+/// Bound for AVAudioEngine to post the reconfiguration caused by selecting a
+/// device whose hardware format differs from the default input's.
+const DEVICE_SETTLE: Duration = Duration::from_secs(1);
+const DEVICE_SETTLE_POLL: Duration = Duration::from_millis(5);
 const FAILURE_NONE: u8 = 0;
 const FAILURE_OVERRUN: u8 = 1;
 const FAILURE_FORMAT: u8 = 2;
@@ -619,7 +623,7 @@ impl NativeCapture {
     fn new(device: AudioObjectID) -> Result<Self> {
         let engine = unsafe { AVAudioEngine::new() };
         let input = unsafe { engine.inputNode() };
-        let capture = Self {
+        let mut capture = Self {
             engine,
             input,
             center: NSNotificationCenter::defaultCenter(),
@@ -631,23 +635,65 @@ impl NativeCapture {
         if unit.is_null() {
             bail!("AVAudioEngine has no microphone audio unit");
         }
-        check_status(
-            unsafe {
-                AudioUnitSetProperty(
-                    unit,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    ptr::from_ref(&device).cast(),
-                    size_of::<AudioObjectID>() as u32,
-                )
-            },
-            "selecting configured microphone",
-        )?;
+        // AVAudioEngine first binds its input node to the system default input.
+        // Selecting another device changes the unit's hardware format at once,
+        // but the engine reconfigures asynchronously and posts a configuration
+        // change about 100 ms later. A start before that lands can be stopped by
+        // it, so observe from before the switch and let it land first.
+        let previous = hardware_shape(&capture.input);
+        let settled = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&settled);
+        capture.observe(move || signal.store(true, Ordering::Release));
+        let selected = unsafe {
+            AudioUnitSetProperty(
+                unit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                ptr::from_ref(&device).cast(),
+                size_of::<AudioObjectID>() as u32,
+            )
+        };
+        if selected != 0 {
+            tracing::warn!("[Capture] selecting microphone failed status={selected}");
+        }
+        check_status(selected, "selecting configured microphone")?;
         if capture.current_device()? != device {
             bail!("AVAudioEngine did not select the requested microphone");
         }
+        if hardware_shape(&capture.input) != previous {
+            let deadline = Instant::now() + DEVICE_SETTLE;
+            while !settled.load(Ordering::Acquire) && Instant::now() < deadline {
+                thread::sleep(DEVICE_SETTLE_POLL);
+            }
+        }
+        capture.unobserve()?;
         Ok(capture)
+    }
+
+    fn observe(&mut self, changed: impl Fn() + 'static) {
+        let notification = RcBlock::new(move |_notification: NonNull<NSNotification>| {
+            // Never tear down the engine from its internal notification queue.
+            changed();
+        });
+        self.observer = Some(unsafe {
+            self.center.addObserverForName_object_queue_usingBlock(
+                Some(AVAudioEngineConfigurationChangeNotification),
+                Some(self.engine.as_ref()),
+                None,
+                &notification,
+            )
+        });
+    }
+
+    fn unobserve(&mut self) -> Result<()> {
+        audio_call(|| {
+            if let Some(observer) = &self.observer {
+                unsafe { self.center.removeObserver(observer.as_ref()) };
+                self.observer = None;
+            }
+            Ok(())
+        })
     }
 
     fn current_device(&self) -> Result<AudioObjectID> {
@@ -670,8 +716,11 @@ impl NativeCapture {
         Ok(device)
     }
 
-    fn format(&self) -> Result<PcmFormat> {
-        let native = unsafe { self.input.outputFormatForBus(0) };
+    /// The hardware-side input format is authoritative. After a device switch
+    /// the node's output format can still describe the previous default input,
+    /// and tapping that stale format fails engine start with -10868.
+    fn format(&self) -> Result<(PcmFormat, Retained<AVAudioFormat>)> {
+        let native = unsafe { self.input.inputFormatForBus(0) };
         let encoding = pcm_encoding(unsafe { native.commonFormat() })
             .context("microphone does not provide a supported PCM sample format")?;
         let format = PcmFormat {
@@ -681,28 +730,18 @@ impl NativeCapture {
             interleaved: unsafe { native.isInterleaved() },
         };
         format.validate()?;
-        Ok(format)
+        Ok((format, native))
     }
 
     fn start(
         &mut self,
+        tap_format: &AVAudioFormat,
         format: PcmFormat,
         transport: Arc<Transport>,
         control: Arc<Control>,
     ) -> Result<()> {
         let changes = Arc::clone(&control);
-        let notification = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-            // Never tear down the engine from its internal notification queue.
-            changes.fail(FAILURE_CONFIGURATION);
-        });
-        self.observer = Some(unsafe {
-            self.center.addObserverForName_object_queue_usingBlock(
-                Some(AVAudioEngineConfigurationChangeNotification),
-                Some(self.engine.as_ref()),
-                None,
-                &notification,
-            )
-        });
+        self.observe(move || changes.fail(FAILURE_CONFIGURATION));
         let tap = RcBlock::new(
             move |buffer: NonNull<AVAudioPCMBuffer>, when: NonNull<AVAudioTime>| {
                 // Native guarantees these borrowed objects and their buffer list
@@ -767,13 +806,18 @@ impl NativeCapture {
             self.input.installTapOnBus_bufferSize_format_block(
                 0,
                 (format.sample_rate / 10.0).ceil() as u32,
-                None,
+                Some(tap_format),
                 RcBlock::as_ptr(&tap),
             );
         }
         unsafe { self.engine.prepare() };
-        unsafe { self.engine.startAndReturnError() }
-            .map_err(|error| anyhow!("starting microphone capture: {error}"))?;
+        unsafe { self.engine.startAndReturnError() }.map_err(|error| {
+            tracing::warn!(
+                "[Capture] microphone engine start failed code={}",
+                error.code()
+            );
+            anyhow!("starting microphone capture: {error}")
+        })?;
         Ok(())
     }
 
@@ -792,13 +836,7 @@ impl NativeCapture {
             }
             Ok(())
         });
-        let unobserved = audio_call(|| {
-            if let Some(observer) = &self.observer {
-                unsafe { self.center.removeObserver(observer.as_ref()) };
-                self.observer = None;
-            }
-            Ok(())
-        });
+        let unobserved = self.unobserve();
         let result = stopped.and(untapped).and(unobserved);
         self.stopped = result.is_ok();
         result
@@ -811,6 +849,15 @@ impl Drop for NativeCapture {
             tracing::warn!("[Capture] native audio teardown failed; original WAV retained");
         }
     }
+}
+
+/// Sample rate and channel count the input unit receives from the hardware.
+fn hardware_shape(input: &AVAudioInputNode) -> (f64, usize) {
+    let format = unsafe { input.inputFormatForBus(0) };
+    (
+        unsafe { format.sampleRate() },
+        unsafe { format.channelCount() } as usize,
+    )
 }
 
 fn drain_packets(
@@ -865,9 +912,14 @@ fn capture_to_wav(
     if permission != MicrophoneAuthorization::Authorized {
         bail!("microphone access is not authorized: {permission:?}");
     }
-    let selected = select_device(source)?;
+    let selected = select_device(source).inspect_err(|_| {
+        tracing::warn!(
+            "[Capture] microphone unavailable configured={}",
+            source.is_some()
+        );
+    })?;
     let mut native = audio_call(|| NativeCapture::new(selected.id))?;
-    let format = audio_call(|| native.format())?;
+    let (format, tap_format) = audio_call(|| native.format())?;
     let transport = Arc::new(Transport::new(format));
     let mut converter = Pcm16Converter::new(format)?;
     // create_new is essential: a stale or recovered only copy is never replaced.
@@ -883,7 +935,14 @@ fn capture_to_wav(
     let mut last_audio = Instant::now();
     let mut started = false;
     let recording = (|| -> Result<()> {
-        audio_call(|| native.start(format, Arc::clone(&transport), Arc::clone(control)))?;
+        audio_call(|| {
+            native.start(
+                &tap_format,
+                format,
+                Arc::clone(&transport),
+                Arc::clone(control),
+            )
+        })?;
         started = true;
         if ready.send(Ok(())).is_err() {
             control.stop_requested.store(true, Ordering::Release);
@@ -970,6 +1029,7 @@ impl Recorder {
     pub fn start(wav_path: &Path, source: Option<&str>) -> Result<Self> {
         let permission = microphone_permission();
         if permission != MicrophoneAuthorization::Authorized {
+            tracing::warn!("[Capture] microphone permission not authorized state={permission:?}");
             bail!("microphone access is not authorized: {permission:?}");
         }
         let started_at = Instant::now();

@@ -82,6 +82,7 @@ const PHASE_DWELL: Duration = Duration::from_millis(180);
 const MAX_PRESENTATION_LAG: Duration = Duration::from_millis(1600);
 // Full-opacity dwell after the completion grid has finished settling.
 const SUCCESS_HOLD: Duration = Duration::from_millis(1200);
+const ATTENTION_HOLD: Duration = Duration::from_secs(8);
 const RESULT_FADE: Duration = Duration::from_millis(140);
 const NOTICE_HOLD: Duration = Duration::from_secs(4);
 const INTERACTION_HOLD: Duration = Duration::from_secs(2);
@@ -219,22 +220,18 @@ impl Caption {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Visibility {
-    Persistent,
-    Until(Instant),
-}
+struct Visibility(Instant);
 
 impl Visibility {
     fn alpha(self, now: Instant, reduced: bool) -> Option<f32> {
-        match self {
-            Self::Persistent => Some(1.0),
-            Self::Until(until) if now < until => Some(if reduced {
+        let until = self.0;
+        (now < until).then(|| {
+            if reduced {
                 1.0
             } else {
                 (until.duration_since(now).as_secs_f32() / RESULT_FADE.as_secs_f32()).min(1.0)
-            }),
-            Self::Until(_) => None,
-        }
+            }
+        })
     }
 }
 
@@ -506,11 +503,11 @@ impl Model {
             }
             if fresh {
                 self.outcome_event = Some(outcome.event_id);
-                // Seed cached successes silently on attach/restart. Once idle,
-                // a fresh daemon event is authoritative even if its complete
-                // operation happened between polls; active work still wins.
+                // Present cached attention once on attach/restart; seed other
+                // cached outcomes silently. Fresh idle events are authoritative
+                // even if their work happened between polls; active work wins.
                 let initial = first || epoch_changed;
-                if !active && !outcome.dismissed && (!initial || persistent(outcome)) {
+                if !active && !outcome.dismissed && (!initial || attention_outcome(outcome)) {
                     let mut result = present_outcome(outcome, &status, now, self.reduced_motion);
                     if !initial
                         && belongs
@@ -532,7 +529,7 @@ impl Model {
                 }
             }
             if !fresh
-                && persistent(outcome)
+                && attention_outcome(outcome)
                 && self
                     .snapshot
                     .as_ref()
@@ -575,7 +572,7 @@ impl Model {
                     },
                     action: RECORDINGS_ACTION.to_owned(),
                 },
-                visibility: Visibility::Until(now + NOTICE_HOLD),
+                visibility: Visibility(now + NOTICE_HOLD),
                 dwell: NOTICE_HOLD,
                 presented: false,
                 waiting_for_settle: false,
@@ -674,7 +671,7 @@ impl Model {
                     .all(TrackColumn::fully_lit)
             {
                 result.waiting_for_settle = false;
-                result.visibility = Visibility::Until(
+                result.visibility = Visibility(
                     now + SUCCESS_HOLD
                         + if self.reduced_motion {
                             Duration::ZERO
@@ -797,9 +794,7 @@ impl Model {
                 if let Some(result) = &mut self.result {
                     if !result.presented {
                         result.presented = true;
-                        if matches!(result.visibility, Visibility::Until(_)) {
-                            result.visibility = Visibility::Until(now + result.dwell);
-                        }
+                        result.visibility = Visibility(now + result.dwell);
                     }
                     let kind = result.kind;
                     let caption = result.caption.clone();
@@ -1091,16 +1086,13 @@ impl Model {
                 && (matches!(
                     self.kind,
                     Some(Kind::Recording | Kind::Working | Kind::Finishing)
-                ) || self
-                    .result
-                    .as_ref()
-                    .is_some_and(|r| matches!(r.visibility, Visibility::Until(_))))
+                ) || self.result.is_some())
                 || (self.lost_since.is_none() || self.kind == Some(Kind::Attention))
                     && self.track.moving(now))
     }
 }
 
-fn persistent(outcome: &TerminalOutcome) -> bool {
+fn attention_outcome(outcome: &TerminalOutcome) -> bool {
     !matches!(
         outcome.completeness,
         Completeness::Cancelled | Completeness::Empty
@@ -1119,7 +1111,7 @@ fn present_outcome(
     now: Instant,
     reduced_motion: bool,
 ) -> ResultView {
-    let attention = persistent(outcome);
+    let attention = attention_outcome(outcome);
     let delivered = matches!(
         outcome.delivery,
         Delivery::Typed | Delivery::Pasted | Delivery::HandedOff
@@ -1302,7 +1294,14 @@ fn present_outcome(
             .action
             .push_str("Dismiss outcome keeps saved recordings.");
     }
-    let dwell = if kind == Kind::Resolved && delivered && outcome.cleanup != Cleanup::Failed {
+    let dwell = if attention {
+        ATTENTION_HOLD
+            + if reduced_motion {
+                Duration::ZERO
+            } else {
+                RESULT_FADE
+            }
+    } else if kind == Kind::Resolved && delivered && outcome.cleanup != Cleanup::Failed {
         if reduced_motion {
             SUCCESS_HOLD
         } else {
@@ -1315,11 +1314,7 @@ fn present_outcome(
         event_id: Some(outcome.event_id),
         kind,
         caption,
-        visibility: if attention {
-            Visibility::Persistent
-        } else {
-            Visibility::Until(now + dwell)
-        },
+        visibility: Visibility(now + dwell),
         dwell,
         presented: false,
         waiting_for_settle: kind == Kind::Resolved
@@ -2687,7 +2682,6 @@ mod tests {
         };
         let complete = present_outcome(&outcome, &status, now, true);
         assert_eq!(complete.kind, Kind::Resolved);
-        assert!(matches!(complete.visibility, Visibility::Until(_)));
         assert!(complete.caption.title.contains("timed out"));
         assert!(!complete.caption.title.contains("budget"));
         assert!(complete.caption.detail.contains("complete"));
@@ -2696,7 +2690,6 @@ mod tests {
         outcome.delivery = Delivery::Deferred;
         let partial = present_outcome(&outcome, &status, now, true);
         assert_eq!(partial.kind, Kind::Attention);
-        assert!(matches!(partial.visibility, Visibility::Persistent));
         assert!(partial.caption.title.contains("timed out"));
         assert!(partial.caption.detail.contains("Partial"));
         assert!(!partial.caption.action.contains("No retry"));
@@ -2849,7 +2842,7 @@ mod tests {
         model.refresh(now + NOTICE_HOLD * 2);
         assert!(model.result.is_none());
         assert!(model.route.is_none());
-        // A persistent Kaylee failure must not tint the next default take.
+        // A Kaylee failure must not tint the next default take.
         let mut model = screenshot_model(ScreenshotState::DeliveryFailed, now, Some(&kaylee));
         let mut next = recording(0, Some(signal(true)));
         next.operation_id = Some("next-default-take".to_owned());
@@ -3796,26 +3789,115 @@ mod tests {
     }
 
     #[test]
-    fn persistent_failure_dismisses_without_replaying_after_a_new_take() {
+    fn failure_dismisses_without_replaying_after_a_new_take() {
         let now = Instant::now();
         let mut model = Model::new(now);
         let mut failed = preview_snapshot(StateKind::Idle);
         failed.outcome = Some(preview_outcome(Completeness::Failed, Delivery::None));
         model.apply(failed.clone(), now);
-        model.refresh(now + Duration::from_secs(60));
+        model.refresh(now + Duration::from_secs(1));
         assert_eq!(model.kind, Some(Kind::Attention));
         failed.outcome.as_mut().expect("outcome").dismissed = true;
-        model.apply(failed.clone(), now + Duration::from_secs(61));
+        model.apply(failed.clone(), now + Duration::from_secs(2));
         assert!(model.kind.is_none());
         let mut next = recording(0, Some(signal(true)));
         next.operation_id = Some("other-take".to_owned());
-        model.apply(next, now + Duration::from_secs(62));
+        model.apply(next, now + Duration::from_secs(3));
         failed.outcome.as_mut().expect("outcome").dismissed = false;
-        model.apply(failed, now + Duration::from_secs(63));
+        model.apply(failed, now + Duration::from_secs(4));
         assert!(
             model.kind.is_none(),
             "cached old event is not completion of a new take"
         );
+    }
+
+    #[test]
+    fn attention_outcomes_expire_without_acknowledging_or_replaying() {
+        for (completeness, delivery) in [
+            (Completeness::Failed, Delivery::None),
+            (Completeness::Partial, Delivery::None),
+            (Completeness::Complete, Delivery::Failed),
+            (Completeness::Complete, Delivery::Deferred),
+            (Completeness::Complete, Delivery::Uncertain),
+        ] {
+            for reduced in [false, true] {
+                let now = Instant::now();
+                let mut model = Model::new(now);
+                model.apply(preview_snapshot(StateKind::Idle), now);
+                let shown = now + Duration::from_secs(1);
+                let mut status = preview_snapshot(StateKind::Idle);
+                status.hud.reduced_motion = Some(reduced);
+                status.outcome = Some(preview_outcome(completeness, delivery));
+                if completeness == Completeness::Failed {
+                    // Capture-start failures need not have an operation identity.
+                    status.outcome.as_mut().unwrap().operation_id = None;
+                }
+                model.apply(status.clone(), shown);
+                assert_eq!(model.kind, Some(Kind::Attention));
+                let hold_end = shown + Duration::from_secs(8);
+                status.capabilities.dismiss = !status.capabilities.dismiss;
+                model.apply(status.clone(), hold_end - FRAME_INTERVAL);
+                assert_eq!(model.kind, Some(Kind::Attention));
+                assert_eq!(model.alpha(hold_end - FRAME_INTERVAL), 1.0);
+                if !reduced {
+                    let fading = hold_end + RESULT_FADE / 2;
+                    model.refresh(fading);
+                    assert!(model.alpha(fading) > 0.0 && model.alpha(fading) < 1.0);
+                }
+                let hidden = hold_end + if reduced { Duration::ZERO } else { RESULT_FADE };
+                model.apply(status.clone(), hidden);
+                assert!(
+                    model.kind.is_none(),
+                    "{completeness:?}/{delivery:?}, reduced={reduced}"
+                );
+                model.apply(status.clone(), hidden + Duration::from_secs(60));
+                assert!(
+                    model.kind.is_none(),
+                    "polling cannot replay an expired event"
+                );
+                let retained = model.snapshot.as_ref().unwrap().outcome.as_ref().unwrap();
+                assert!(
+                    !retained.dismissed,
+                    "HUD expiry must not acknowledge the outcome"
+                );
+                assert_eq!(
+                    retained.artifacts,
+                    status.outcome.as_ref().unwrap().artifacts
+                );
+                status.outcome.as_mut().unwrap().event_id += 1;
+                model.apply(status, hidden + Duration::from_secs(61));
+                assert_eq!(
+                    model.kind,
+                    Some(Kind::Attention),
+                    "a newer event presents again"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn attaching_or_changing_epoch_presents_cached_attention_once() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Idle);
+        status.outcome = Some(preview_outcome(Completeness::Failed, Delivery::None));
+        for shown in [now, now + Duration::from_secs(60)] {
+            model.apply(status.clone(), shown);
+            assert_eq!(model.kind, Some(Kind::Attention));
+            model.apply(
+                status.clone(),
+                shown + Duration::from_secs(8) - FRAME_INTERVAL,
+            );
+            assert_eq!(model.kind, Some(Kind::Attention));
+            model.apply(status.clone(), shown + Duration::from_secs(8) + RESULT_FADE);
+            assert!(model.kind.is_none());
+            model.apply(status.clone(), shown + Duration::from_secs(30));
+            assert!(
+                model.kind.is_none(),
+                "the cached failure is presented only once per epoch"
+            );
+            status.epoch = "new-daemon-epoch".to_owned();
+        }
     }
 
     #[test]
@@ -3855,7 +3937,7 @@ mod tests {
             status.outcome = Some(outcome.clone());
             let view = present_outcome(&outcome, &status, now, false);
             assert_eq!(view.kind, Kind::Neutral);
-            assert!(!matches!(view.visibility, Visibility::Persistent));
+            assert!(view.visibility.alpha(now + NOTICE_HOLD, false).is_none());
             assert!(
                 !view.caption.action.is_empty(),
                 "saved audio remains deliberately recoverable"
