@@ -304,8 +304,8 @@ microphone activity, indeterminate processing activity, and measured progress
 only when multi-chunk reports exist. Exceptions such as Copied, deferred,
 uncertain, and failed outcomes remain explicit but transient; see
 [HUD timing](CONFIGURATION.md#hud--passive-status). Auto-hide does not dismiss
-the outcome: the menu/status bar keeps its attention mark and message, and
-saved recordings remain available for Copy/recovery.
+the outcome: the menu/status bar keeps its message, outcomes that need attention
+keep the attention mark, and saved recordings remain available for Copy/recovery.
 
 ## Recovery
 

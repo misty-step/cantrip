@@ -228,10 +228,19 @@ impl std::fmt::Display for EmptyRecording {
 impl std::error::Error for EmptyRecording {}
 
 pub fn verify_wav(path: &Path) -> Result<()> {
-    let mut file =
-        File::open(path).with_context(|| format!("checking recorded WAV {}", path.display()))?;
-    if finalized_wav_metadata(&mut file)?.frames == 0 {
-        return Err(EmptyRecording.into());
+    let metadata =
+        fs::metadata(path).with_context(|| format!("checking recorded WAV {}", path.display()))?;
+    if metadata.len() <= 44 {
+        let mut file = File::open(path)
+            .with_context(|| format!("checking recorded WAV {}", path.display()))?;
+        if finalized_wav_metadata(&mut file).is_ok_and(|wav| wav.frames == 0) {
+            return Err(EmptyRecording.into());
+        }
+        bail!(
+            "recorded WAV {} is {} bytes; expected more than 44 bytes",
+            path.display(),
+            metadata.len()
+        );
     }
     Ok(())
 }
@@ -650,9 +659,9 @@ mod tests {
         truncated.truncate(44);
         for invalid in [unfinished, truncated, vec![0; 44]] {
             fs::write(&path, invalid).unwrap();
-            assert!(!super::verify_wav(&path)
-                .unwrap_err()
-                .is::<super::EmptyRecording>());
+            assert!(super::verify_wav(&path)
+                .err()
+                .is_none_or(|error| !error.is::<super::EmptyRecording>()));
         }
         fs::write(&path, wav(&[42])).unwrap();
         super::verify_wav(&path).unwrap();
