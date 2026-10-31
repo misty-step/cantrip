@@ -9,6 +9,8 @@ use block2::RcBlock;
 use cantrip_engine::audio::{
     verify_wav, InputSignal, Pcm16Converter, Pcm16WavWriter, PcmEncoding, PcmFormat, SignalMonitor,
 };
+use cantrip_engine::ipc::MicrophoneAuthorization;
+use cantrip_engine::ports::MicrophoneAccessUnsupported;
 use crossbeam_queue::ArrayQueue;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{Bool, NSObjectProtocol, ProtocolObject};
@@ -37,7 +39,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -51,6 +53,9 @@ const FAILURE_FORMAT: u8 = 2;
 const FAILURE_CONFIGURATION: u8 = 3;
 const FAILURE_DISCONTINUITY: u8 = 4;
 const FIRST_SAMPLE_TIME: i64 = i64::MIN;
+/// An unanswered prompt keeps its request thread at most this long; an answer
+/// given later still reaches this process's authorization.
+const MICROPHONE_DECISION_WAIT: Duration = Duration::from_secs(120);
 
 fn pcm_encoding(format: AVAudioCommonFormat) -> Option<PcmEncoding> {
     match format {
@@ -62,22 +67,18 @@ fn pcm_encoding(format: AVAudioCommonFormat) -> Option<PcmEncoding> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MicrophonePermission {
-    Authorized,
-    NotDetermined,
-    Denied,
-    Restricted,
-}
-
-impl MicrophonePermission {
-    fn guidance(self) -> &'static str {
-        match self {
-            Self::Authorized => "microphone access authorized",
-            Self::NotDetermined => "microphone access has not been requested; enable it explicitly in Cantrip Settings",
-            Self::Denied => "microphone access denied; enable Cantrip in System Settings > Privacy & Security > Microphone",
-            Self::Restricted => "microphone access restricted by macOS policy",
+/// What the operator should know or do about a microphone authorization.
+pub fn guidance(authorization: MicrophoneAuthorization) -> &'static str {
+    match authorization {
+        MicrophoneAuthorization::Authorized => "authorized",
+        MicrophoneAuthorization::NotDetermined => {
+            "not requested; choose Allow Microphone Access in the Cantrip menu or Settings"
         }
+        MicrophoneAuthorization::Requesting => "waiting for your answer to the macOS prompt",
+        MicrophoneAuthorization::Denied => {
+            "denied; enable Cantrip in System Settings > Privacy & Security > Microphone"
+        }
+        MicrophoneAuthorization::Restricted => "restricted by macOS policy",
     }
 }
 
@@ -89,45 +90,82 @@ pub struct InputDevice {
     pub is_default: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct CaptureDiagnosis {
-    pub ready: bool,
-    pub permission: MicrophonePermission,
-    pub selected_device: Option<InputDevice>,
-    pub detail: String,
-}
-
-/// Query only. Neither this nor capture/doctor opens a permission prompt.
-pub fn microphone_permission() -> MicrophonePermission {
-    let status = unsafe {
+/// This process's own authorization, as a query only: never a prompt. macOS
+/// caches it per process, so only the capture owner's answer governs capture.
+pub fn microphone_permission() -> MicrophoneAuthorization {
+    let status = autoreleasepool(|_| unsafe {
         AVCaptureDevice::authorizationStatusForMediaType(
             AVMediaTypeAudio.expect("AVMediaTypeAudio is available on supported macOS"),
         )
-    };
+    });
     match status {
-        AVAuthorizationStatus::Authorized => MicrophonePermission::Authorized,
-        AVAuthorizationStatus::NotDetermined => MicrophonePermission::NotDetermined,
-        AVAuthorizationStatus::Denied => MicrophonePermission::Denied,
-        _ => MicrophonePermission::Restricted,
+        AVAuthorizationStatus::Authorized => MicrophoneAuthorization::Authorized,
+        AVAuthorizationStatus::NotDetermined => MicrophoneAuthorization::NotDetermined,
+        AVAuthorizationStatus::Denied => MicrophoneAuthorization::Denied,
+        _ => MicrophoneAuthorization::Restricted,
     }
 }
 
-/// Invoke only in response to the user's explicit microphone permission action.
-/// The system completion runs off the calling thread; the Settings host should
-/// invoke this blocking function on its setup worker, not its UI event loop.
-pub fn request_microphone_permission() -> Result<MicrophonePermission> {
-    let current = microphone_permission();
-    if current != MicrophonePermission::NotDetermined {
-        return Ok(current);
+/// The capture owner's authorization and its one explicit request at a time.
+/// The request awaits the operator's answer on its own thread, never the
+/// engine's, and the authorization reads `Requesting` until it arrives.
+#[derive(Default)]
+pub struct MicrophoneAccess {
+    request: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl MicrophoneAccess {
+    pub fn authorization(&self) -> MicrophoneAuthorization {
+        if self.requesting() {
+            MicrophoneAuthorization::Requesting
+        } else {
+            microphone_permission()
+        }
     }
-    if NSBundle::mainBundle()
-        .objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription"))
-        .is_none()
-    {
-        bail!(
-            "microphone permission requires the installed Cantrip.app with its usage description"
-        );
+
+    /// Ask macOS for the operator's explicit action and return at once. Only an
+    /// undetermined authorization opens the system prompt; an answered one is
+    /// returned as it stands.
+    pub fn request(&self) -> Result<MicrophoneAuthorization> {
+        let mut request = self.request.lock().unwrap_or_else(PoisonError::into_inner);
+        if request.as_ref().is_some_and(|thread| !thread.is_finished()) {
+            return Ok(MicrophoneAuthorization::Requesting);
+        }
+        let current = microphone_permission();
+        if current != MicrophoneAuthorization::NotDetermined {
+            return Ok(current);
+        }
+        // macOS terminates a process that asks without declaring its purpose.
+        if autoreleasepool(|_| {
+            NSBundle::mainBundle()
+                .objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription"))
+                .is_none()
+        }) {
+            return Err(MicrophoneAccessUnsupported(
+                "Only Cantrip.app can ask macOS for microphone access; run Cantrip from its app bundle.",
+            )
+            .into());
+        }
+        let thread = thread::Builder::new()
+            .name("cantrip-microphone-access".to_owned())
+            .spawn(|| autoreleasepool(|_| await_microphone_decision()))
+            .context("starting the microphone access request")?;
+        *request = Some(thread);
+        tracing::info!("[Capture] microphone access requested");
+        Ok(MicrophoneAuthorization::Requesting)
     }
+
+    fn requesting(&self) -> bool {
+        self.request
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+    }
+}
+
+/// Block this request thread, never the engine's, until the operator answers.
+fn await_microphone_decision() {
     let (sender, receiver) = mpsc::sync_channel(1);
     let completion = RcBlock::new(move |granted: Bool| {
         let _ = sender.try_send(granted.as_bool());
@@ -138,10 +176,14 @@ pub fn request_microphone_permission() -> Result<MicrophonePermission> {
             &completion,
         );
     }
-    receiver
-        .recv_timeout(Duration::from_secs(120))
-        .context("waiting for the explicit macOS microphone permission decision")?;
-    Ok(microphone_permission())
+    if receiver.recv_timeout(MICROPHONE_DECISION_WAIT).is_ok() {
+        tracing::info!(
+            "[Capture] microphone access answered state={:?}",
+            microphone_permission()
+        );
+    } else {
+        tracing::warn!("[Capture] microphone access unanswered class=microphone-request-timeout");
+    }
 }
 
 pub fn input_devices() -> Result<Vec<InputDevice>> {
@@ -153,25 +195,14 @@ pub fn input_devices() -> Result<Vec<InputDevice>> {
     })
 }
 
-pub fn diagnosis(source: Option<&str>) -> CaptureDiagnosis {
-    let permission = microphone_permission();
-    let selected = autoreleasepool(|_| select_device(source));
-    let (selected_device, device_error) = match selected {
-        Ok(device) => (Some(device.public), None),
-        Err(error) => (None, Some(format!("{error:#}"))),
-    };
-    let detail = if permission != MicrophonePermission::Authorized {
-        permission.guidance().to_owned()
-    } else if let Some(error) = device_error {
-        error
-    } else {
-        "AVAudioEngine input ready; hardware PCM is converted to 16 kHz mono locally".to_owned()
-    };
-    CaptureDiagnosis {
-        ready: permission == MicrophonePermission::Authorized && selected_device.is_some(),
-        permission,
-        selected_device,
-        detail,
+/// The selected input as this process finds it: presence, not authorization,
+/// which belongs to the capture owner.
+pub fn diagnosis(source: Option<&str>) -> String {
+    match autoreleasepool(|_| select_device(source)) {
+        Ok(_) => {
+            "AVAudioEngine input ready; hardware PCM is converted to 16 kHz mono locally".to_owned()
+        }
+        Err(error) => format!("{error:#}"),
     }
 }
 
@@ -750,8 +781,8 @@ fn capture_to_wav(
     ready: &mpsc::SyncSender<std::result::Result<(), String>>,
 ) -> Result<()> {
     let permission = microphone_permission();
-    if permission != MicrophonePermission::Authorized {
-        bail!(permission.guidance());
+    if permission != MicrophoneAuthorization::Authorized {
+        bail!("microphone access {}", guidance(permission));
     }
     let selected = select_device(source)?;
     let mut native = audio_call(|| NativeCapture::new(selected.id))?;
@@ -790,7 +821,7 @@ fn capture_to_wav(
                 bail!("microphone stopped supplying audio; retained take is incomplete");
             }
             if now >= next_device_poll {
-                if microphone_permission() != MicrophonePermission::Authorized {
+                if microphone_permission() != MicrophoneAuthorization::Authorized {
                     bail!("microphone permission was revoked during capture");
                 }
                 let alive: u32 = unsafe {
@@ -857,8 +888,8 @@ pub struct Recorder {
 impl Recorder {
     pub fn start(wav_path: &Path, source: Option<&str>) -> Result<Self> {
         let permission = microphone_permission();
-        if permission != MicrophonePermission::Authorized {
-            bail!(permission.guidance());
+        if permission != MicrophoneAuthorization::Authorized {
+            bail!("microphone access {}", guidance(permission));
         }
         let started_at = Instant::now();
         let control = Arc::new(Control::new());

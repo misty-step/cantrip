@@ -139,6 +139,11 @@ enum CliCommand {
     Ping,
     /// Re-read the config file in the running daemon.
     Reload,
+    /// Microphone access for the running Cantrip, the process that records (macOS).
+    Microphone {
+        #[command(subcommand)]
+        command: MicrophoneCommand,
+    },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -183,6 +188,13 @@ enum KeyCommand {
     Rm { id: String },
     Status { id: String },
 }
+
+#[derive(Debug, Subcommand)]
+enum MicrophoneCommand {
+    /// Ask the running Cantrip to request macOS microphone access; you answer the prompt.
+    Allow,
+}
+
 fn main() {
     let cli = Cli::parse();
     let dual_sink = matches!(cli.command, Some(CliCommand::Daemon { .. }));
@@ -344,6 +356,9 @@ fn run(cli: Cli) -> Result<()> {
             clipboard,
         }),
         CliCommand::Reload => send_command(Command::Reload),
+        CliCommand::Microphone { command } => match command {
+            MicrophoneCommand::Allow => send_command(Command::AllowMicrophone),
+        },
         CliCommand::Config { command } => run_config(command),
         CliCommand::Key { command } => run_key(command),
         CliCommand::Ping => send_command(Command::Ping),
@@ -582,6 +597,9 @@ fn print_status(json: bool) -> Result<()> {
         println!("notice: {} (event {})", notice.message, notice.event_id);
     }
     print_outcome(status.outcome.as_ref());
+    if let Some(microphone) = &status.microphone {
+        println!("microphone: {}", enum_label(microphone));
+    }
     let pending = status.pending_recordings;
     println!("pending-recordings: {pending}");
     if pending > 0 {
@@ -914,13 +932,21 @@ fn doctor() -> Result<()> {
         Ok(_) => println!("config: defaults in use — open Settings to customize"),
         Err(_) => println!("config: blocked — invalid or unreadable; open Settings to repair"),
     }
+    let status = ipc::status().ok();
+    println!(
+        "{}",
+        microphone_diagnosis(
+            status.as_ref().map(|status| status.microphone),
+            cantrip::capture::microphone_permission,
+        )
+    );
     let capture = cantrip::capture::diagnosis(
         config
             .as_ref()
             .ok()
             .and_then(|config| config.audio_source.as_deref()),
     );
-    println!("capture: {}", capture.detail);
+    println!("capture: {capture}");
     if let Ok(config) = &config {
         println!("{}", stt_diagnosis(config));
         println!("{}", cleanup_diagnosis(config));
@@ -944,11 +970,35 @@ fn doctor() -> Result<()> {
         println!("telemetry: blocked — fix config first");
     }
     println!("hud: native passive panel; launch Cantrip.app or cantrip hud");
-    match ipc::status() {
-        Ok(status) => println!("daemon: reachable ({})", status.state_name()),
-        Err(_) => println!("daemon: not running or unreachable — open Cantrip.app"),
+    match status {
+        Some(status) => println!("daemon: reachable ({})", status.state_name()),
+        None => println!("daemon: not running or unreachable — open Cantrip.app"),
     }
     Ok(())
+}
+
+/// Microphone access as the running Cantrip, which records, reports it. Only
+/// without one does doctor ask its own process, and labels that answer: macOS
+/// answers each process separately.
+#[cfg(target_os = "macos")]
+fn microphone_diagnosis(
+    owner: Option<Option<ipc::MicrophoneAuthorization>>,
+    this_process: impl FnOnce() -> ipc::MicrophoneAuthorization,
+) -> String {
+    match owner {
+        Some(Some(authorization)) => format!(
+            "microphone: {} — reported by the running Cantrip",
+            cantrip::capture::guidance(authorization)
+        ),
+        Some(None) => {
+            "microphone: not reported by the running Cantrip; restart Cantrip from this version"
+                .to_owned()
+        }
+        None => format!(
+            "microphone: {} — this process only; Cantrip is not running and may differ",
+            cantrip::capture::guidance(this_process())
+        ),
+    }
 }
 
 fn executable_ready(command: &str) -> bool {
@@ -1197,6 +1247,20 @@ fn endpoint_lane(origin: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn doctor_reports_the_capture_owners_microphone_access_and_labels_its_own() {
+        use ipc::MicrophoneAuthorization as Access;
+        let running = |reported| {
+            microphone_diagnosis(Some(reported), || {
+                panic!("a running Cantrip answers for itself")
+            })
+        };
+        let own = microphone_diagnosis(None, || Access::Authorized);
+        assert_ne!(running(Some(Access::Authorized)), own);
+        assert_ne!(running(None), own);
+    }
 
     #[test]
     fn endpoint_diagnostics_drop_sensitive_url_components() {

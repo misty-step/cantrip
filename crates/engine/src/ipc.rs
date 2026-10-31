@@ -53,6 +53,9 @@ pub enum Command {
     },
     Ping,
     Reload,
+    /// Ask macOS for microphone access in the capture owner's own process.
+    /// Sent only for the operator's explicit choice; only their answer grants it.
+    AllowMicrophone,
 }
 
 impl Command {
@@ -79,6 +82,7 @@ impl Command {
             Self::Forget { .. } => "forget".to_owned(),
             Self::Ping => "ping".to_owned(),
             Self::Reload => "reload".to_owned(),
+            Self::AllowMicrophone => "allow-microphone".to_owned(),
         }
     }
 }
@@ -371,6 +375,20 @@ pub enum OperationKind {
     Forget,
 }
 
+/// Microphone authorization as macOS reports it to the capture owner, the
+/// process that records. macOS caches it per process, so another process's
+/// answer never stands in for it. `Requesting` means the owner is waiting for
+/// the operator's answer to the system prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MicrophoneAuthorization {
+    NotDetermined,
+    Requesting,
+    Authorized,
+    Denied,
+    Restricted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusSnapshot {
     pub epoch: String,
@@ -392,6 +410,10 @@ pub struct StatusSnapshot {
     /// The active take's non-default target; None for the default flow and when idle.
     #[serde(default)]
     pub handoff: Option<Handoff>,
+    /// The capture owner's microphone authorization; None where the platform has
+    /// none (Linux) or the owner predates this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<MicrophoneAuthorization>,
 }
 
 impl StatusSnapshot {

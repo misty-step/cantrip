@@ -7,13 +7,13 @@ use crate::delivery::{
 };
 use crate::ipc::{
     self, Artifacts, AudioSignal, Capabilities, Cleanup, Command, CommandReply, Completeness,
-    Delivery, InteractionNotice, OperationKind, Request, StateKind, StatusSnapshot,
-    TerminalOutcome,
+    Delivery, InteractionNotice, MicrophoneAuthorization, OperationKind, Request, StateKind,
+    StatusSnapshot, TerminalOutcome,
 };
 use crate::models;
 use crate::paths;
 use crate::pipeline::{self, PostprocStatus, Stage};
-use crate::ports::{DeliveryPermit, Platform, Recorder};
+use crate::ports::{DeliveryPermit, MicrophoneAccessUnsupported, Platform, Recorder};
 use crate::recovery::{self, Take};
 use crate::stt;
 use crate::telemetry::{self, TelemetryReporter};
@@ -38,6 +38,8 @@ const MAX_CLIENTS: usize = 64;
 /// Only the daemon consumes capture samples; status clients share this cache.
 const SIGNAL_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 const CAPABILITY_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// The capture owner's answer to a microphone prompt reaches status this soon.
+const MICROPHONE_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const CANCEL_OPEN: u8 = 0;
 const CANCEL_REQUESTED: u8 = 1;
 const CANCEL_SEALED: u8 = 2;
@@ -210,6 +212,9 @@ struct Daemon {
     has_text: bool,
     history_revision: u64,
     local_model: bool,
+    /// The platform's microphone authorization for this process, re-read on a
+    /// cadence and after an explicit request; status clients share this cache.
+    microphone: Option<MicrophoneAuthorization>,
     worker_available: bool,
     retainer: Option<JoinHandle<WorkerResult>>,
 }
@@ -221,6 +226,7 @@ impl Daemon {
         local_model: bool,
         platform: Arc<dyn Platform>,
     ) -> Self {
+        let microphone = platform.microphone_authorization();
         Self {
             config,
             platform,
@@ -236,6 +242,7 @@ impl Daemon {
             history_revision: 0,
             recordings,
             local_model,
+            microphone,
             worker_available: true,
             retainer: None,
         }
@@ -409,6 +416,7 @@ impl Daemon {
                 .state
                 .operation()
                 .and_then(|operation| operation.handoff.clone()),
+            microphone: self.microphone,
         }
     }
 }
@@ -606,6 +614,7 @@ fn serve(
     let mut clients: Vec<PendingClient> = Vec::new();
     let mut history = HistoryReader::spawn()?;
     let mut next_capability_refresh = Instant::now();
+    let mut next_microphone_refresh = Instant::now() + MICROPHONE_REFRESH_INTERVAL;
     loop {
         drain_stage(daemon, stage_rx);
         drain_worker_results(daemon, result_rx, telemetry_reporter);
@@ -620,6 +629,10 @@ fn serve(
         if Instant::now() >= next_capability_refresh {
             daemon.local_model = local_model_ready(&SttConfig::default());
             next_capability_refresh = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
+        }
+        if Instant::now() >= next_microphone_refresh {
+            daemon.microphone = daemon.platform.microphone_authorization();
+            next_microphone_refresh = Instant::now() + MICROPHONE_REFRESH_INTERVAL;
         }
         if let Ok((revision, refreshed)) = history.results.try_recv() {
             history.active = false;
@@ -972,6 +985,7 @@ fn execute(
                 "reload-failed",
             ),
         },
+        Command::AllowMicrophone => allow_microphone(daemon),
     }
 }
 
@@ -1395,6 +1409,49 @@ fn dismiss(daemon: &mut Daemon, event_id: Option<u64>) -> CommandReply {
         daemon.reply(true, "dismissed", None)
     } else {
         daemon.reject("Nothing to dismiss.", "nothing-to-dismiss")
+    }
+}
+
+/// Ask for microphone access in this capture owner's own process: macOS caches
+/// the answer per process, so access requested by any other process never
+/// reaches capture. Only this explicit command asks; the answer arrives later.
+fn allow_microphone(daemon: &mut Daemon) -> CommandReply {
+    let authorization = match daemon.platform.request_microphone_access() {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            return match error.downcast_ref::<MicrophoneAccessUnsupported>() {
+                Some(unsupported) => {
+                    daemon.reject(&unsupported.to_string(), "microphone-unsupported")
+                }
+                None => daemon.reject(
+                    "Microphone access could not be requested.",
+                    "microphone-request-failed",
+                ),
+            };
+        }
+    };
+    daemon.microphone = Some(authorization);
+    match authorization {
+        MicrophoneAuthorization::Requesting => daemon.reply(
+            true,
+            "Waiting for your answer to the microphone prompt.",
+            None,
+        ),
+        MicrophoneAuthorization::Authorized => {
+            daemon.reply(true, "Microphone access is allowed.", None)
+        }
+        MicrophoneAuthorization::Denied => daemon.reject(
+            "Microphone access is denied; enable Cantrip in System Settings > Privacy & Security > Microphone.",
+            "microphone-denied",
+        ),
+        MicrophoneAuthorization::Restricted => daemon.reject(
+            "Microphone access is restricted by system policy.",
+            "microphone-restricted",
+        ),
+        MicrophoneAuthorization::NotDetermined => daemon.reject(
+            "Microphone access could not be requested.",
+            "microphone-request-failed",
+        ),
     }
 }
 
@@ -2681,6 +2738,76 @@ mod tests {
             kind,
         );
         (daemon, operation)
+    }
+
+    /// A capture owner that reports a microphone authorization, as macOS does.
+    struct ReportingPlatform(MicrophoneAuthorization);
+
+    impl Platform for ReportingPlatform {
+        fn start_recording(&self, _: &Path, _: Option<&str>) -> Result<Box<dyn Recorder>> {
+            panic!("this engine scenario must not capture");
+        }
+
+        fn prepare_delivery(&self) {}
+
+        fn delivery_permit(&self) -> Arc<dyn DeliveryPermit> {
+            Arc::new(TestPermit)
+        }
+
+        fn handoff_color(&self, slot: usize) -> [u8; 3] {
+            [slot as u8, 0, 0]
+        }
+
+        fn sender_identity(&self, _: &UnixStream) -> String {
+            "test-client".to_owned()
+        }
+
+        fn microphone_authorization(&self) -> Option<MicrophoneAuthorization> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn status_carries_the_owners_microphone_authorization_only_where_one_exists() {
+        let wire = |daemon: &Daemon| -> serde_json::Value {
+            serde_json::from_slice(&encode_reply(&daemon.snapshot()).unwrap()).unwrap()
+        };
+        // Without per-app authorization (Linux) the status wire is unchanged, and
+        // a snapshot from an owner that predates the field reads as unreported.
+        let unreported = wire(&idle_daemon());
+        assert!(unreported.get("microphone").is_none());
+        let unreported: StatusSnapshot = serde_json::from_value(unreported).unwrap();
+        assert_eq!(unreported.microphone, None);
+
+        let owner = Daemon::new(
+            Config::default(),
+            Vec::new(),
+            false,
+            Arc::new(ReportingPlatform(MicrophoneAuthorization::NotDetermined)),
+        );
+        let reported = wire(&owner);
+        assert_eq!(reported["microphone"], "not-determined");
+        let reported: StatusSnapshot = serde_json::from_value(reported).unwrap();
+        assert_eq!(
+            reported.microphone,
+            Some(MicrophoneAuthorization::NotDetermined)
+        );
+    }
+
+    #[test]
+    fn a_platform_without_microphone_authorization_refuses_the_request_by_class() {
+        let mut daemon = idle_daemon();
+        let (job_tx, job_rx) = mpsc::channel();
+        let reply = execute(
+            Command::AllowMicrophone,
+            &mut daemon,
+            Path::new("/tmp"),
+            &job_tx,
+        );
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_deref(), Some("microphone-unsupported"));
+        assert_eq!(daemon.snapshot().microphone, None);
+        assert!(job_rx.try_recv().is_err());
     }
 
     #[test]
