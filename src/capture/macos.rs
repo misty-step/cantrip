@@ -49,12 +49,12 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const PACKET_FRAMES: usize = 1_024;
+const PACKET_FRAMES: usize = 256;
 const WRITER_POLL: Duration = Duration::from_millis(2);
 const DEVICE_POLL: Duration = Duration::from_millis(200);
 const INTERRUPTION_GRACE: Duration = Duration::from_secs(5);
@@ -461,6 +461,8 @@ struct Control {
     failure: AtomicU8,
     frames_seen: AtomicU64,
     next_sample_time: AtomicI64,
+    /// First CoreAudio status of a failed render; an error code, never audio.
+    render_status: AtomicI32,
 }
 
 impl Control {
@@ -470,7 +472,15 @@ impl Control {
             failure: AtomicU8::new(FAILURE_NONE),
             frames_seen: AtomicU64::new(0),
             next_sample_time: AtomicI64::new(FIRST_SAMPLE_TIME),
+            render_status: AtomicI32::new(0),
         }
+    }
+
+    fn fail_render(&self, status: i32) {
+        let _ = self
+            .render_status
+            .compare_exchange(0, status, Ordering::AcqRel, Ordering::Acquire);
+        self.fail(FAILURE_RENDER);
     }
 
     fn fail(&self, failure: u8) {
@@ -492,6 +502,7 @@ impl Control {
             });
         self.next_sample_time
             .store(FIRST_SAMPLE_TIME, Ordering::Release);
+        self.render_status.store(0, Ordering::Release);
     }
 
     fn failure_class(&self) -> &'static str {
@@ -534,8 +545,10 @@ struct Transport {
 
 impl Transport {
     fn new(format: PcmFormat) -> Self {
-        // One second of hardware PCM plus a tap-sized margin. This is fixed
-        // for the take: even a stalled disk cannot cause memory growth.
+        // One second of hardware PCM plus a burst margin. Every input callback
+        // takes at least one packet, so small packets keep that second for
+        // HAL buffers down to PACKET_FRAMES. This is fixed for the take: even
+        // a stalled disk cannot cause memory growth.
         let capacity = (format.sample_rate / PACKET_FRAMES as f64).ceil() as usize + 8;
         let transport = Self {
             free: ArrayQueue::new(capacity),
@@ -689,7 +702,7 @@ impl InputContext {
             )
         };
         if rendered != 0 {
-            control.fail(FAILURE_RENDER);
+            control.fail_render(rendered);
             return;
         }
         let time = unsafe { time.as_ref() };
@@ -796,21 +809,33 @@ impl NativeCapture {
             &0_u32,
             "disabling audio output",
         )?;
-        let selected = capture.set(
+        let selected = capture.set_status(
             kAudioOutputUnitProperty_CurrentDevice,
             kAudioUnitScope_Global,
             0,
             &device,
-            "selecting configured microphone",
         );
-        if selected.is_err() {
-            tracing::warn!("[Capture] selecting microphone failed");
+        if selected != 0 {
+            tracing::warn!("[Capture] selecting microphone failed status={selected}");
         }
-        selected?;
+        check_status(selected, "selecting configured microphone")?;
         if capture.current_device()? != device {
             bail!("CoreAudio did not select the requested microphone");
         }
         Ok(capture)
+    }
+
+    fn set_status<T: Copy>(&self, property: u32, scope: u32, element: u32, value: &T) -> i32 {
+        unsafe {
+            AudioUnitSetProperty(
+                self.unit,
+                property,
+                scope,
+                element,
+                ptr::from_ref(value).cast(),
+                size_of::<T>() as u32,
+            )
+        }
     }
 
     fn set<T: Copy>(
@@ -821,17 +846,7 @@ impl NativeCapture {
         value: &T,
         operation: &'static str,
     ) -> Result<()> {
-        let status = unsafe {
-            AudioUnitSetProperty(
-                self.unit,
-                property,
-                scope,
-                element,
-                ptr::from_ref(value).cast(),
-                size_of::<T>() as u32,
-            )
-        };
-        check_status(status, operation)
+        check_status(self.set_status(property, scope, element, value), operation)
     }
 
     /// Callers use only the exact POD type documented for the property.
@@ -1220,21 +1235,34 @@ fn capture_to_wav(
                 // A Bluetooth headset switching to its microphone profile (or
                 // another route change) stops the engine just after start.
                 // Before any audio arrived nothing is lost: restart capture.
-                audio_call(|| native.stop())?;
+                let stopped = audio_call(|| native.stop());
+                let alive = unsafe {
+                    property::<u32>(
+                        selected.id,
+                        kAudioDevicePropertyDeviceIsAlive,
+                        kAudioObjectPropertyScopeGlobal,
+                    )
+                };
+                if !matches!(alive, Ok(alive) if alive != 0) {
+                    return Err(ended(
+                        "device-changed",
+                        "selected microphone disconnected or changed during capture",
+                    ));
+                }
+                if let Err(error) = stopped {
+                    tracing::warn!("[Capture] microphone capture failed class=stop-failed");
+                    return Err(error);
+                }
                 if control.frames_seen.load(Ordering::Acquire) == 0 {
-                    let alive = unsafe {
-                        property::<u32>(
-                            selected.id,
-                            kAudioDevicePropertyDeviceIsAlive,
-                            kAudioObjectPropertyScopeGlobal,
-                        )
+                    let trigger = match failure {
+                        FAILURE_CONFIGURATION => "configuration-changed",
+                        FAILURE_RENDER => "render-failed",
+                        _ => "engine-stopped",
                     };
-                    if !matches!(alive, Ok(alive) if alive != 0) {
-                        return Err(ended(
-                            "device-changed",
-                            "selected microphone disconnected or changed during capture",
-                        ));
-                    }
+                    tracing::info!(
+                        "[Capture] microphone route change detected trigger={trigger} status={}",
+                        control.render_status.load(Ordering::Acquire)
+                    );
                     let Some(restarted) = restart_capture(selected.id, control, &mut restarts)?
                     else {
                         return Ok(());
@@ -1249,8 +1277,9 @@ fn capture_to_wav(
             }
             if let Err(error) = control.capture_failure() {
                 tracing::warn!(
-                    "[Capture] microphone capture failed class={}",
-                    control.failure_class()
+                    "[Capture] microphone capture failed class={} status={}",
+                    control.failure_class(),
+                    control.render_status.load(Ordering::Acquire)
                 );
                 return Err(error);
             }
@@ -1571,6 +1600,39 @@ mod tests {
             encoding: PcmEncoding::Signed16,
             interleaved: true,
         }
+    }
+
+    #[test]
+    fn rearm_forgets_only_route_failures_before_audio() {
+        for terminal in [FAILURE_OVERRUN, FAILURE_FORMAT, FAILURE_DISCONTINUITY] {
+            let control = Control::new();
+            control.fail(terminal);
+            control.rearm();
+            assert_eq!(control.failure.load(Ordering::Acquire), terminal);
+            assert!(control.capture_failure().is_err());
+        }
+        let control = Control::new();
+        control.fail(FAILURE_CONFIGURATION);
+        control.rearm();
+        assert!(control.capture_failure().is_ok());
+        control.fail_render(-10863);
+        assert_eq!(control.failure_class(), "render-failed");
+        control.rearm();
+        assert!(control.capture_failure().is_ok());
+        assert_eq!(control.render_status.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn stop_during_a_route_restart_ends_as_an_ordinary_stop() {
+        let control = Arc::new(Control::new());
+        control.fail(FAILURE_CONFIGURATION);
+        control.stop_requested.store(true, Ordering::Release);
+        let mut restarts = 0;
+        // Stop is honored before any device is touched.
+        let restarted = restart_capture(0, &control, &mut restarts).unwrap();
+        assert!(restarted.is_none());
+        assert_eq!(restarts, 0);
+        assert!(control.capture_failure().is_ok());
     }
 
     #[test]
