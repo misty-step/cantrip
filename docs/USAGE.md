@@ -211,14 +211,15 @@ Stopped audio and plaintext history are retained on Mac too; read
    engine already exists, the app attaches without duplicating it and will not
    terminate that external owner when quitting. Check that owner rather than
    launching competitors when IPC is unavailable.
-4. Open **Settings** from the Cantrip menu. Choose the microphone deliberately:
+4. Open **Settings…** from the Cantrip menu and choose **General**. Choose the
+   microphone deliberately:
    System default follows the OS default; choosing a device saves its stable
    CoreAudio input UID in `audio_source`. A missing selected UID refuses capture,
    never silently records another microphone. Microphone access belongs to the
    process that records, the app or the `daemon` it attached to, because macOS
    answers each process separately. Settings and the menu show that process's
    answer, and Settings says when no Cantrip is running. Choose **Allow
-   microphone access** in Settings, **Allow Microphone Access…** in the menu, or
+   Microphone Access…** in Settings or the menu, or
    run `"$CANTRIP" microphone allow`: each asks the running Cantrip to show the
    macOS prompt, which you answer deliberately. If the app is attached to a
    `daemon` you started from a terminal, macOS asks for, and grants, that
@@ -229,7 +230,7 @@ Stopped audio and plaintext history are retained on Mac too; read
    resolution. Neither `doctor` nor an attempted recording grants
    permission. Do not grant Accessibility, Input Monitoring, or Screen
    Recording: this workflow needs none of them.
-5. Check **Dictation shortcut** in Settings. Its default is
+5. Check **Dictation shortcut** in Settings → General. Its default is
    **Control+Option+Space** (`Control+Alt+Space` in configuration); it is editable.
    Inspect System Settings → Keyboard → Keyboard Shortcuts → Input Sources for
    a conflict, and choose an unused combination rather than changing unrelated
@@ -320,7 +321,8 @@ keep the attention mark, and saved recordings remain available for Copy/recovery
 
 ### Copy a past transcript from Settings
 
-Open `cantrip settings` and use **Past transcripts**. Entries are newest first
+Open `cantrip settings` and use **Past transcripts**; on Mac, Settings opens
+on its **Transcripts** pane. Entries are newest first
 and show their local time, recording duration (or “duration unknown”), and opening
 words. Partial text is marked. Completed takes and older archived transcripts are
 included, even when the daemon is offline.
@@ -407,7 +409,7 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 | `cantrip app` (Mac only; also no arguments) | Run the native menu/panel/shortcut client, owning or attaching to one engine |
 | `cantrip daemon [--preload]` | Run the dictation daemon; Mac engine-only, without menu/panel/shortcut |
 | `cantrip hud [--screenshot PATH]` | Linux passive layer-shell HUD (daemon normally spawns/watches it); Mac native panel/offscreen rendering (app normally owns the live panel) |
-| `cantrip settings [--screenshot PATH]` | Open configuration editing and reload |
+| `cantrip settings [--screenshot PATH]` | Open configuration editing and reload; on Mac, show the running app's Settings window (`--pane NAME` selects the pane rendered with `--screenshot`) |
 | `cantrip actions [--doctor] [--screenshot PATH]` | Open recording recovery and setup |
 | `cantrip toggle` / `start` / `stop` / `cancel` | Recording and processing transitions |
 | `cantrip status [--json]` / `ping` | State, progress, outcomes, and capabilities / daemon liveness |

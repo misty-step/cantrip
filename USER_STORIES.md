@@ -116,7 +116,7 @@ Criteria:
 
 No-gos: no automatic cloud syncing of local history files.
 
-Evidence: `crates/engine/src/archive.rs`, `crates/engine/src/recovery.rs`, `src/settings.rs`, `scripts/verify-settings-history.py`
+Evidence: `crates/engine/src/archive.rs`, `crates/engine/src/recovery.rs`, `src/settings.rs`, `src/settings/model.rs`, `src/macos/settings.rs`, `scripts/verify-settings-history.py`
 
 ## US-006 Forget retained take audio on explicit confirmation
 
@@ -240,4 +240,4 @@ Criteria:
 
 No-gos: no automatic Mac typing/paste fallback, clipboard read/restore, implicit model downloads, broad desktop permission grants, duplicate engine or durable ledger; no weakening of the existing Linux story criteria. Clipboard managers may retain copies. Offscreen/headless proof is not attended mic-to-editor, panel-focus, Intel hardware, or published/notarized-release proof.
 
-Evidence: `src/macos.rs`, `src/macos/shortcut.rs`, `src/capture/macos.rs`, `src/desktop/macos.rs`, `src/inject/macos.rs`, `src/hud/macos.rs`, `src/settings.rs`, `crates/engine/src/engine.rs`, `crates/engine/src/paths.rs`, `crates/engine/src/keys.rs`, `crates/engine/tests/capture_start.rs`, `crates/engine/tests/microphone_access.rs`, `scripts/verify-macos`, `scripts/package-macos`, `tests/test_release_macos.py`, `docs/USAGE.md`, `docs/DESKTOP.md`, `docs/PRIVACY.md`, `docs/decisions/0033-capture-owner-microphone-authorization.md`
+Evidence: `src/macos.rs`, `src/macos/settings.rs`, `src/macos/requests.rs`, `src/macos/shortcut.rs`, `src/capture/macos.rs`, `src/desktop/macos.rs`, `src/inject/macos.rs`, `src/hud/macos.rs`, `src/settings.rs`, `src/settings/model.rs`, `crates/engine/src/engine.rs`, `crates/engine/src/paths.rs`, `crates/engine/src/keys.rs`, `crates/engine/tests/capture_start.rs`, `crates/engine/tests/microphone_access.rs`, `scripts/verify-macos`, `scripts/package-macos`, `tests/test_release_macos.py`, `docs/USAGE.md`, `docs/DESKTOP.md`, `docs/PRIVACY.md`, `docs/decisions/0033-capture-owner-microphone-authorization.md`

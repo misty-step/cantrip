@@ -62,11 +62,15 @@ enum CliCommand {
         #[arg(long, value_name = "PATH")]
         screenshot: Option<PathBuf>,
     },
-    /// Open the configuration window.
+    /// Open the configuration window (on macOS, in the running menu-bar app).
     Settings {
         /// Render one frame to a PNG at PATH, then exit (visual testing).
         #[arg(long, value_name = "PATH")]
         screenshot: Option<PathBuf>,
+        /// Settings pane to render with --screenshot (default: transcripts).
+        #[cfg(target_os = "macos")]
+        #[arg(long, value_enum, requires = "screenshot")]
+        pane: Option<settings::Pane>,
     },
     /// Open recording recovery, explicit clipboard actions, and setup.
     Actions {
@@ -324,6 +328,9 @@ fn run(cli: Cli) -> Result<()> {
             handoff,
         } => hud::run(screenshot, state, handoff),
         CliCommand::HudGallery { screenshot } => hud::gallery::run(screenshot),
+        #[cfg(target_os = "macos")]
+        CliCommand::Settings { screenshot, pane } => settings::run(screenshot, pane),
+        #[cfg(not(target_os = "macos"))]
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
         CliCommand::Toggle { postproc, handoff } => send_command(Command::Toggle {

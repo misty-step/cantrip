@@ -289,22 +289,9 @@ python3 scripts/verify-macos \
   --output /path/to/new/evidence-directory
 ```
 
-The helper relocates the real bundle, verifies its signature/Mach-O identity,
-and runs with disposable HOME/XDG directories and a system-only runtime PATH.
-It explicitly downloads the public local model and transcribes the checked JFK
-WAV, checks missing-model refusal without implicit downloads, tests denied or
-invalid-device capture without live audio, and replays explicit Auto/Paste/Type
-to terminal Deferred without rewriting config. It also checks graceful daemon
-termination and saves five states of the production macOS HUD as **offscreen
-NSView pixels**, plus a sanitized `verification.json`. A logged-in WindowServer
-session is needed for those pixels; `--skip-hud` requires an explicit
-`--hud-unavailable-reason` and records the omission rather than a pass.
-
-Offscreen pixels prove rendering, not live panel focus or microphone-to-editor
-delivery. Validate those with the [attended Mac trial](docs/USAGE.md#first-dictation-macos-attended-clipboard-trial).
-The helper does not grant permissions, capture live microphone audio, or touch
-the general clipboard. Record actual platform/signing results in the PR; do not
-infer Intel or production signing success from an arm64 development smoke.
+[macOS development and verification](docs/INSTALLATION.md#macos-development-and-verification)
+describes what the helper checks and saves, what `--skip-hud` omits, and what
+its offscreen pixels do not prove.
 
 ## Work and documentation ownership
 

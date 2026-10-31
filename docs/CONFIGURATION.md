@@ -17,7 +17,9 @@ not exist. `config edit` opens the file in `$EDITOR`. Do not reinitialize an
 existing configuration during updates.
 
 `cantrip settings` opens a window for common settings. Save writes the file back
-with comments preserved and reloads the running daemon.
+with comments preserved and reloads the running daemon. On macOS it is the
+menu-bar app's own Settings window (**Settings…** in the Cantrip menu), with
+the same Save, Reload from Disk, and Repair behavior.
 
 Settings can repair a file that parses as TOML but fails Cantrip validation:
 it loads the actual values, explains the validation error, and enables Save
