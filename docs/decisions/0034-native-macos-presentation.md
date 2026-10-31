@@ -33,13 +33,15 @@ abstraction, and theming shares palette tokens only.
 
 The macOS window code is AppKit through `objc2`; there is no Swift toolchain.
 Native windows read and write through the same IPC as every other client, so
-an app attached to an external daemon still reports that owner's state. The
-HUD's pixel field is unchanged on both platforms; only its macOS backing
-changes. The panel keeps its light or dark appearance over any content, so
-over a material the container keeps most of that appearance's window
-background and the HUD's colors are fitted to it: captions read at WCAG 4.5:1
-whatever is behind the panel. Reduce Transparency and Increase Contrast remove
-the material.
+an app attached to an external daemon still reports that owner's state. Linux
+HUD pixels are unchanged; on macOS the HUD's backing changes and its caption and
+field colors are refitted to it. The panel keeps its light or dark appearance
+over any content, so over a material the container keeps most of that
+appearance's window background and the HUD's colors are fitted to it: captions
+read at WCAG 4.5:1 whatever is behind the panel, except that a handoff take's
+route wash is not yet included in that fit
+([#222](https://github.com/misty-step/cantrip/issues/222)). Reduce Transparency
+and Increase Contrast remove the material.
 Offscreen NSView pixels are not live panel/focus proof; native surfaces are
 verified in a disposable `macvm` VM. Historical 0007 still governs Linux.
 

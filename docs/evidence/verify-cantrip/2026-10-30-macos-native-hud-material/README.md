@@ -162,7 +162,7 @@ failure as the first HUD after launch, with temporary logging builds of 348c941
 - The cause of the stale first frame in `macvm shot`s, and whether a real
   display ever shows it (see above).
 - The macOS 13.3–15 `NSVisualEffectView` fallback was not exercised. The
-  binary references no AppKit class at link time (`nm -u` lists no
+  binary references no AppKit class at link time (`nm -u` lists no AppKit
   `OBJC_CLASS` symbols), so a 13.3 system can load it, and only
   `available!(macos = 26.0)` reaches `NSGlassEffectView`. Its container gets the
   same 80% window background and fitted palette as Liquid Glass.

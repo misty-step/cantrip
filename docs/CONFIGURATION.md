@@ -496,7 +496,9 @@ On Mac the container behind the field and captions is a rounded system material
 its light or dark appearance over any content, so the container keeps 80% of
 that appearance's window background over the material, and the field and
 caption colors are adjusted in lightness to read at 4.5:1 even over pure black
-or white. Reduce Transparency or Increase Contrast replaces the material with an
+or white; a handoff take's route wash is not yet part of that fit
+([#222](https://github.com/misty-step/cantrip/issues/222)). Reduce Transparency
+or Increase Contrast replaces the material with an
 opaque system background. On Liquid Glass a handoff take washes the container
 in the target's color without the colored border.
 `hud --screenshot` draws the opaque background: the window server composites
