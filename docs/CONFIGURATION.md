@@ -492,11 +492,13 @@ for the rendering contract.
 
 On Mac the container behind the field and captions is a rounded system material
 ([ADR 0034](decisions/0034-native-macos-presentation.md)): Liquid Glass on macOS
-26 and later and the HUD window material on earlier releases. Reduce
-Transparency or Increase Contrast replaces it with an opaque system background.
-The field and captions follow the panel's light or dark appearance. On Liquid
-Glass a handoff take tints the glass instead of drawing a colored border and
-wash.
+26 and later and the HUD window material on earlier releases. The panel keeps
+its light or dark appearance over any content, so the container keeps 80% of
+that appearance's window background over the material, and the field and
+caption colors are adjusted in lightness to read at 4.5:1 even over pure black
+or white. Reduce Transparency or Increase Contrast replaces the material with an
+opaque system background. On Liquid Glass a handoff take washes the container
+in the target's color without the colored border.
 `hud --screenshot` draws the opaque background: the window server composites
 materials only on screen.
 
