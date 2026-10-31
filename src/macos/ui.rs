@@ -301,16 +301,21 @@ impl Message {
     }
 }
 
-/// Bring `window` in front of other apps. An agent app has no Dock icon, so a
-/// deliberately opened window must activate the app to receive keyboard input.
+/// Bring `window` in front of other apps with keyboard focus. An agent app has
+/// no Dock icon to click, so a window the operator asked for must make Cantrip
+/// the active app. macOS 14 and later activate cooperatively and ignore a
+/// request from the command that asked; the forced activation the operator's
+/// request stands for still makes the window key there.
 pub(crate) fn present(window: &NSWindow) {
     let app = NSApplication::sharedApplication(window.mtm());
     if objc2::available!(macos = 14.0) {
         app.activate();
-    } else {
-        #[allow(deprecated)]
-        app.activateIgnoringOtherApps(true);
     }
+    // Deprecated since macOS 14, but the only call that still takes focus from
+    // the Terminal that ran `cantrip settings`; cooperative `activate` alone
+    // leaves the window in front without keyboard focus.
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
     window.makeKeyAndOrderFront(None);
     window.orderFrontRegardless();
 }
