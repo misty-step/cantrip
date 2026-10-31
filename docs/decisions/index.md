@@ -19,6 +19,7 @@ agent will otherwise re-propose. Do not write one per PR. Start from
 - [0030](0030-local-only-handoff-targets.md): local-only policy belongs to the handoff target.
 - [0031](0031-shared-engine-native-macos.md): one shared engine; macOS manual paste without silent downgrade.
 - [0032](0032-cloud-stt-without-inference-deadlines.md): wait for cloud STT without inference deadlines; cleanup honors its explicit timeout.
+- [0033](0033-capture-owner-microphone-authorization.md): microphone authorization is read and requested only through the capture owner.
 
 ## Historical
 

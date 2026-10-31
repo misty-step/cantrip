@@ -9,6 +9,8 @@ use block2::RcBlock;
 use cantrip_engine::audio::{
     verify_wav, InputSignal, Pcm16Converter, Pcm16WavWriter, PcmEncoding, PcmFormat, SignalMonitor,
 };
+use cantrip_engine::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
+use cantrip_engine::ports::MicrophoneAccessUnsupported;
 use crossbeam_queue::ArrayQueue;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::{Bool, NSObjectProtocol, ProtocolObject};
@@ -31,13 +33,15 @@ use objc2_core_audio::{
 use objc2_core_audio_types::AudioBuffer;
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_foundation::{ns_string, NSBundle, NSNotification, NSNotificationCenter};
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::mem::{size_of, MaybeUninit};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -55,6 +59,9 @@ const FAILURE_FORMAT: u8 = 2;
 const FAILURE_CONFIGURATION: u8 = 3;
 const FAILURE_DISCONTINUITY: u8 = 4;
 const FIRST_SAMPLE_TIME: i64 = i64::MIN;
+/// An unanswered prompt keeps its request thread at most this long; an answer
+/// given later still reaches this process's authorization.
+const MICROPHONE_DECISION_WAIT: Duration = Duration::from_secs(120);
 
 fn pcm_encoding(format: AVAudioCommonFormat) -> Option<PcmEncoding> {
     match format {
@@ -66,25 +73,6 @@ fn pcm_encoding(format: AVAudioCommonFormat) -> Option<PcmEncoding> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MicrophonePermission {
-    Authorized,
-    NotDetermined,
-    Denied,
-    Restricted,
-}
-
-impl MicrophonePermission {
-    fn guidance(self) -> &'static str {
-        match self {
-            Self::Authorized => "microphone access authorized",
-            Self::NotDetermined => "microphone access has not been requested; enable it explicitly in Cantrip Settings",
-            Self::Denied => "microphone access denied; enable Cantrip in System Settings > Privacy & Security > Microphone",
-            Self::Restricted => "microphone access restricted by macOS policy",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDevice {
     /// Stable CoreAudio UID: the value to store in config.audio_source.
@@ -93,45 +81,176 @@ pub struct InputDevice {
     pub is_default: bool,
 }
 
-#[derive(Clone, Debug)]
-pub struct CaptureDiagnosis {
-    pub ready: bool,
-    pub permission: MicrophonePermission,
-    pub selected_device: Option<InputDevice>,
-    pub detail: String,
-}
-
-/// Query only. Neither this nor capture/doctor opens a permission prompt.
-pub fn microphone_permission() -> MicrophonePermission {
-    let status = unsafe {
+/// This process's own authorization, as a query only: never a prompt. macOS
+/// caches it per process, so only the capture owner's answer governs capture.
+pub fn microphone_permission() -> MicrophoneAuthorization {
+    let status = autoreleasepool(|_| unsafe {
         AVCaptureDevice::authorizationStatusForMediaType(
             AVMediaTypeAudio.expect("AVMediaTypeAudio is available on supported macOS"),
         )
-    };
+    });
     match status {
-        AVAuthorizationStatus::Authorized => MicrophonePermission::Authorized,
-        AVAuthorizationStatus::NotDetermined => MicrophonePermission::NotDetermined,
-        AVAuthorizationStatus::Denied => MicrophonePermission::Denied,
-        _ => MicrophonePermission::Restricted,
+        AVAuthorizationStatus::Authorized => MicrophoneAuthorization::Authorized,
+        AVAuthorizationStatus::NotDetermined => MicrophoneAuthorization::NotDetermined,
+        AVAuthorizationStatus::Denied => MicrophoneAuthorization::Denied,
+        _ => MicrophoneAuthorization::Restricted,
     }
 }
 
-/// Invoke only in response to the user's explicit microphone permission action.
-/// The system completion runs off the calling thread; the Settings host should
-/// invoke this blocking function on its setup worker, not its UI event loop.
-pub fn request_microphone_permission() -> Result<MicrophonePermission> {
-    let current = microphone_permission();
-    if current != MicrophonePermission::NotDetermined {
-        return Ok(current);
-    }
-    if NSBundle::mainBundle()
-        .objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription"))
-        .is_none()
-    {
-        bail!(
-            "microphone permission requires the installed Cantrip.app with its usage description"
+/// The capture owner's authorization and its one explicit request at a time.
+/// The request awaits the operator's answer on its own thread, never the
+/// engine's, and the authorization reads `Requesting` until it arrives.
+pub struct MicrophonePrompt {
+    request: Mutex<Option<JoinHandle<()>>>,
+    grantee: MicrophoneGrantee,
+}
+
+impl Default for MicrophonePrompt {
+    /// Finds who macOS grants for this process while its parents still run.
+    fn default() -> Self {
+        let grantee = find_grantee();
+        tracing::info!(
+            "[Capture] microphone grantee={}",
+            match &grantee {
+                MicrophoneGrantee::Cantrip => "cantrip",
+                MicrophoneGrantee::Launcher(Some(_)) => "launcher",
+                MicrophoneGrantee::Launcher(None) => "launcher-unknown",
+            }
         );
+        Self {
+            request: Mutex::new(None),
+            grantee,
+        }
     }
+}
+
+impl MicrophonePrompt {
+    pub fn authorization(&self) -> MicrophoneAuthorization {
+        if self.requesting() {
+            MicrophoneAuthorization::Requesting
+        } else {
+            microphone_permission()
+        }
+    }
+
+    pub fn grantee(&self) -> &MicrophoneGrantee {
+        &self.grantee
+    }
+
+    /// Ask macOS for the operator's explicit action and return at once. Only an
+    /// undetermined authorization opens the system prompt; an answered one is
+    /// returned as it stands.
+    pub fn request(&self) -> Result<MicrophoneAuthorization> {
+        let mut request = self.request.lock().unwrap_or_else(PoisonError::into_inner);
+        if request.as_ref().is_some_and(|thread| !thread.is_finished()) {
+            return Ok(MicrophoneAuthorization::Requesting);
+        }
+        let current = microphone_permission();
+        if current != MicrophoneAuthorization::NotDetermined {
+            return Ok(current);
+        }
+        // macOS terminates a process that asks without declaring its purpose.
+        if autoreleasepool(|_| {
+            NSBundle::mainBundle()
+                .objectForInfoDictionaryKey(ns_string!("NSMicrophoneUsageDescription"))
+                .is_none()
+        }) {
+            return Err(MicrophoneAccessUnsupported(
+                "Only Cantrip.app can ask macOS for microphone access; run Cantrip from its app bundle.",
+            )
+            .into());
+        }
+        let thread = thread::Builder::new()
+            .name("cantrip-microphone-access".to_owned())
+            .spawn(|| autoreleasepool(|_| await_microphone_decision()))
+            .context("starting the microphone access request")?;
+        *request = Some(thread);
+        tracing::info!("[Capture] microphone access requested");
+        Ok(MicrophoneAuthorization::Requesting)
+    }
+
+    fn requesting(&self) -> bool {
+        self.request
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|thread| !thread.is_finished())
+    }
+}
+
+/// Most ancestors walked looking for the app that started this process.
+const MAX_ANCESTORS: usize = 32;
+
+/// Who macOS asks and grants for this process. launchd starts Cantrip.app,
+/// which then answers for itself. Any other process answers through the app
+/// that started it, such as Terminal for a `cantrip daemon` run there. macOS
+/// has no public call for that responsible app, so walk the parent processes
+/// to the first app bundle.
+fn find_grantee() -> MicrophoneGrantee {
+    let mut pid = unsafe { libc::getppid() };
+    if pid <= 1 {
+        return MicrophoneGrantee::Cantrip;
+    }
+    let own = autoreleasepool(|_| PathBuf::from(NSBundle::mainBundle().bundlePath().to_string()));
+    for _ in 0..MAX_ANCESTORS {
+        let Some(path) = process_path(pid) else {
+            break;
+        };
+        if let Some(app) = enclosing_app(&path) {
+            return if app == own {
+                MicrophoneGrantee::Cantrip
+            } else {
+                MicrophoneGrantee::Launcher(app_name(app))
+            };
+        }
+        match parent_pid(pid) {
+            Some(parent) if parent > 1 => pid = parent,
+            _ => break,
+        }
+    }
+    MicrophoneGrantee::Launcher(None)
+}
+
+fn process_path(pid: libc::pid_t) -> Option<PathBuf> {
+    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length =
+        unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+    let length = usize::try_from(length).ok().filter(|length| *length > 0)?;
+    buffer.truncate(length);
+    Some(PathBuf::from(OsString::from_vec(buffer)))
+}
+
+/// The short BSD record needs no same-user check, so `login`'s root-owned
+/// process between Terminal and its shell does not end the walk.
+fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+    let mut info = MaybeUninit::<libc::proc_bsdshortinfo>::zeroed();
+    let size = size_of::<libc::proc_bsdshortinfo>() as libc::c_int;
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    (filled == size).then(|| unsafe { info.assume_init() }.pbsi_ppid as libc::pid_t)
+}
+
+/// The outermost app bundle containing `path`, so a nested helper app counts
+/// as the app that ships it.
+fn enclosing_app(path: &Path) -> Option<&Path> {
+    path.ancestors()
+        .filter(|ancestor| ancestor.extension() == Some(OsStr::new("app")))
+        .last()
+}
+
+fn app_name(app: &Path) -> Option<String> {
+    app.file_stem()?.to_str().map(str::to_owned)
+}
+
+/// Block this request thread, never the engine's, until the operator answers.
+fn await_microphone_decision() {
     let (sender, receiver) = mpsc::sync_channel(1);
     let completion = RcBlock::new(move |granted: Bool| {
         let _ = sender.try_send(granted.as_bool());
@@ -142,10 +261,14 @@ pub fn request_microphone_permission() -> Result<MicrophonePermission> {
             &completion,
         );
     }
-    receiver
-        .recv_timeout(Duration::from_secs(120))
-        .context("waiting for the explicit macOS microphone permission decision")?;
-    Ok(microphone_permission())
+    if receiver.recv_timeout(MICROPHONE_DECISION_WAIT).is_ok() {
+        tracing::info!(
+            "[Capture] microphone access answered state={:?}",
+            microphone_permission()
+        );
+    } else {
+        tracing::warn!("[Capture] microphone access unanswered class=microphone-request-timeout");
+    }
 }
 
 pub fn input_devices() -> Result<Vec<InputDevice>> {
@@ -157,25 +280,14 @@ pub fn input_devices() -> Result<Vec<InputDevice>> {
     })
 }
 
-pub fn diagnosis(source: Option<&str>) -> CaptureDiagnosis {
-    let permission = microphone_permission();
-    let selected = autoreleasepool(|_| select_device(source));
-    let (selected_device, device_error) = match selected {
-        Ok(device) => (Some(device.public), None),
-        Err(error) => (None, Some(format!("{error:#}"))),
-    };
-    let detail = if permission != MicrophonePermission::Authorized {
-        permission.guidance().to_owned()
-    } else if let Some(error) = device_error {
-        error
-    } else {
-        "AVAudioEngine input ready; hardware PCM is converted to 16 kHz mono locally".to_owned()
-    };
-    CaptureDiagnosis {
-        ready: permission == MicrophonePermission::Authorized && selected_device.is_some(),
-        permission,
-        selected_device,
-        detail,
+/// The selected input as this process finds it: presence, not authorization,
+/// which belongs to the capture owner.
+pub fn diagnosis(source: Option<&str>) -> String {
+    match autoreleasepool(|_| select_device(source)) {
+        Ok(_) => {
+            "AVAudioEngine input ready; hardware PCM is converted to 16 kHz mono locally".to_owned()
+        }
+        Err(error) => format!("{error:#}"),
     }
 }
 
@@ -797,8 +909,8 @@ fn capture_to_wav(
     ready: &mpsc::SyncSender<std::result::Result<(), String>>,
 ) -> Result<()> {
     let permission = microphone_permission();
-    if permission != MicrophonePermission::Authorized {
-        bail!(permission.guidance());
+    if permission != MicrophoneAuthorization::Authorized {
+        bail!("microphone access is not authorized: {permission:?}");
     }
     let selected = select_device(source).inspect_err(|_| {
         tracing::warn!(
@@ -849,7 +961,7 @@ fn capture_to_wav(
                 bail!("microphone stopped supplying audio; retained take is incomplete");
             }
             if now >= next_device_poll {
-                if microphone_permission() != MicrophonePermission::Authorized {
+                if microphone_permission() != MicrophoneAuthorization::Authorized {
                     bail!("microphone permission was revoked during capture");
                 }
                 let alive: u32 = unsafe {
@@ -916,9 +1028,9 @@ pub struct Recorder {
 impl Recorder {
     pub fn start(wav_path: &Path, source: Option<&str>) -> Result<Self> {
         let permission = microphone_permission();
-        if permission != MicrophonePermission::Authorized {
+        if permission != MicrophoneAuthorization::Authorized {
             tracing::warn!("[Capture] microphone permission not authorized state={permission:?}");
-            bail!(permission.guidance());
+            bail!("microphone access is not authorized: {permission:?}");
         }
         let started_at = Instant::now();
         let control = Arc::new(Control::new());
@@ -1068,6 +1180,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn the_launching_app_is_the_outermost_bundle_on_its_executable_path() {
+        let app = |path: &str| enclosing_app(Path::new(path)).and_then(app_name);
+        assert_eq!(
+            app("/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal").as_deref(),
+            Some("Terminal")
+        );
+        assert_eq!(
+            app("/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper.app/Contents/MacOS/Code Helper")
+                .as_deref(),
+            Some("Visual Studio Code")
+        );
+        assert_eq!(app("/bin/zsh"), None);
+        assert_eq!(app("/usr/bin/login"), None);
     }
 
     #[test]

@@ -70,6 +70,7 @@ fn status_recommends_recovery_only_for_confirmed_undelivered_or_incomplete_takes
             capabilities: Capabilities::default(),
             hud: HudConfig::default(),
             handoff: None,
+            microphone: None,
         };
         let listener = UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();

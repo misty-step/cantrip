@@ -214,12 +214,21 @@ Stopped audio and plaintext history are retained on Mac too; read
 4. Open **Settings** from the Cantrip menu. Choose the microphone deliberately:
    System default follows the OS default; choosing a device saves its stable
    CoreAudio input UID in `audio_source`. A missing selected UID refuses capture,
-   never silently records another microphone. Choose **Allow microphone access**
-   in Settings or **Allow Microphone Access…** in the menu and answer the macOS
-   prompt deliberately. If denied, use Privacy & Security → Microphone to review
-   Cantrip's grant; restricted access needs policy resolution. Neither `doctor`
-   nor an attempted recording grants permission. Do not grant Accessibility,
-   Input Monitoring, or Screen Recording: this workflow needs none of them.
+   never silently records another microphone. Microphone access belongs to the
+   process that records, the app or the `daemon` it attached to, because macOS
+   answers each process separately. Settings and the menu show that process's
+   answer, and Settings says when no Cantrip is running. Choose **Allow
+   microphone access** in Settings, **Allow Microphone Access…** in the menu, or
+   run `"$CANTRIP" microphone allow`: each asks the running Cantrip to show the
+   macOS prompt, which you answer deliberately. If the app is attached to a
+   `daemon` you started from a terminal, macOS asks for, and grants, that
+   terminal app instead, for example Terminal, and the grant covers everything
+   that app runs. Cantrip names that app before you choose Allow, and that app,
+   not Cantrip, is listed under Privacy & Security → Microphone. If denied,
+   review the named app's entry there; restricted access needs policy
+   resolution. Neither `doctor` nor an attempted recording grants
+   permission. Do not grant Accessibility, Input Monitoring, or Screen
+   Recording: this workflow needs none of them.
 5. Check **Dictation shortcut** in Settings. Its default is
    **Control+Option+Space** (`Control+Alt+Space` in configuration); it is editable.
    Inspect System Settings → Keyboard → Keyboard Shortcuts → Input Sources for
@@ -414,6 +423,7 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 | `cantrip dismiss [--event-id ID]` | Acknowledge feedback without deleting recordings |
 | `cantrip forget ID --yes` | Delete retained audio and incomplete text; keep complete archived text |
 | `cantrip reload` | Re-read configuration in the running daemon |
+| `cantrip microphone allow` | Mac: ask the running Cantrip, which records, to request microphone access; you answer its prompt. For a `daemon` started from a terminal, macOS grants that terminal app and everything it runs ([step 4](#first-dictation-macos-attended-clipboard-trial)) |
 
 Daemon reply reads have a ten-second absolute deadline; arriving bytes do not
 reset it. A complete newline-framed reply remains readable after the peer closes

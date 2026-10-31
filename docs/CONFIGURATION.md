@@ -88,8 +88,8 @@ display name or a transient numeric device index. Settings lists microphones
 and preserves an unavailable selection visibly. Omission chooses System default;
 an explicitly selected UID that disappears or changes refuses capture rather
 than falling back to another microphone. Microphone permission is requested only
-by a deliberate Settings/menu action in Cantrip.app. Capture and `doctor` do not
-prompt or broaden permissions. Follow the
+by a deliberate Allow action, always in the running Cantrip that records. Capture
+and `doctor` do not prompt or broaden permissions. Follow the
 [Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
 after selecting a device or granting access.
 

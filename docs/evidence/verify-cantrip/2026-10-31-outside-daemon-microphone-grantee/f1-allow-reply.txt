@@ -1,0 +1,3 @@
+state: idle
+message: Waiting for your answer to the microphone prompt. Terminal and everything it runs share this microphone access; Terminal started this daemon.
+exit=0

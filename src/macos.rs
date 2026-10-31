@@ -3,22 +3,25 @@
 //!
 //! The engine runs on its own std thread through the same `daemon::run` host as
 //! Linux, and this process reaches it only through its IPC contract: the menu,
-//! the shortcut and the HUD hold no second dictation state. Settings and
-//! Recordings and recovery are the shared windows, opened as their own
-//! processes, so closing one never stops dictation. macOS delivery is explicit
-//! clipboard copy and manual paste; nothing here requests Accessibility, Input
-//! Monitoring or Screen Recording access.
+//! the shortcut and the HUD hold no second dictation state, and microphone
+//! access is read from and requested by whichever process owns the engine.
+//! Settings and Recordings and recovery are the shared windows, opened as
+//! their own processes, so closing one never stops dictation. macOS delivery
+//! is explicit clipboard copy and manual paste; nothing here requests
+//! Accessibility, Input Monitoring or Screen Recording access.
 
 mod mark;
 pub(crate) mod shortcut;
 
-use crate::capture::{self, MicrophonePermission};
 use crate::hud::macos::{runtime_dir, LiveHud};
 use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{
     config::Config,
     engine::{request_shutdown, shutdown_requested},
-    ipc::{self, Command, Completeness, StateKind},
+    ipc::{
+        self, Command, Completeness, MicrophoneAccess, MicrophoneAuthorization, MicrophoneGrantee,
+        StateKind,
+    },
 };
 use mark::{Tone, CHASE_STEP};
 use objc2::{
@@ -50,7 +53,7 @@ use std::{
 
 /// A just-started engine binds its socket within this window.
 const STARTUP_GRACE: Duration = Duration::from_secs(15);
-/// The configured shortcut and microphone access are re-read this often.
+/// The configured shortcut is re-read, and closed windows reaped, this often.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// Menu lines stay readable at the menu's default width.
 const LINE_LIMIT: usize = 72;
@@ -175,13 +178,13 @@ enum Engine {
 
 /// What a menu item does, bound as the menu opens: an action never retargets
 /// a later take or outcome.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 enum Choice {
     Send(Command),
     Settings,
     Recordings,
     CheckSetup,
-    Microphone,
+    MicrophoneSettings,
     StartEngine,
     Login,
     Quit,
@@ -303,6 +306,40 @@ fn sentence(text: &str) -> String {
     })
 }
 
+/// The menu's microphone item, from the access the capture owner reports:
+/// Allow asks that process, never this one, and an unknown access shows
+/// nothing. When macOS would grant another app, such as the terminal that
+/// started an outside daemon, the item names it and a disabled line beneath
+/// says what that grant covers, before Allow is chosen.
+fn microphone_item(
+    access: Option<&MicrophoneAccess>,
+) -> Option<(String, Option<Choice>, Option<String>)> {
+    let access = access?;
+    let target = match access.grantee {
+        MicrophoneGrantee::Cantrip => String::new(),
+        MicrophoneGrantee::Launcher(_) => format!(" for {}", access.grantee.name()),
+    };
+    let (title, choice) = match access.authorization {
+        MicrophoneAuthorization::Authorized => return None,
+        MicrophoneAuthorization::NotDetermined => (
+            format!("Allow Microphone Access{target}…"),
+            Some(Choice::Send(Command::AllowMicrophone)),
+        ),
+        MicrophoneAuthorization::Requesting => {
+            ("Waiting for your microphone decision…".to_owned(), None)
+        }
+        MicrophoneAuthorization::Denied => (
+            format!("Microphone Access Denied{target} — Open Privacy Settings…"),
+            Some(Choice::MicrophoneSettings),
+        ),
+        MicrophoneAuthorization::Restricted => (
+            format!("Microphone access{target} is restricted on this Mac"),
+            None,
+        ),
+    };
+    Some((title, choice, access.grantee.disclosure()))
+}
+
 /// Every piece of app state the AppKit thread owns, created at launch.
 struct Host {
     hud: LiveHud,
@@ -317,8 +354,6 @@ struct Host {
     shortcut: Registration,
     commands: mpsc::Sender<Command>,
     replies: mpsc::Receiver<Reply>,
-    microphone: MicrophonePermission,
-    microphone_request: Option<JoinHandle<Result<MicrophonePermission>>>,
     /// The latest failed action, shown until a later action succeeds.
     problem: Option<String>,
     /// What the open menu's items do, by tag.
@@ -327,7 +362,7 @@ struct Host {
     settings: Option<Child>,
     actions: Option<Child>,
     timer: Option<(Retained<NSTimer>, Duration)>,
-    /// When the shortcut and microphone access were last re-read.
+    /// When the shortcut was last re-read.
     refreshed: Instant,
     /// The processing chase's clock.
     launched: Instant,
@@ -374,8 +409,6 @@ impl Host {
             }),
             commands,
             replies,
-            microphone: capture::microphone_permission(),
-            microphone_request: None,
             problem: None,
             choices: Vec::new(),
             settings: None,
@@ -466,21 +499,8 @@ impl Host {
                 }
             };
         }
-        match self
-            .microphone_request
-            .take_if(|request| request.is_finished())
-            .map(JoinHandle::join)
-        {
-            Some(Ok(Ok(permission))) => self.microphone = permission,
-            Some(Ok(Err(error))) => self.problem = Some(format!("{error:#}")),
-            Some(Err(_)) => {
-                self.problem = Some("The microphone request stopped unexpectedly.".to_owned());
-            }
-            None => {}
-        }
         if now.duration_since(self.refreshed) >= REFRESH_INTERVAL {
             self.refreshed = now;
-            self.microphone = capture::microphone_permission();
             self.shortcut.refresh();
             // Reap closed windows; dictation continues regardless.
             for window in [&mut self.settings, &mut self.actions] {
@@ -532,9 +552,12 @@ impl Host {
         let route = status
             .and_then(|status| status.handoff.as_ref())
             .map_or(palette.accent, |handoff| handoff.color);
-        let needs_operator = status.is_some_and(|status| status.attention)
-            || self.microphone != MicrophonePermission::Authorized
-            || self.shortcut.active().is_none();
+        let needs_operator = status.is_some_and(|status| {
+            status.attention
+                || status.microphone.as_ref().is_some_and(|access| {
+                    access.authorization != MicrophoneAuthorization::Authorized
+                })
+        }) || self.shortcut.active().is_none();
         let tone = match status.map(|status| &status.state) {
             None | Some(StateKind::Unknown(_)) => Tone::Unknown,
             Some(StateKind::Recording) => Tone::Recording(route),
@@ -601,7 +624,6 @@ impl Host {
 
     /// Rebuild the menu from live status as it opens.
     fn fill(&mut self, menu: &NSMenu, target: &AnyObject) {
-        self.microphone = capture::microphone_permission();
         let (state, detail) = self.describe(Instant::now());
         let status = self.hud.status();
         let capabilities = status.map(|status| status.capabilities).unwrap_or_default();
@@ -703,23 +725,11 @@ impl Host {
             .item("Settings…", Choice::Settings)
             .setKeyEquivalent(ns_string!(","));
         items.separator();
-        match self.microphone {
-            MicrophonePermission::Authorized => {}
-            MicrophonePermission::NotDetermined if self.microphone_request.is_some() => {
-                items.add("Waiting for your microphone decision…", None);
-            }
-            MicrophonePermission::NotDetermined => {
-                items.item("Allow Microphone Access…", Choice::Microphone);
-            }
-            MicrophonePermission::Denied => {
-                items.item(
-                    "Microphone Access Denied — Open Privacy Settings…",
-                    Choice::Microphone,
-                );
-            }
-            MicrophonePermission::Restricted => {
-                items.add("Microphone access is restricted on this Mac", None);
-            }
+        if let Some((title, choice, disclosure)) =
+            microphone_item(status.and_then(|status| status.microphone.as_ref()))
+        {
+            items.add(&title, choice);
+            items.line(disclosure.as_deref());
         }
         if status.is_none() && !self.quitting && !matches!(self.engine, Engine::Owned { .. }) {
             items.item("Start Cantrip", Choice::StartEngine);
@@ -770,7 +780,7 @@ impl Host {
             Choice::Settings => open_window(&mut self.settings, &["settings"]),
             Choice::Recordings => open_window(&mut self.actions, &["actions"]),
             Choice::CheckSetup => open_window(&mut self.actions, &["actions", "--doctor"]),
-            Choice::Microphone => self.microphone_access(),
+            Choice::MicrophoneSettings => open_microphone_settings(),
             Choice::StartEngine => {
                 self.start_engine();
                 Ok(())
@@ -782,25 +792,6 @@ impl Host {
             self.problem = Some(format!("{error:#}"));
         }
         false
-    }
-
-    /// Ask for microphone access when it was never requested, or open Privacy
-    /// & Security when it was denied. Only the operator's answer grants it.
-    fn microphone_access(&mut self) -> Result<()> {
-        match capture::microphone_permission() {
-            MicrophonePermission::NotDetermined if self.microphone_request.is_none() => {
-                // The system prompt answers this explicit choice. The request
-                // blocks until the operator decides, so it waits off this thread.
-                let request = thread::Builder::new()
-                    .name("cantrip-microphone".to_owned())
-                    .spawn(|| autoreleasepool(|_| capture::request_microphone_permission()))
-                    .context("Microphone access was not requested")?;
-                self.microphone_request = Some(request);
-                Ok(())
-            }
-            MicrophonePermission::Denied => open_microphone_settings(),
-            _ => Ok(()),
-        }
     }
 }
 
@@ -920,6 +911,43 @@ impl AppDelegate {
             After::Continue => {}
             After::Quit => app.terminate(None),
             After::FinishQuit => app.replyToApplicationShouldTerminate(true),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn microphone_actions_reach_the_capture_owner_and_name_another_grantee() {
+        use MicrophoneAuthorization::*;
+        assert_eq!(microphone_item(None), None);
+        let terminal = MicrophoneGrantee::Launcher(Some("Terminal".to_owned()));
+        for grantee in [MicrophoneGrantee::Cantrip, terminal] {
+            let launched = grantee != MicrophoneGrantee::Cantrip;
+            let item = |authorization| {
+                microphone_item(Some(&MicrophoneAccess {
+                    authorization,
+                    grantee: grantee.clone(),
+                }))
+            };
+            let choice = |authorization| item(authorization).and_then(|(_, choice, _)| choice);
+            assert_eq!(item(Authorized), None);
+            assert_eq!(
+                choice(NotDetermined),
+                Some(Choice::Send(Command::AllowMicrophone))
+            );
+            assert_eq!(choice(Denied), Some(Choice::MicrophoneSettings));
+            assert_eq!(choice(Requesting), None);
+            assert_eq!(choice(Restricted), None);
+            // Before Allow, an outside daemon's menu names the app macOS grants.
+            for authorization in [NotDetermined, Requesting, Denied, Restricted] {
+                let (title, _, disclosure) = item(authorization).unwrap();
+                assert_eq!(disclosure.is_some(), launched);
+                let shown = format!("{title} {}", disclosure.unwrap_or_default());
+                assert_eq!(shown.contains("Terminal"), launched, "{shown}");
+            }
         }
     }
 }

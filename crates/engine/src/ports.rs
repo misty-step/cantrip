@@ -2,6 +2,7 @@
 
 use crate::audio::InputSignal;
 use crate::delivery::{ClipboardFallback, InjectionFailure, InjectionMode, InjectionOutcome};
+use crate::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
 use anyhow::Result;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,20 @@ impl std::fmt::Display for MissingMicrophone {
 }
 
 impl std::error::Error for MissingMicrophone {}
+
+/// This capture owner has no microphone authorization to request: Linux
+/// records without one, and macOS asks only for an app bundle that declares
+/// its microphone purpose. Safe to show in command feedback.
+#[derive(Debug)]
+pub struct MicrophoneAccessUnsupported(pub &'static str);
+
+impl std::fmt::Display for MicrophoneAccessUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for MicrophoneAccessUnsupported {}
 
 /// An owned live capture. Stop transfers its finalized WAV; failures retain the
 /// original path for the engine's durability/recovery path.
@@ -59,4 +74,26 @@ pub trait Platform: Send + Sync {
     fn handoff_color(&self, slot: usize) -> [u8; 3];
     /// Operational process identity only: no arguments, titles or transcript.
     fn sender_identity(&self, stream: &UnixStream) -> String;
+    /// The microphone authorization the OS reports to this process, which is
+    /// the capture owner; `Requesting` while its explicit request awaits the
+    /// operator. The default, None, means capture needs no per-app authorization.
+    fn microphone_authorization(&self) -> Option<MicrophoneAuthorization> {
+        None
+    }
+    /// Who macOS asks and grants for this process: Cantrip itself, or the app
+    /// that started it. Fixed for the process lifetime, so the engine reads it
+    /// once; None wherever `microphone_authorization` is None.
+    fn microphone_grantee(&self) -> Option<MicrophoneGrantee> {
+        None
+    }
+    /// Start the operator's explicit microphone request in this process and
+    /// return at once: the host awaits the answer off the engine thread and
+    /// reports `Requesting` meanwhile. Only the explicit command calls this,
+    /// never start, status or polling. The default has nothing to request.
+    fn request_microphone_access(&self) -> Result<MicrophoneAuthorization> {
+        Err(
+            MicrophoneAccessUnsupported("This desktop has no microphone permission to request.")
+                .into(),
+        )
+    }
 }

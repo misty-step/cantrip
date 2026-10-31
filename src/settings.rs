@@ -12,9 +12,10 @@
 //! fresh by ID and hands it to the clipboard. History needs neither a valid
 //! config file nor a running Cantrip.
 //!
-//! On macOS the window also picks the microphone by device, requests microphone
-//! access only when the operator chooses to, and sets the global dictation
-//! shortcut. Linux keeps PipeWire source names and compositor shortcuts.
+//! On macOS the window also picks the microphone by device, shows the running
+//! Cantrip's microphone access and asks it to request access only when the
+//! operator chooses to, and sets the global dictation shortcut. Linux keeps
+//! PipeWire source names and compositor shortcuts.
 //!
 //! `cantrip settings --screenshot <path>` renders the window, lets the history
 //! list load, and dumps a PNG of one frame, then exits. It exists for visual
@@ -924,6 +925,10 @@ impl SettingsApp {
                 ui.end_row();
             });
         #[cfg(target_os = "macos")]
+        if let Some(note) = access_note(self.daemon_online, self.mac.microphone.as_ref()) {
+            ui.colored_label(color(self.palette.attention), note);
+        }
+        #[cfg(target_os = "macos")]
         self.delivery_note(ui);
     }
 
@@ -975,7 +980,8 @@ impl SettingsApp {
 
     #[cfg(target_os = "macos")]
     fn input_rows(&mut self, ui: &mut egui::Ui) {
-        self.mac.rows(ui, &mut self.edit, self.palette);
+        self.mac
+            .rows(ui, &mut self.edit, self.palette, self.daemon_online);
     }
 
     fn stt_section(&mut self, ui: &mut egui::Ui) {
@@ -1224,13 +1230,64 @@ impl SettingsApp {
 }
 
 /// The macOS microphone device, microphone access and global shortcut rows.
+/// Access belongs to the running Cantrip, which records: macOS answers each
+/// process separately, so this window reads it from that process's status and
+/// asks that process to request it, never consulting its own.
 #[cfg(target_os = "macos")]
 struct MacInput {
     devices: Result<Vec<crate::capture::InputDevice>, String>,
-    permission: crate::capture::MicrophonePermission,
-    request: Option<Receiver<Result<crate::capture::MicrophonePermission>>>,
+    /// What the running Cantrip last reported; None when it did not.
+    microphone: Option<ipc::MicrophoneAccess>,
+    /// The Allow command on its way to the running Cantrip.
+    allow: Option<Receiver<Result<ipc::CommandReply>>>,
     access_problem: Option<String>,
     delivery: inject::DeliveryAvailability,
+}
+
+/// The microphone access row: the running Cantrip's answer, or why it is unknown.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AccessRow {
+    /// No running Cantrip answered; this window's own answer never stands in.
+    Unknown,
+    /// The running Cantrip does not report it.
+    Unreported,
+    Waiting,
+    Ask,
+    Allowed,
+    Denied,
+    Restricted,
+}
+
+#[cfg(target_os = "macos")]
+fn access_row(
+    online: bool,
+    reported: Option<ipc::MicrophoneAuthorization>,
+    sending: bool,
+) -> AccessRow {
+    use ipc::MicrophoneAuthorization as Access;
+    if !online {
+        return AccessRow::Unknown;
+    }
+    match reported {
+        _ if sending => AccessRow::Waiting,
+        None => AccessRow::Unreported,
+        Some(Access::NotDetermined) => AccessRow::Ask,
+        Some(Access::Requesting) => AccessRow::Waiting,
+        Some(Access::Authorized) => AccessRow::Allowed,
+        Some(Access::Denied) => AccessRow::Denied,
+        Some(Access::Restricted) => AccessRow::Restricted,
+    }
+}
+
+/// Before the operator answers for another app, such as the terminal that
+/// started an outside daemon: who macOS grants and what that grant covers.
+#[cfg(target_os = "macos")]
+fn access_note(online: bool, reported: Option<&ipc::MicrophoneAccess>) -> Option<String> {
+    let access = reported.filter(|_| online)?;
+    (access.authorization != ipc::MicrophoneAuthorization::Authorized)
+        .then(|| access.grantee.disclosure())
+        .flatten()
 }
 
 #[cfg(target_os = "macos")]
@@ -1238,37 +1295,42 @@ impl MacInput {
     fn load() -> Self {
         Self {
             devices: crate::capture::input_devices().map_err(|error| format!("{error:#}")),
-            permission: crate::capture::microphone_permission(),
-            request: None,
+            microphone: None,
+            allow: None,
             access_problem: None,
             delivery: inject::delivery_availability(),
         }
     }
 
-    /// Apply a finished access decision; the authorization itself is re-read
-    /// with the dictation status every second.
-    fn poll_request(&mut self) {
-        if let Some(result) = completed_request(self.request.as_ref()) {
-            self.request = None;
-            match result {
-                Ok(permission) => self.permission = permission,
-                Err(error) => self.access_problem = Some(format!("{error:#}")),
-            }
-        }
+    /// Apply the running Cantrip's reply to Allow. True once it arrives, so the
+    /// window re-reads the authorization the request just changed.
+    fn poll_allow(&mut self) -> bool {
+        let Some(result) = completed_request(self.allow.as_ref()) else {
+            return false;
+        };
+        self.allow = None;
+        self.access_problem = match result {
+            Ok(reply) if reply.ok => None,
+            Ok(reply) => Some(
+                reply
+                    .message
+                    .unwrap_or_else(|| "Cantrip did not request microphone access.".to_owned()),
+            ),
+            Err(_) => Some("Cantrip did not answer; open Cantrip, then try again.".to_owned()),
+        };
+        true
     }
 
-    /// The system prompt answers this explicit choice. The request waits for the
-    /// operator's decision, so it runs off the UI thread.
-    fn request_access(&mut self, ctx: &egui::Context) {
+    /// Ask the running Cantrip to request access. Its system prompt waits for
+    /// the operator there, so the command returns at once, off the UI thread.
+    fn allow_access(&mut self, ctx: &egui::Context) {
         let (tx, rx) = mpsc::channel();
         let context = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(objc2::rc::autoreleasepool(|_| {
-                crate::capture::request_microphone_permission()
-            }));
+            let _ = tx.send(ipc::command(ipc::Command::AllowMicrophone));
             context.request_repaint();
         });
-        self.request = Some(rx);
+        self.allow = Some(rx);
         self.access_problem = None;
     }
 
@@ -1285,8 +1347,13 @@ impl MacInput {
         }
     }
 
-    fn rows(&mut self, ui: &mut egui::Ui, edit: &mut Editable, palette: theme::Palette) {
-        use crate::capture::MicrophonePermission as Access;
+    fn rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        edit: &mut Editable,
+        palette: theme::Palette,
+        online: bool,
+    ) {
         use crate::macos::shortcut::{Shortcut, DEFAULT};
         let attention = color(palette.attention);
 
@@ -1335,20 +1402,31 @@ impl MacInput {
         }
 
         ui.label(egui::RichText::new("Microphone access").weak());
-        ui.horizontal(|ui| match self.permission {
-            Access::Authorized => {
-                ui.label("Allowed");
+        let row = access_row(
+            online,
+            self.microphone.as_ref().map(|access| access.authorization),
+            self.allow.is_some(),
+        );
+        ui.horizontal(|ui| match row {
+            AccessRow::Unknown => {
+                ui.label("Unknown while Cantrip is not running");
             }
-            Access::NotDetermined if self.request.is_some() => {
+            AccessRow::Unreported => {
+                ui.label("Not reported by the running Cantrip");
+            }
+            AccessRow::Waiting => {
                 ui.label("Waiting for your decision…");
             }
-            Access::NotDetermined => {
+            AccessRow::Ask => {
                 ui.label("Not requested yet");
                 if ui.button("Allow microphone access").clicked() {
-                    self.request_access(ui.ctx());
+                    self.allow_access(ui.ctx());
                 }
             }
-            Access::Denied => {
+            AccessRow::Allowed => {
+                ui.label("Allowed");
+            }
+            AccessRow::Denied => {
                 ui.colored_label(attention, "Denied");
                 if ui.button("Open Privacy Settings").clicked() {
                     self.access_problem = crate::macos::open_microphone_settings()
@@ -1356,7 +1434,7 @@ impl MacInput {
                         .map(|error| format!("{error:#}"));
                 }
             }
-            Access::Restricted => {
+            AccessRow::Restricted => {
                 ui.colored_label(attention, "Restricted by macOS policy");
             }
         });
@@ -1654,7 +1732,11 @@ impl eframe::App for SettingsApp {
         self.frames += 1;
         self.history.poll(ctx);
         #[cfg(target_os = "macos")]
-        self.mac.poll_request();
+        {
+            if self.mac.poll_allow() {
+                self.last_poll = Instant::now() - DAEMON_POLL;
+            }
+        }
         if let Some(result) = completed_request(self.poll_result.as_ref()) {
             match result {
                 Ok(status) => {
@@ -1670,9 +1752,17 @@ impl eframe::App for SettingsApp {
                         },
                         ToString::to_string,
                     );
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.mac.microphone = status.microphone;
+                    }
                 }
                 Err(_) => {
                     self.daemon_online = false;
+                    #[cfg(target_os = "macos")]
+                    {
+                        self.mac.microphone = None;
+                    }
                     self.daemon_state = "unreachable".to_owned();
                 }
             }
@@ -1710,10 +1800,6 @@ impl eframe::App for SettingsApp {
         if self.last_poll.elapsed() >= DAEMON_POLL && self.poll_result.is_none() {
             self.last_poll = Instant::now();
             self.palette = theme::load();
-            #[cfg(target_os = "macos")]
-            {
-                self.mac.permission = crate::capture::microphone_permission();
-            }
             apply_theme(ctx, self.palette);
             let (tx, rx) = mpsc::channel();
             let context = ctx.clone();
@@ -2119,5 +2205,52 @@ mod tests {
         assert!(edit.to_config().validate().is_err());
         edit.pp_passes = 1;
         assert!(edit.to_config().validate().is_ok());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn microphone_access_offers_allow_only_for_the_running_cantrips_undetermined_answer() {
+        use ipc::MicrophoneAuthorization as Access;
+        for reported in [
+            None,
+            Some(Access::NotDetermined),
+            Some(Access::Requesting),
+            Some(Access::Authorized),
+            Some(Access::Denied),
+            Some(Access::Restricted),
+        ] {
+            for sending in [false, true] {
+                // Without a running Cantrip no answer stands in, not even its last one.
+                assert_eq!(access_row(false, reported, sending), AccessRow::Unknown);
+                let asks = access_row(true, reported, sending) == AccessRow::Ask;
+                assert_eq!(asks, reported == Some(Access::NotDetermined) && !sending);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn microphone_access_names_another_app_before_its_allow() {
+        use ipc::{MicrophoneAccess, MicrophoneAuthorization as Access, MicrophoneGrantee};
+        let terminal = MicrophoneGrantee::Launcher(Some("Terminal".to_owned()));
+        for grantee in [MicrophoneGrantee::Cantrip, terminal] {
+            let launched = grantee != MicrophoneGrantee::Cantrip;
+            for authorization in [
+                Access::NotDetermined,
+                Access::Requesting,
+                Access::Denied,
+                Access::Restricted,
+            ] {
+                let reported = MicrophoneAccess {
+                    authorization,
+                    grantee: grantee.clone(),
+                };
+                let note = access_note(true, Some(&reported));
+                assert_eq!(note.is_some(), launched);
+                assert!(note.is_none_or(|note| note.contains("Terminal")));
+                // Without a running Cantrip, no grantee is known.
+                assert_eq!(access_note(false, Some(&reported)), None);
+            }
+        }
     }
 }

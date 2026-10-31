@@ -1,12 +1,21 @@
 //! The desktop composition root; shared workflow depends only on engine ports.
 
 use anyhow::Result;
+#[cfg(target_os = "macos")]
+use cantrip_engine::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
 use cantrip_engine::ports::{DeliveryPermit, Platform, Recorder};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 
-pub(crate) struct NativePlatform;
+/// Linux capture needs no per-app microphone authorization, so it keeps the
+/// port's defaults: none to report and nothing to request.
+#[derive(Default)]
+pub(crate) struct NativePlatform {
+    /// macOS authorizes this process, the capture owner, and no other.
+    #[cfg(target_os = "macos")]
+    microphone: crate::capture::MicrophonePrompt,
+}
 
 impl Platform for NativePlatform {
     fn start_recording(&self, wav: &Path, source: Option<&str>) -> Result<Box<dyn Recorder>> {
@@ -27,6 +36,21 @@ impl Platform for NativePlatform {
 
     fn sender_identity(&self, stream: &UnixStream) -> String {
         sender_identity(stream)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn microphone_authorization(&self) -> Option<MicrophoneAuthorization> {
+        Some(self.microphone.authorization())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn microphone_grantee(&self) -> Option<MicrophoneGrantee> {
+        Some(self.microphone.grantee().clone())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn request_microphone_access(&self) -> Result<MicrophoneAuthorization> {
+        self.microphone.request()
     }
 }
 
@@ -70,5 +94,20 @@ fn sender_identity(stream: &UnixStream) -> String {
     match crate::desktop::peer_pid(stream) {
         Ok(pid) => format!("pid={pid}"),
         Err(_) => "unknown".to_owned(),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use cantrip_engine::ports::MicrophoneAccessUnsupported;
+
+    #[test]
+    fn linux_reports_no_microphone_authorization_and_refuses_requests_explicitly() {
+        let platform = NativePlatform::default();
+        assert_eq!(platform.microphone_authorization(), None);
+        assert_eq!(platform.microphone_grantee(), None);
+        let refused = platform.request_microphone_access().unwrap_err();
+        assert!(refused.is::<MicrophoneAccessUnsupported>());
     }
 }

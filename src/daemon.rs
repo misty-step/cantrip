@@ -5,7 +5,7 @@ use cantrip_engine::config::Config;
 use std::sync::Arc;
 
 pub fn run(config: Config, preload: bool) -> Result<()> {
-    let platform = Arc::new(crate::platform::NativePlatform);
+    let platform = Arc::new(crate::platform::NativePlatform::default());
     #[cfg(target_os = "linux")]
     let lifetime = Arc::new(std::sync::atomic::AtomicBool::new(true));
     #[cfg(target_os = "linux")]

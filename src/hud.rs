@@ -2351,6 +2351,7 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
         },
         hud: cantrip_engine::config::HudConfig::default(),
         handoff: None,
+        microphone: None,
     }
 }
 

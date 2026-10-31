@@ -9,8 +9,7 @@ mod macos;
 pub use linux::{check_source, Recorder};
 #[cfg(target_os = "macos")]
 pub use macos::{
-    diagnosis, input_devices, microphone_permission, request_microphone_permission,
-    CaptureDiagnosis, InputDevice, MicrophonePermission, Recorder,
+    diagnosis, input_devices, microphone_permission, InputDevice, MicrophonePrompt, Recorder,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
