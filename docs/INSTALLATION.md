@@ -440,8 +440,9 @@ private HOME/XDG directories, explicitly downloads the public local model, and
 transcribes only the checked public JFK WAV. It verifies missing-model refusal
 without implicit downloads, denied/invalid-UID capture without live audio,
 terminal Deferred for explicit Auto/Paste/Type without config migration,
-graceful shutdown, five offscreen production NSView HUD states, and each native
-Settings pane rendered offscreen. It saves
+graceful shutdown, five offscreen production NSView HUD states, each native
+Settings pane, and the Recordings and Recovery window's Recordings view and its
+Setup view after Check Setup, all rendered offscreen. It saves
 sanitized `verification.json` and own-view PNGs, not private transcripts.
 A logged-in WindowServer session is needed for NSView rendering. An explicit
 `--skip-hud --hud-unavailable-reason 'REASON'` records an omission of those

@@ -110,8 +110,9 @@ recovery. Cancelling it is still a cancellation; stopping it without cancelling
 reports that the microphone supplied no audio, not a storage failure.
 
 Native 16 kHz mono PCM16 audio uses about **1.92 MB per minute (115 MB per hour)**.
-The Actions window shows retained recordings; use its **Include completed
-history** option to find resolved takes as well. [Copy and recovery](USAGE.md#recovery)
+The Recordings and Recovery window shows retained recordings; choose **Include
+completed history** (Linux) or **All Recordings** (Mac) to find resolved takes
+as well. [Copy and recovery](USAGE.md#recovery)
 always operate on a selected recording, not an interchangeable failure slot.
 
 Graceful shutdown stops and retains live capture. On startup, Cantrip imports

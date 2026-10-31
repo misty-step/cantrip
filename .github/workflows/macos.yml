@@ -76,7 +76,7 @@ jobs:
         run: |
           python3 scripts/package-macos --target "$TARGET" --ad-hoc \
             --source-revision "$SOURCE_REVISION" --output "$RUNNER_TEMP/native-app"
-      - name: Exercise relocated app, real public-file STT, capture refusal, native HUD and Settings
+      - name: Exercise relocated app, real public-file STT, capture refusal, native HUD and windows
         env:
           TARGET: ${{ matrix.target }}
         run: |
@@ -90,5 +90,6 @@ jobs:
             ${{ runner.temp }}/native-proof/verification.json
             ${{ runner.temp }}/native-proof/hud-*.png
             ${{ runner.temp }}/native-proof/settings-*.png
+            ${{ runner.temp }}/native-proof/recordings-*.png
           if-no-files-found: error
           retention-days: 14

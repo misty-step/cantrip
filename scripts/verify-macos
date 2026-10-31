@@ -192,9 +192,19 @@ def verify(args):
                 require(data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 100, f"native Settings did not render its {pane} pane")
                 panes.append({"name": image.name, "sha256": sha256(image), "pane": pane})
             settings = {"status": "passed", "surface": "native-window-offscreen-pixels", "screenshots": panes}
+            views = []
+            # The Setup view renders after Check Setup ran; it downloads and changes nothing.
+            for view, extra in (("recordings", []), ("setup", ["--doctor"])):
+                image = staged_output / f"recordings-{view}.png"
+                run([executable, "actions", "--screenshot", image, *extra], env=environment, cwd=root, timeout=120)
+                data = image.read_bytes()
+                require(data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 100, f"native Recordings and Recovery did not render its {view} view")
+                views.append({"name": image.name, "sha256": sha256(image), "view": view})
+            recordings = {"status": "passed", "surface": "native-window-offscreen-pixels", "screenshots": views}
         else:
             hud = {"status": "not-run", "reason": args.hud_unavailable_reason}
             settings = {"status": "not-run", "reason": args.hud_unavailable_reason}
+            recordings = {"status": "not-run", "reason": args.hud_unavailable_reason}
         require(sha256(config) == original_config, "native smoke changed the isolated operator configuration")
         proof = {
             "schema_version": 1, "status": "passed", "target": args.target,
@@ -204,7 +214,7 @@ def verify(args):
             "foreground_stt": {"status": "passed", "reference_phrase_matched": True, "transcript_characters": characters, "transcript_uploaded": False},
             "missing_model": {"status": "passed", "implicit_download": False},
             "native_capture_refusal": refusals["capture"], "keyboard_delivery_refusal": refusals["keyboard"], "hud": hud,
-            "settings_window": settings,
+            "settings_window": settings, "recordings_window": recordings,
             "tcc_permission_grants": "not-tested-no-permissions-modified",
             "clipboard_delivery": "not-tested-no-clipboard-actions-requested",
         }
@@ -225,7 +235,7 @@ def main():
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--target", choices=PACKAGER["TARGETS"], required=True)
     parser.add_argument("--output", type=Path, required=True, help="new directory for sanitized public-fixture proof and own-panel PNGs")
-    parser.add_argument("--skip-hud", action="store_true", help="explicitly omit the offscreen HUD and Settings renders only when a logged-in WindowServer session is unavailable")
+    parser.add_argument("--skip-hud", action="store_true", help="explicitly omit the offscreen HUD and window renders only when a logged-in WindowServer session is unavailable")
     parser.add_argument("--hud-unavailable-reason")
     args = parser.parse_args()
     try:

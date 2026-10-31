@@ -5,13 +5,15 @@
 //! Linux, and this process reaches it only through its IPC contract: the menu,
 //! the shortcut, the HUD and the windows hold no second dictation state, and
 //! microphone access is read from and requested by whichever process owns the
-//! engine. Settings is an AppKit window in this process, opened from the menu
-//! or by `cantrip settings` through [`requests`]; it closes with the app and
-//! closing it never stops dictation. Recordings and recovery is still its own
-//! process. macOS delivery is explicit clipboard copy and manual paste; nothing
-//! here requests Accessibility, Input Monitoring or Screen Recording access.
+//! engine. Settings and Recordings and Recovery are AppKit windows in this
+//! process, opened from the menu or by `cantrip settings` and `cantrip actions`
+//! through [`requests`]; they close with the app and closing them never stops
+//! dictation. macOS delivery is explicit clipboard copy and manual paste;
+//! nothing here requests Accessibility, Input Monitoring or Screen Recording
+//! access.
 
 mod mark;
+pub(crate) mod recordings;
 pub(crate) mod requests;
 pub(crate) mod settings;
 pub(crate) mod shortcut;
@@ -35,23 +37,24 @@ use objc2::{
     sel, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSApplicationTerminateReply, NSBeep, NSControlStateValueOn, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSRunningApplication, NSStatusBar, NSStatusBarButton, NSStatusItem,
-    NSVariableStatusItemLength, NSWorkspace, NSWorkspaceOpenConfiguration,
+    NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSBeep, NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
+    NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{
     ns_string, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSRunLoop,
     NSRunLoopCommonModes, NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
+use recordings::{AppRequest, Open, RecordingsWindow};
 use requests::{Listener, Show};
 use settings::{Live, Pane, SettingsWindow};
 use shortcut::Registration;
 use std::{
     cell::RefCell,
     fs,
-    process::{Child, Command as Process, Stdio},
+    process::{Command as Process, Stdio},
     sync::mpsc,
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -59,7 +62,7 @@ use std::{
 
 /// A just-started engine binds its socket within this window.
 const STARTUP_GRACE: Duration = Duration::from_secs(15);
-/// The configured shortcut is re-read, and closed windows reaped, this often.
+/// The configured shortcut is re-read this often.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 /// Menu lines stay readable at the menu's default width.
 const LINE_LIMIT: usize = 72;
@@ -190,6 +193,8 @@ enum Choice {
     Settings,
     Recordings,
     CheckSetup,
+    /// Recordings and Recovery on its setup pane, where installing starts.
+    InstallModel,
     MicrophoneSettings,
     StartEngine,
     Login,
@@ -255,29 +260,6 @@ impl Items<'_> {
         self.menu
             .addItem(&NSMenuItem::separatorItem(self.menu.mtm()));
     }
-}
-
-/// Bring a shared window forward, or open it as its own process, so closing it
-/// never stops dictation.
-fn open_window(window: &mut Option<Child>, arguments: &[&str]) -> Result<()> {
-    if let Some(child) = window.as_mut() {
-        if matches!(child.try_wait(), Ok(None)) {
-            if let Some(app) =
-                NSRunningApplication::runningApplicationWithProcessIdentifier(child.id() as _)
-            {
-                app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
-            }
-            return Ok(());
-        }
-    }
-    let child = Process::new(std::env::current_exe()?)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .spawn()
-        .context("Opening the window")?;
-    *window = Some(child);
-    Ok(())
 }
 
 /// Register or unregister Cantrip.app's own login item, or open its approval
@@ -372,7 +354,8 @@ fn microphone_item(
 struct Host {
     hud: LiveHud,
     engine: Engine,
-    /// Quit was chosen; the engine is finishing its take before the app exits.
+    /// Quit was chosen; the engine is finishing its take, and the Recordings
+    /// window its setup work, before the app exits.
     quitting: bool,
     _item: Retained<NSStatusItem>,
     button: Retained<NSStatusBarButton>,
@@ -388,10 +371,10 @@ struct Host {
     choices: Vec<Choice>,
     /// The Settings window while it is open.
     settings: Option<Retained<SettingsWindow>>,
-    /// `cantrip settings` asks through this to show a window.
+    /// `cantrip settings` and `cantrip actions` ask through this to show a window.
     requests: Option<Listener>,
-    /// The Actions window, its own process.
-    actions: Option<Child>,
+    /// The Recordings and Recovery window while it is open.
+    recordings: Option<Retained<RecordingsWindow>>,
     timer: Option<(Retained<NSTimer>, Duration)>,
     /// When the shortcut was last re-read.
     refreshed: Instant,
@@ -404,7 +387,7 @@ enum After {
     Continue,
     /// A termination signal reached Cantrip: quit the app as well.
     Quit,
-    /// Quit was waiting for the engine, which has now finished.
+    /// Quit was waiting for the engine and the windows, which have now finished.
     FinishQuit,
 }
 
@@ -448,7 +431,7 @@ impl Host {
             choices: Vec::new(),
             settings: None,
             requests,
-            actions: None,
+            recordings: None,
             timer: None,
             refreshed: now,
             launched: now,
@@ -537,16 +520,17 @@ impl Host {
         }
         self.serve_requests();
         self.tick_settings(now);
+        self.tick_recordings(now);
         if now.duration_since(self.refreshed) >= REFRESH_INTERVAL {
             self.refreshed = now;
             self.shortcut.refresh();
-            // Reap a closed Actions process; dictation continues regardless.
-            self.actions
-                .take_if(|child| !matches!(child.try_wait(), Ok(None)));
         }
         self.show_mark(now);
         self.schedule(interval, target);
-        if self.quitting && !matches!(self.engine, Engine::Owned { .. }) {
+        if self.quitting
+            && !matches!(self.engine, Engine::Owned { .. })
+            && self.recordings.is_none()
+        {
             After::FinishQuit
         } else if !self.quitting && shutdown_requested() {
             After::Quit
@@ -567,6 +551,8 @@ impl Host {
             } else {
                 match show {
                     Show::Settings => self.show_settings(),
+                    Show::Recordings => self.show_recordings(Open::Recordings),
+                    Show::CheckSetup => self.show_recordings(Open::CheckSetup),
                 }
             };
             responder.reply(shown);
@@ -595,7 +581,7 @@ impl Host {
     /// Hand the open Settings window live status, and release it once closed.
     fn tick_settings(&mut self, now: Instant) {
         if self.settings.as_ref().is_some_and(|window| window.closed()) {
-            self.close_windows();
+            self.release_settings();
             return;
         }
         let Some(window) = &self.settings else {
@@ -610,13 +596,76 @@ impl Host {
         });
     }
 
-    /// Close and release the in-process windows, as quitting does.
-    fn close_windows(&mut self) {
+    fn release_settings(&mut self) {
         if let Some(window) = self.settings.take() {
             if !window.closed() {
                 window.close();
             }
             window.teardown();
+        }
+    }
+
+    /// Bring the Recordings and Recovery window forward where `open` asks.
+    fn show_recordings(&mut self, open: Open) -> Result<()> {
+        if self.recordings.is_none() {
+            self.recordings = Some(RecordingsWindow::new(self.button.mtm()));
+            self.tick_recordings(Instant::now());
+        }
+        if let Some(window) = &self.recordings {
+            window.open(open);
+        }
+        Ok(())
+    }
+
+    /// Hand the Recordings window live status and do what it asks of the app;
+    /// release it once closed.
+    fn tick_recordings(&mut self, now: Instant) {
+        if self
+            .recordings
+            .as_ref()
+            .is_some_and(|window| window.closed())
+        {
+            if let Some(window) = self.recordings.take() {
+                window.teardown();
+            }
+            return;
+        }
+        let Some(window) = &self.recordings else {
+            return;
+        };
+        let line = self.describe(now).0;
+        let status = self.hud.status();
+        let requests = window.tick(&Live {
+            line: &line,
+            online: status.is_some(),
+            microphone: status.and_then(|status| status.microphone),
+        });
+        for request in requests {
+            match request {
+                AppRequest::OpenSettings => {
+                    if let Err(error) = self.show_settings() {
+                        if let Some(window) = &self.recordings {
+                            window.show_problem(format!("{error:#}"));
+                        }
+                    }
+                }
+                AppRequest::StartEngine => self.start_engine(),
+            }
+        }
+    }
+
+    /// Close the in-process windows, as quitting does. Settings closes at once;
+    /// Recordings first lets a download clean up or a bounded start finish.
+    fn close_windows(&mut self) {
+        self.release_settings();
+        if self
+            .recordings
+            .as_ref()
+            .is_some_and(|window| window.close_for_quit())
+        {
+            if let Some(window) = self.recordings.take() {
+                window.teardown();
+            }
         }
     }
 
@@ -795,7 +844,7 @@ impl Host {
                 }
                 // The HUD names this item for saved audio while local recovery lacks its model.
                 if failed_audio && !capabilities.local_model {
-                    items.item("Install Local Model…", Choice::CheckSetup);
+                    items.item("Install Local Model…", Choice::InstallModel);
                 }
             }
             if capabilities.dismiss && outcome.needs_attention() {
@@ -864,8 +913,9 @@ impl Host {
         let done = match choice {
             Choice::Send(command) => self.send(command),
             Choice::Settings => self.show_settings(),
-            Choice::Recordings => open_window(&mut self.actions, &["actions"]),
-            Choice::CheckSetup => open_window(&mut self.actions, &["actions", "--doctor"]),
+            Choice::Recordings => self.show_recordings(Open::Recordings),
+            Choice::CheckSetup => self.show_recordings(Open::CheckSetup),
+            Choice::InstallModel => self.show_recordings(Open::Setup),
             Choice::MicrophoneSettings => open_microphone_settings(),
             Choice::StartEngine => {
                 self.start_engine();
@@ -921,13 +971,16 @@ define_class!(
             };
             // The windows belong to this process and close with it.
             host.close_windows();
-            if !matches!(host.engine, Engine::Owned { .. }) {
+            let owned = matches!(host.engine, Engine::Owned { .. });
+            if !owned && host.recordings.is_none() {
                 return NSApplicationTerminateReply::TerminateNow;
             }
-            // Finish capture and settle cancellation first; recordings stay retained.
             host.quitting = true;
-            request_shutdown();
-            tracing::info!("[Daemon] quit requested; waiting for the engine");
+            if owned {
+                // Finish capture and settle cancellation first; recordings stay retained.
+                request_shutdown();
+                tracing::info!("[Daemon] quit requested; waiting for the engine");
+            }
             NSApplicationTerminateReply::TerminateLater
         }
 

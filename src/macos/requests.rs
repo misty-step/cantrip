@@ -2,8 +2,9 @@
 //! its windows, which live in the app's own process. The app listens on a
 //! socket in its owner-only runtime directory, beside the lock that keeps one
 //! app per user, and answers each request after acting on it. A command that
-//! finds no app starts it first, so `cantrip settings` behaves like choosing
-//! Settings… from the menu and never leaves a window process of its own.
+//! finds no app starts it first, so `cantrip settings` and `cantrip actions`
+//! behave like choosing Settings… or Recordings and Recovery… from the menu
+//! and never leave a window process of their own.
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -27,12 +28,19 @@ const STARTUP_WAIT: Duration = Duration::from_secs(20);
 #[serde(tag = "show", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum Show {
     Settings,
+    /// Recordings and Recovery, on its recordings.
+    Recordings,
+    /// Recordings and Recovery, running the setup check.
+    CheckSetup,
 }
 
 impl Show {
+    /// The menu item that shows the same window.
     fn name(self) -> &'static str {
         match self {
             Self::Settings => "Settings",
+            Self::Recordings => "Recordings and Recovery",
+            Self::CheckSetup => "Check Setup",
         }
     }
 }
@@ -296,8 +304,11 @@ mod tests {
         assert!(matches!(client.join().unwrap(), Ok(Ok(()))));
 
         let asking = path.clone();
-        let client = std::thread::spawn(move || ask(&asking, Show::Settings));
-        serve_until_answered(&mut listener, || Err(anyhow!("window refused")));
+        let client = std::thread::spawn(move || ask(&asking, Show::CheckSetup));
+        assert_eq!(
+            serve_until_answered(&mut listener, || Err(anyhow!("window refused"))),
+            Show::CheckSetup
+        );
         assert!(matches!(client.join().unwrap(), Ok(Err(_))));
     }
 
