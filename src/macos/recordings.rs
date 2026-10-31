@@ -160,6 +160,7 @@ struct Views {
     forget: Retained<NSButton>,
     missing: Message,
     // Setup
+    setup_activity: Retained<NSStackView>,
     setup_spinner: Retained<NSProgressIndicator>,
     setup_busy: Retained<NSTextField>,
     setup_status: Message,
@@ -829,14 +830,23 @@ impl RecordingsWindow {
         );
         views.local.setEnabled(actions.recover_locally);
         views.provider.setEnabled(actions.recover_with_provider);
-        ui::set_text(
-            &views.local_note,
-            if take.audio_available {
-                model::LOCAL
-            } else {
-                model::NO_AUDIO
-            },
-        );
+        // A recovery Cantrip cannot run says what it needs instead.
+        let capabilities = recordings.status().map(|status| status.capabilities);
+        let local_note = match capabilities {
+            _ if !take.audio_available => model::NO_AUDIO,
+            Some(capabilities) if !capabilities.local_model => {
+                "Needs the local model. Install it from Setup."
+            }
+            _ => model::LOCAL,
+        };
+        ui::set_text(&views.local_note, local_note);
+        let provider_note = match capabilities {
+            Some(capabilities) if !capabilities.remote_configured => {
+                "No transcription provider is configured. Add an endpoint in Settings."
+            }
+            _ => model::PROVIDER,
+        };
+        ui::set_text(&views.provider_note, provider_note);
         views.provider_note.setHidden(!take.audio_available);
         views.forget.setEnabled(actions.forget);
     }
@@ -845,11 +855,9 @@ impl RecordingsWindow {
         let views = self.views();
         let state = self.state();
         let recordings = &state.recordings;
-        show_busy(
-            &views.setup_spinner,
-            &views.setup_busy,
-            recordings.setup_busy(),
-        );
+        let busy = recordings.setup_busy();
+        views.setup_activity.setHidden(busy.is_none());
+        show_busy(&views.setup_spinner, &views.setup_busy, busy);
         views.setup_status.show(
             recordings.setup_status().map(|status| status.text.as_str()),
             recordings
@@ -1384,6 +1392,7 @@ impl RecordingsWindow {
             provider_note,
             forget,
             missing,
+            setup_activity,
             setup_spinner,
             setup_busy,
             setup_status,
