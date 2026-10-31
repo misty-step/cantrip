@@ -2,8 +2,10 @@
 //!
 //! Native objects stay on one owned thread. The input callback only renders,
 //! validates and copies into a bounded, preallocated lock-free packet pool;
-//! conversion and WAV I/O happen on that owning thread. Overruns/interruption
-//! fail the take but retain its WAV.
+//! conversion and WAV I/O happen on that owning thread. A route change while
+//! the device settles restarts capture into the same WAV, and a short skipped
+//! I/O cycle is recorded as silence; other interruptions fail the take but
+//! retain its WAV.
 
 use anyhow::{anyhow, bail, Context, Result};
 use block2::RcBlock;
@@ -65,8 +67,8 @@ const INPUT_ELEMENT: u32 = 1;
 const OUTPUT_ELEMENT: u32 = 0;
 /// Smallest per-callback capacity requested from the input unit.
 const MIN_SLICE_FRAMES: u32 = 8_192;
-/// Capture restarts allowed when the route changes before any audio arrived,
-/// e.g. a Bluetooth headset switching from playback to its microphone profile.
+/// Capture restarts allowed while the route settles, e.g. a Bluetooth headset
+/// switching from playback to its microphone profile.
 const ROUTE_RESTARTS: u32 = 3;
 const ROUTE_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// A Bluetooth headset settles into its microphone profile shortly after
@@ -474,7 +476,7 @@ struct Control {
     render_status: AtomicI32,
     /// Skipped-I/O gaps recorded as silence, and their total length.
     gaps: AtomicU32,
-    gap_frames: AtomicU64,
+    silence_micros: AtomicU64,
 }
 
 impl Control {
@@ -486,7 +488,7 @@ impl Control {
             next_sample_time: AtomicI64::new(FIRST_SAMPLE_TIME),
             render_status: AtomicI32::new(0),
             gaps: AtomicU32::new(0),
-            gap_frames: AtomicU64::new(0),
+            silence_micros: AtomicU64::new(0),
         }
     }
 
@@ -770,7 +772,10 @@ impl InputContext {
                     return;
                 }
                 control.gaps.fetch_add(1, Ordering::AcqRel);
-                control.gap_frames.fetch_add(gap as u64, Ordering::AcqRel);
+                control.silence_micros.fetch_add(
+                    (gap as f64 * 1_000_000.0 / self.format.sample_rate) as u64,
+                    Ordering::AcqRel,
+                );
             }
         }
         // SAFETY: the unit rendered into our own buffer, which stays valid
@@ -1311,23 +1316,28 @@ fn capture_to_wav(
                     tracing::warn!("[Capture] microphone capture failed class=stop-failed");
                     return Err(error);
                 }
-                let captured = control.frames_seen.load(Ordering::Acquire);
-                if captured == 0 || opened.elapsed() < ROUTE_SETTLE {
-                    let trigger = match failure {
-                        FAILURE_CONFIGURATION => "configuration-changed",
-                        FAILURE_RENDER => "render-failed",
-                        _ => "engine-stopped",
-                    };
-                    tracing::info!(
-                        "[Capture] microphone route change detected trigger={trigger} status={} captured_ms={}",
-                        control.render_status.load(Ordering::Acquire),
-                        (captured as f64 / format.sample_rate * 1_000.0).round()
-                    );
+                if control.frames_seen.load(Ordering::Acquire) == 0
+                    || opened.elapsed() < ROUTE_SETTLE
+                {
                     // Keep what the old route captured: the WAV stays 16 kHz
                     // mono, and each hardware format gets its own converter.
                     drain_packets(&transport, format, &mut converter, &mut writer, control)?;
                     converter.finish(&mut writer)?;
                     writer.checkpoint()?;
+                    let trigger = match failure {
+                        FAILURE_CONFIGURATION => "configuration-changed",
+                        FAILURE_RENDER => "render-failed",
+                        _ => "engine-stopped",
+                    };
+                    // A 16 kHz PCM16 WAV holds 32 bytes per millisecond.
+                    tracing::info!(
+                        "[Capture] microphone route change detected trigger={trigger} status={} kept_ms={}",
+                        control.render_status.load(Ordering::Acquire),
+                        writer
+                            .get_ref()
+                            .metadata()
+                            .map_or(0, |wav| wav.len().saturating_sub(44) / 32)
+                    );
                     let Some(restarted) = restart_capture(selected.id, control, &mut restarts)?
                     else {
                         return Ok(());
@@ -1395,17 +1405,16 @@ fn capture_to_wav(
         }
         Ok(())
     })();
+    // Stop/remove the native tap before draining the final bounded queue. No
+    // callback can append after finalization, including on an abandoned take.
+    let stopped = native.stop();
     let gaps = control.gaps.load(Ordering::Acquire);
     if gaps != 0 {
         tracing::warn!(
             "[Capture] microphone skipped audio recorded as silence gaps={gaps} silence_ms={}",
-            (control.gap_frames.load(Ordering::Acquire) as f64 / format.sample_rate * 1_000.0)
-                .round()
+            control.silence_micros.load(Ordering::Acquire) / 1_000
         );
     }
-    // Stop/remove the native tap before draining the final bounded queue. No
-    // callback can append after finalization, including on an abandoned take.
-    let stopped = native.stop();
     let drained = drain_packets(&transport, format, &mut converter, &mut writer, control);
     let conversion = converter.finish(&mut writer);
     let finalization = writer.finish();
@@ -1423,8 +1432,9 @@ fn capture_to_wav(
         Ok(())
     };
     // Evaluate every finalization step even after an earlier error. The first
-    // failure still reaches the engine, so incomplete audio is never sent as a
-    // successful take and never silently retried through another capture device.
+    // failure still reaches the engine, so a take that ended early is never
+    // sent as a successful take and never silently retried through another
+    // capture device.
     recording
         .and(control.capture_failure())
         .and(stopped)
@@ -1735,6 +1745,37 @@ mod tests {
                 .iter()
                 .all(|bytes| *bytes == 123_i16.to_ne_bytes()));
         }
+    }
+
+    #[test]
+    fn skipped_io_is_queued_as_zeroed_frames_until_the_pool_is_exhausted() {
+        let format = mono_format();
+        let transport = Transport::new(format);
+        let control = Control::new();
+        // Recycled packets still hold earlier audio; silence must overwrite it.
+        while let Some(mut packet) = transport.free.pop() {
+            packet.bytes.fill(0x55);
+            assert!(transport.ready.push(packet).is_ok());
+        }
+        while let Some(packet) = transport.ready.pop() {
+            transport.recycle(packet, &control);
+        }
+        assert!(transport.push_silence(PACKET_FRAMES + 3, format, &control));
+        assert_eq!(
+            control.frames_seen.load(Ordering::Acquire),
+            PACKET_FRAMES as u64 + 3
+        );
+        for frames in [PACKET_FRAMES, 3] {
+            let packet = transport.ready.pop().expect("silence packet");
+            assert_eq!(packet.frames, frames);
+            assert!(packet.bytes[..frames * format.bytes_per_frame()]
+                .iter()
+                .all(|&byte| byte == 0));
+            transport.recycle(packet, &control);
+        }
+        let pool = transport.free.len();
+        assert!(!transport.push_silence((pool + 1) * PACKET_FRAMES, format, &control));
+        assert_eq!(control.failure_class(), "overrun");
     }
 
     #[test]
