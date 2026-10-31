@@ -47,7 +47,7 @@ def run(command, *, env, cwd, timeout=60, check=True):
 def native_refusals(executable, root, env, config):
     # This deliberately invalid CoreAudio UID cannot open a device, even if the
     # host already authorized microphone access. Native capture checks TCC and
-    # resolves the UID without asking for permission or starting AVAudioEngine.
+    # resolves the UID without asking for permission or starting capture.
     daemon_log = root / "daemon.log"
     original_config = config.read_bytes()
     keyboard_refusals = []
