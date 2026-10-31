@@ -64,11 +64,11 @@ const REFRESH: &str = "refresh";
 /// The recording table's columns: identifier, title, width. Together they fit
 /// the table beside a legacy scroller; the last visible column takes the rest.
 const COLUMNS: [(&str, &str, f64); 5] = [
-    ("recorded", "Recorded", 170.0),
-    ("duration", "Duration", 70.0),
-    ("transcript", "Transcript", 140.0),
-    ("audio", "Audio", 90.0),
-    ("waiting", "Recovery", 80.0),
+    ("recorded", "Recorded", 190.0),
+    ("duration", "Duration", 60.0),
+    ("transcript", "Transcript", 135.0),
+    ("audio", "Audio", 85.0),
+    ("waiting", "Recovery", 75.0),
 ];
 
 /// Where the window opens when it is asked to show.
