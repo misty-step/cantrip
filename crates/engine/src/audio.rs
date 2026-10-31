@@ -215,10 +215,27 @@ fn peak_level(peak: u16) -> u8 {
         .clamp(1.0, 100.0) as u8
 }
 
+/// A finalized recording with no sample frames, not a finalization failure.
+#[derive(Debug)]
+pub struct EmptyRecording;
+
+impl std::fmt::Display for EmptyRecording {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("The microphone supplied no audio.")
+    }
+}
+
+impl std::error::Error for EmptyRecording {}
+
 pub fn verify_wav(path: &Path) -> Result<()> {
     let metadata =
         fs::metadata(path).with_context(|| format!("checking recorded WAV {}", path.display()))?;
     if metadata.len() <= 44 {
+        let mut file = File::open(path)
+            .with_context(|| format!("checking recorded WAV {}", path.display()))?;
+        if finalized_wav_metadata(&mut file).is_ok_and(|wav| wav.frames == 0) {
+            return Err(EmptyRecording.into());
+        }
         bail!(
             "recorded WAV {} is {} bytes; expected more than 44 bytes",
             path.display(),
@@ -226,6 +243,19 @@ pub fn verify_wav(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(crate) fn finalized_wav_metadata(file: &mut File) -> Result<crate::stt::WavMetadata> {
+    let metadata = crate::stt::wav_metadata_from(file)?;
+    // Do not classify an unfinished container with trailing samples as empty.
+    file.seek(SeekFrom::Start(4))?;
+    let mut riff_size = [0_u8; 4];
+    file.read_exact(&mut riff_size)?;
+    anyhow::ensure!(
+        u64::from(u32::from_le_bytes(riff_size)) + 8 == file.metadata()?.len(),
+        "recorded WAV has an unfinished length"
+    );
+    Ok(metadata)
 }
 
 pub fn remove_recording(path: &Path) -> Result<()> {
@@ -614,6 +644,28 @@ mod tests {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn verification_distinguishes_finalized_empty_audio_from_corruption() {
+        let path = wav_path("verified-empty");
+        fs::write(&path, wav(&[])).unwrap();
+        assert!(super::verify_wav(&path)
+            .unwrap_err()
+            .is::<super::EmptyRecording>());
+        let mut unfinished = wav(&[]);
+        unfinished.extend_from_slice(&42_i16.to_le_bytes());
+        let mut truncated = wav(&[42]);
+        truncated.truncate(44);
+        for invalid in [unfinished, truncated, vec![0; 44]] {
+            fs::write(&path, invalid).unwrap();
+            assert!(super::verify_wav(&path)
+                .err()
+                .is_none_or(|error| !error.is::<super::EmptyRecording>()));
+        }
+        fs::write(&path, wav(&[42])).unwrap();
+        super::verify_wav(&path).unwrap();
+        fs::remove_file(path).unwrap();
     }
     #[test]
     fn live_signal_tracks_peak_and_sustained_digital_silence() {

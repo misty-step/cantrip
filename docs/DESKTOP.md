@@ -44,6 +44,8 @@ The HUD is bottom-anchored, pointer-transparent, and does not take focus. Its
 presence does not establish that the microphone or destination works. The
 [attended trial](USAGE.md#4a-dictate-into-an-editor-on-supported-hyprland), not a
 compositor name or a successful diagnostic exit, establishes your actual result.
+Failure feedback auto-hides according to [HUD timing](CONFIGURATION.md#hud--passive-status)
+without dismissing the outcome or clearing menu/status-bar attention.
 
 ### macOS supported boundary
 
