@@ -492,9 +492,11 @@ for the rendering contract.
 
 On Mac the HUD has the same square, opaque container and one-point edge as on
 Linux ([ADR 0034](decisions/0034-native-macos-presentation.md)), in the colors
-of the system's light or dark appearance instead of an Omarchy theme. The field
-and caption colors are adjusted in lightness to read at 4.5:1 on that
-container, including a handoff take's route wash.
+of the system's light or dark appearance instead of an Omarchy theme. Colors
+are adjusted only in lightness: the field and captions to read at 4.5:1 on that
+container, including a handoff take's route wash, and the edge to reach 3:1
+against the container, so the panel stays framed over a white page in Light or
+a black page in Dark.
 
 ## Opt-in telemetry (`[telemetry]`)
 

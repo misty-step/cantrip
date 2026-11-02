@@ -111,12 +111,23 @@ impl Palette {
         color
     }
 
+    /// A 1-point frame or divider in `color` on this palette's background and
+    /// surface: on macOS, adjusted only in lightness to reach WCAG's 3:1
+    /// non-text contrast on both; Omarchy's colors are drawn as the theme
+    /// gives them.
+    pub fn visible(&self, color: [u8; 3]) -> [u8; 3] {
+        #[cfg(target_os = "macos")]
+        let color = contrasting(color, [self.background, self.surface], NON_TEXT_CONTRAST);
+        color
+    }
+
     /// This palette with `surface` behind its text, such as a handoff take's
-    /// washed container: on macOS its text and field colors are refitted to
-    /// read at 4.5:1 there; Omarchy's colors are drawn as the theme gives them.
+    /// washed container: on macOS its text, field and frame colors are refitted
+    /// to read there; Omarchy's colors are drawn as the theme gives them.
     pub fn on_surface(self, surface: [u8; 3]) -> Self {
         let palette = Self { surface, ..self };
         Self {
+            border: palette.visible(self.border),
             foreground: palette.legible(self.foreground),
             accent: palette.legible(self.accent),
             attention: palette.legible(self.attention),
@@ -191,11 +202,25 @@ pub(crate) fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
     contrast(luminance(a), luminance(b))
 }
 
+/// WCAG 2's minimum contrast for text (1.4.3).
+#[cfg(any(target_os = "macos", test))]
+const TEXT_CONTRAST: f32 = 4.5;
+/// WCAG 2's minimum contrast for a component's boundary (1.4.11).
+#[cfg(target_os = "macos")]
+const NON_TEXT_CONTRAST: f32 = 3.0;
+
 /// Native semantic accents are not necessarily text colors. Preserve the hue
 /// and saturation, adjusting only lightness to reach 4.5:1 on both native
 /// surfaces. AppKit resolves both surfaces from the same light/dark appearance.
 #[cfg(any(target_os = "macos", test))]
 fn legible(color: [u8; 3], backgrounds: [[u8; 3]; 2]) -> [u8; 3] {
+    contrasting(color, backgrounds, TEXT_CONTRAST)
+}
+
+/// `color` with only its lightness moved, as little as eight-bit channels
+/// allow, to reach `minimum` contrast on both `backgrounds`.
+#[cfg(any(target_os = "macos", test))]
+fn contrasting(color: [u8; 3], backgrounds: [[u8; 3]; 2], minimum: f32) -> [u8; 3] {
     let backgrounds = backgrounds.map(luminance);
     let minimum_contrast = |value: f32| {
         backgrounds
@@ -203,7 +228,7 @@ fn legible(color: [u8; 3], backgrounds: [[u8; 3]; 2]) -> [u8; 3] {
             .map(|&background| contrast(value, background))
             .fold(f32::INFINITY, f32::min)
     };
-    let passes = |color| minimum_contrast(luminance(color)) >= 4.5;
+    let passes = |color| minimum_contrast(luminance(color)) >= minimum;
     if passes(color) {
         return color;
     }
@@ -330,7 +355,7 @@ fn hex_rgb(text: &str) -> Option<[u8; 3]> {
 /// increased contrast and the operator's accent color, flattened to opaque sRGB.
 #[cfg(target_os = "macos")]
 mod native {
-    use super::{legible, Palette};
+    use super::{contrasting, legible, Palette, NON_TEXT_CONTRAST};
     use block2::StackBlock;
     use objc2::{rc::Retained, MainThreadMarker};
     use objc2_app_kit::{NSAppearance, NSApplication, NSColor, NSColorSpace};
@@ -388,7 +413,12 @@ mod native {
         Some(Palette {
             background,
             surface,
-            border: flat(NSColor::separatorColor(), surface)?,
+            // AppKit's separator is decorative and too faint to frame the panel.
+            border: contrasting(
+                flat(NSColor::separatorColor(), surface)?,
+                [background, surface],
+                NON_TEXT_CONTRAST,
+            ),
             foreground: flat(NSColor::labelColor(), surface)?,
             accent: legible(
                 flat(NSColor::controlAccentColor(), surface)?,

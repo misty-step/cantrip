@@ -2869,42 +2869,71 @@ mod tests {
         assert_eq!(border(&model), [0, 255, 0]);
     }
 
-    /// AppKit's Light and Dark colors as `theme::resolve` flattened them on
-    /// macOS 27.0.1, with the accent and attention it fits to them.
+    /// AppKit's Light and Dark palettes, resolved as the panel resolves its
+    /// view's appearance, each with the page of its own polarity: white and
+    /// black.
     #[cfg(target_os = "macos")]
-    fn appkit_palettes() -> [Palette; 2] {
-        [
-            (
-                [255; 3],
-                [230; 3],
-                [39; 3],
-                [255, 141, 40],
-                [[203, 48, 224], [0, 136, 255], [52, 199, 89], [0, 192, 232]],
-            ),
-            (
-                [30; 3],
-                [52; 3],
-                [221; 3],
-                [255, 146, 48],
-                [[219, 52, 242], [0, 145, 255], [48, 209, 88], [60, 211, 254]],
-            ),
-        ]
-        .map(|(surface, border, foreground, attention, targets)| {
-            let palette = Palette {
-                background: surface,
-                surface,
-                border,
-                foreground,
-                accent: [0, 122, 255],
-                attention,
-                targets,
-            };
-            Palette {
-                accent: palette.legible(palette.accent),
-                attention: palette.legible(attention),
-                ..palette
+    fn appkit_palettes() -> [(Palette, [u8; 3]); 2] {
+        use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+        // SAFETY: framework constants, valid for the process lifetime.
+        let names = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
+        let [light, dark] = names.map(|name| {
+            theme::resolve(&NSAppearance::appearanceNamed(name).expect("a system appearance"))
+        });
+        // A failed resolution falls back to Tokyo Night.
+        assert!(light != Palette::default() && dark != Palette::default());
+        assert_ne!(light.surface, dark.surface);
+        [(light, [255; 3]), (dark, [0; 3])]
+    }
+
+    /// `model` painted at 1x with `palette`, as BGRA bytes, and its container's
+    /// `[left, top, width, height]`.
+    #[cfg(target_os = "macos")]
+    fn painted(model: &Model, palette: Palette, now: Instant) -> (Vec<u8>, [u32; 4]) {
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let height = layout_height(model, &font, CONTAINER_WIDTH);
+        let mut bytes = vec![0; (SURFACE_WIDTH * height * 4) as usize];
+        Canvas {
+            bytes: &mut bytes,
+            width: SURFACE_WIDTH,
+            height,
+            scale: 1.0,
+            alpha: 1.0,
+        }
+        .paint_hud(model, &font, palette, &model.frame(now), CONTAINER_WIDTH);
+        let container = container_rect(SURFACE_WIDTH as f32, height as f32, CONTAINER_WIDTH)
+            .map(|value| value as u32);
+        (bytes, container)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn rgb_at(bytes: &[u8], x: u32, y: u32) -> [u8; 3] {
+        let index = ((y * SURFACE_WIDTH + x) * 4) as usize;
+        [bytes[index + 2], bytes[index + 1], bytes[index]]
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_default_frame_reaches_3_to_1_on_its_surface_and_the_page() {
+        use crate::theme::contrast_ratio;
+        let now = Instant::now();
+        for (palette, page) in appkit_palettes() {
+            for state in [ScreenshotState::Recording, ScreenshotState::DeliveryFailed] {
+                let model = screenshot_model(state, now, None);
+                let (bytes, [left, top, width, body_height]) = painted(&model, palette, now);
+                // The top edge right of any attention rail, and the surface beside the captions.
+                let frame = rgb_at(&bytes, left + 10, top);
+                let surface = rgb_at(&bytes, left + width - 4, top + body_height - 4);
+                assert_eq!(surface, palette.surface, "{state:?}");
+                for behind in [surface, page] {
+                    let ratio = contrast_ratio(frame, behind);
+                    assert!(
+                        ratio >= 3.0,
+                        "{state:?}: {frame:?} on {behind:?} reads {ratio}:1"
+                    );
+                }
             }
-        })
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -2912,8 +2941,7 @@ mod tests {
     fn a_handoff_take_reads_at_4_5_to_1_on_its_washed_surface() {
         use crate::theme::contrast_ratio;
         let now = Instant::now();
-        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
-        for palette in appkit_palettes() {
+        for (palette, _) in appkit_palettes() {
             for slot in 0..24 {
                 let color = palette.target(slot);
                 let washed = mix(palette.surface, color, ROUTE_WASH);
@@ -2926,29 +2954,8 @@ mod tests {
                 // handoff draws the attention rail.
                 for state in [ScreenshotState::Recording, ScreenshotState::DeliveryFailed] {
                     let model = screenshot_model(state, now, Some(&handoff));
-                    let height = layout_height(&model, &font, CONTAINER_WIDTH);
-                    let mut bytes = vec![0; (SURFACE_WIDTH * height * 4) as usize];
-                    Canvas {
-                        bytes: &mut bytes,
-                        width: SURFACE_WIDTH,
-                        height,
-                        scale: 1.0,
-                        alpha: 1.0,
-                    }
-                    .paint_hud(
-                        &model,
-                        &font,
-                        palette,
-                        &model.frame(now),
-                        CONTAINER_WIDTH,
-                    );
-                    let pixel = |x: u32, y: u32| {
-                        let index = ((y * SURFACE_WIDTH + x) * 4) as usize;
-                        [bytes[index + 2], bytes[index + 1], bytes[index]]
-                    };
-                    let [left, top, width, body_height] =
-                        container_rect(SURFACE_WIDTH as f32, height as f32, CONTAINER_WIDTH)
-                            .map(|value| value as u32);
+                    let (bytes, [left, top, width, body_height]) = painted(&model, palette, now);
+                    let pixel = |x: u32, y: u32| rgb_at(&bytes, x, y);
                     // The wash fills the container beside the captions.
                     assert_eq!(
                         pixel(left + width - 4, top + body_height - 4),
@@ -2977,14 +2984,17 @@ mod tests {
                         "slot {slot} {state:?}: {drawn:?} on {washed:?} reads {ratio}:1"
                     );
                 }
-                // The label and captions take their colors from the same fitted palette.
+                // The label and captions take their colors from the same fitted palette,
+                // and an interaction notice's divider takes its frame color.
                 let fitted = palette.on_surface(washed);
                 let label = fitted.legible(mix(color, fitted.foreground, ROUTE_LABEL_LIFT));
-                for text in [fitted.foreground, label] {
-                    let ratio = contrast_ratio(text, washed);
+                for (drawn, minimum) in
+                    [(fitted.foreground, 4.5), (label, 4.5), (fitted.border, 3.0)]
+                {
+                    let ratio = contrast_ratio(drawn, washed);
                     assert!(
-                        ratio >= 4.5,
-                        "slot {slot}: {text:?} on {washed:?} reads {ratio}:1"
+                        ratio >= minimum,
+                        "slot {slot}: {drawn:?} on {washed:?} reads {ratio}:1"
                     );
                 }
             }

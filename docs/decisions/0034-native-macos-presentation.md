@@ -42,7 +42,8 @@ an app attached to an external daemon still reports that owner's state. One
 painter draws the HUD on both platforms; only the palette and the captions'
 menu names differ, and nothing behind the panel shows through it. On macOS the
 field and caption colors are fitted to read at WCAG 4.5:1 on the opaque
-container, including a handoff take's route wash. Offscreen NSView pixels are
+container, including a handoff take's route wash, and the edge to 3:1 non-text
+contrast. Offscreen NSView pixels are
 not live panel/focus proof; native surfaces are verified in a disposable
 `macvm` VM. Historical 0007 still governs Linux.
 
