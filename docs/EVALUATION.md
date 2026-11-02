@@ -113,6 +113,37 @@ separate operator approval. A single `--allow-paid` run does not authorize a
 schedule. Keep the durable commission journal across invocations; never reset
 it to restart spending after a failure or a budget stop.
 
+### 2026-11-02 operator refinement study
+
+The operator separately commissioned up to **$6 total** for the combined STT
+and cleanup comparison on selected retained takes, with cloud disclosure
+authorized, no paid retries, and no paid judges. This is a new dated commission,
+not a reset or increase of the earlier $4.50 living-speech commission. The
+[commission ledger](../eval/cloud-stt-contracts.md#operator-commissions) records
+its aggregate receipt.
+
+Private audio, original take IDs, silver references, vocabulary candidates,
+model outputs, and the operator adjudication sheet stay in the owner-only
+`~/.cache/tmp/cantrip-eval-private/` directory, never in Git, telemetry, or worker
+uploads. The public receipt contains aggregates and reproducibility hashes only.
+Before/after **agent silver adjudication** must be distinguished from pending
+operator adjudication; neither silver phase is a human-reviewed reference.
+
+The one-off private orchestration reuses the unchanged Rust WER/CER scorer and
+the isolated native local-transcription path. It reserves every paid request
+before submission in its locked append-only commission journal. Cleanup uses
+reviewed provider price ceilings and full output-limit reservations, not a
+generation cap. Individual failed/unknown-cost flags remain in the journal.
+The operator subsequently authorized append-only aggregate reconciliation
+against the eval key's actual usage counter, without resetting the journal or
+retrying failed calls. Before each remaining one-call batch, measured absolute
+key usage plus its worst-case reservation must stay at or below **$4.50**,
+leaving margin under the unchanged $6 commission and $5 key limits.
+A normal-stop empty response succeeds only for an explicit empty-input control.
+Report the routing and cold-local timing differences from the application;
+request-to-final cleanup latency is not live release-to-delivery proof.
+
+
 ### Local weekly schedule
 
 The user timer keeps original dictation audio, reviewed references, installed

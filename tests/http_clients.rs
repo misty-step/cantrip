@@ -296,11 +296,15 @@ fn refine_decision_triage_skips_when_clean() {
     cfg.decision_model = Some("typesafe/jev-1.13".to_owned());
     cfg.decision_endpoint = Some(decision_endpoint);
 
-    let res = postproc::refine("This text is already clean.", &cfg, &[], None, None)
+    let vocabulary = vec!["Cantrip".to_owned()];
+    let res = postproc::refine("This text is already clean.", &cfg, &vocabulary, None, None)
         .expect("refine should succeed via decision triage");
     assert_eq!(res.text, "This text is already clean.");
     assert!(res.usage.is_none());
-    decision_server.join().expect("decision server joins");
+    let request = decision_server.join().expect("decision server joins");
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["state"]["source"], "This text is already clean.");
+    assert_eq!(body["state"]["vocabulary"], serde_json::json!(["Cantrip"]));
 }
 
 #[test]
