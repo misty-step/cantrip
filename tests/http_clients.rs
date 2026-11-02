@@ -215,8 +215,9 @@ fn refine_two_passes_chains_output() {
     let cfg = postproc_config(endpoint); // passes = 2
     let first = "Initial text. The Exa AP and the CL expose methods.";
 
-    let refined =
-        postproc::refine(first, &cfg, &[], None, None).expect("two-pass refine should succeed");
+    let vocabulary = vec!["Cantrip".to_owned(), "API".to_owned(), "CLI".to_owned()];
+    let refined = postproc::refine(first, &cfg, &vocabulary, None, None)
+        .expect("two-pass refine should succeed");
     assert_eq!(
         refined.text,
         "First-pass text. The Exa API and the CLI expose methods."
@@ -232,6 +233,10 @@ fn refine_two_passes_chains_output() {
     );
 
     let pass2: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert!(pass2["messages"][0]["content"]
+        .as_str()
+        .expect("proofread system prompt")
+        .contains(&vocabulary.join(", ")));
     // The source of pass 2 is chained from pass 1's output.
     assert_eq!(
         pass2["messages"][1]["content"],
@@ -324,10 +329,22 @@ fn refine_decision_watchdog_rejects_answered_question() {
     cfg.decision_model = Some("typesafe/jev-1.13".to_owned());
     cfg.decision_endpoint = Some(endpoint);
 
-    let res = postproc::refine("what time is the meeting tomorrow", &cfg, &[], None, None)
+    let source = "what time is the meeting tomorrow";
+    let vocabulary = vec!["Cantrip".to_owned()];
+    let res = postproc::refine(source, &cfg, &vocabulary, None, None)
         .expect("refine should succeed with fallback");
     assert_eq!(res.text, "what time is the meeting tomorrow");
-    server.join().expect("server joins");
+    let requests = server.join().expect("server joins");
+    let watchdog: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+    assert_eq!(watchdog["state"]["source"], source);
+    assert_eq!(
+        watchdog["state"]["candidate"],
+        "The meeting is at 2 PM tomorrow."
+    );
+    assert_eq!(
+        watchdog["state"]["vocabulary"],
+        serde_json::json!(vocabulary)
+    );
 }
 
 #[test]

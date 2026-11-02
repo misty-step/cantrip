@@ -1,7 +1,7 @@
 {
   "schema": "cantrip.eval.behavior.v1",
   "dataset": "cantrip-evals",
-  "corpus_version": "2026-11-02",
+  "corpus_version": "2026-11-02-r2",
   "default_split": "regression",
   "grader": {
     "deterministic": "exact-accepted-v1",
@@ -213,7 +213,6 @@
       "category": "cleanup",
       "input": "the thing we need to do is we need to keep the backup because the backup is what lets us recover if the migration fails",
       "accepted": [
-        "Keep the backup so we can recover if the migration fails.",
         "We need to keep the backup so we can recover if the migration fails."
       ]
     },
@@ -275,6 +274,14 @@
       "input": "a failed check does not necessarily mean the release is broken",
       "accepted": [
         "A failed check does not necessarily mean the release is broken."
+      ]
+    },
+    {
+      "id": "statement-not-command",
+      "category": "preservation",
+      "input": "we need to keep the backup",
+      "accepted": [
+        "We need to keep the backup."
       ]
     }
   ]

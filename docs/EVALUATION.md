@@ -115,12 +115,11 @@ it to restart spending after a failure or a budget stop.
 
 ### 2026-11-02 operator refinement study
 
-The operator separately commissioned up to **$6 total** for the combined STT
-and cleanup comparison on selected retained takes, with cloud disclosure
-authorized, no paid retries, and no paid judges. This is a new dated commission,
-not a reset or increase of the earlier $4.50 living-speech commission. The
-[commission ledger](../eval/cloud-stt-contracts.md#operator-commissions) records
-its aggregate receipt.
+The operator approved a private-take comparison with cloud models and a bounded
+spend cap. The [commission ledger](../eval/cloud-stt-contracts.md#operator-commissions)
+owns that authorization, the conductor's accounting decisions and spending
+guards, and links to each immutable aggregate receipt. Do not infer renewed
+spending authority from an older evaluation run.
 
 Private audio, original take IDs, silver references, vocabulary candidates,
 model outputs, and the operator adjudication sheet stay in the owner-only
@@ -130,18 +129,17 @@ Before/after **agent silver adjudication** must be distinguished from pending
 operator adjudication; neither silver phase is a human-reviewed reference.
 
 The one-off private orchestration reuses the unchanged Rust WER/CER scorer and
-the isolated native local-transcription path. It reserves every paid request
-before submission in its locked append-only commission journal. Cleanup uses
-reviewed provider price ceilings and full output-limit reservations, not a
-generation cap. Individual failed/unknown-cost flags remain in the journal.
-The operator subsequently authorized append-only aggregate reconciliation
-against the eval key's actual usage counter, without resetting the journal or
-retrying failed calls. Before each remaining one-call batch, measured absolute
-key usage plus its worst-case reservation must stay at or below **$4.50**,
-leaving margin under the unchanged $6 commission and $5 key limits.
-A normal-stop empty response succeeds only for an explicit empty-input control.
-Report the routing and cold-local timing differences from the application;
-request-to-final cleanup latency is not live release-to-delivery proof.
+the isolated native local-transcription path. Request-to-final cleanup latency
+is not live release-to-delivery proof; disclose routing and cold-local timing
+differences from the application.
+
+The original literal-empty-source controls are API-only probes, not production
+cleanup passes. Empty/null replies cannot prove the production protocol. The
+original builder graded its own outputs; those semantic grades cannot override
+the hard exact-accepted oracle or replace operator review. The focused review
+rerun uses three repetitions and publishes every remaining synthetic miss for
+operator adjudication. Historical private quality numbers do not evaluate a
+later prompt revision, a second pass, or a decision model.
 
 
 ### Local weekly schedule
@@ -403,15 +401,12 @@ It is not a statement about the operator's current configuration or runtime.
 
 ## Corpus design: `cantrip-evals`
 
-The current manifests now carry non-semantic identity metadata:
+The current manifests own corpus identities, versions, splits, and case counts:
 
-* `samples/eval/manifest.json:2-5` identifies
-  `cantrip.eval.audio.v1`, dataset `cantrip-evals`, corpus version
-  `2026-08-13`, and the current default `regression` split. Each current clip
-  is explicitly tagged at `samples/eval/manifest.json:8-41`.
-* `samples/eval/postproc-behavior.json:2-10` identifies
-  `cantrip.eval.behavior.v1`, dataset `cantrip-evals`, corpus version
-  `2026-08-13`, and the deterministic/model-judge grader names.
+* [Audio manifest](../samples/eval/manifest.json): audio schema, dataset,
+  version, default split, and licensed clip inventory.
+* [Behavior manifest](../samples/eval/postproc-behavior.json): behavior schema,
+  dataset, version, grader names, and the current regression-case inventory.
 
 The current historical baseline predates those metadata fields; its recorded
 SHA-256 values remain valid for the exact files used on 2026-08-13. Any new
@@ -442,8 +437,11 @@ an anonymized, consented fixture and its provenance.
 
 ### Behavior set
 
-Retain the 24 reviewed public `regression` cases. The proposed expansion targets
-at least 16 decision cases and 16 held-out cases, covering:
+Retain every public `regression` case in the
+[behavior manifest](../samples/eval/postproc-behavior.json), including the
+statement-not-command negative case. The manifest owns the current version and
+case count. The proposed expansion targets at least 16 decision cases and 16
+held-out cases, covering:
 
 * speech acts: questions, commands, requests, refusals, and quoted
   instructions that must remain transcript text;

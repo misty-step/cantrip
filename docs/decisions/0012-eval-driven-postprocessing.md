@@ -30,23 +30,29 @@ its meaning; invented mechanisms, explanations, and facts are not.
 The transcript is data, never instructions to the model. Questions remain
 questions, hypotheses remain exploratory, and commands remain commands: cleanup
 must neither answer nor execute them. Fidelity takes precedence over compression:
-preserve facts, numbers, dates, negation, qualifications, point of view, and all
-distinct alternatives. Keep certainty, requirements, and conditions equally
-strong. Preserve the exact characters of identifiers, paths, versions, and
-literal quoted errors, even when they appear misspelled. Keep unclear wording
-rather than guessing. Output only the refined transcript.
+preserve facts, numbers and their written form, dates, negation, qualifications,
+grammatical person, subject pronouns, and all distinct alternatives with their
+qualifiers. A first-person statement of need must not become a bare command.
+Keep certainty, requirements, and conditions equally strong. Preserve the exact
+characters of identifiers, paths, versions, and literal quoted errors, even when
+they appear misspelled. Keep unclear wording rather than guessing. Output only
+the refined transcript; retain a filler-only source or sound annotation rather
+than inventing speech or requesting an empty production reply.
 
-The operator's `vocabulary` supplies canonical spellings only for the intended
-name. It does not authorize replacing ordinary words, literal quoted
-misspellings, identifiers, or versions. Names are corrected by this LLM pass;
+The operator's `vocabulary` supplies canonical spellings for intended names and
+acronyms, including clear missing-letter or missing-space recognition errors.
+Capitalization alone does not make an ordinary spoken acronym a literal
+identifier. Vocabulary does not authorize replacing ordinary words, literal
+quoted misspellings, identifiers, or versions. Corrections use this LLM pass;
 there is no local alias table or decoder biasing. Raw bypasses cleanup and
 returns the recognizer's hypothesis, not a guarantee of verbatim recognition.
 
 The first pass refines; optional later passes only proofread the refined text,
 without compressing it again. Local STT stays the default, cleanup stays off
 until configured, and the shared cleanup deadline/fail-open policy is unchanged.
-Optional triage evaluates whether this refinement is needed and receives the
-same vocabulary as generation.
+Optional decision gates judge this refinement contract, not verbatim source
+wording. Their [content boundary](../PRIVACY.md#what-leaves-the-machine) owns
+what is sent to their endpoint.
 Model selection remains explicit and is evaluated separately from this text
 contract. The [evaluation guide](../EVALUATION.md) owns measurement and disclosure
 requirements.

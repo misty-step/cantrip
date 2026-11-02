@@ -247,10 +247,10 @@ Primary API references:
 
 ## Operator commissions
 
-The 2026-11-02 STT and Clean study is a separate, explicitly authorized **$6
-combined commission**. It does not reopen or widen the earlier $4.50 cloud-STT
-commission above. Its aggregate-only receipt is retained with the evaluation
-baselines; private audio, text, vocabulary, and per-take outputs are not published.
+The operator approved the 2026-11-02 STT and Clean comparison: up to **$6
+combined spend**, selected retained takes disclosed to cloud models, and no
+paid judges. It does not reopen or widen the earlier $4.50 cloud-STT commission
+above. Private audio, text, vocabulary, and per-take outputs are not published.
 
 | Commission | Cap | OpenRouter eval-key spend | Direct OpenAI spend | Total measured spend | Receipt |
 | --- | ---: | ---: | ---: | ---: | --- |
