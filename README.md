@@ -97,7 +97,7 @@ See [binary runtime prerequisites](docs/INSTALLATION.md#runtime-prerequisites-an
 and [desktop capabilities](docs/DESKTOP.md#supported-desktops). On Linux, a
 working PipeWire session with `pw-record` is needed for capture;
 clipboard/paste needs `wl-copy`. Automatic keys and the passive HUD have
-separate compositor requirements. On macOS, capture uses AVAudioEngine with
+separate compositor requirements. On macOS, capture uses a CoreAudio HAL input unit with
 explicit microphone permission; delivery is clipboard/manual paste. `doctor`
 and an idle daemon are not proof of a microphone-to-editor dictation.
 

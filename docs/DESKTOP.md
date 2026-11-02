@@ -50,7 +50,7 @@ without dismissing the outcome or clearing menu/status-bar attention.
 ### macOS supported boundary
 
 The native app requires macOS **13.3+** and a matching-architecture build. It uses
-AVAudioEngine/CoreAudio capture, local CPU Parakeet with explicitly installed
+CoreAudio HAL input capture, local CPU Parakeet with explicitly installed
 weights, native NSPasteboard Copy, and a passive nonactivating NSPanel on a
 [system material](CONFIGURATION.md#hud--passive-status). The app
 owns the menu bar, panel, and editable Control+Option+Space global toggle shortcut.

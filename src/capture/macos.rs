@@ -1,8 +1,11 @@
-//! AVAudioEngine/CoreAudio capture without a second workflow or unsafe Send.
+//! CoreAudio HAL capture without a second workflow or unsafe Send.
 //!
-//! Native objects stay on one owned thread. The tap only validates/copies into
-//! a bounded, preallocated lock-free packet pool; conversion and WAV I/O happen
-//! on that owning thread. Overruns/interruption fail the take but retain its WAV.
+//! Native objects stay on one owned thread. The input callback only renders,
+//! validates and copies into a bounded, preallocated lock-free packet pool;
+//! conversion and WAV I/O happen on that owning thread. A route change while
+//! the device settles restarts capture into the same WAV, and a short skipped
+//! I/O cycle is recorded as silence; other interruptions fail the take but
+//! retain its WAV.
 
 use anyhow::{anyhow, bail, Context, Result};
 use block2::RcBlock;
@@ -12,17 +15,21 @@ use cantrip_engine::audio::{
 use cantrip_engine::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
 use cantrip_engine::ports::MicrophoneAccessUnsupported;
 use crossbeam_queue::ArrayQueue;
-use objc2::rc::{autoreleasepool, Retained};
-use objc2::runtime::{Bool, NSObjectProtocol, ProtocolObject};
+use objc2::rc::autoreleasepool;
+use objc2::runtime::Bool;
 use objc2_audio_toolbox::{
-    kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, AudioUnitGetProperty,
-    AudioUnitSetProperty,
+    kAudioOutputUnitProperty_CurrentDevice, kAudioOutputUnitProperty_EnableIO,
+    kAudioOutputUnitProperty_IsRunning, kAudioOutputUnitProperty_SetInputCallback,
+    kAudioUnitManufacturer_Apple, kAudioUnitProperty_MaximumFramesPerSlice,
+    kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
+    kAudioUnitScope_Output, kAudioUnitSubType_HALOutput, kAudioUnitType_Output,
+    AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext,
+    AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioOutputUnitStart,
+    AudioOutputUnitStop, AudioUnit, AudioUnitAddPropertyListener, AudioUnitGetProperty,
+    AudioUnitInitialize, AudioUnitRemovePropertyListenerWithUserData, AudioUnitRender,
+    AudioUnitRenderActionFlags, AudioUnitSetProperty, AudioUnitUninitialize,
 };
 use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
-use objc2_avf_audio::{
-    AVAudioCommonFormat, AVAudioEngine, AVAudioEngineConfigurationChangeNotification,
-    AVAudioFormat, AVAudioInputNode, AVAudioPCMBuffer, AVAudioTime,
-};
 use objc2_core_audio::{
     kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyStreams,
     kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDevices,
@@ -30,52 +37,57 @@ use objc2_core_audio::{
     kAudioObjectPropertyScopeInput, kAudioObjectSystemObject, AudioObjectGetPropertyData,
     AudioObjectGetPropertyDataSize, AudioObjectID, AudioObjectPropertyAddress,
 };
-use objc2_core_audio_types::AudioBuffer;
+use objc2_core_audio_types::{
+    kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM, AudioBuffer,
+    AudioBufferList, AudioStreamBasicDescription, AudioTimeStamp, AudioTimeStampFlags,
+};
 use objc2_core_foundation::{CFRetained, CFString};
-use objc2_foundation::{ns_string, NSBundle, NSNotification, NSNotificationCenter};
-use std::ffi::{OsStr, OsString};
+use objc2_foundation::{ns_string, NSBundle};
+use std::cell::UnsafeCell;
+use std::ffi::{c_void, OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::mem::{size_of, MaybeUninit};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering,
+};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const PACKET_FRAMES: usize = 1_024;
+const PACKET_FRAMES: usize = 256;
 const WRITER_POLL: Duration = Duration::from_millis(2);
 const DEVICE_POLL: Duration = Duration::from_millis(200);
 const INTERRUPTION_GRACE: Duration = Duration::from_secs(5);
-/// Bound for AVAudioEngine to post the reconfiguration caused by selecting a
-/// device whose hardware format differs from the default input's.
-const DEVICE_SETTLE: Duration = Duration::from_secs(1);
-const DEVICE_SETTLE_POLL: Duration = Duration::from_millis(5);
-/// Engine restarts allowed when the route changes before any audio arrived,
-/// e.g. a Bluetooth headset switching from playback to its microphone profile.
+/// HAL input element (bus 1) and output element (bus 0) of an I/O unit.
+const INPUT_ELEMENT: u32 = 1;
+const OUTPUT_ELEMENT: u32 = 0;
+/// Smallest per-callback capacity requested from the input unit.
+const MIN_SLICE_FRAMES: u32 = 8_192;
+/// Capture restarts allowed while the route settles, e.g. a Bluetooth headset
+/// switching from playback to its microphone profile.
 const ROUTE_RESTARTS: u32 = 3;
 const ROUTE_RETRY_DELAY: Duration = Duration::from_millis(100);
+/// A Bluetooth headset settles into its microphone profile shortly after
+/// capture opens it, sometimes after its first buffers. Route changes this
+/// early restart capture and keep the audio already captured; later changes
+/// end the take honestly.
+const ROUTE_SETTLE: Duration = Duration::from_secs(2);
+/// Longest skipped-I/O gap recorded as silence instead of failing the take.
+const MAX_SILENCE_GAP: Duration = Duration::from_millis(250);
 const FAILURE_NONE: u8 = 0;
 const FAILURE_OVERRUN: u8 = 1;
 const FAILURE_FORMAT: u8 = 2;
 const FAILURE_CONFIGURATION: u8 = 3;
 const FAILURE_DISCONTINUITY: u8 = 4;
+const FAILURE_RENDER: u8 = 5;
 const FIRST_SAMPLE_TIME: i64 = i64::MIN;
 /// An unanswered prompt keeps its request thread at most this long; an answer
 /// given later still reaches this process's authorization.
 const MICROPHONE_DECISION_WAIT: Duration = Duration::from_secs(120);
-
-fn pcm_encoding(format: AVAudioCommonFormat) -> Option<PcmEncoding> {
-    match format {
-        AVAudioCommonFormat::PCMFormatFloat32 => Some(PcmEncoding::Float32),
-        AVAudioCommonFormat::PCMFormatFloat64 => Some(PcmEncoding::Float64),
-        AVAudioCommonFormat::PCMFormatInt16 => Some(PcmEncoding::Signed16),
-        AVAudioCommonFormat::PCMFormatInt32 => Some(PcmEncoding::Signed32),
-        _ => None,
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDevice {
@@ -289,7 +301,7 @@ pub fn input_devices() -> Result<Vec<InputDevice>> {
 pub fn diagnosis(source: Option<&str>) -> String {
     match autoreleasepool(|_| select_device(source)) {
         Ok(_) => {
-            "AVAudioEngine input ready; hardware PCM is converted to 16 kHz mono locally".to_owned()
+            "CoreAudio input ready; hardware PCM is converted to 16 kHz mono locally".to_owned()
         }
         Err(error) => format!("{error:#}"),
     }
@@ -460,6 +472,11 @@ struct Control {
     failure: AtomicU8,
     frames_seen: AtomicU64,
     next_sample_time: AtomicI64,
+    /// First CoreAudio status of a failed render; an error code, never audio.
+    render_status: AtomicI32,
+    /// Skipped-I/O gaps recorded as silence, and their total length.
+    gaps: AtomicU32,
+    silence_micros: AtomicU64,
 }
 
 impl Control {
@@ -469,7 +486,17 @@ impl Control {
             failure: AtomicU8::new(FAILURE_NONE),
             frames_seen: AtomicU64::new(0),
             next_sample_time: AtomicI64::new(FIRST_SAMPLE_TIME),
+            render_status: AtomicI32::new(0),
+            gaps: AtomicU32::new(0),
+            silence_micros: AtomicU64::new(0),
         }
+    }
+
+    fn fail_render(&self, status: i32) {
+        let _ = self
+            .render_status
+            .compare_exchange(0, status, Ordering::AcqRel, Ordering::Acquire);
+        self.fail(FAILURE_RENDER);
     }
 
     fn fail(&self, failure: u8) {
@@ -481,17 +508,17 @@ impl Control {
         );
     }
 
-    /// Forget a route change that stopped the engine before any audio arrived;
-    /// any other latched failure stays terminal.
+    /// Forget a route change or render failure that capture is restarting
+    /// from; any other latched failure stays terminal.
     fn rearm(&self) {
-        let _ = self.failure.compare_exchange(
-            FAILURE_CONFIGURATION,
-            FAILURE_NONE,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let _ = self
+            .failure
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |failure| {
+                matches!(failure, FAILURE_CONFIGURATION | FAILURE_RENDER).then_some(FAILURE_NONE)
+            });
         self.next_sample_time
             .store(FIRST_SAMPLE_TIME, Ordering::Release);
+        self.render_status.store(0, Ordering::Release);
     }
 
     fn failure_class(&self) -> &'static str {
@@ -500,6 +527,7 @@ impl Control {
             FAILURE_FORMAT => "format",
             FAILURE_CONFIGURATION => "configuration-changed",
             FAILURE_DISCONTINUITY => "discontinuity",
+            FAILURE_RENDER => "render-failed",
             _ => "other",
         }
     }
@@ -515,6 +543,7 @@ impl Control {
                 bail!("microphone device/session configuration was interrupted")
             }
             FAILURE_DISCONTINUITY => bail!("microphone sample timeline was interrupted"),
+            FAILURE_RENDER => bail!("microphone stopped delivering audio"),
             _ => bail!("microphone capture failed"),
         }
     }
@@ -532,8 +561,10 @@ struct Transport {
 
 impl Transport {
     fn new(format: PcmFormat) -> Self {
-        // One second of hardware PCM plus a tap-sized margin. This is fixed
-        // for the take: even a stalled disk cannot cause memory growth.
+        // One second of hardware PCM plus a burst margin. Every input callback
+        // takes at least one packet, so small packets keep that second for
+        // HAL buffers down to PACKET_FRAMES. This is fixed for the take: even
+        // a stalled disk cannot cause memory growth.
         let capacity = (format.sample_rate / PACKET_FRAMES as f64).ceil() as usize + 8;
         let transport = Self {
             free: ArrayQueue::new(capacity),
@@ -557,6 +588,31 @@ impl Transport {
             control.fail(FAILURE_OVERRUN);
             std::mem::forget(packet);
         }
+    }
+
+    /// Queue `frames` of silence where the HAL skipped I/O cycles. Realtime
+    /// safe: it only zeroes preallocated packets. False after a failure.
+    fn push_silence(&self, frames: usize, format: PcmFormat, control: &Control) -> bool {
+        let bytes_per_frame = format.bytes_per_frame();
+        let mut remaining = frames;
+        while remaining > 0 {
+            let Some(mut packet) = self.free.pop() else {
+                control.fail(FAILURE_OVERRUN);
+                return false;
+            };
+            packet.frames = remaining.min(PACKET_FRAMES);
+            packet.bytes[..packet.frames * bytes_per_frame].fill(0);
+            remaining -= packet.frames;
+            if let Err(packet) = self.ready.push(packet) {
+                control.fail(FAILURE_OVERRUN);
+                self.recycle(packet, control);
+                return false;
+            }
+        }
+        control
+            .frames_seen
+            .fetch_add(frames as u64, Ordering::Release);
+        true
     }
 
     /// The native buffer list is borrowed only for this call. Validation happens
@@ -612,7 +668,7 @@ impl Transport {
             packet.frames = (frames - start).min(PACKET_FRAMES);
             let plane_bytes = packet.frames * bytes_per_plane_frame;
             for (plane, buffer) in buffers.iter().enumerate() {
-                // SAFETY: AVAudioPCMBuffer owns mData throughout the tap call;
+                // SAFETY: the caller keeps mData valid throughout this call;
                 // required/plane count validation above bounds both ranges.
                 unsafe {
                     ptr::copy_nonoverlapping(
@@ -635,246 +691,436 @@ impl Transport {
     }
 }
 
-/// Native objects are deliberately not Send; this guard is constructed, used
-/// and destroyed entirely within the capture thread's autorelease pool.
+/// Per-unit state the realtime input callback borrows. It is boxed so its
+/// address is stable, and it is freed only after the unit is disposed.
+struct InputContext {
+    unit: AudioUnit,
+    format: PcmFormat,
+    capacity: usize,
+    samples: UnsafeCell<Box<[f32]>>,
+    transport: Arc<Transport>,
+    control: Arc<Control>,
+    hardware_changed: AtomicBool,
+    /// Longest skipped-I/O gap, in device frames, recorded as silence.
+    max_gap: i64,
+}
+
+impl InputContext {
+    /// Runs on the HAL's realtime I/O thread: no allocation, locks or I/O.
+    fn capture(
+        &self,
+        flags: NonNull<AudioUnitRenderActionFlags>,
+        time: NonNull<AudioTimeStamp>,
+        bus: u32,
+        frames: usize,
+    ) {
+        let control = self.control.as_ref();
+        if frames == 0 || control.failure.load(Ordering::Acquire) != FAILURE_NONE {
+            return;
+        }
+        if frames > self.capacity {
+            control.fail(FAILURE_FORMAT);
+            return;
+        }
+        let bytes = frames * self.format.bytes_per_frame();
+        // SAFETY: only this unit's single I/O thread runs the callback, and
+        // the buffer outlives the unit; no other reference exists meanwhile.
+        let samples = unsafe { &mut *self.samples.get() };
+        let mut list = AudioBufferList {
+            mNumberBuffers: 1,
+            mBuffers: [AudioBuffer {
+                mNumberChannels: self.format.channels as u32,
+                mDataByteSize: bytes as u32,
+                mData: samples.as_mut_ptr().cast(),
+            }],
+        };
+        let rendered = unsafe {
+            AudioUnitRender(
+                self.unit,
+                flags.as_ptr(),
+                time,
+                bus,
+                frames as u32,
+                NonNull::from(&mut list),
+            )
+        };
+        if rendered != 0 {
+            control.fail_render(rendered);
+            return;
+        }
+        let time = unsafe { time.as_ref() };
+        if time.mFlags.contains(AudioTimeStampFlags::SampleTimeValid) {
+            let sample_time = time.mSampleTime.round() as i64;
+            let Some(next) = sample_time.checked_add(frames as i64) else {
+                control.fail(FAILURE_DISCONTINUITY);
+                return;
+            };
+            let expected = control.next_sample_time.swap(next, Ordering::AcqRel);
+            if expected != FIRST_SAMPLE_TIME && expected != sample_time {
+                // An overloaded HAL skips whole I/O cycles. Keep the take's
+                // timeline by recording a short skip as silence and counting
+                // it; anything longer or backwards is a real discontinuity.
+                let gap = sample_time.saturating_sub(expected);
+                if gap <= 0 || gap > self.max_gap {
+                    control.fail(FAILURE_DISCONTINUITY);
+                    return;
+                }
+                if !self
+                    .transport
+                    .push_silence(gap as usize, self.format, control)
+                {
+                    return;
+                }
+                control.gaps.fetch_add(1, Ordering::AcqRel);
+                control.silence_micros.fetch_add(
+                    (gap as f64 * 1_000_000.0 / self.format.sample_rate) as u64,
+                    Ordering::AcqRel,
+                );
+            }
+        }
+        // SAFETY: the unit rendered into our own buffer, which stays valid
+        // and unaliased until this callback returns.
+        unsafe {
+            self.transport
+                .copy_buffers(&list.mBuffers, frames, self.format, control)
+        };
+    }
+}
+
+unsafe extern "C-unwind" fn capture_input(
+    context: NonNull<c_void>,
+    flags: NonNull<AudioUnitRenderActionFlags>,
+    time: NonNull<AudioTimeStamp>,
+    bus: u32,
+    frames: u32,
+    _data: *mut AudioBufferList,
+) -> i32 {
+    // SAFETY: registered with a pointer to the unit's boxed InputContext,
+    // which outlives every callback from that unit.
+    let context = unsafe { context.cast::<InputContext>().as_ref() };
+    context.capture(flags, time, bus, frames as usize);
+    0
+}
+
+unsafe extern "C-unwind" fn hardware_format_changed(
+    context: NonNull<c_void>,
+    _unit: AudioUnit,
+    _property: u32,
+    scope: u32,
+    element: u32,
+) {
+    if scope == kAudioUnitScope_Input && element == INPUT_ELEMENT {
+        // SAFETY: as for capture_input; the listener is removed before disposal.
+        let context = unsafe { context.cast::<InputContext>().as_ref() };
+        context.hardware_changed.store(true, Ordering::Release);
+    }
+}
+
+/// A CoreAudio HAL input unit bound to exactly one device. Unlike
+/// AVAudioEngine it has no output side and no default-device aggregate, so
+/// nothing rebinds it to the system default while a Bluetooth route settles.
+/// Constructed, used and destroyed on the capture thread.
 struct NativeCapture {
-    engine: Retained<AVAudioEngine>,
-    input: Retained<AVAudioInputNode>,
-    center: Retained<NSNotificationCenter>,
-    observer: Option<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
-    tap_installed: bool,
+    unit: AudioUnit,
+    context: Option<Box<InputContext>>,
+    listening: bool,
+    initialized: bool,
     stopped: bool,
 }
 
 impl NativeCapture {
     fn new(device: AudioObjectID) -> Result<Self> {
-        let engine = unsafe { AVAudioEngine::new() };
-        let input = unsafe { engine.inputNode() };
-        let mut capture = Self {
-            engine,
-            input,
-            center: NSNotificationCenter::defaultCenter(),
-            observer: None,
-            tap_installed: false,
-            stopped: false,
+        let description = AudioComponentDescription {
+            componentType: kAudioUnitType_Output,
+            componentSubType: kAudioUnitSubType_HALOutput,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0,
         };
-        if unsafe { capture.input.audioUnit() }.is_null() {
-            bail!("AVAudioEngine has no microphone audio unit");
+        let component =
+            unsafe { AudioComponentFindNext(ptr::null_mut(), NonNull::from(&description)) };
+        if component.is_null() {
+            bail!("CoreAudio has no microphone input unit");
         }
-        capture.select(device)?;
+        let mut unit: AudioUnit = ptr::null_mut();
+        check_status(
+            unsafe { AudioComponentInstanceNew(component, NonNull::from(&mut unit)) },
+            "creating microphone input unit",
+        )?;
+        let capture = Self {
+            unit,
+            context: None,
+            listening: false,
+            initialized: false,
+            stopped: true,
+        };
+        // Input must be enabled before a device is bound to the unit.
+        capture.set(
+            kAudioOutputUnitProperty_EnableIO,
+            kAudioUnitScope_Input,
+            INPUT_ELEMENT,
+            &1_u32,
+            "enabling microphone input",
+        )?;
+        capture.set(
+            kAudioOutputUnitProperty_EnableIO,
+            kAudioUnitScope_Output,
+            OUTPUT_ELEMENT,
+            &0_u32,
+            "disabling audio output",
+        )?;
+        let selected = capture.set_status(
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &device,
+        );
+        if selected != 0 {
+            tracing::warn!("[Capture] selecting microphone failed status={selected}");
+        }
+        check_status(selected, "selecting configured microphone")?;
+        if capture.current_device()? != device {
+            bail!("CoreAudio did not select the requested microphone");
+        }
         Ok(capture)
     }
 
-    /// Bind the input unit to `device` and let the resulting reconfiguration land.
-    fn select(&mut self, device: AudioObjectID) -> Result<()> {
-        // AVAudioEngine first binds its input node to the system default input.
-        // Selecting another device changes the unit's hardware format at once,
-        // but the engine reconfigures asynchronously and posts a configuration
-        // change about 100 ms later. A start before that lands can be stopped by
-        // it, so observe from before the switch and let it land first.
-        let previous = hardware_shape(&self.input);
-        let settled = Arc::new(AtomicBool::new(false));
-        let signal = Arc::clone(&settled);
-        self.observe(move || signal.store(true, Ordering::Release));
-        let selection = (|| -> Result<()> {
-            let selected = unsafe {
-                AudioUnitSetProperty(
-                    self.input.audioUnit(),
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    ptr::from_ref(&device).cast(),
-                    size_of::<AudioObjectID>() as u32,
-                )
-            };
-            if selected != 0 {
-                tracing::warn!("[Capture] selecting microphone failed status={selected}");
-            }
-            check_status(selected, "selecting configured microphone")?;
-            if self.current_device()? != device {
-                bail!("AVAudioEngine did not select the requested microphone");
-            }
-            if hardware_shape(&self.input) != previous {
-                let deadline = Instant::now() + DEVICE_SETTLE;
-                while !settled.load(Ordering::Acquire) && Instant::now() < deadline {
-                    thread::sleep(DEVICE_SETTLE_POLL);
-                }
-            }
-            Ok(())
-        })();
-        // The settle observer never outlives selection, even when it fails.
-        let unobserved = self.unobserve();
-        selection.and(unobserved)
-    }
-
-    fn observe(&mut self, changed: impl Fn() + 'static) {
-        let notification = RcBlock::new(move |_notification: NonNull<NSNotification>| {
-            // Never tear down the engine from its internal notification queue.
-            changed();
-        });
-        self.observer = Some(unsafe {
-            self.center.addObserverForName_object_queue_usingBlock(
-                Some(AVAudioEngineConfigurationChangeNotification),
-                Some(self.engine.as_ref()),
-                None,
-                &notification,
+    fn set_status<T: Copy>(&self, property: u32, scope: u32, element: u32, value: &T) -> i32 {
+        unsafe {
+            AudioUnitSetProperty(
+                self.unit,
+                property,
+                scope,
+                element,
+                ptr::from_ref(value).cast(),
+                size_of::<T>() as u32,
             )
-        });
+        }
     }
 
-    fn unobserve(&mut self) -> Result<()> {
-        audio_call(|| {
-            if let Some(observer) = &self.observer {
-                unsafe { self.center.removeObserver(observer.as_ref()) };
-                self.observer = None;
-            }
-            Ok(())
-        })
+    fn set<T: Copy>(
+        &self,
+        property: u32,
+        scope: u32,
+        element: u32,
+        value: &T,
+        operation: &'static str,
+    ) -> Result<()> {
+        check_status(self.set_status(property, scope, element, value), operation)
     }
 
-    fn current_device(&self) -> Result<AudioObjectID> {
-        let mut device = 0_u32;
-        let mut size = size_of::<AudioObjectID>() as u32;
+    /// Callers use only the exact POD type documented for the property.
+    fn get<T: Copy>(
+        &self,
+        property: u32,
+        scope: u32,
+        element: u32,
+        operation: &'static str,
+    ) -> Result<T> {
+        let mut value = MaybeUninit::<T>::uninit();
+        let mut size = size_of::<T>() as u32;
         let status = unsafe {
             AudioUnitGetProperty(
-                self.input.audioUnit(),
-                kAudioOutputUnitProperty_CurrentDevice,
-                kAudioUnitScope_Global,
-                0,
-                NonNull::from(&mut device).cast(),
+                self.unit,
+                property,
+                scope,
+                element,
+                NonNull::from(&mut value).cast(),
                 NonNull::from(&mut size),
             )
         };
-        check_status(status, "checking current microphone")?;
-        if size as usize != size_of::<AudioObjectID>() {
-            bail!("microphone returned an unexpected device identity");
+        check_status(status, operation)?;
+        if size as usize != size_of::<T>() {
+            bail!("{operation} returned an unexpected size");
         }
-        Ok(device)
+        // SAFETY: CoreAudio filled exactly size_of::<T>() bytes of a POD value.
+        Ok(unsafe { value.assume_init() })
     }
 
-    /// The hardware-side input format is authoritative. After a device switch
-    /// the node's output format can still describe the previous default input,
-    /// and tapping that stale format fails engine start with -10868.
-    fn format(&self) -> Result<(PcmFormat, Retained<AVAudioFormat>)> {
-        let native = unsafe { self.input.inputFormatForBus(0) };
-        let encoding = pcm_encoding(unsafe { native.commonFormat() })
-            .context("microphone does not provide a supported PCM sample format")?;
+    fn current_device(&self) -> Result<AudioObjectID> {
+        self.get(
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            "checking current microphone",
+        )
+    }
+
+    fn is_running(&self) -> bool {
+        self.get::<u32>(
+            kAudioOutputUnitProperty_IsRunning,
+            kAudioUnitScope_Global,
+            0,
+            "checking microphone capture",
+        )
+        .is_ok_and(|running| running != 0)
+    }
+
+    /// The device's own format. Capture asks the unit for the same rate and
+    /// channels as packed interleaved Float32, so the unit never resamples.
+    fn format(&self) -> Result<PcmFormat> {
+        let hardware: AudioStreamBasicDescription = self.get(
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Input,
+            INPUT_ELEMENT,
+            "reading microphone format",
+        )?;
         let format = PcmFormat {
-            sample_rate: unsafe { native.sampleRate() },
-            channels: unsafe { native.channelCount() } as usize,
-            encoding,
-            interleaved: unsafe { native.isInterleaved() },
+            sample_rate: hardware.mSampleRate,
+            channels: hardware.mChannelsPerFrame as usize,
+            encoding: PcmEncoding::Float32,
+            interleaved: true,
         };
         format.validate()?;
-        Ok((format, native))
+        Ok(format)
+    }
+
+    /// Whether the device's rate or channel count no longer matches `format`.
+    /// Checked when the unit reports a hardware format change, and on polls.
+    fn hardware_changed(&self, format: PcmFormat, polling: bool) -> bool {
+        let notified = self
+            .context
+            .as_ref()
+            .is_some_and(|context| context.hardware_changed.swap(false, Ordering::AcqRel));
+        if !notified && !polling {
+            return false;
+        }
+        match self.format() {
+            Ok(current) => {
+                current.sample_rate != format.sample_rate || current.channels != format.channels
+            }
+            Err(_) => true,
+        }
     }
 
     fn start(
         &mut self,
-        tap_format: &AVAudioFormat,
         format: PcmFormat,
         transport: Arc<Transport>,
         control: Arc<Control>,
     ) -> Result<()> {
-        self.stopped = false;
-        let changes = Arc::clone(&control);
-        self.observe(move || changes.fail(FAILURE_CONFIGURATION));
-        let tap = RcBlock::new(
-            move |buffer: NonNull<AVAudioPCMBuffer>, when: NonNull<AVAudioTime>| {
-                // Native guarantees these borrowed objects and their buffer list
-                // remain valid until this tap returns. No object crosses threads.
-                let buffer = unsafe { buffer.as_ref() };
-                let frames = unsafe { buffer.frameLength() } as usize;
-                if frames == 0 || control.failure.load(Ordering::Acquire) != FAILURE_NONE {
-                    return;
-                }
-                // AVAudioFormat is immutable and retained by this buffer. Checking
-                // its metadata does not allocate a conversion buffer or perform I/O.
-                let observed = unsafe { buffer.format() };
-                if pcm_encoding(unsafe { observed.commonFormat() }) != Some(format.encoding)
-                    || unsafe { observed.channelCount() } as usize != format.channels
-                    || unsafe { observed.sampleRate() } != format.sample_rate
-                    || (format.channels > 1
-                        && unsafe { observed.isInterleaved() } != format.interleaved)
-                {
-                    control.fail(FAILURE_FORMAT);
-                    return;
-                }
-                let when = unsafe { when.as_ref() };
-                if unsafe { when.isSampleTimeValid() } {
-                    let sample_time = unsafe { when.sampleTime() };
-                    let next = match sample_time.checked_add(frames as i64) {
-                        Some(next) => next,
-                        None => {
-                            control.fail(FAILURE_DISCONTINUITY);
-                            return;
-                        }
-                    };
-                    let expected = control.next_sample_time.swap(next, Ordering::AcqRel);
-                    if expected != FIRST_SAMPLE_TIME && expected != sample_time {
-                        control.fail(FAILURE_DISCONTINUITY);
-                        return;
-                    }
-                }
-                let list = unsafe { buffer.audioBufferList() };
-                let count = unsafe { list.as_ref().mNumberBuffers } as usize;
-                let expected_planes = if format.interleaved {
-                    1
-                } else {
-                    format.channels
-                };
-                if count != expected_planes {
-                    control.fail(FAILURE_FORMAT);
-                    return;
-                }
-                // AudioBufferList is a C flexible-array object. The count comes
-                // from AVFoundation and was bounded against the validated format.
-                let buffers = unsafe {
-                    std::slice::from_raw_parts(
-                        ptr::addr_of!((*list.as_ptr()).mBuffers).cast::<AudioBuffer>(),
-                        count,
-                    )
-                };
-                unsafe { transport.copy_buffers(buffers, frames, format, &control) };
-            },
-        );
-        self.tap_installed = true;
-        unsafe {
-            self.input.installTapOnBus_bufferSize_format_block(
-                0,
-                (format.sample_rate / 10.0).ceil() as u32,
-                Some(tap_format),
-                RcBlock::as_ptr(&tap),
-            );
+        if self.context.is_some() {
+            bail!("microphone input unit was already started");
         }
-        unsafe { self.engine.prepare() };
-        unsafe { self.engine.startAndReturnError() }.map_err(|error| {
-            tracing::warn!(
-                "[Capture] microphone engine start failed code={}",
-                error.code()
-            );
-            anyhow!("starting microphone capture: {error}")
-        })?;
-        Ok(())
+        self.stopped = false;
+        let frame_bytes = format.bytes_per_frame() as u32;
+        let client = AudioStreamBasicDescription {
+            mSampleRate: format.sample_rate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: frame_bytes,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: frame_bytes,
+            mChannelsPerFrame: format.channels as u32,
+            mBitsPerChannel: 32,
+            mReserved: 0,
+        };
+        self.set(
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Output,
+            INPUT_ELEMENT,
+            &client,
+            "setting microphone sample format",
+        )?;
+        let mut capacity: u32 = self.get(
+            kAudioUnitProperty_MaximumFramesPerSlice,
+            kAudioUnitScope_Global,
+            0,
+            "reading microphone buffer size",
+        )?;
+        if capacity < MIN_SLICE_FRAMES {
+            self.set(
+                kAudioUnitProperty_MaximumFramesPerSlice,
+                kAudioUnitScope_Global,
+                0,
+                &MIN_SLICE_FRAMES,
+                "sizing microphone buffer",
+            )?;
+            capacity = MIN_SLICE_FRAMES;
+        }
+        let capacity = capacity as usize;
+        let context = self.context.insert(Box::new(InputContext {
+            unit: self.unit,
+            format,
+            capacity,
+            samples: UnsafeCell::new(vec![0.0; capacity * format.channels].into_boxed_slice()),
+            max_gap: (format.sample_rate * MAX_SILENCE_GAP.as_secs_f64()).round() as i64,
+            transport,
+            control,
+            hardware_changed: AtomicBool::new(false),
+        }));
+        let context = ptr::from_ref(context.as_ref()).cast_mut().cast::<c_void>();
+        self.set(
+            kAudioOutputUnitProperty_SetInputCallback,
+            kAudioUnitScope_Global,
+            0,
+            &AURenderCallbackStruct {
+                inputProc: Some(capture_input),
+                inputProcRefCon: context,
+            },
+            "installing microphone callback",
+        )?;
+        check_status(
+            unsafe {
+                AudioUnitAddPropertyListener(
+                    self.unit,
+                    kAudioUnitProperty_StreamFormat,
+                    Some(hardware_format_changed),
+                    context,
+                )
+            },
+            "observing microphone format",
+        )?;
+        self.listening = true;
+        check_status(
+            unsafe { AudioUnitInitialize(self.unit) },
+            "initializing microphone input",
+        )?;
+        self.initialized = true;
+        let started = unsafe { AudioOutputUnitStart(self.unit) };
+        if started != 0 {
+            tracing::warn!("[Capture] microphone engine start failed code={started}");
+        }
+        check_status(started, "starting microphone capture")
     }
 
     fn stop(&mut self) -> Result<()> {
         if self.stopped {
             return Ok(());
         }
-        let stopped = audio_call(|| {
-            unsafe { self.engine.stop() };
+        let stopped = check_status(
+            unsafe { AudioOutputUnitStop(self.unit) },
+            "stopping microphone capture",
+        );
+        let unobserved = if self.listening {
+            self.listening = false;
+            let context = self.context.as_deref().map_or(ptr::null_mut(), |context| {
+                ptr::from_ref(context).cast_mut().cast::<c_void>()
+            });
+            check_status(
+                unsafe {
+                    AudioUnitRemovePropertyListenerWithUserData(
+                        self.unit,
+                        kAudioUnitProperty_StreamFormat,
+                        Some(hardware_format_changed),
+                        context,
+                    )
+                },
+                "removing microphone format observer",
+            )
+        } else {
             Ok(())
-        });
-        let untapped = audio_call(|| {
-            if self.tap_installed {
-                unsafe { self.input.removeTapOnBus(0) };
-                self.tap_installed = false;
-            }
+        };
+        let uninitialized = if self.initialized {
+            self.initialized = false;
+            check_status(
+                unsafe { AudioUnitUninitialize(self.unit) },
+                "releasing microphone input",
+            )
+        } else {
             Ok(())
-        });
-        let unobserved = self.unobserve();
-        let result = stopped.and(untapped).and(unobserved);
+        };
+        let result = stopped.and(unobserved).and(uninitialized);
         self.stopped = result.is_ok();
         result
     }
@@ -885,16 +1131,9 @@ impl Drop for NativeCapture {
         if self.stop().is_err() {
             tracing::warn!("[Capture] native audio teardown failed; original WAV retained");
         }
+        // Disposal ends every callback; the boxed context is freed only after.
+        unsafe { AudioComponentInstanceDispose(self.unit) };
     }
-}
-
-/// Sample rate and channel count the input unit receives from the hardware.
-fn hardware_shape(input: &AVAudioInputNode) -> (f64, usize) {
-    let format = unsafe { input.inputFormatForBus(0) };
-    (
-        unsafe { format.sampleRate() },
-        unsafe { format.channelCount() } as usize,
-    )
 }
 
 fn drain_packets(
@@ -948,54 +1187,50 @@ fn ended(class: &'static str, message: &'static str) -> anyhow::Error {
 struct Restarted {
     native: NativeCapture,
     format: PcmFormat,
-    tap_format: Retained<AVAudioFormat>,
     transport: Arc<Transport>,
     converter: Pcm16Converter,
 }
 
-/// Restart capture of `device` on a fresh engine after a route change before
-/// any audio. A fresh engine is essential: the replaced engine can still post
-/// its notification for the same change, and that must never stop this one.
+/// Restart capture of `device` on a fresh input unit while its route settles,
+/// reading the format the device settled on. `None` means stop or cancel
+/// arrived first; the audio already kept is the whole take.
 fn restart_capture(
     device: AudioObjectID,
     control: &Arc<Control>,
     restarts: &mut u32,
-) -> Result<Restarted> {
+) -> Result<Option<Restarted>> {
     loop {
+        if control.stop_requested.load(Ordering::Acquire) {
+            // The route change lost no kept audio; this is an ordinary stop.
+            control.rearm();
+            return Ok(None);
+        }
         *restarts += 1;
         tracing::info!(
-            "[Capture] microphone route changed before audio; restarting attempt={restarts}"
+            "[Capture] microphone route changed while settling; restarting attempt={restarts}"
         );
         let attempt = (|| -> Result<Restarted> {
             let mut native = audio_call(|| NativeCapture::new(device))?;
-            let (format, tap_format) = audio_call(|| native.format())?;
+            let format = audio_call(|| native.format())?;
             let transport = Arc::new(Transport::new(format));
             let converter = Pcm16Converter::new(format)?;
             control.rearm();
-            audio_call(|| {
-                native.start(
-                    &tap_format,
-                    format,
-                    Arc::clone(&transport),
-                    Arc::clone(control),
-                )
-            })?;
+            audio_call(|| native.start(format, Arc::clone(&transport), Arc::clone(control)))?;
             Ok(Restarted {
                 native,
                 format,
-                tap_format,
                 transport,
                 converter,
             })
         })();
         match attempt {
-            Ok(restarted) => return Ok(restarted),
+            Ok(restarted) => return Ok(Some(restarted)),
             // The route may still be settling; retry within the same budget.
+            // A stop request unparks this wait and ends the take above.
             Err(_)
-                if *restarts < ROUTE_RESTARTS
-                    && !control.stop_requested.load(Ordering::Acquire) =>
+                if *restarts < ROUTE_RESTARTS || control.stop_requested.load(Ordering::Acquire) =>
             {
-                thread::sleep(ROUTE_RETRY_DELAY);
+                thread::park_timeout(ROUTE_RETRY_DELAY);
             }
             Err(error) => {
                 tracing::warn!("[Capture] microphone capture failed class=restart-failed");
@@ -1022,7 +1257,7 @@ fn capture_to_wav(
         );
     })?;
     let mut native = audio_call(|| NativeCapture::new(selected.id))?;
-    let (mut format, mut tap_format) = audio_call(|| native.format())?;
+    let mut format = audio_call(|| native.format())?;
     let mut transport = Arc::new(Transport::new(format));
     let mut converter = Pcm16Converter::new(format)?;
     // create_new is essential: a stale or recovered only copy is never replaced.
@@ -1038,16 +1273,11 @@ fn capture_to_wav(
     let mut last_audio = Instant::now();
     let mut started = false;
     let mut restarts = 0;
+    let mut opened = Instant::now();
     let recording = (|| -> Result<()> {
-        audio_call(|| {
-            native.start(
-                &tap_format,
-                format,
-                Arc::clone(&transport),
-                Arc::clone(control),
-            )
-        })?;
+        audio_call(|| native.start(format, Arc::clone(&transport), Arc::clone(control)))?;
         started = true;
+        opened = Instant::now();
         if ready.send(Ok(())).is_err() {
             control.stop_requested.store(true, Ordering::Release);
         }
@@ -1056,35 +1286,64 @@ fn capture_to_wav(
                 writer.checkpoint()?;
             }
             let polling = Instant::now() >= next_device_poll;
-            // AVAudioEngine reports a route change by posting a configuration
-            // change, by stopping itself, or both, in either order. Any other
-            // latched failure is terminal.
+            // A route change shows as a new device format, a failed render or
+            // a unit that stopped itself. Any other latched failure is terminal.
+            if native.hardware_changed(format, polling) {
+                control.fail(FAILURE_CONFIGURATION);
+            }
             let failure = control.failure.load(Ordering::Acquire);
-            let route_changed = failure == FAILURE_CONFIGURATION
-                || (failure == FAILURE_NONE && polling && !unsafe { native.engine.isRunning() });
+            let route_changed = matches!(failure, FAILURE_CONFIGURATION | FAILURE_RENDER)
+                || (failure == FAILURE_NONE && polling && !native.is_running());
             if route_changed && restarts < ROUTE_RESTARTS {
                 // A Bluetooth headset switching to its microphone profile (or
                 // another route change) stops the engine just after start.
-                // Before any audio arrived nothing is lost: restart capture.
-                audio_call(|| native.stop())?;
-                if control.frames_seen.load(Ordering::Acquire) == 0 {
-                    let alive = unsafe {
-                        property::<u32>(
-                            selected.id,
-                            kAudioDevicePropertyDeviceIsAlive,
-                            kAudioObjectPropertyScopeGlobal,
-                        )
+                // While the route settles, restart capture and keep the WAV.
+                let stopped = audio_call(|| native.stop());
+                let alive = unsafe {
+                    property::<u32>(
+                        selected.id,
+                        kAudioDevicePropertyDeviceIsAlive,
+                        kAudioObjectPropertyScopeGlobal,
+                    )
+                };
+                if !matches!(alive, Ok(alive) if alive != 0) {
+                    return Err(ended(
+                        "device-changed",
+                        "selected microphone disconnected or changed during capture",
+                    ));
+                }
+                if let Err(error) = stopped {
+                    tracing::warn!("[Capture] microphone capture failed class=stop-failed");
+                    return Err(error);
+                }
+                if control.frames_seen.load(Ordering::Acquire) == 0
+                    || opened.elapsed() < ROUTE_SETTLE
+                {
+                    // Keep what the old route captured: the WAV stays 16 kHz
+                    // mono, and each hardware format gets its own converter.
+                    drain_packets(&transport, format, &mut converter, &mut writer, control)?;
+                    converter.finish(&mut writer)?;
+                    writer.checkpoint()?;
+                    let trigger = match failure {
+                        FAILURE_CONFIGURATION => "configuration-changed",
+                        FAILURE_RENDER => "render-failed",
+                        _ => "engine-stopped",
                     };
-                    if !matches!(alive, Ok(alive) if alive != 0) {
-                        return Err(ended(
-                            "device-changed",
-                            "selected microphone disconnected or changed during capture",
-                        ));
-                    }
-                    let restarted = restart_capture(selected.id, control, &mut restarts)?;
+                    // A 16 kHz PCM16 WAV holds 32 bytes per millisecond.
+                    tracing::info!(
+                        "[Capture] microphone route change detected trigger={trigger} status={} kept_ms={}",
+                        control.render_status.load(Ordering::Acquire),
+                        writer
+                            .get_ref()
+                            .metadata()
+                            .map_or(0, |wav| wav.len().saturating_sub(44) / 32)
+                    );
+                    let Some(restarted) = restart_capture(selected.id, control, &mut restarts)?
+                    else {
+                        return Ok(());
+                    };
                     native = restarted.native;
                     format = restarted.format;
-                    tap_format = restarted.tap_format;
                     transport = restarted.transport;
                     converter = restarted.converter;
                     last_audio = Instant::now();
@@ -1093,8 +1352,9 @@ fn capture_to_wav(
             }
             if let Err(error) = control.capture_failure() {
                 tracing::warn!(
-                    "[Capture] microphone capture failed class={}",
-                    control.failure_class()
+                    "[Capture] microphone capture failed class={} status={}",
+                    control.failure_class(),
+                    control.render_status.load(Ordering::Acquire)
                 );
                 return Err(error);
             }
@@ -1116,20 +1376,24 @@ fn capture_to_wav(
                         "microphone permission was revoked during capture",
                     ));
                 }
-                let alive: u32 = unsafe {
-                    property(
+                // A device query that fails means the device went away.
+                let alive = unsafe {
+                    property::<u32>(
                         selected.id,
                         kAudioDevicePropertyDeviceIsAlive,
                         kAudioObjectPropertyScopeGlobal,
-                    )?
+                    )
                 };
-                if alive == 0 || native.current_device()? != selected.id {
+                let bound = native.current_device();
+                if !matches!(alive, Ok(alive) if alive != 0)
+                    || !matches!(bound, Ok(bound) if bound == selected.id)
+                {
                     return Err(ended(
                         "device-changed",
                         "selected microphone disconnected or changed during capture",
                     ));
                 }
-                if !unsafe { native.engine.isRunning() } {
+                if !native.is_running() {
                     return Err(ended(
                         "engine-stopped",
                         "microphone engine stopped during capture",
@@ -1144,6 +1408,13 @@ fn capture_to_wav(
     // Stop/remove the native tap before draining the final bounded queue. No
     // callback can append after finalization, including on an abandoned take.
     let stopped = native.stop();
+    let gaps = control.gaps.load(Ordering::Acquire);
+    if gaps != 0 {
+        tracing::warn!(
+            "[Capture] microphone skipped audio recorded as silence gaps={gaps} silence_ms={}",
+            control.silence_micros.load(Ordering::Acquire) / 1_000
+        );
+    }
     let drained = drain_packets(&transport, format, &mut converter, &mut writer, control);
     let conversion = converter.finish(&mut writer);
     let finalization = writer.finish();
@@ -1161,8 +1432,9 @@ fn capture_to_wav(
         Ok(())
     };
     // Evaluate every finalization step even after an earlier error. The first
-    // failure still reaches the engine, so incomplete audio is never sent as a
-    // successful take and never silently retried through another capture device.
+    // failure still reaches the engine, so a take that ended early is never
+    // sent as a successful take and never silently retried through another
+    // capture device.
     recording
         .and(control.capture_failure())
         .and(stopped)
@@ -1414,6 +1686,39 @@ mod tests {
     }
 
     #[test]
+    fn rearm_forgets_only_route_failures_before_audio() {
+        for terminal in [FAILURE_OVERRUN, FAILURE_FORMAT, FAILURE_DISCONTINUITY] {
+            let control = Control::new();
+            control.fail(terminal);
+            control.rearm();
+            assert_eq!(control.failure.load(Ordering::Acquire), terminal);
+            assert!(control.capture_failure().is_err());
+        }
+        let control = Control::new();
+        control.fail(FAILURE_CONFIGURATION);
+        control.rearm();
+        assert!(control.capture_failure().is_ok());
+        control.fail_render(-10863);
+        assert_eq!(control.failure_class(), "render-failed");
+        control.rearm();
+        assert!(control.capture_failure().is_ok());
+        assert_eq!(control.render_status.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn stop_during_a_route_restart_ends_as_an_ordinary_stop() {
+        let control = Arc::new(Control::new());
+        control.fail(FAILURE_CONFIGURATION);
+        control.stop_requested.store(true, Ordering::Release);
+        let mut restarts = 0;
+        // Stop is honored before any device is touched.
+        let restarted = restart_capture(0, &control, &mut restarts).unwrap();
+        assert!(restarted.is_none());
+        assert_eq!(restarts, 0);
+        assert!(control.capture_failure().is_ok());
+    }
+
+    #[test]
     fn transport_overrun_is_explicit_and_keeps_the_queued_prefix() {
         let format = mono_format();
         let transport = Transport::new(format);
@@ -1440,6 +1745,37 @@ mod tests {
                 .iter()
                 .all(|bytes| *bytes == 123_i16.to_ne_bytes()));
         }
+    }
+
+    #[test]
+    fn skipped_io_is_queued_as_zeroed_frames_until_the_pool_is_exhausted() {
+        let format = mono_format();
+        let transport = Transport::new(format);
+        let control = Control::new();
+        // Recycled packets still hold earlier audio; silence must overwrite it.
+        while let Some(mut packet) = transport.free.pop() {
+            packet.bytes.fill(0x55);
+            assert!(transport.ready.push(packet).is_ok());
+        }
+        while let Some(packet) = transport.ready.pop() {
+            transport.recycle(packet, &control);
+        }
+        assert!(transport.push_silence(PACKET_FRAMES + 3, format, &control));
+        assert_eq!(
+            control.frames_seen.load(Ordering::Acquire),
+            PACKET_FRAMES as u64 + 3
+        );
+        for frames in [PACKET_FRAMES, 3] {
+            let packet = transport.ready.pop().expect("silence packet");
+            assert_eq!(packet.frames, frames);
+            assert!(packet.bytes[..frames * format.bytes_per_frame()]
+                .iter()
+                .all(|&byte| byte == 0));
+            transport.recycle(packet, &control);
+        }
+        let pool = transport.free.len();
+        assert!(!transport.push_silence((pool + 1) * PACKET_FRAMES, format, &control));
+        assert_eq!(control.failure_class(), "overrun");
     }
 
     #[test]
