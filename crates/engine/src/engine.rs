@@ -1099,8 +1099,6 @@ fn start_recording(
         .as_ref()
         .map(|(name, target)| daemon.handoff_view(name, target));
     let operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
-    daemon.outcome = None;
-    daemon.notice = None;
     daemon.state = State::RequestingMicrophone {
         operation,
         config: Box::new(config),
@@ -1128,7 +1126,17 @@ fn advance_microphone_start(
         .microphone
         .as_ref()
         .map(|access| access.authorization);
-    match microphone_transition(event, authorization) {
+    let transition = microphone_transition(event, authorization);
+    if matches!(event, MicrophoneEvent::Press)
+        && matches!(
+            transition,
+            MicrophoneTransition::Request | MicrophoneTransition::Wait
+        )
+    {
+        daemon.outcome = None;
+        daemon.notice = None;
+    }
+    match transition {
         MicrophoneTransition::Request => {
             let reply = allow_microphone(daemon);
             if !reply.ok {
