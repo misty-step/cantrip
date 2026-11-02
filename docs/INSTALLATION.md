@@ -410,6 +410,13 @@ configuration selects clipboard/manual paste. Existing Auto/Paste/Type choices
 are preserved and defer without opening the pasteboard or sending keys, never
 silently downgraded.
 
+The first dictation Start or shortcut can ask for microphone access, then record
+after Allow without another press. Installation, launch, status, polling, and
+opening Settings do not ask. See the
+[capture-owner authorization decision](decisions/0033-capture-owner-microphone-authorization.md)
+and [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
+for cancellation and denied-access guidance.
+
 ### Production prerequisites and fail-closed packaging
 
 Production mode is the default when neither development signing mode is selected.

@@ -115,6 +115,11 @@ impl Operation {
 
 enum State {
     Idle,
+    RequestingMicrophone {
+        operation: Operation,
+        config: Box<Config>,
+        started: Instant,
+    },
     Recording {
         operation: Operation,
         recorder: Box<dyn Recorder>,
@@ -138,24 +143,58 @@ impl State {
         match self {
             Self::Idle => StateKind::Idle,
             Self::Recording { .. } => StateKind::Recording,
-            Self::Processing { .. } => StateKind::Processing,
+            Self::RequestingMicrophone { .. } | Self::Processing { .. } => StateKind::Processing,
         }
     }
 
     fn operation(&self) -> Option<&Operation> {
         match self {
             Self::Idle => None,
-            Self::Recording { operation, .. } | Self::Processing { operation, .. } => {
-                Some(operation)
-            }
+            Self::RequestingMicrophone { operation, .. }
+            | Self::Recording { operation, .. }
+            | Self::Processing { operation, .. } => Some(operation),
         }
     }
 
     fn stage(&self) -> Option<&Stage> {
         match self {
+            Self::RequestingMicrophone { .. } => Some(&Stage::RequestingMicrophone),
             Self::Processing { stage, .. } => Some(stage),
             _ => None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum MicrophoneEvent {
+    Press,
+    Answer,
+    Cancel,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MicrophoneTransition {
+    Request,
+    Wait,
+    Record,
+    Refuse,
+    Cancel,
+}
+
+/// The pending press's transition table. Only Press can request access; Answer
+/// consumes the owner's eventual result, and Cancel removes the recording intent.
+fn microphone_transition(
+    event: MicrophoneEvent,
+    authorization: Option<MicrophoneAuthorization>,
+) -> MicrophoneTransition {
+    use MicrophoneAuthorization as Access;
+    use MicrophoneEvent as Event;
+    match (event, authorization) {
+        (Event::Cancel, _) => MicrophoneTransition::Cancel,
+        (Event::Press, None) | (_, Some(Access::Authorized)) => MicrophoneTransition::Record,
+        (Event::Press, Some(Access::NotDetermined)) => MicrophoneTransition::Request,
+        (_, Some(Access::Requesting)) => MicrophoneTransition::Wait,
+        _ => MicrophoneTransition::Refuse,
     }
 }
 
@@ -367,11 +406,12 @@ impl Daemon {
                 }),
             ),
             State::Processing { phase_started, .. } => (phase_started.elapsed().as_secs(), None),
+            State::RequestingMicrophone { started, .. } => (started.elapsed().as_secs(), None),
             State::Idle => (0, None),
         };
         let idle = matches!(self.state, State::Idle) && self.worker_available;
         let cancellable = match &self.state {
-            State::Recording { .. } => true,
+            State::RequestingMicrophone { .. } | State::Recording { .. } => true,
             State::Processing {
                 operation, kind, ..
             } => {
@@ -406,7 +446,10 @@ impl Daemon {
                 .as_ref()
                 .is_some_and(TerminalOutcome::needs_attention),
             capabilities: Capabilities {
-                stop: matches!(self.state, State::Recording { .. }),
+                stop: matches!(
+                    self.state,
+                    State::RequestingMicrophone { .. } | State::Recording { .. }
+                ),
                 cancel: cancellable,
                 recover: idle && self.has_audio,
                 copy: idle && self.has_text,
@@ -638,11 +681,9 @@ fn serve(
             next_capability_refresh = Instant::now() + CAPABILITY_REFRESH_INTERVAL;
         }
         if Instant::now() >= next_microphone_refresh {
-            if let (Some(access), Some(authorization)) = (
-                daemon.microphone.as_mut(),
-                daemon.platform.microphone_authorization(),
-            ) {
-                access.authorization = authorization;
+            refresh_microphone(daemon);
+            if matches!(daemon.state, State::RequestingMicrophone { .. }) {
+                advance_microphone_start(daemon, runtime_dir, MicrophoneEvent::Answer);
             }
             next_microphone_refresh = Instant::now() + MICROPHONE_REFRESH_INTERVAL;
         }
@@ -950,7 +991,7 @@ fn execute(
             State::Idle => start_recording(daemon, runtime_dir, postproc, handoff),
             // A shortcut stops only the take it started: another shortcut's toggle must
             // never paste a handoff take or hand off a desktop take.
-            State::Recording { config, .. }
+            State::RequestingMicrophone { config, .. } | State::Recording { config, .. }
                 if config
                     .selected_handoff
                     .as_ref()
@@ -958,11 +999,14 @@ fn execute(
                     != handoff.as_deref() =>
             {
                 daemon.reject(
-                    "Recording continues; stop it with the shortcut that started it.",
+                    "Use the shortcut that started this take to stop it.",
                     "handoff-mismatch",
                 )
             }
             State::Recording { .. } => stop_recording(daemon, job_tx, StopReason::Toggle),
+            State::RequestingMicrophone { .. } => {
+                advance_microphone_start(daemon, runtime_dir, MicrophoneEvent::Cancel)
+            }
             State::Processing { .. } => daemon.busy(),
         },
         Command::Start { postproc, handoff } => match &daemon.state {
@@ -971,10 +1015,13 @@ fn execute(
         },
         Command::Stop => match &daemon.state {
             State::Recording { .. } => stop_recording(daemon, job_tx, StopReason::Stop),
+            State::RequestingMicrophone { .. } => {
+                advance_microphone_start(daemon, runtime_dir, MicrophoneEvent::Cancel)
+            }
             State::Idle => daemon.reject("Nothing is recording.", "not-recording"),
             State::Processing { .. } => daemon.busy(),
         },
-        Command::Cancel => cancel_command(daemon, job_tx),
+        Command::Cancel => cancel_command(daemon, runtime_dir, job_tx),
         Command::Last => replay_latest(daemon, job_tx),
         Command::Recover {
             id,
@@ -1060,17 +1107,124 @@ fn start_recording(
         );
     }
     let take_id = recovery::new_id();
+    let handoff = config
+        .selected_handoff
+        .as_ref()
+        .map(|(name, target)| daemon.handoff_view(name, target));
+    let operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
+    daemon.outcome = None;
+    daemon.notice = None;
+    daemon.state = State::RequestingMicrophone {
+        operation,
+        config: Box::new(config),
+        started: Instant::now(),
+    };
+    refresh_microphone(daemon);
+    advance_microphone_start(daemon, runtime_dir, MicrophoneEvent::Press)
+}
+
+fn refresh_microphone(daemon: &mut Daemon) {
+    if let (Some(access), Some(authorization)) = (
+        daemon.microphone.as_mut(),
+        daemon.platform.microphone_authorization(),
+    ) {
+        access.authorization = authorization;
+    }
+}
+
+fn advance_microphone_start(
+    daemon: &mut Daemon,
+    runtime_dir: &Path,
+    event: MicrophoneEvent,
+) -> CommandReply {
+    let authorization = daemon
+        .microphone
+        .as_ref()
+        .map(|access| access.authorization);
+    match microphone_transition(event, authorization) {
+        MicrophoneTransition::Request => {
+            let reply = allow_microphone(daemon);
+            if !reply.ok {
+                return finish_microphone_start(
+                    daemon,
+                    reply
+                        .message
+                        .as_deref()
+                        .unwrap_or("Microphone access could not be requested."),
+                    reply.error.as_deref(),
+                );
+            }
+            advance_microphone_start(daemon, runtime_dir, MicrophoneEvent::Answer)
+        }
+        MicrophoneTransition::Wait => {
+            let (message, _) = allow_reply(daemon.microphone.as_ref().expect("requesting owner"));
+            daemon.reply(true, message, None)
+        }
+        MicrophoneTransition::Refuse => {
+            let (message, error) = daemon.microphone.as_ref().map_or_else(
+                || {
+                    (
+                        "Microphone access could not be read.".to_owned(),
+                        Some("microphone-request-failed"),
+                    )
+                },
+                allow_reply,
+            );
+            finish_microphone_start(daemon, &message, error)
+        }
+        MicrophoneTransition::Cancel => finish_microphone_start(
+            daemon,
+            "Recording cancelled before microphone access was allowed.",
+            None,
+        ),
+        MicrophoneTransition::Record => {
+            let State::RequestingMicrophone {
+                operation, config, ..
+            } = std::mem::replace(&mut daemon.state, State::Idle)
+            else {
+                unreachable!("microphone start advanced without a pending press");
+            };
+            begin_capture(daemon, runtime_dir, operation, config)
+        }
+    }
+}
+
+fn finish_microphone_start(
+    daemon: &mut Daemon,
+    message: &str,
+    error: Option<&str>,
+) -> CommandReply {
+    let State::RequestingMicrophone { operation, .. } =
+        std::mem::replace(&mut daemon.state, State::Idle)
+    else {
+        unreachable!("microphone start settled without a pending press");
+    };
+    let mut outcome = setup_failure(message, error.unwrap_or("cancelled"));
+    outcome.operation_id = Some(operation.identity.operation_id.clone());
+    outcome.handoff = operation.handoff;
+    if error.is_none() {
+        outcome.completeness = Completeness::Cancelled;
+        outcome.delivery = Delivery::Cancelled;
+        outcome.error = None;
+    }
+    daemon.notice = None;
+    daemon.publish(outcome);
+    daemon.reply(error.is_none(), message, error)
+}
+
+fn begin_capture(
+    daemon: &mut Daemon,
+    runtime_dir: &Path,
+    operation: Operation,
+    config: Box<Config>,
+) -> CommandReply {
+    let take_id = &operation.identity.take_id;
     let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
     match daemon
         .platform
         .start_recording(&wav, config.audio_source.as_deref())
     {
         Ok(recorder) => {
-            let handoff = config
-                .selected_handoff
-                .as_ref()
-                .map(|(name, target)| daemon.handoff_view(name, target));
-            let operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
             let started = Instant::now();
             daemon.outcome = None;
             daemon.notice = None;
@@ -1078,7 +1232,7 @@ fn start_recording(
                 operation,
                 recorder,
                 wav,
-                config: Box::new(config),
+                config,
                 started,
                 signal: Box::new(None),
                 next_signal_sample: started,
@@ -1097,7 +1251,7 @@ fn start_recording(
                 Ok(true) => {
                     let duration_ms = stt::wav_duration_ms(&wav).unwrap_or(0);
                     let saved =
-                        persist_attempt(&take_id, duration_ms, None, Some(&wav), false, true);
+                        persist_attempt(take_id, duration_ms, None, Some(&wav), false, true);
                     outcome.artifacts = saved.artifacts;
                     describe_artifacts(&mut outcome);
                     storage_warning(&mut outcome, saved.warning);
@@ -1237,9 +1391,13 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, reason: StopReason)
     }
 }
 
-fn cancel_command(daemon: &mut Daemon, job_tx: &Sender<Job>) -> CommandReply {
+fn cancel_command(daemon: &mut Daemon, runtime_dir: &Path, job_tx: &Sender<Job>) -> CommandReply {
     match &daemon.state {
         State::Idle => daemon.reject("Nothing to cancel.", "nothing-to-cancel"),
+        State::RequestingMicrophone { .. } => {
+            // Cancellation consumes the intent; the native prompt may still be answered.
+            advance_microphone_start(daemon, runtime_dir, MicrophoneEvent::Cancel)
+        }
         State::Recording { .. } => stop_recording(daemon, job_tx, StopReason::Cancel),
         State::Processing { kind, .. }
             if !matches!(kind, WorkKind::Transcription | WorkKind::Delivery) =>
@@ -1426,7 +1584,7 @@ fn dismiss(daemon: &mut Daemon, event_id: Option<u64>) -> CommandReply {
 
 /// Ask for microphone access in this capture owner's own process: macOS caches
 /// the answer per process, so access requested by any other process never
-/// reaches capture. Only this explicit command asks; the answer arrives later.
+/// reaches capture. Explicit Allow and a first dictation press share this path.
 fn allow_microphone(daemon: &mut Daemon) -> CommandReply {
     let authorization = match daemon.platform.request_microphone_access() {
         Ok(authorization) => authorization,
@@ -1467,13 +1625,16 @@ fn allow_reply(access: &MicrophoneAccess) -> (String, Option<&'static str>) {
         MicrophoneAuthorization::Authorized => ("Microphone access is allowed.".to_owned(), None),
         MicrophoneAuthorization::Denied => (
             format!(
-                "Microphone access is denied; enable {} in System Settings > Privacy & Security > Microphone.",
+                "Microphone access is denied; enable {} in System Settings › Privacy & Security › Microphone.",
                 access.grantee.name()
             ),
             Some("microphone-denied"),
         ),
         MicrophoneAuthorization::Restricted => (
-            "Microphone access is restricted by system policy.".to_owned(),
+            format!(
+                "Microphone access is restricted by system policy; review {} in System Settings › Privacy & Security › Microphone and ask your administrator.",
+                access.grantee.name()
+            ),
             Some("microphone-restricted"),
         ),
         MicrophoneAuthorization::NotDetermined => {
@@ -1686,7 +1847,7 @@ fn shutdown_state(state: &mut State) {
                 tracing::warn!("[Capture] shutdown runtime cleanup failed class=storage-failed");
             }
         }
-        State::Processing { operation, .. } => {
+        State::RequestingMicrophone { operation, .. } | State::Processing { operation, .. } => {
             operation.request_cancel();
         }
         State::Idle => {}
@@ -2825,6 +2986,63 @@ mod tests {
     }
 
     #[test]
+    fn microphone_start_transition_table_covers_every_authorization_and_event() {
+        use MicrophoneAuthorization as Access;
+        use MicrophoneTransition as Step;
+        let authorizations = [
+            None,
+            Some(Access::NotDetermined),
+            Some(Access::Requesting),
+            Some(Access::Authorized),
+            Some(Access::Denied),
+            Some(Access::Restricted),
+        ];
+        for (event, expected) in [
+            (
+                MicrophoneEvent::Press,
+                [
+                    Step::Record,
+                    Step::Request,
+                    Step::Wait,
+                    Step::Record,
+                    Step::Refuse,
+                    Step::Refuse,
+                ],
+            ),
+            (
+                MicrophoneEvent::Answer,
+                [
+                    Step::Refuse,
+                    Step::Refuse,
+                    Step::Wait,
+                    Step::Record,
+                    Step::Refuse,
+                    Step::Refuse,
+                ],
+            ),
+            (
+                MicrophoneEvent::Cancel,
+                [
+                    Step::Cancel,
+                    Step::Cancel,
+                    Step::Cancel,
+                    Step::Cancel,
+                    Step::Cancel,
+                    Step::Cancel,
+                ],
+            ),
+        ] {
+            for (authorization, expected) in authorizations.into_iter().zip(expected) {
+                assert_eq!(
+                    microphone_transition(event, authorization),
+                    expected,
+                    "{event:?} {authorization:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn status_carries_the_owners_microphone_authorization_only_where_one_exists() {
         let wire = |daemon: &Daemon| -> serde_json::Value {
             serde_json::from_slice(&encode_reply(&daemon.snapshot()).unwrap()).unwrap()
@@ -3004,7 +3222,7 @@ mod tests {
             next_signal_sample: Instant::now(),
         };
         let (sender, receiver) = mpsc::channel();
-        assert!(cancel_command(&mut daemon, &sender).ok);
+        assert!(cancel_command(&mut daemon, Path::new("/tmp"), &sender).ok);
         let job = receiver.try_recv().unwrap();
         let report = deliver_with(
             "must remain saved",
@@ -3334,7 +3552,7 @@ mod tests {
         drain_stage(&mut daemon, &receiver);
         assert!(daemon.snapshot().elapsed < 10);
         let (jobs, _) = mpsc::channel();
-        assert!(cancel_command(&mut daemon, &jobs).ok);
+        assert!(cancel_command(&mut daemon, Path::new("/tmp"), &jobs).ok);
         sender
             .send(StageEvent {
                 identity: operation.identity,
@@ -3350,7 +3568,7 @@ mod tests {
         let (mut daemon, operation) = processing(WorkKind::Delivery);
         assert!(operation.seal());
         let (sender, _) = mpsc::channel();
-        assert!(!cancel_command(&mut daemon, &sender).ok);
+        assert!(!cancel_command(&mut daemon, Path::new("/tmp"), &sender).ok);
         assert!(!operation.cancel.load(Ordering::Acquire));
     }
 
@@ -3358,7 +3576,7 @@ mod tests {
     fn accepted_cancellation_prevents_successful_settlement() {
         let (mut daemon, operation) = processing(WorkKind::Transcription);
         let (sender, _) = mpsc::channel();
-        assert!(cancel_command(&mut daemon, &sender).ok);
+        assert!(cancel_command(&mut daemon, Path::new("/tmp"), &sender).ok);
         assert!(!operation.seal());
         assert!(!operation.request_cancel());
         assert_eq!(daemon.snapshot().stage, Some(Stage::Cancelling));

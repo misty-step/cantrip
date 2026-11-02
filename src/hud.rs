@@ -772,6 +772,9 @@ impl Model {
                 let progress = stage.and_then(Stage::measured_progress);
                 let phase = WorkPhase::from_stage(stage);
                 let caption = match stage {
+                    Some(Stage::RequestingMicrophone) => {
+                        Caption::title("Allow microphone access to start recording…")
+                    }
                     Some(Stage::Cancelling) => {
                         Caption::title("Cancelling… Waiting for current work.")
                     }
@@ -2685,6 +2688,21 @@ mod tests {
                 [[0; 2]; AUDIO_WAVEFORM_BINS]
             },
         }
+    }
+
+    #[test]
+    fn microphone_prompt_stays_explicit_with_ordinary_captions_disabled() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Processing);
+        status.stage = Some(Stage::RequestingMicrophone);
+        status.hud.labels = false;
+        model.apply(status, now);
+        model.refresh(now + Duration::from_secs(1));
+        assert_eq!(model.kind, Some(Kind::Working));
+        assert!(model.caption.title.contains("microphone"));
+        assert!(model.caption.title.contains("recording"));
+        assert!(!model.caption.title.is_empty());
     }
 
     #[test]

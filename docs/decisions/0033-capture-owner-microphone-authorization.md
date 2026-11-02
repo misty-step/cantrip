@@ -20,8 +20,9 @@ runs the engine's Recorder — Cantrip.app when it owns the engine, or an extern
 ## Decision
 
 Every surface reads microphone authorization from the capture owner's status
-snapshot and asks for it with the owner's `allow-microphone` command, through the
-[Platform port](../../crates/engine/src/ports.rs). No client queries or requests
+snapshot. Explicit Allow and a first dictation press share the owner's
+`allow-microphone` path through the [Platform port](../../crates/engine/src/ports.rs).
+No client queries or requests
 in its own process, and there is no client-side fallback: without a reachable
 owner its access is unknown. The owner's request never blocks its engine thread
 and reports `requesting` until the operator answers. Platforms without per-app
@@ -44,9 +45,21 @@ started from a terminal.
 Settings, the menu and capture agree, including when the app is attached to an
 external daemon, whose grant goes to the app that started it. No surface can
 show or change access while no engine runs, and `doctor` then labels its own
-answer as this process only. The request stays an explicit operator action:
-start, status and polling never ask, and Recorder start keeps its own check.
-Owners that predate the field omit it and read as unreported.
+answer as this process only.
+
+A macOS start or toggle with undetermined access requests it without blocking
+the engine. The pending press reports microphone `requesting` and a requesting
+HUD stage. Authorized continues that same press into recording; Cancel, Stop,
+or the matching toggle consumes the pending intent, so a later Allow cannot
+start it. Denied and Restricted end the press with their distinct failure
+classes and the named app's System Settings › Privacy & Security › Microphone
+guidance. The engine's `microphone_transition` table owns these edges; Recorder
+start retains its own authorization check.
+
+Status, polling, `doctor`, and opening Settings never request access. The
+explicit Allow controls remain available without starting a recording.
+Platforms without per-app authorization keep their existing start behavior.
+Owners that predate the status field omit it and read as unreported.
 
 Revisit if: macOS shares microphone authorization across a bundle's processes,
 or Cantrip records in more than one process.
