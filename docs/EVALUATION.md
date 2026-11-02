@@ -138,8 +138,10 @@ cleanup passes. Empty/null replies cannot prove the production protocol. The
 original builder graded its own outputs; those semantic grades cannot override
 the hard exact-accepted oracle or replace operator review. The focused review
 rerun uses three repetitions and publishes every remaining synthetic miss for
-operator adjudication. Historical private quality numbers do not evaluate a
-later prompt revision, a second pass, or a decision model.
+operator adjudication. The frozen v4/v5 review round, its private fidelity
+selection, strict exact counts, and recommended `min_chars` live in the
+[receipt's `review_round`](../eval/baselines/2026-11-02-hone-clean/run.json).
+Earlier private quality numbers do not evaluate a second pass or decision model.
 
 
 ### Local weekly schedule

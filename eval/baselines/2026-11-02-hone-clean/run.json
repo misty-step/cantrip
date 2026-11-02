@@ -3,7 +3,7 @@
   "run_id": "operator-2026-11-02-hone-clean",
   "date": "2026-11-02",
   "claim_type": "measured_unless_explicitly_inferred_or_unverified",
-  "source_revision": "68a7670e59bc9409828e4551bf9214236b4eec19",
+  "source_revision": "37ae96118e195ae6c8347ffe4c000ce5c52c124b",
   "base_revision": "2921fcce22e45f1e728e12111848850562887311",
   "source_scope": "Frozen prompt bytes match the implementation constant; model API evaluation is not a built/live application verification.",
   "corpus": {
@@ -47,13 +47,13 @@
     }
   ],
   "production_prompt": {
-    "version": 3,
-    "production_base_matches_evaluated_final_prompt": true,
-    "production_module_sha256": "d129fc7e2ff99292f8d86c36294a296c2d873c2b1deca1206b9e4efb00ad5930",
-    "effective_base_sha256": "aacb81d32e5dd049fa47fb4c523a6cb98ede1a95217842b10261e200a982cc62",
-    "effective_system_with_vocabulary_sha256": "df0aa4cd36a39475ea5eb39a8de8c2d9258370a9aa4bf6a9123a300e4eb9b27f",
-    "prompt_version": 3,
-    "scope": "Static byte identity only; not a build or live-app verification."
+    "version": 5,
+    "implementation_source_revision": "37ae96118e195ae6c8347ffe4c000ce5c52c124b",
+    "frozen_prompt_matches_private_trial": true,
+    "base_sha256": "bdcc34d888a270ff9d45989b05a8e4a53b23501a6a432accd5fd4326b1dfb95d",
+    "system_with_evaluated_vocabulary_sha256": "536d79ca8c6afd7d878964e7ae871caee6c4d2a6c861b80329249deb5c926c7c",
+    "supersedes": "Original v3 evidence remains in this receipt; its prompt hashes are historical.",
+    "scope": "Static byte identity and live API trial only; not a compiled-app verification."
   },
   "method": {
     "repeats": 1,
@@ -1619,7 +1619,11 @@
     "final_counter_observed_utc": "2026-11-02T21:59:38.308381+00:00",
     "earlier_post_inference_checkpoint_usd": 1.293057114,
     "counter_update_without_new_paid_submissions_usd": 0.020750108,
-    "counter_note": "A final free metadata read found higher usage without any further study submissions. The final counter supersedes the earlier aggregate checkpoint, which remains in the append-only journal."
+    "counter_note": "A final free metadata read found higher usage without any further study submissions. The final counter supersedes the earlier aggregate checkpoint, which remains in the append-only journal.",
+    "final_review_round_key_usage_usd": 2.092176619,
+    "final_total_actual_commission_spend_usd": 1.938182222,
+    "review_round_submissions": 219,
+    "note": "The original block above is the pre-review checkpoint; the final counter and 219 additional cloud submissions are in review_round."
   },
   "exceptions": {
     "routed_gpt_transcribe": {
@@ -1651,14 +1655,16 @@
       "reasoning_effort": "low",
       "timeout_ms": 30000,
       "passes": 1,
-      "min_chars": 0,
+      "min_chars": 20,
       "instructions": "",
       "decision_model": "unset",
-      "credential": "Use the operator-owned daily credential; no live app, configuration, or keyring changes were made."
+      "credential": "Use the operator-owned daily credential; no live app, configuration, or keyring changes were made.",
+      "min_chars_evidence": "See review_round.routing_recommendation."
     },
     "why": "Only the final Sol arm completed all 56 cases with zero observed hard fidelity or empty-input failures. The incident name was corrected. The earlier Hone candidate is rejected, not silently re-scored.",
     "stt": "Keep local Parakeet v3 int8 as the default. MAI-Transcribe-2 is the strongest viable cloud alternative in these observations, but silver-reference selection bias, five public clips, and cold local timings do not justify a default switch before operator adjudication.",
-    "local_cleanup": "Withdrawn by operator after memory pressure; no promotion claim."
+    "local_cleanup": "Withdrawn by operator after memory pressure; no promotion claim.",
+    "decision_model": "A decision model is not recommended with Clean: its watchdog and triage criteria were revised to the refinement contract but not evaluated."
   },
   "limitations": [
     "[MEASURED] The private speech set has 16 takes, not 24 successful speech dictations; eight selected nonempty WAVs are noise controls. One operator, English-only, mostly technical/project speech.",
@@ -1669,7 +1675,8 @@
     "[UNVERIFIED] Live app release-to-text, clipboard delivery, and the new compiled artifact were not exercised in this private study. Hosted CI and the ordinary review gate remain required before merge.",
     "[MEASURED] Counter lookups occur outside model request timing and pace later requests; provider routing, cache state, network conditions, and host load were not controlled.",
     "[MEASURED] The operator withdrew local-gemma after memory pressure; no further local models, STT, builds/tests, VMs, or browser automation ran after that hold.",
-    "[MEASURED] Public receipts contain aggregates, public model metadata, and hashes only. Audio, text, original take IDs, vocabulary strings, per-call outputs, and adjudication choices remain private."
+    "[MEASURED] Public receipts contain aggregates, public model metadata, and hashes only. Audio, text, original take IDs, vocabulary strings, per-call outputs, and adjudication choices remain private.",
+    "[UNVERIFIED] The review-round grades are one builder-agent blind A/B grading. Remaining public synthetic misses are listed in the PR and still need operator review; Clean is not promoted by this receipt."
   ],
   "primary_sources": [
     "https://github.com/misty-step/hone/blob/2d6ae6cf909d606900192b770791e1719a3e3244/public/system-prompt.md",
@@ -1687,6 +1694,181 @@
     "staged_file_secret_scan": "TruffleHog filesystem scan of the eight staged files: zero findings; no network verification, concurrency 1",
     "staged_privacy_review": "All staged changed lines manually reviewed. No retained audio/text, original take IDs, private vocabulary, per-take output, or adjudication choices. New behavior inputs are synthetic.",
     "product_checks": "Hosted CI required. Local compile/tests/clippy and live release-to-delivery checks intentionally not run under operator hold.",
-    "hooks": "Per-command core.hooksPath=/dev/null authorized for these commits and push only; persistent Git config unchanged."
+    "hooks": "Per-command core.hooksPath=/dev/null authorized for these commits and push only; persistent Git config unchanged.",
+    "review_round": "Prompt v4 and v5 are frozen under review_round. Rustfmt/scans ran by hand; hosted CI is the gate."
+  },
+  "review_round": {
+    "claim_type": "measured",
+    "reason": "Review findings F2/F3/F7 after the first receipt. Prompt v4 was frozen as the requested focused revision; the conductor then allowed one final revision, v5, frozen whatever the outcome.",
+    "protocol": {
+      "model": "openai/gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "passes": 1,
+      "decision_model": null,
+      "public_repeats": 3,
+      "public_cases": "32 reviewed core cases plus statement-not-command, a separately counted negative case",
+      "private_comparison": "One call per variant for each of 16 nonempty fixed Parakeet hypotheses; the eight empty sources were not submitted. Same vocabulary and provider guards as the original private cleanup runner; no app routing or min_chars was applied.",
+      "selection_rule": "Private fidelity gates first, then core strict counts out of 96, then keep v4 on a tie.",
+      "independence": "The 32 core cases were reused for v4/v5 tuning; the private takes were not shown to the revision but were inspected in the original study. This is not a new independent held-out corpus. One builder agent graded blind A/B outputs.",
+      "promotion": "Not promoted. Operator review of every remaining miss is still required."
+    },
+    "prompts": {
+      "v4": {
+        "source_revision": "c0d9d3301e31fb1517d29b71087c599784fe8aa6",
+        "base_sha256": "ce611e1477e31c7e0f07d07b481a664218233f6cdf23170bf9cd8e5ef1f55dd1",
+        "system_with_evaluated_vocabulary_sha256": "f723bbfbb18d707d3a06536584439a83ded4e63134046707510c977d56e43248"
+      },
+      "v5": {
+        "source_revision": "37ae96118e195ae6c8347ffe4c000ce5c52c124b",
+        "base_sha256": "bdcc34d888a270ff9d45989b05a8e4a53b23501a6a432accd5fd4326b1dfb95d",
+        "system_with_evaluated_vocabulary_sha256": "536d79ca8c6afd7d878964e7ae871caee6c4d2a6c861b80329249deb5c926c7c"
+      }
+    },
+    "strict_exact_accepted": {
+      "sol_current_original_single": "28/32",
+      "sol_hone_final_original_single": "23/32",
+      "v4_core_by_repeat": {
+        "1": 27,
+        "2": 26,
+        "3": 27
+      },
+      "v4_core_total": "80/96",
+      "v4_negative": "3/3",
+      "v5_core_by_repeat": {
+        "1": 26,
+        "2": 28,
+        "3": 28
+      },
+      "v5_core_total": "82/96",
+      "v5_negative": "3/3"
+    },
+    "private_blind_fidelity": {
+      "v4_hard_failures": 1,
+      "v5_hard_failures": 0,
+      "normal_stop_calls": {
+        "v4": 16,
+        "v5": 16
+      },
+      "failure_class": "distinct_claim_omitted",
+      "grade_scope": "Blind A/B per case; builder grading, not independent review.",
+      "latency": {
+        "v4": {
+          "n": 16,
+          "p50_ms": 2985.131624999994,
+          "p95_ms": 10565.318207999993,
+          "max_ms": 10565.318207999993
+        },
+        "v5": {
+          "n": 16,
+          "p50_ms": 2703.4748539999855,
+          "p95_ms": 11665.965499999998,
+          "max_ms": 11665.965499999998
+        }
+      },
+      "reported_usd": {
+        "v4_public_and_private": 0.236589,
+        "v5_public_and_private": 0.254054
+      }
+    },
+    "selected": "v5",
+    "selection_reason": "v4 had one private hard fidelity failure and v5 had none; v5 also had more strict core exact outputs (82 vs 80/96).",
+    "remaining_v5_core_misses": {
+      "cases_with_any_miss": [
+        "clean-compression",
+        "long-detail-preservation",
+        "simple-prose",
+        "technical-path",
+        "technical-spelling",
+        "topic-paragraphs"
+      ],
+      "miss_calls": 14
+    },
+    "routing_recommendation": {
+      "claim_type": "inferred",
+      "min_chars": 20,
+      "default_unchanged": 40,
+      "evidence": "The retained noise controls produced Scribe annotations of 8\u201319 characters; one MAI noise response was below 40; Parakeet produced empty hypotheses. Twenty is the smallest threshold above every observed annotation length, and it admits 14/16 private speech hypotheses rather than 13/16 at 40. This is snapshot evidence, not a general noise detector. Production never submits empty source; cleanup treats an empty or null reply as failure."
+    },
+    "accounting": {
+      "key_usage_before_v4_usd": 1.607293619,
+      "key_usage_after_v5_usd": 2.092176619,
+      "total_commission_spend_usd": 1.938182222,
+      "new_inference_submissions": 219,
+      "submitted_total_including_prior_receipt": 850,
+      "absolute_key_ceiling_usd": 4.5,
+      "unknown_cost_flags_new": 0,
+      "paid_retries": 0,
+      "launch_failure": "One unsubmitted pass-env invocation error was corrected before any inference request."
+    },
+    "v4_strict_by_case_including_negative": {
+      "basic-punctuation": 3,
+      "filler-removal": 3,
+      "repeated-words": 3,
+      "false-start": 3,
+      "truncated-acronym": 1,
+      "technical-spelling": 3,
+      "short-question": 3,
+      "long-question": 3,
+      "embedded-instruction": 3,
+      "email-request": 3,
+      "answer-request": 3,
+      "security-request": 3,
+      "summary-request": 2,
+      "negation": 3,
+      "quantities": 3,
+      "names": 3,
+      "technical-path": 2,
+      "quoted-command": 3,
+      "point-of-view": 3,
+      "long-detail-preservation": 0,
+      "numbered-sequence": 3,
+      "explicit-paragraph": 3,
+      "topic-paragraphs": 0,
+      "simple-prose": 0,
+      "clean-compression": 0,
+      "meaningful-uncertainty": 3,
+      "literal-identifiers-and-version": 3,
+      "vocabulary-common-words": 3,
+      "quoted-misspelling": 3,
+      "canonical-product-name": 3,
+      "minimum-and-option": 3,
+      "qualified-negation": 3,
+      "statement-not-command": 3
+    },
+    "v5_strict_by_case_including_negative": {
+      "basic-punctuation": 3,
+      "filler-removal": 3,
+      "repeated-words": 3,
+      "false-start": 3,
+      "truncated-acronym": 3,
+      "technical-spelling": 2,
+      "short-question": 3,
+      "long-question": 3,
+      "embedded-instruction": 3,
+      "email-request": 3,
+      "answer-request": 3,
+      "security-request": 3,
+      "summary-request": 3,
+      "negation": 3,
+      "quantities": 3,
+      "names": 3,
+      "technical-path": 2,
+      "quoted-command": 3,
+      "point-of-view": 3,
+      "long-detail-preservation": 0,
+      "numbered-sequence": 3,
+      "explicit-paragraph": 3,
+      "topic-paragraphs": 0,
+      "simple-prose": 0,
+      "clean-compression": 0,
+      "meaningful-uncertainty": 3,
+      "literal-identifiers-and-version": 3,
+      "vocabulary-common-words": 3,
+      "quoted-misspelling": 3,
+      "canonical-product-name": 3,
+      "minimum-and-option": 3,
+      "qualified-negation": 3,
+      "statement-not-command": 3
+    }
   }
 }
