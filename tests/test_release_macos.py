@@ -1,5 +1,6 @@
 """Native bundle boundaries: real Mach-O dependency relocation and fail-closed signing."""
 
+import json
 import os
 from pathlib import Path
 import platform
@@ -10,12 +11,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "package-macos"
 PACKAGE = runpy.run_path(str(SCRIPT))
+VERIFY = runpy.run_path(str(ROOT / "scripts" / "verify-macos"))
 VERSION = "0.1.0"
 
 
@@ -59,6 +62,39 @@ class MacSigningPrerequisiteContracts(unittest.TestCase):
             for invalid in ("-", "Cantrip Development", "A" * 39, "G" * 40):
                 with self.subTest(identity=invalid):
                     self.assertIn("full forty-character SHA-1", self.invoke(directory, "--dev-sign-identity", invalid))
+
+
+class MacCaptureRefusalContracts(unittest.TestCase):
+    def test_permission_smoke_never_starts_an_undetermined_owner(self):
+        for authorization, expected_error in (
+            ("not-determined", None),
+            ("authorized", "capture-failed"),
+            ("denied", "microphone-denied"),
+            ("restricted", "microphone-restricted"),
+        ):
+            with self.subTest(authorization=authorization), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                commands = []
+                status = {"state": "idle", "microphone": {"authorization": authorization}}
+
+                def run(command, **_):
+                    commands.append(command[1:])
+                    if command[1] == "start":
+                        self.assertIsNotNone(expected_error, "undetermined access must never receive Start")
+                        return subprocess.CompletedProcess(command, 1, b"", expected_error.encode())
+                    self.assertEqual(command[1:], ["status", "--json"])
+                    return subprocess.CompletedProcess(command, 0, json.dumps(status).encode(), b"")
+
+                with mock.patch.dict(VERIFY["capture_refusal"].__globals__, {"run": run}):
+                    result = VERIFY["capture_refusal"](root / "cantrip", root, {}, status)
+                self.assertEqual(
+                    commands,
+                    ([["start", "--postproc", "raw"]] if expected_error else []) + [["status", "--json"]],
+                )
+                self.assertEqual(result["status"], "passed" if expected_error else "not-run")
+                self.assertFalse(result["live_audio_created"])
+                if expected_error:
+                    self.assertEqual(result["guard"], expected_error)
 
 
 @unittest.skipUnless(

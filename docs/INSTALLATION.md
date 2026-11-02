@@ -486,12 +486,18 @@ python3 scripts/verify-macos --app "$output/Cantrip.app" \
 The native helper relocates the real app with a system-only runtime PATH and
 private HOME/XDG directories, explicitly downloads the public local model, and
 transcribes only the checked public JFK WAV. It verifies missing-model refusal
-without implicit downloads, denied/invalid-UID capture without live audio,
-terminal Deferred for explicit Auto/Paste/Type without config migration,
-graceful shutdown, five offscreen production NSView HUD states, each native
-Settings pane, and the Recordings and Recovery window's Recordings view and its
+without implicit downloads, denied/restricted or invalid-UID capture refusal
+without live audio, terminal Deferred for explicit Auto/Paste/Type without
+config migration, graceful shutdown, seven offscreen production NSView HUD states,
+each native Settings pane, and the Recordings and Recovery window's Recordings view and its
 Setup view after Check Setup, all rendered offscreen. It saves
 sanitized `verification.json` and own-view PNGs, not private transcripts.
+
+The capture check reads the owner's authorization first. For undetermined
+access it records `not-run` without sending Start or opening a real prompt;
+authorized access checks the invalid UID, and denied/restricted access checks
+the corresponding authorization refusal class.
+
 A logged-in WindowServer session is needed for NSView rendering. An explicit
 `--skip-hud --hud-unavailable-reason 'REASON'` records an omission of those
 renders, not a pass.

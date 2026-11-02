@@ -437,22 +437,25 @@ impl MicrophoneAccess {
     /// What the operator should know or do, naming the app macOS grants.
     pub fn guidance(&self) -> String {
         let state = match self.authorization {
-            MicrophoneAuthorization::Authorized => "authorized".to_owned(),
+            MicrophoneAuthorization::Authorized => "Microphone access is allowed.".to_owned(),
             MicrophoneAuthorization::NotDetermined => {
-                "not requested; start dictation to request access, or choose Allow Microphone Access in the Cantrip menu or Settings"
+                "Microphone access has not been requested; start dictation to request access, or choose Allow Microphone Access in the Cantrip menu or Settings."
                     .to_owned()
             }
             MicrophoneAuthorization::Requesting => {
-                "waiting for your answer to the macOS prompt".to_owned()
+                "Waiting for your answer to the microphone prompt.".to_owned()
             }
             MicrophoneAuthorization::Denied => format!(
-                "denied; enable {} in System Settings > Privacy & Security > Microphone",
+                "Microphone access is denied; enable {} in System Settings › Privacy & Security › Microphone.",
                 self.grantee.name()
             ),
-            MicrophoneAuthorization::Restricted => "restricted by macOS policy".to_owned(),
+            MicrophoneAuthorization::Restricted => format!(
+                "Microphone access is restricted by system policy; review {} in System Settings › Privacy & Security › Microphone and ask your administrator.",
+                self.grantee.name()
+            ),
         };
         match self.grantee.disclosure() {
-            Some(disclosure) => format!("{state}. {disclosure}"),
+            Some(disclosure) => format!("{state} {disclosure}"),
             None => state,
         }
     }

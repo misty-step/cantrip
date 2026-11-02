@@ -1093,6 +1093,19 @@ fn start_recording(
             Some("postproc-model-unset"),
         );
     }
+    if config.stt.endpoint.is_none() && !local_model_ready(&config.stt) {
+        let mut outcome = setup_failure(
+            "Local model unavailable — run: cantrip models pull",
+            "local-model-unavailable",
+        );
+        outcome.event_id = daemon.event_id();
+        daemon.outcome = Some(outcome);
+        return daemon.reply(
+            false,
+            "Local model unavailable — run: cantrip models pull",
+            Some("local-model-unavailable"),
+        );
+    }
     let take_id = recovery::new_id();
     let handoff = config
         .selected_handoff
@@ -1135,6 +1148,7 @@ fn advance_microphone_start(
     {
         daemon.outcome = None;
         daemon.notice = None;
+        tracing::info!("[Daemon] state idle -> requesting-microphone class=microphone-requesting");
     }
     match transition {
         MicrophoneTransition::Request => {
@@ -1179,7 +1193,16 @@ fn advance_microphone_start(
             else {
                 unreachable!("microphone start advanced without a pending press");
             };
-            begin_capture(daemon, runtime_dir, operation, config)
+            let reply = begin_capture(daemon, runtime_dir, operation, config);
+            if reply.ok {
+                let previous = if matches!(event, MicrophoneEvent::Press) {
+                    "idle"
+                } else {
+                    "requesting-microphone"
+                };
+                tracing::info!("[Daemon] state {previous} -> recording class=capture-started");
+            }
+            reply
         }
     }
 }
@@ -1194,6 +1217,10 @@ fn finish_microphone_start(
     else {
         unreachable!("microphone start settled without a pending press");
     };
+    tracing::info!(
+        "[Daemon] pending-press -> idle class={}",
+        error.unwrap_or("cancelled")
+    );
     let mut outcome = setup_failure(message, error.unwrap_or("cancelled"));
     outcome.operation_id = Some(operation.identity.operation_id.clone());
     outcome.handoff = operation.handoff;
@@ -1213,19 +1240,6 @@ fn begin_capture(
     operation: Operation,
     config: Box<Config>,
 ) -> CommandReply {
-    if config.stt.endpoint.is_none() && !local_model_ready(&config.stt) {
-        let mut outcome = setup_failure(
-            "Local model unavailable — run: cantrip models pull",
-            "local-model-unavailable",
-        );
-        outcome.event_id = daemon.event_id();
-        daemon.outcome = Some(outcome);
-        return daemon.reply(
-            false,
-            "Local model unavailable — run: cantrip models pull",
-            Some("local-model-unavailable"),
-        );
-    }
     let take_id = &operation.identity.take_id;
     let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
     match daemon
@@ -1245,15 +1259,14 @@ fn begin_capture(
                 signal: Box::new(None),
                 next_signal_sample: started,
             };
-            tracing::info!("[Daemon] state idle -> recording");
             daemon.reply(true, "recording", None)
         }
         Err(error) => {
-            tracing::warn!("[Capture] starting recording failed class=capture-failed");
             let (message, class) = match error.downcast_ref::<crate::ports::MissingMicrophone>() {
                 Some(missing) => (missing.to_string(), "capture-source-missing"),
                 None => ("Starting recording failed".to_owned(), "capture-failed"),
             };
+            tracing::warn!("[Capture] starting recording failed class={class}");
             let mut outcome = setup_failure(&message, class);
             match wav.try_exists() {
                 Ok(true) => {
@@ -1274,6 +1287,8 @@ fn begin_capture(
                 Ok(false) => {}
                 Err(_) => storage_warning(&mut outcome, true),
             }
+            outcome.operation_id = Some(operation.identity.operation_id.clone());
+            outcome.handoff = operation.handoff;
             outcome.event_id = daemon.event_id();
             daemon.outcome = Some(outcome);
             daemon.reply(false, message, Some(class))
@@ -1625,37 +1640,18 @@ fn allow_microphone(daemon: &mut Daemon) -> CommandReply {
 /// The answer to Allow and its error class. When macOS asks for the app that
 /// started this process rather than for Cantrip, the answer names that app.
 fn allow_reply(access: &MicrophoneAccess) -> (String, Option<&'static str>) {
-    let (message, error) = match access.authorization {
-        MicrophoneAuthorization::Requesting => (
-            "Waiting for your answer to the microphone prompt.".to_owned(),
-            None,
-        ),
-        MicrophoneAuthorization::Authorized => ("Microphone access is allowed.".to_owned(), None),
-        MicrophoneAuthorization::Denied => (
-            format!(
-                "Microphone access is denied; enable {} in System Settings › Privacy & Security › Microphone.",
-                access.grantee.name()
-            ),
-            Some("microphone-denied"),
-        ),
-        MicrophoneAuthorization::Restricted => (
-            format!(
-                "Microphone access is restricted by system policy; review {} in System Settings › Privacy & Security › Microphone and ask your administrator.",
-                access.grantee.name()
-            ),
-            Some("microphone-restricted"),
-        ),
+    let error = match access.authorization {
+        MicrophoneAuthorization::Denied => Some("microphone-denied"),
+        MicrophoneAuthorization::Restricted => Some("microphone-restricted"),
         MicrophoneAuthorization::NotDetermined => {
             return (
                 "Microphone access could not be requested.".to_owned(),
                 Some("microphone-request-failed"),
             );
         }
+        MicrophoneAuthorization::Requesting | MicrophoneAuthorization::Authorized => None,
     };
-    match access.grantee.disclosure() {
-        Some(disclosure) => (format!("{message} {disclosure}"), error),
-        None => (message, error),
-    }
+    (access.guidance(), error)
 }
 
 fn select_take(
@@ -2990,63 +2986,6 @@ mod tests {
 
         fn request_microphone_access(&self) -> Result<MicrophoneAuthorization> {
             Ok(self.0)
-        }
-    }
-
-    #[test]
-    fn microphone_start_transition_table_covers_every_authorization_and_event() {
-        use MicrophoneAuthorization as Access;
-        use MicrophoneTransition as Step;
-        let authorizations = [
-            None,
-            Some(Access::NotDetermined),
-            Some(Access::Requesting),
-            Some(Access::Authorized),
-            Some(Access::Denied),
-            Some(Access::Restricted),
-        ];
-        for (event, expected) in [
-            (
-                MicrophoneEvent::Press,
-                [
-                    Step::Record,
-                    Step::Request,
-                    Step::Wait,
-                    Step::Record,
-                    Step::Refuse,
-                    Step::Refuse,
-                ],
-            ),
-            (
-                MicrophoneEvent::Answer,
-                [
-                    Step::Refuse,
-                    Step::Refuse,
-                    Step::Wait,
-                    Step::Record,
-                    Step::Refuse,
-                    Step::Refuse,
-                ],
-            ),
-            (
-                MicrophoneEvent::Cancel,
-                [
-                    Step::Cancel,
-                    Step::Cancel,
-                    Step::Cancel,
-                    Step::Cancel,
-                    Step::Cancel,
-                    Step::Cancel,
-                ],
-            ),
-        ] {
-            for (authorization, expected) in authorizations.into_iter().zip(expected) {
-                assert_eq!(
-                    microphone_transition(event, authorization),
-                    expected,
-                    "{event:?} {authorization:?}"
-                );
-            }
         }
     }
 

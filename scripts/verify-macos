@@ -44,10 +44,49 @@ def run(command, *, env, cwd, timeout=60, check=True):
     return result
 
 
+def capture_refusal(executable, root, env, before):
+    authorization = (before.get("microphone") or {}).get("authorization")
+    expected_errors = {
+        "authorized": "capture-failed",
+        "denied": "microphone-denied",
+        "restricted": "microphone-restricted",
+    }
+    require(
+        authorization in (*expected_errors, "not-determined"),
+        "capture owner's microphone authorization is unavailable or already requesting",
+    )
+    if authorization == "not-determined":
+        # Never send Start here: first-press authorization would open a real prompt.
+        result = {
+            "status": "not-run", "reason": "not-determined-no-start-or-prompt-requested",
+            "authorization": authorization, "live_audio_created": False,
+        }
+    else:
+        error = expected_errors[authorization]
+        refused = run([executable, "start", "--postproc", "raw"], env=env, cwd=root, check=False)
+        require(
+            refused.returncode != 0 and error.encode() in refused.stderr,
+            f"native capture did not refuse {authorization} access with {error}",
+        )
+        result = {
+            "status": "passed", "guard": error,
+            "authorization": authorization, "live_audio_created": False,
+        }
+    after = json.loads(run([executable, "status", "--json"], env=env, cwd=root).stdout)
+    require(after.get("state") == "idle", "permission smoke left the engine outside Idle")
+    require(
+        (after.get("microphone") or {}).get("authorization") == authorization,
+        "permission smoke changed the capture owner's authorization",
+    )
+    require(not list((root / "run").rglob("*.wav")), "permission smoke created live microphone audio")
+    require(not list((root / "state").rglob("*.wav")), "permission smoke retained unexpected microphone audio")
+    return result
+
+
 def native_refusals(executable, root, env, config):
-    # This deliberately invalid CoreAudio UID cannot open a device, even if the
-    # host already authorized microphone access. Native capture checks TCC and
-    # resolves the UID without asking for permission or starting capture.
+    # An authorized owner resolves this invalid UID before opening a device.
+    # Denied/restricted owners fail by authorization class. An undetermined
+    # owner is observed only, so this verifier never opens a permission prompt.
     daemon_log = root / "daemon.log"
     original_config = config.read_bytes()
     keyboard_refusals = []
@@ -67,12 +106,7 @@ def native_refusals(executable, root, env, config):
                 raise RuntimeError("isolated native daemon did not become ready")
             before = json.loads(run([executable, "status", "--json"], env=env, cwd=root).stdout)
             require(before.get("state") == "idle", "isolated daemon is not Idle before permission smoke")
-            refused = run([executable, "start", "--postproc", "raw"], env=env, cwd=root, check=False)
-            require(refused.returncode != 0 and b"capture-failed" in refused.stderr, "unsupported/unauthorized native capture was not rejected by the capture guard")
-            after = json.loads(run([executable, "status", "--json"], env=env, cwd=root).stdout)
-            require(after.get("state") == "idle", "rejected native capture left the engine outside Idle")
-            require(not list((root / "run").rglob("*.wav")), "denied/unsupported capture created live microphone audio")
-            require(not list((root / "state").rglob("*.wav")), "denied/unsupported capture retained unexpected microphone audio")
+            capture = capture_refusal(executable, root, env, before)
             for mode in ("auto", "paste", "type"):
                 selected = original_config.replace(b'injection = "clipboard"', f'injection = "{mode}"'.encode(), 1)
                 config.write_bytes(selected)
@@ -106,7 +140,7 @@ def native_refusals(executable, root, env, config):
                 raise RuntimeError("native daemon did not shut down gracefully")
         require(exit_code == 0, "native daemon returned a failure during graceful shutdown")
     return {
-        "capture": {"status": "passed", "guard": "denied-or-unsupported-device", "live_audio_created": False},
+        "capture": capture,
         "keyboard": {"status": "passed", "requests": keyboard_refusals, "explicit_clipboard_commands_requested": False},
     }
 
@@ -177,7 +211,10 @@ def verify(args):
         staged_output = root / "proof"
         staged_output.mkdir()
         if not args.skip_hud:
-            for state in ("recording", "transcribing", "deferred", "delivery-uncertain", "setup-missing"):
+            for state in (
+                "recording", "transcribing", "deferred", "delivery-uncertain", "setup-missing",
+                "requesting-microphone", "requesting-microphone-launcher",
+            ):
                 image = staged_output / f"hud-{state}.png"
                 run([executable, "hud", "--screenshot", image, "--state", state], env=environment, cwd=root, timeout=120)
                 data = image.read_bytes()

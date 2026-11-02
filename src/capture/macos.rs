@@ -276,14 +276,13 @@ fn await_microphone_decision() {
     }
     // One outstanding thread stays with the OS prompt, including after a pending
     // recording is cancelled. A late answer must not expire a still-live press.
-    if receiver.recv().is_ok() {
-        tracing::info!(
-            "[Capture] microphone access answered state={:?}",
-            microphone_permission()
-        );
-    } else {
-        tracing::warn!("[Capture] microphone access request ended class=microphone-request-failed");
-    }
+    receiver
+        .recv()
+        .expect("the microphone completion block owns its sender");
+    tracing::info!(
+        "[Capture] microphone access answered state={:?}",
+        microphone_permission()
+    );
 }
 
 pub fn input_devices() -> Result<Vec<InputDevice>> {

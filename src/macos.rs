@@ -137,9 +137,38 @@ fn app_bundle() -> Option<Retained<NSURL>> {
 /// How Cantrip answered one command.
 enum Reply {
     Accepted,
+    RequestingMicrophone(String),
     /// The engine's own sentence; a reply's `error` is a log class, not words.
     Refused(String),
     Unreachable,
+}
+
+impl Reply {
+    fn from_command(reply: ipc::CommandReply) -> Self {
+        if !reply.ok {
+            return Self::Refused(
+                reply
+                    .message
+                    .unwrap_or_else(|| "Cantrip did not accept this action.".to_owned()),
+            );
+        }
+        match (reply.stage, reply.message) {
+            (Some(cantrip_engine::pipeline::Stage::RequestingMicrophone), Some(message)) => {
+                Self::RequestingMicrophone(message)
+            }
+            _ => Self::Accepted,
+        }
+    }
+
+    fn message(&self, microphone_pending: bool) -> Option<&str> {
+        match self {
+            Self::Accepted => None,
+            Self::RequestingMicrophone(message) if microphone_pending => Some(message),
+            Self::RequestingMicrophone(_) => None,
+            Self::Refused(message) => Some(message),
+            Self::Unreachable => Some("Cantrip did not answer this action."),
+        }
+    }
 }
 
 /// One worker submits commands in order, so the AppKit thread never waits on IPC.
@@ -151,12 +180,7 @@ fn spawn_commands() -> Result<(mpsc::Sender<Command>, mpsc::Receiver<Reply>)> {
         .spawn(move || {
             for command in incoming {
                 let reply = match ipc::command(command) {
-                    Ok(reply) if reply.ok => Reply::Accepted,
-                    Ok(reply) => Reply::Refused(
-                        reply
-                            .message
-                            .unwrap_or_else(|| "Cantrip did not accept this action.".to_owned()),
-                    ),
+                    Ok(reply) => Reply::from_command(reply),
                     Err(_) => Reply::Unreachable,
                 };
                 if replies.send(reply).is_err() {
@@ -296,6 +320,19 @@ pub(crate) fn status_line(status: &ipc::StatusSnapshot) -> String {
         StateKind::Recording => {
             format!("Recording · {}", crate::hud::format_elapsed(status.elapsed))
         }
+        StateKind::Processing
+            if status.stage == Some(cantrip_engine::pipeline::Stage::RequestingMicrophone) =>
+        {
+            status.microphone.as_ref().map_or_else(
+                || "Requesting microphone access…".to_owned(),
+                |access| {
+                    format!(
+                        "Requesting microphone access for {}…",
+                        access.grantee.name()
+                    )
+                },
+            )
+        }
         StateKind::Processing => status.stage.as_ref().map_or_else(
             || "Working…".to_owned(),
             |stage| sentence(&stage.to_string()),
@@ -365,8 +402,8 @@ struct Host {
     shortcut: Registration,
     commands: mpsc::Sender<Command>,
     replies: mpsc::Receiver<Reply>,
-    /// The latest failed action, shown until a later action succeeds.
-    problem: Option<String>,
+    /// The latest action reply; permission disclosures are shown while pending.
+    feedback: Option<Reply>,
     /// What the open menu's items do, by tag.
     choices: Vec<Choice>,
     /// The Settings window while it is open.
@@ -427,7 +464,7 @@ impl Host {
             }),
             commands,
             replies,
-            problem: None,
+            feedback: None,
             choices: Vec::new(),
             settings: None,
             requests,
@@ -509,14 +546,10 @@ impl Host {
         let interval = self.hud.tick(self.button.mtm(), now);
         self.reap_engine();
         while let Ok(reply) = self.replies.try_recv() {
-            self.problem = match reply {
-                Reply::Accepted => None,
-                Reply::Refused(message) => Some(message),
-                Reply::Unreachable => {
-                    NSBeep();
-                    Some("Cantrip did not answer this action.".to_owned())
-                }
-            };
+            if matches!(reply, Reply::Unreachable) {
+                NSBeep();
+            }
+            self.feedback = Some(reply);
         }
         self.serve_requests();
         self.tick_settings(now);
@@ -785,7 +818,15 @@ impl Host {
                 })
                 .as_deref(),
         );
-        items.line(self.problem.as_deref().or(notice));
+        let microphone_pending = status.is_some_and(|status| {
+            status.stage == Some(cantrip_engine::pipeline::Stage::RequestingMicrophone)
+        });
+        items.line(
+            self.feedback
+                .as_ref()
+                .and_then(|reply| reply.message(microphone_pending))
+                .or(notice),
+        );
         items.separator();
         if idle {
             let start = Command::Start {
@@ -908,8 +949,8 @@ impl Host {
         else {
             return false;
         };
-        // The problem line now reports this choice, or the reply to its command.
-        self.problem = None;
+        // The feedback line now reports this choice, or the reply to its command.
+        self.feedback = None;
         let done = match choice {
             Choice::Send(command) => self.send(command),
             Choice::Settings => self.show_settings(),
@@ -925,7 +966,7 @@ impl Host {
             Choice::Quit => return true,
         };
         if let Err(error) = done {
-            self.problem = Some(format!("{error:#}"));
+            self.feedback = Some(Reply::Refused(format!("{error:#}")));
         }
         false
     }
@@ -1059,6 +1100,28 @@ impl AppDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_pending_press_keeps_the_owner_disclosure_until_recording() {
+        let access = MicrophoneAccess {
+            authorization: MicrophoneAuthorization::Requesting,
+            grantee: MicrophoneGrantee::Launcher(Some("Terminal".to_owned())),
+        };
+        let reply = Reply::from_command(ipc::CommandReply {
+            ok: true,
+            state: StateKind::Processing,
+            stage: Some(cantrip_engine::pipeline::Stage::RequestingMicrophone),
+            message: Some(access.guidance()),
+            outcome: None,
+            error: None,
+        });
+        let shown = reply
+            .message(true)
+            .expect("pending press reply is presented");
+        assert!(shown.contains("Terminal"));
+        assert!(shown.contains("everything it runs"));
+        assert_eq!(reply.message(false), None);
+    }
 
     #[test]
     fn microphone_actions_reach_the_capture_owner_and_name_another_grantee() {
