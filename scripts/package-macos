@@ -53,9 +53,16 @@ def run(command, *, cwd=None, timeout=60, check=True, env=None):
 
 
 def native_prerequisites(target, args):
-    if args.ad_hoc:
-        if args.sign_identity or args.team_id or args.notary_profile:
-            raise ReleaseError("--ad-hoc cannot be combined with production signing/notarization inputs")
+    production_inputs = args.sign_identity or args.team_id or args.notary_profile
+    if args.ad_hoc and args.dev_sign_identity:
+        raise ReleaseError("--ad-hoc and --dev-sign-identity cannot be combined")
+    if args.keychain and not args.dev_sign_identity:
+        raise ReleaseError("--keychain requires --dev-sign-identity")
+    if args.ad_hoc or args.dev_sign_identity:
+        if production_inputs:
+            raise ReleaseError("development signing cannot be combined with production signing/notarization inputs")
+        if args.dev_sign_identity and not re.fullmatch(r"[0-9A-Fa-f]{40}", args.dev_sign_identity):
+            raise ReleaseError("--dev-sign-identity must be the certificate's full forty-character SHA-1")
     else:
         missing = [
             option for option, value in (
@@ -77,6 +84,10 @@ def native_prerequisites(target, args):
     run(["xcrun", "--find", "clang"])
     if args.ad_hoc:
         return "-"
+    if args.dev_sign_identity:
+        # Self-signed local identities need not be trusted by Apple's PKI.
+        # codesign selects the private key, and sign_bundle verifies its binding.
+        return args.dev_sign_identity.upper()
     run(["xcrun", "--find", "notarytool"])
     run(["xcrun", "--find", "stapler"])
     identities = run(["security", "find-identity", "-v", "-p", "codesigning"]).stdout.decode()
@@ -278,16 +289,15 @@ def create_bundle(binary, app, target, version, read_source):
     return info, entitlements, libraries, system
 
 
-def sign_bundle(app, libraries, entitlements, identity, team_id, *, ad_hoc):
-    timestamp = "--timestamp=none" if ad_hoc else "--timestamp"
-    # Ad-hoc code has no Team ID. Hardened library validation therefore refuses
-    # its contained non-platform dylibs; production retains the hardened runtime
-    # and signs every native library with the same Developer ID team.
-    options = "0" if ad_hoc else "runtime"
+def sign_bundle(app, libraries, entitlements, identity, team_id, *, development, keychain=None):
+    timestamp = "--timestamp=none" if development else "--timestamp"
+    # Development identities have no Developer ID team for library validation.
+    options = "0" if development else "runtime"
+    signing_keychain = ["--keychain", keychain] if keychain else []
     for library in libraries:
-        run(["codesign", "--force", "--sign", identity, "--options", options, timestamp, library])
+        run(["codesign", "--force", "--sign", identity, *signing_keychain, "--options", options, timestamp, library])
     run([
-        "codesign", "--force", "--sign", identity, "--options", options, timestamp,
+        "codesign", "--force", "--sign", identity, *signing_keychain, "--options", options, timestamp,
         "--entitlements", entitlements, app,
     ])
     run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app])
@@ -296,11 +306,21 @@ def sign_bundle(app, libraries, entitlements, identity, team_id, *, ad_hoc):
     if "Identifier=com.misty-step.cantrip\n" not in details:
         raise ReleaseError("app signature does not bind the stable bundle identity")
     hardened = bool(re.search(r"flags=.*\bruntime\b", details))
-    if hardened != (not ad_hoc):
+    if hardened != (not development):
         raise ReleaseError("app signature hardened-runtime state differs from the requested signing mode")
-    if ad_hoc:
+    if identity == "-":
         if "Signature=adhoc" not in details:
             raise ReleaseError("development package does not have the requested ad-hoc signature")
+    elif "Signature=adhoc" in details:
+        raise ReleaseError("identity-signed package unexpectedly has an ad-hoc signature")
+    elif development:
+        requirement = run(["codesign", "--display", "--requirements", "-", app])
+        designated = (requirement.stdout + requirement.stderr).decode()
+        if not re.search(
+            rf'\bcertificate (?:root|leaf|0) = H"{re.escape(identity)}"',
+            designated, re.IGNORECASE,
+        ):
+            raise ReleaseError("development designated requirement does not pin the requested certificate SHA-1")
     elif (
         f"TeamIdentifier={team_id}\n" not in details
         or "Authority=Developer ID Application: " not in details or "Timestamp=" not in details
@@ -353,6 +373,7 @@ def publish(output, app, assets):
 
 def package(args):
     identity = native_prerequisites(args.target, args)
+    development = args.ad_hoc or bool(args.dev_sign_identity)
     output = (args.output or Path("dist") / "macos" / args.target).absolute()
     if os.path.lexists(output):
         raise ReleaseError(f"refusing to overwrite an existing output: {output}")
@@ -361,7 +382,7 @@ def package(args):
     revision = revision_result.stdout.decode().strip() if revision_result.returncode == 0 else None
     if args.source_revision and args.source_revision != revision:
         raise ReleaseError("--source-revision does not match checkout HEAD")
-    if args.ad_hoc:
+    if development:
         read_source = lambda path: (ROOT / path).read_bytes()
         dirty = bool(run(["git", "-C", ROOT, "status", "--porcelain=v1", "--untracked-files=all"]).stdout) if revision else None
     else:
@@ -394,19 +415,24 @@ def package(args):
             "schema_version": 1, "version": version, "target": args.target,
             "bundle_identifier": info["CFBundleIdentifier"], "minimum_macos": info["LSMinimumSystemVersion"],
             "source_revision": revision, "source_tree_dirty": dirty, "rust_toolchain": toolchain,
-            "signing": "ad-hoc-development" if args.ad_hoc else "developer-id", "hardened_runtime": not args.ad_hoc,
+            "signing": "ad-hoc-development" if args.ad_hoc else "local-identity-development" if development else "developer-id",
+            "signing_identity_sha1": None if args.ad_hoc else identity,
+            "hardened_runtime": not development,
             "system_libraries": system, "onnxruntime": runtime_identity,
         }
         (app / "Contents" / "Resources" / "build.json").write_bytes(RELEASE["json_bytes"](build))
         entitlement_file = staging / "entitlements.plist"
         entitlement_file.write_bytes(plistlib.dumps(entitlements))
-        sign_bundle(app, libraries, entitlement_file, identity, args.team_id, ad_hoc=args.ad_hoc)
+        sign_bundle(
+            app, libraries, entitlement_file, identity, args.team_id,
+            development=development, keychain=args.keychain,
+        )
         executable = app / "Contents" / "MacOS" / "cantrip"
         reported = run([executable, "--version"], cwd=staging).stdout.decode().strip()
         if reported != f"cantrip {version}":
             raise ReleaseError(f"bundled binary --version reports {reported!r}, expected 'cantrip {version}'")
-        notarization = {"status": "not-requested-development", "stapled": False} if args.ad_hoc else notarize(app, staging, args.notary_profile)
-        suffix = "-development" if args.ad_hoc else ""
+        notarization = {"status": "not-requested-development", "stapled": False} if development else notarize(app, staging, args.notary_profile)
+        suffix = "-development" if development else ""
         archive = staging / f"cantrip-v{version}-{args.target}{suffix}.zip"
         zip_bundle(app, archive)
         manifest = staging / "manifest.json"
@@ -418,7 +444,7 @@ def package(args):
         }))
         sums = staging / "SHA256SUMS"
         sums.write_text("".join(f"{RELEASE['sha256'](asset)}  {asset.name}\n" for asset in (archive, manifest)))
-        if not args.ad_hoc:
+        if not development:
             RELEASE["verify_checkout"](ROOT, revision)
         publish(output, app, [archive, manifest, sums])
     return output
@@ -428,6 +454,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter, epilog="""
 Native development build (repeat on an Intel Mac with x86_64-apple-darwin):
   python3 scripts/package-macos --target aarch64-apple-darwin --ad-hoc --output dist/mac-arm64-dev
+
+Stable local development identity (caller unlocks the Keychain first):
+  python3 scripts/package-macos --target aarch64-apple-darwin \\
+    --dev-sign-identity CERTIFICATE_SHA1 --keychain /path/to/development.keychain-db \\
+    --output dist/mac-arm64-local
 
 Production build, sign, notarize, staple, and Gatekeeper-assess (no publication):
   python3 scripts/package-macos --target aarch64-apple-darwin --output dist/mac-arm64 \\
@@ -442,8 +473,11 @@ Application certificate WITH its private key in Keychain, plus an authenticated
 the pinned CPU ONNX Runtime from its immutable source commit, without global
 installation; arm64 uses ort-sys' checksum-pinned prebuilt CPU runtime unless
 --source-runtime is explicitly selected.
-Production has no unsigned, unnotarized, or ad-hoc fallback. --ad-hoc is explicitly
-DEVELOPMENT ONLY; its archive/manifest never claim production or notarization.
+Production has no unsigned, unnotarized, or development-signing fallback.
+--ad-hoc and --dev-sign-identity are DEVELOPMENT ONLY: no hardened runtime or
+notarization. A local identity keeps its certificate-pinned designated requirement
+across updates; ad-hoc signatures change with the code. Passwords are never read
+by this script: unlock a separate signing keychain before invoking it.
 
 The ZIP contains Cantrip.app and every non-system native dylib. End users expand
 the ZIP and move Cantrip.app in Finder; no source, Rust, Python, Homebrew, or
@@ -455,6 +489,8 @@ grants permissions, or launches the application. Existing output is never replac
     parser.add_argument("--source-revision")
     parser.add_argument("--source-runtime", action="store_true", help="build the pinned CPU ONNX Runtime from source (automatic for Intel; needs CMake 3.28+)")
     parser.add_argument("--ad-hoc", action="store_true", help="explicit DEVELOPMENT ad-hoc signing, without notarization")
+    parser.add_argument("--dev-sign-identity", help="DEVELOPMENT signing with a local certificate's full SHA-1, without notarization")
+    parser.add_argument("--keychain", type=lambda value: Path(value).expanduser(), help="optional keychain containing --dev-sign-identity; caller must unlock it first")
     parser.add_argument("--sign-identity", help="Developer ID Application certificate name or SHA-1 Keychain identity")
     parser.add_argument("--team-id", help="Apple Developer Team ID bound to the signing identity")
     parser.add_argument("--notary-profile", help="existing authenticated notarytool Keychain profile name")
@@ -465,6 +501,8 @@ grants permissions, or launches the application. Existing output is never replac
         parser.exit(1, f"package-macos: {error}\n")
     if args.ad_hoc:
         print("DEVELOPMENT ONLY: ad-hoc signed; NOT hardened, production-signed, or notarized.")
+    elif args.dev_sign_identity:
+        print("DEVELOPMENT ONLY: local identity signed; NOT hardened, Developer ID signed, or notarized.")
     else:
         print("Developer ID signed, Apple notarization Accepted, ticket stapled, Gatekeeper assessment passed.")
     print(output / "Cantrip.app")
