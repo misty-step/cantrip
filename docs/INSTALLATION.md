@@ -449,8 +449,8 @@ A logged-in WindowServer session is needed for NSView rendering. An explicit
 renders, not a pass.
 
 Record exact-head platform results in the PR. Offscreen views draw the HUD's
-opaque backing, not the live panel's material, position or focus, and file STT
-is not a microphone-to-editor trial. Use
+pixels, not the live panel's position or focus, and file STT is not a
+microphone-to-editor trial. Use
 the [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial) for microphone,
 shortcut/menu, login, and general-clipboard/manual-paste behavior. Intel runtime
 execution and production signing/notarization each require their own proof,

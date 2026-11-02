@@ -111,26 +111,16 @@ impl Palette {
         color
     }
 
-    /// This palette for a container that shows its background at `opacity`
-    /// over whatever is behind it. Background and surface become that
-    /// container over black and over white, the darkest and lightest it can
-    /// look, and the text and field colors are refitted to read at 4.5:1 on
-    /// both.
-    #[cfg(any(target_os = "macos", test))]
-    pub fn translucent(self, opacity: f32) -> Self {
-        let over = |behind: f32| {
-            self.background.map(|channel| {
-                (f32::from(channel) * opacity + behind * (1.0 - opacity)).round() as u8
-            })
-        };
-        let backgrounds = [over(0.0), over(255.0)];
+    /// This palette with `surface` behind its text, such as a handoff take's
+    /// washed container: on macOS its text and field colors are refitted to
+    /// read at 4.5:1 there; Omarchy's colors are drawn as the theme gives them.
+    pub fn on_surface(self, surface: [u8; 3]) -> Self {
+        let palette = Self { surface, ..self };
         Self {
-            background: backgrounds[0],
-            surface: backgrounds[1],
-            foreground: legible(self.foreground, backgrounds),
-            accent: legible(self.accent, backgrounds),
-            attention: legible(self.attention, backgrounds),
-            ..self
+            foreground: palette.legible(self.foreground),
+            accent: palette.legible(self.accent),
+            attention: palette.legible(self.attention),
+            ..palette
         }
     }
 }
@@ -193,6 +183,12 @@ fn luminance(color: [u8; 3]) -> f32 {
 #[cfg(any(target_os = "macos", test))]
 fn contrast(a: f32, b: f32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// The WCAG contrast ratio of two sRGB colors.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
+    contrast(luminance(a), luminance(b))
 }
 
 /// Native semantic accents are not necessarily text colors. Preserve the hue
@@ -414,7 +410,7 @@ mod native {
 
 #[cfg(test)]
 mod contrast_tests {
-    use super::{contrast, hsl, hue_distance, legible, luminance, Palette};
+    use super::{contrast, hsl, hue_distance, legible, luminance};
 
     #[test]
     fn native_accents_remain_readable_on_light_and_dark_surfaces() {
@@ -437,30 +433,6 @@ mod contrast_tests {
                     .all(|&background| contrast(luminance(original), luminance(background)) >= 4.5)
                 {
                     assert_eq!(adjusted, original);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_translucent_container_keeps_its_text_readable_over_any_backdrop() {
-        // AppKit's Light and Dark window background and label color.
-        for (background, foreground) in [([255; 3], [38; 3]), ([30; 3], [221; 3])] {
-            let palette = Palette {
-                background,
-                surface: background,
-                foreground,
-                accent: legible([0, 122, 255], [background; 2]),
-                attention: legible([255, 141, 40], [background; 2]),
-                ..Palette::default()
-            }
-            .translucent(0.8);
-            for behind in (0..=255).step_by(15) {
-                let container = background
-                    .map(|channel| (f32::from(channel) * 0.8 + behind as f32 * 0.2).round() as u8);
-                for color in [palette.foreground, palette.accent, palette.attention] {
-                    let ratio = contrast(luminance(color), luminance(container));
-                    assert!(ratio >= 4.5, "{color:?} on {container:?}: {ratio}");
                 }
             }
         }

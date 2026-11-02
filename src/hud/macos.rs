@@ -5,37 +5,28 @@
 //! area and draws the instrument's pixels at that screen's backing scale. It never
 //! becomes key, never activates Cantrip and never needs a permission.
 //!
-//! The instrument's container is a system material (ADR 0034): Liquid Glass on
-//! macOS 26 and later, the HUD window material before, and an opaque system
-//! background while Reduce Transparency or Increase Contrast is on. Over a
-//! material the container keeps most of the appearance's window background,
-//! and the palette is fitted to it, so captions stay legible whatever is
-//! behind the panel. The shared painter draws only the field, rail and
-//! captions over it.
+//! The panel itself is clear. The shared painter draws the instrument as it
+//! does on Linux (ADR 0034): a square, opaque container with a one-point edge,
+//! the field and the captions, in the colors of the panel's light or dark
+//! appearance.
 
 use super::{
-    acquire_instance_lock, container_rect, save_screenshot, Backing, Instrument, Poller,
-    ScreenshotState, CONTAINER_WIDTH, FRAME_INTERVAL, POLL_INTERVAL, PREFERENCE_INTERVAL,
-    ROUTE_WASH, SURFACE_HEIGHT, SURFACE_WIDTH,
+    acquire_instance_lock, save_screenshot, Instrument, Poller, ScreenshotState, CONTAINER_WIDTH,
+    FRAME_INTERVAL, POLL_INTERVAL, PREFERENCE_INTERVAL, SURFACE_HEIGHT, SURFACE_WIDTH,
 };
 use crate::theme::{self, Palette};
 use anyhow::{Context, Result};
-use block2::RcBlock;
 use cantrip_engine::ipc::StatusSnapshot;
 use objc2::{
-    available, define_class, msg_send,
+    define_class, msg_send,
     rc::{autoreleasepool, Retained},
-    runtime::Bool,
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
 };
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy,
-    NSAutoresizingMaskOptions, NSBackingStoreType, NSBezierPath, NSBitmapFormat, NSBitmapImageRep,
-    NSColor, NSColorSpace, NSDeviceRGBColorSpace, NSEventMask, NSGlassEffectView,
-    NSGlassEffectViewStyle, NSGraphicsContext, NSImage, NSPanel, NSScreen, NSStatusWindowLevel,
-    NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
-    NSVisualEffectView, NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowStyleMask,
-    NSWorkspace,
+    NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
+    NSBitmapFormat, NSBitmapImageRep, NSColor, NSColorSpace, NSDeviceRGBColorSpace, NSEventMask,
+    NSGraphicsContext, NSPanel, NSScreen, NSStatusWindowLevel, NSView, NSWindowAnimationBehavior,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::{
@@ -55,15 +46,6 @@ use std::{
 
 /// Gap above the bottom of the screen's usable area, matching the Wayland layer margin.
 const BOTTOM_MARGIN: f64 = 36.0;
-/// The container's corner radius. The field's corner cells stay about four
-/// points inside the curve.
-const CORNER_RADIUS: f64 = 12.0;
-/// The opacity of the appearance's window background over a material. Liquid
-/// Glass does not flip the panel's appearance to suit what is behind it, so a
-/// dark panel's light captions over a white page would sit on light glass. At
-/// this opacity the material's rim and a fifth of what is behind still show,
-/// and the fitted palette reads at 4.5:1 even over pure black or white.
-const SCRIM: f32 = 0.8;
 
 /// The system Reduce Motion setting. NSWorkspace answers on any thread; the
 /// status reader's thread has no ambient autorelease pool.
@@ -117,9 +99,7 @@ fn pump(app: &NSApplication, timeout: Duration) {
 
 /// Render a composed scenario through the real HUD view into an owned bitmap.
 /// No window is ordered on screen, nothing is read from the display, and the
-/// process can neither activate nor show a Dock icon. The window server
-/// composites system materials only on screen, so the container shows the
-/// opaque system background that Reduce Transparency selects.
+/// process can neither activate nor show a Dock icon.
 fn render_offscreen(
     mtm: MainThreadMarker,
     path: &Path,
@@ -140,14 +120,12 @@ fn render_offscreen(
         scale: 2,
     });
     let view = HudView::new(mtm);
-    view.set_underlay(Underlay::Opaque(route(&instrument)));
     let frame = paint_frame(&view, &mut instrument, placement, now, true)
         .context("composing the HUD screenshot")?;
-    let size = frame.container.size;
-    view.setFrameSize(size);
+    view.setFrameSize(NSSize::new(f64::from(frame.width), f64::from(frame.height)));
     let (pixel_width, pixel_height) = (
-        size.width as u32 * placement.scale,
-        size.height as u32 * placement.scale,
+        frame.width * placement.scale,
+        frame.height * placement.scale,
     );
     let bytes = view.render_offscreen(pixel_width, pixel_height)?;
     eprintln!("rendered the HUD view offscreen at {}x", placement.scale);
@@ -175,26 +153,16 @@ fn surface_width(available: f64) -> u32 {
     (available.max(1.0) as u32).clamp(80, SURFACE_WIDTH)
 }
 
-/// The color of the take's handoff route, if it has one.
-fn route(instrument: &Instrument) -> Option<[u8; 3]> {
-    instrument
-        .model
-        .route
-        .as_ref()
-        .map(|route| route.handoff.color)
-}
-
-/// One painted frame: the panel's logical size, the container's frame within
-/// it, and whether it shows the instrument.
+/// One painted frame: the panel's logical size and whether it shows the
+/// instrument.
 struct Frame {
     width: u32,
     height: u32,
-    container: NSRect,
     shown: bool,
 }
 
 /// Size the instrument for `placement` and paint its next frame into `view`,
-/// which shows the container, unless the presented pixels already match.
+/// unless the presented pixels already match.
 fn paint_frame(
     view: &HudView,
     instrument: &mut Instrument,
@@ -206,41 +174,18 @@ fn paint_frame(
     let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
     let height = instrument.height(container_width);
     let scale = placement.scale;
-    // The whole panel fades, so the material fades with the pixels.
+    // The panel fades as a whole through its window's alpha.
     let presentation =
         instrument.prepare(now, 1.0, (width, height), scale, container_width, force)?;
-    let [left, top, container_width, container_height] =
-        container_rect(width as f32, height as f32, container_width);
-    // AppKit counts up from the panel's bottom edge.
-    let container = NSRect::new(
-        NSPoint::new(
-            f64::from(left),
-            f64::from(height as f32 - top - container_height),
-        ),
-        NSSize::new(f64::from(container_width), f64::from(container_height)),
-    );
-    // The whole surface, placed so that its container fills the view.
-    let surface = NSRect::new(
-        NSPoint::new(-container.origin.x, -container.origin.y),
-        NSSize::new(f64::from(width), f64::from(height)),
-    );
     let (pixel_width, pixel_height) = (width * scale, height * scale);
-    view.paint(pixel_width, pixel_height, surface, |bytes| {
-        instrument.paint(
-            &presentation,
-            bytes,
-            pixel_width,
-            pixel_height,
-            scale,
-            Backing::Native,
-        )
+    view.paint(pixel_width, pixel_height, |bytes| {
+        instrument.paint(&presentation, bytes, pixel_width, pixel_height, scale)
     });
     let shown = presentation.shown;
     instrument.presented(presentation);
     Some(Frame {
         width,
         height,
-        container,
         shown,
     })
 }
@@ -283,7 +228,7 @@ impl LiveHud {
             // AppKit resolves the appearance only here; the status reader
             // publishes this snapshot with its next sample.
             self.palette = theme::load();
-            self.panel.refresh(mtm);
+            self.panel.refresh();
             if self.lock.is_none() {
                 self.lock = acquire_lock();
             }
@@ -348,149 +293,12 @@ impl Placement {
     }
 }
 
-/// What shows through the instrument's container.
-enum Backdrop {
-    /// Liquid Glass, macOS 26 and later, with the instrument as its content
-    /// view.
-    Glass(Retained<NSGlassEffectView>),
-    /// The HUD window material on earlier releases, holding the instrument.
-    Material(Retained<NSVisualEffectView>),
-    /// No material: the instrument's view fills an opaque system background.
-    Opaque,
-}
-
-impl Backdrop {
-    /// Reduce Transparency and Increase Contrast ask for an opaque background.
-    fn opaque_preferred() -> bool {
-        let workspace = NSWorkspace::sharedWorkspace();
-        workspace.accessibilityDisplayShouldReduceTransparency()
-            || workspace.accessibilityDisplayShouldIncreaseContrast()
-    }
-
-    /// The backdrop the display preferences allow, holding `view` at the
-    /// container's `frame` in `root`.
-    fn new(mtm: MainThreadMarker, root: &NSView, view: &HudView, frame: NSRect) -> Self {
-        // Liquid Glass may lay its content view out with constraints; the
-        // others place the view by its frame.
-        view.setTranslatesAutoresizingMaskIntoConstraints(true);
-        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewNotSizable);
-        let backdrop = if Self::opaque_preferred() {
-            root.addSubview(view);
-            Self::Opaque
-        } else if available!(macos = 26.0) {
-            let glass = NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), frame);
-            glass.setStyle(NSGlassEffectViewStyle::Regular);
-            glass.setCornerRadius(CORNER_RADIUS);
-            fill(view, &glass);
-            glass.setContentView(Some(view));
-            root.addSubview(&glass);
-            Self::Glass(glass)
-        } else {
-            let material = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame);
-            material.setMaterial(NSVisualEffectMaterial::HUDWindow);
-            material.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-            // The panel is never key; keep the material active regardless.
-            material.setState(NSVisualEffectState::Active);
-            fill(view, &material);
-            material.addSubview(view);
-            root.addSubview(&material);
-            Self::Material(material)
-        };
-        backdrop.place(view, frame);
-        backdrop
-    }
-
-    /// Take the backdrop and the instrument's view out of the panel.
-    fn remove(&self, view: &HudView) {
-        match self {
-            Self::Glass(glass) => {
-                glass.setContentView(None);
-                glass.removeFromSuperview();
-            }
-            Self::Material(material) => material.removeFromSuperview(),
-            Self::Opaque => {}
-        }
-        view.removeFromSuperview();
-    }
-
-    /// Move the container to `frame` in the panel.
-    fn place(&self, view: &HudView, frame: NSRect) {
-        match self {
-            Self::Glass(glass) => glass.setFrame(frame),
-            Self::Material(material) => {
-                material.setFrame(frame);
-                material.setMaskImage(Some(&rounded(frame.size)));
-            }
-            Self::Opaque => view.setFrame(frame),
-        }
-    }
-
-    /// Wash the container with a handoff route's color, and edge it with that
-    /// color where no glass rim edges it.
-    fn tint(&self, view: &HudView, route: Option<[u8; 3]>) {
-        view.set_underlay(match self {
-            Self::Glass(_) => Underlay::Glass(route),
-            Self::Material(_) => Underlay::Material(route),
-            Self::Opaque => Underlay::Opaque(route),
-        });
-    }
-
-    /// The colors of `view`'s appearance, fitted to what shows through the
-    /// container.
-    fn palette(&self, view: &HudView) -> Palette {
-        let palette = theme::resolve(&view.effectiveAppearance());
-        match self {
-            Self::Glass(_) | Self::Material(_) => palette.translucent(SCRIM),
-            Self::Opaque => palette,
-        }
-    }
-}
-
-/// Keep `view` filling `parent` as the container resizes.
-fn fill(view: &HudView, parent: &NSView) {
-    view.setFrame(parent.bounds());
-    view.setAutoresizingMask(
-        NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
-    );
-}
-
-/// The container's rounded shape at `size`, as a material's mask.
-fn rounded(size: NSSize) -> Retained<NSImage> {
-    let draw = RcBlock::new(|bounds: NSRect| -> Bool {
-        NSColor::blackColor().setFill();
-        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-            bounds,
-            CORNER_RADIUS,
-            CORNER_RADIUS,
-        )
-        .fill();
-        Bool::YES
-    });
-    NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw)
-}
-
-fn srgb([red, green, blue]: [u8; 3], alpha: f64) -> Retained<NSColor> {
-    NSColor::colorWithSRGBRed_green_blue_alpha(
-        f64::from(red) / 255.0,
-        f64::from(green) / 255.0,
-        f64::from(blue) / 255.0,
-        alpha,
-    )
-}
-
 struct Panel {
     window: Retained<NSPanel>,
-    /// The panel's content view; the backdrop sits in it at the container's frame.
-    root: Retained<NSView>,
     view: Retained<HudView>,
-    backdrop: Backdrop,
-    /// The container's frame in the panel.
-    container: NSRect,
-    /// The handoff route color the backdrop carries.
-    route: Option<[u8; 3]>,
     placement: Option<Placement>,
-    /// The colors of the instrument view's effective appearance, fitted to the
-    /// backdrop and followed as soon as AppKit changes either.
+    /// The colors of the instrument view's effective appearance, followed as
+    /// soon as AppKit changes it.
     palette: Palette,
 }
 
@@ -524,34 +332,20 @@ impl Panel {
         window.setHidesOnDeactivate(false);
         window.setAnimationBehavior(NSWindowAnimationBehavior::None);
         window.setExcludedFromWindowsMenu(true);
-        let root = NSView::initWithFrame(NSView::alloc(mtm), frame);
-        window.setContentView(Some(&root));
         let view = HudView::new(mtm);
-        let container = NSRect::ZERO;
-        let backdrop = Backdrop::new(mtm, &root, &view, container);
-        backdrop.tint(&view, None);
-        let palette = backdrop.palette(&view);
+        window.setContentView(Some(&view));
+        let palette = theme::resolve(&view.effectiveAppearance());
         Self {
             window,
-            root,
             view,
-            backdrop,
-            container,
-            route: None,
             placement: None,
             palette,
         }
     }
 
-    /// Follow the display preferences: the backdrop they allow and the colors
-    /// of the instrument view's appearance.
-    fn refresh(&mut self, mtm: MainThreadMarker) {
-        if Backdrop::opaque_preferred() != matches!(self.backdrop, Backdrop::Opaque) {
-            self.backdrop.remove(&self.view);
-            self.backdrop = Backdrop::new(mtm, &self.root, &self.view, self.container);
-            self.backdrop.tint(&self.view, self.route);
-        }
-        self.palette = self.backdrop.palette(&self.view);
+    /// Resolve the colors of the instrument view's appearance again.
+    fn refresh(&mut self) {
+        self.palette = theme::resolve(&self.view.effectiveAppearance());
     }
 
     fn present(&mut self, instrument: &mut Instrument, mtm: MainThreadMarker, now: Instant) {
@@ -565,14 +359,9 @@ impl Panel {
             return;
         };
         if self.view.ivars().appearance_changed.take() {
-            self.palette = self.backdrop.palette(&self.view);
+            self.refresh();
         }
         instrument.palette = self.palette;
-        let route = route(instrument);
-        if route != self.route {
-            self.route = route;
-            self.backdrop.tint(&self.view, route);
-        }
         let alpha = f64::from(instrument.alpha(now));
         if self.window.alphaValue() != alpha {
             self.window.setAlphaValue(alpha);
@@ -584,10 +373,6 @@ impl Panel {
         if self.window.frame() != window_frame {
             self.window.setFrame_display(window_frame, false);
         }
-        if self.container != frame.container {
-            self.container = frame.container;
-            self.backdrop.place(&self.view, frame.container);
-        }
         self.view.setNeedsDisplay(true);
         if frame.shown && !ordered {
             // Shown without activating Cantrip or taking keyboard focus.
@@ -598,65 +383,11 @@ impl Panel {
     }
 }
 
-/// What the instrument's view draws inside the container's rounded shape,
-/// beneath its pixels: the appearance's window background, any route's wash
-/// and, where no glass rim edges the container, a one-point edge. Wash and edge
-/// take the route's color when the take has one, as the painted container's
-/// border does.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Underlay {
-    /// Over Liquid Glass, whose rim edges the container.
-    Glass(Option<[u8; 3]>),
-    /// Over the HUD window material.
-    Material(Option<[u8; 3]>),
-    /// Opaque, for Reduce Transparency and Increase Contrast.
-    Opaque(Option<[u8; 3]>),
-}
-
-impl Underlay {
-    /// Draw into `bounds`, which `shape` rounds and clips.
-    fn draw(self, bounds: NSRect, shape: &NSBezierPath) {
-        let (opacity, route, edged) = match self {
-            Self::Glass(route) => (SCRIM, route, false),
-            Self::Material(route) => (SCRIM, route, true),
-            Self::Opaque(route) => (1.0, route, true),
-        };
-        NSColor::windowBackgroundColor()
-            .colorWithAlphaComponent(f64::from(opacity))
-            .setFill();
-        shape.fill();
-        if let Some(color) = route {
-            srgb(color, f64::from(ROUTE_WASH)).setFill();
-            shape.fill();
-        }
-        if !edged {
-            return;
-        }
-        let edge = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-            NSRect::new(
-                NSPoint::new(bounds.origin.x + 0.5, bounds.origin.y + 0.5),
-                NSSize::new(bounds.size.width - 1.0, bounds.size.height - 1.0),
-            ),
-            CORNER_RADIUS - 0.5,
-            CORNER_RADIUS - 0.5,
-        );
-        edge.setLineWidth(1.0);
-        match route {
-            Some(color) => srgb(color, 1.0),
-            None => NSColor::separatorColor(),
-        }
-        .setStroke();
-        edge.stroke();
-    }
-}
-
 /// The instrument's latest premultiplied BGRA pixels.
 struct Pixels {
     bytes: Arc<Vec<u8>>,
     width: usize,
     height: usize,
-    /// Where the surface they cover lies in the view, in points.
-    surface: NSRect,
     /// Theme colors are sRGB; Core Graphics matches them to each display.
     space: Option<CFRetained<CGColorSpace>>,
 }
@@ -719,10 +450,10 @@ unsafe extern "C-unwind" fn release_pixels(
     drop(unsafe { Arc::from_raw(info.cast_const().cast::<Vec<u8>>()) });
 }
 
-/// The instrument's pixels and what its view draws beneath them.
+/// The instrument's latest pixels, and whether AppKit changed the view's
+/// appearance since the panel last resolved its colors.
 struct HudState {
     pixels: RefCell<Pixels>,
-    underlay: Cell<Underlay>,
     /// AppKit changed the view's effective appearance, as switching between
     /// Light and Dark does.
     appearance_changed: Cell<bool>,
@@ -760,37 +491,26 @@ impl HudView {
                 bytes: Arc::new(Vec::new()),
                 width: 0,
                 height: 0,
-                surface: NSRect::ZERO,
                 // SAFETY: a framework constant, valid for the process lifetime.
                 space: CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })),
             }),
-            underlay: Cell::new(Underlay::Glass(None)),
             appearance_changed: Cell::new(true),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer.
         unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
     }
 
-    /// Replace the pixels in place once Core Graphics has released the last
-    /// frame. They cover `surface`, in the view's points.
-    fn paint(&self, width: u32, height: u32, surface: NSRect, paint: impl FnOnce(&mut [u8])) {
+    /// Replace the pixels in place once Core Graphics has released the last frame.
+    fn paint(&self, width: u32, height: u32, paint: impl FnOnce(&mut [u8])) {
         let mut pixels = self.ivars().pixels.borrow_mut();
         let bytes = Arc::make_mut(&mut pixels.bytes);
         bytes.resize(width as usize * height as usize * 4, 0);
         paint(bytes);
         pixels.width = width as usize;
         pixels.height = height as usize;
-        pixels.surface = surface;
     }
 
-    fn set_underlay(&self, underlay: Underlay) {
-        if self.ivars().underlay.replace(underlay) != underlay {
-            self.setNeedsDisplay(true);
-        }
-    }
-
-    /// Draw the underlay, then the pixels one-to-one into the view's backing,
-    /// all inside the container's rounded shape; transparent elsewhere.
+    /// Draw the pixels one-to-one into the view's backing; transparent elsewhere.
     fn draw(&self) {
         let Some(context) = NSGraphicsContext::currentContext() else {
             return;
@@ -798,18 +518,9 @@ impl HudView {
         let context = context.CGContext();
         let bounds = self.bounds();
         CGContext::clear_rect(Some(&context), bounds);
-        let shape = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-            bounds,
-            CORNER_RADIUS,
-            CORNER_RADIUS,
-        );
-        // The shape also clips the attention rail along the container's left edge.
-        shape.addClip();
-        self.ivars().underlay.get().draw(bounds, &shape);
-        let pixels = self.ivars().pixels.borrow();
-        if let Some(image) = pixels.image() {
+        if let Some(image) = self.ivars().pixels.borrow().image() {
             CGContext::set_interpolation_quality(Some(&context), CGInterpolationQuality::None);
-            CGContext::draw_image(Some(&context), pixels.surface, Some(&image));
+            CGContext::draw_image(Some(&context), bounds, Some(&image));
         }
     }
 
