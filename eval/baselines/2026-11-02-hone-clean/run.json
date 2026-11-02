@@ -1,0 +1,1692 @@
+{
+  "schema": "cantrip.operator-refinement-study.v1",
+  "run_id": "operator-2026-11-02-hone-clean",
+  "date": "2026-11-02",
+  "claim_type": "measured_unless_explicitly_inferred_or_unverified",
+  "source_revision": "68a7670e59bc9409828e4551bf9214236b4eec19",
+  "base_revision": "2921fcce22e45f1e728e12111848850562887311",
+  "source_scope": "Frozen prompt bytes match the implementation constant; model API evaluation is not a built/live application verification.",
+  "corpus": {
+    "retained_nonempty_wav_takes": 24,
+    "private_speech_takes": 16,
+    "private_noise_controls": 8,
+    "archived_raw_plus_audio": 15,
+    "recovered_speech_take": 1,
+    "licensed_public_clips": 5,
+    "private_audio_seconds": 2099.1,
+    "speech_take_audio_seconds": 2055.8,
+    "public_audio_seconds": 48.648,
+    "speech_audio_range_seconds": [
+      4.1,
+      490.3
+    ],
+    "synthetic_behavior_cases": 32,
+    "evaluated_vocabulary_terms": 41,
+    "private_corpus_sha256": "6edcb40959050a6c9bad95687e20137260ef7275b60f2dac5bc7957cb4bba3e7",
+    "vocabulary_sha256": "b62dfa1b50a9ff070d6db0e5d3816ddfbd1b4ea7bce5f16c7e19ff1d987e0e24",
+    "behavior_manifest_sha256": "0b0aeb4b0cfac94d0e4f618622119df55656a86e3c0ae91caaf79b6e3859454f",
+    "operator_adjudication_pending_spans": 28,
+    "additional_vocabulary_candidates_not_evaluated": 13,
+    "reference_status": "Before/after agent silver adjudication; operator adjudication is pending. Eight noise controls are inferred from recognizer agreement, not independently listened to."
+  },
+  "prompts": [
+    {
+      "id": "current",
+      "effective_base_sha256": "ee943ee3148e89409a8ff131ff5e3fe5ac2a67f2bf6dc757bdd1d193dbf44cd5",
+      "system_with_evaluated_vocabulary_sha256": "a7fa19acf8893620f4007e3f61cd5e46aca82018834ed387ad7365409796e3aa"
+    },
+    {
+      "id": "hone-initial",
+      "effective_base_sha256": "a296ac13b3b402da508d2da3715c1bc7fa996496f57a05b0308db92e843b5719",
+      "system_with_evaluated_vocabulary_sha256": "f7d2b2c4beca97e65c05651826f6c84ff95853edfc519e9308f7d5e4f4f53119"
+    },
+    {
+      "id": "hone-final",
+      "effective_base_sha256": "aacb81d32e5dd049fa47fb4c523a6cb98ede1a95217842b10261e200a982cc62",
+      "system_with_evaluated_vocabulary_sha256": "df0aa4cd36a39475ea5eb39a8de8c2d9258370a9aa4bf6a9123a300e4eb9b27f"
+    }
+  ],
+  "production_prompt": {
+    "version": 3,
+    "production_base_matches_evaluated_final_prompt": true,
+    "production_module_sha256": "d129fc7e2ff99292f8d86c36294a296c2d873c2b1deca1206b9e4efb00ad5930",
+    "effective_base_sha256": "aacb81d32e5dd049fa47fb4c523a6cb98ede1a95217842b10261e200a982cc62",
+    "effective_system_with_vocabulary_sha256": "df0aa4cd36a39475ea5eb39a8de8c2d9258370a9aa4bf6a9123a300e4eb9b27f",
+    "prompt_version": 3,
+    "scope": "Static byte identity only; not a build or live-app verification."
+  },
+  "method": {
+    "repeats": 1,
+    "arm_order": "Seed 20261102, randomized sequential arms within each take; no paid retries. Final blind grading uses a new opaque-label shuffle.",
+    "scorer": "Unchanged examples/eval/wer.rs (cantrip-ascii-v1), called through a private std-only native adapter.",
+    "scorer_sha256": "b1277cbe1af80c89ad07dc592707a1ddfefa502a1c4787162739716c8f8bb053",
+    "noun_spans": "Reference occurrences matched case-insensitively to canonical vocabulary; output occurrences require exact spelling and case. Count-matched precision/recall is provisional, not a semantic entity annotator.",
+    "cleanup_grading": "Human-agent blind review of every completed private output and every non-exact control. Independently authored exact-accepted outputs provide deterministic fidelity/readability oracles. No paid judges.",
+    "quality_gate": "Complete final arm: zero private factual/modality/number/negation/identifier/speech-act failures, zero behavior fidelity failures, zero empty-input inventions, and the incident name corrected.",
+    "selection": "Highest private readability among qualified final arms; within 0.15 points prefer lower private p95, then cost.",
+    "routing": "Provider fallbacks disabled. Cleanup enforces provider.max_price at reviewed standard token prices, with no temperature, generation cap, reasoning.exclude, or Ollama think override. The app does not send these provider guards.",
+    "timeout_scope": "30-second client socket timeout in the private cleanup runner; not proof of the application shared deadline. Selected-arm observed maximum was below 30 seconds.",
+    "counter_guard": "Authoritative eval-key counter read before every final one-call batch. Absolute key usage plus the full next-call reservation must be <=$4.50. Append-only reconciliation retains every unknown flag; no reset or paid failed-call retry."
+  },
+  "host": {
+    "os": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "chip": "Apple M5",
+    "memory_gib": 24,
+    "cores": 10,
+    "thermal_and_power": "not controlled",
+    "competing_host_load": "not isolated or sampled"
+  },
+  "native_baseline": {
+    "version": "0.1.11",
+    "sha256": "3659fe8dedd3b58d5554c550cbf5ad4c83217fd7c69fc0a3c3b8981761da3d4d",
+    "timing": "Cold CLI process per clip; includes model load, pipeline, archive and stdout. No live app/config/keyring changes."
+  },
+  "local_model_hashes": {
+    "encoder-model.int8.onnx": "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09",
+    "nemo128.onnx": "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f",
+    "config.json": "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466",
+    "decoder_joint-model.int8.onnx": "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70",
+    "vocab.txt": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d"
+  },
+  "stt": {
+    "lanes": [
+      {
+        "model": "parakeet-tdt-0.6b-v3-int8",
+        "canonical_version": "parakeet-tdt-0.6b-v3-int8",
+        "submitted_calls": 29,
+        "http_or_process_failures": 0,
+        "nonempty_noise_control_outputs": 0,
+        "noise_control_request_failures": 0,
+        "successful_nonempty_speech_latency": {
+          "n": 21,
+          "p50_ms": 3624.8700419673696,
+          "p95_ms": 23728.015583008528,
+          "min_ms": 684.3984160223044,
+          "max_ms": 33117.808416020125
+        },
+        "reported_usage_cost_usd": 0.0,
+        "unknown_cost_calls": 0,
+        "actual_usd_per_audio_hour": 0.0,
+        "cost_status": "zero_api_charges_excludes_hardware"
+      },
+      {
+        "model": "microsoft/mai-transcribe-2",
+        "canonical_version": "microsoft/mai-transcribe-2-20260903",
+        "submitted_calls": 29,
+        "http_or_process_failures": 0,
+        "nonempty_noise_control_outputs": 1,
+        "noise_control_request_failures": 0,
+        "successful_nonempty_speech_latency": {
+          "n": 21,
+          "p50_ms": 958.2874579937197,
+          "p95_ms": 5644.987041014247,
+          "min_ms": 491.93329201079905,
+          "max_ms": 7948.951999947894
+        },
+        "reported_usage_cost_usd": 0.06,
+        "unknown_cost_calls": 0,
+        "actual_usd_per_audio_hour": 0.10057045798669118,
+        "cost_status": "reported"
+      },
+      {
+        "model": "openai/gpt-transcribe",
+        "canonical_version": "openai/gpt-transcribe-20260805",
+        "submitted_calls": 29,
+        "http_or_process_failures": 27,
+        "nonempty_noise_control_outputs": 0,
+        "noise_control_request_failures": 8,
+        "successful_nonempty_speech_latency": {
+          "n": 2,
+          "p50_ms": 18362.9597084946,
+          "p95_ms": 19318.53512499947,
+          "min_ms": 17407.38429198973,
+          "max_ms": 19318.53512499947
+        },
+        "reported_usage_cost_usd": 0.062775,
+        "unknown_cost_calls": 27,
+        "actual_usd_per_audio_hour": null,
+        "cost_status": "unknown_total; reported sum is only a lower bound"
+      },
+      {
+        "model": "elevenlabs/scribe-v2",
+        "canonical_version": "elevenlabs/scribe-v2-20260929",
+        "submitted_calls": 29,
+        "http_or_process_failures": 0,
+        "nonempty_noise_control_outputs": 8,
+        "noise_control_request_failures": 0,
+        "successful_nonempty_speech_latency": {
+          "n": 21,
+          "p50_ms": 1242.376291018445,
+          "p95_ms": 10190.789375046734,
+          "min_ms": 565.2236249879934,
+          "max_ms": 12032.142666983418
+        },
+        "reported_usage_cost_usd": 0.1312512666666428,
+        "unknown_cost_calls": 0,
+        "actual_usd_per_audio_hour": 0.21999999999995998,
+        "cost_status": "reported"
+      },
+      {
+        "model": "deepgram/nova-3",
+        "canonical_version": "deepgram/nova-3-20260714",
+        "submitted_calls": 29,
+        "http_or_process_failures": 0,
+        "nonempty_noise_control_outputs": 0,
+        "noise_control_request_failures": 0,
+        "successful_nonempty_speech_latency": {
+          "n": 21,
+          "p50_ms": 1138.6652080109343,
+          "p95_ms": 4745.367709023412,
+          "min_ms": 533.9354169555008,
+          "max_ms": 6956.271749979351
+        },
+        "reported_usage_cost_usd": 0.1539219400000716,
+        "unknown_cost_calls": 0,
+        "actual_usd_per_audio_hour": 0.25800000000011997,
+        "cost_status": "reported"
+      }
+    ],
+    "before_and_after_agent_adjudication": [
+      {
+        "phase": "before",
+        "model": "deepgram/nova-3",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.08243802501555374,
+        "macro_cer": 0.04448751914681313,
+        "pooled_wer": 0.06766127337675983,
+        "pooled_cer": 0.031469052945563014,
+        "noun_spans": {
+          "correct": 59,
+          "expected": 94,
+          "predicted": 66,
+          "recall": 0.6276595744680851,
+          "precision": 0.8939393939393939
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 1361.7379585048184,
+          "p95_ms": 6956.271749979351,
+          "min_ms": 618.7457079649903,
+          "max_ms": 6956.271749979351
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.14733233333340187,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "before",
+        "model": "deepgram/nova-3",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.12338461538461538,
+        "macro_cer": 0.04791147241914577,
+        "pooled_wer": 0.08208955223880597,
+        "pooled_cer": 0.038128249566724434,
+        "noun_spans": {
+          "correct": 3,
+          "expected": 10,
+          "predicted": 3,
+          "recall": 0.3,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 744.2456670105457,
+          "p95_ms": 1100.9163749986328,
+          "min_ms": 533.9354169555008,
+          "max_ms": 1100.9163749986328
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.0034864400000016215,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "before",
+        "model": "elevenlabs/scribe-v2",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.11345192441326477,
+        "macro_cer": 0.09550171430705168,
+        "pooled_wer": 0.053792813616305946,
+        "pooled_cer": 0.03435247327864777,
+        "noun_spans": {
+          "correct": 78,
+          "expected": 94,
+          "predicted": 78,
+          "recall": 0.8297872340425532,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 1961.0821249953005,
+          "p95_ms": 12032.142666983418,
+          "min_ms": 565.2236249879934,
+          "max_ms": 12032.142666983418
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.12563222222219939,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "before",
+        "model": "elevenlabs/scribe-v2",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.046857142857142854,
+        "macro_cer": 0.021205545509342977,
+        "pooled_wer": 0.029850746268656716,
+        "pooled_cer": 0.01559792027729636,
+        "noun_spans": {
+          "correct": 7,
+          "expected": 10,
+          "predicted": 7,
+          "recall": 0.7,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 1067.034249950666,
+          "p95_ms": 5129.568291013129,
+          "min_ms": 810.5719159939326,
+          "max_ms": 5129.568291013129
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.002972933333332793,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "before",
+        "model": "microsoft/mai-transcribe-2",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.0,
+        "macro_cer": 0.0,
+        "pooled_wer": 0.0,
+        "pooled_cer": 0.0,
+        "noun_spans": {
+          "correct": 77,
+          "expected": 94,
+          "predicted": 77,
+          "recall": 0.8191489361702128,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 1277.3153540038038,
+          "p95_ms": 7948.951999947894,
+          "min_ms": 491.93329201079905,
+          "max_ms": 7948.951999947894
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.05733333333333333,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Reference-source lane; near-zero silver WER is circular, not independent quality evidence."
+      },
+      {
+        "phase": "before",
+        "model": "microsoft/mai-transcribe-2",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.025978021978021976,
+        "macro_cer": 0.005253938026425984,
+        "pooled_wer": 0.022388059701492536,
+        "pooled_cer": 0.005199306759098787,
+        "noun_spans": {
+          "correct": 7,
+          "expected": 10,
+          "predicted": 7,
+          "recall": 0.7,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 874.1400000290014,
+          "p95_ms": 1230.630708974786,
+          "min_ms": 534.9895840045065,
+          "max_ms": 1230.630708974786
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.001388888888888889,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "before",
+        "model": "openai/gpt-transcribe",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.88422216368445,
+        "macro_cer": 0.8797503769215226,
+        "pooled_wer": 0.590670308888422,
+        "pooled_cer": 0.5764354958985831,
+        "noun_spans": {
+          "correct": 18,
+          "expected": 94,
+          "predicted": 18,
+          "recall": 0.19148936170212766,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 2,
+          "p50_ms": 18362.9597084946,
+          "p95_ms": 19318.53512499947,
+          "min_ms": 17407.38429198973,
+          "max_ms": 19318.53512499947
+        },
+        "failures_or_empty": 14,
+        "reported_usd": 0.062775,
+        "unknown_cost_calls": 14,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "before",
+        "model": "openai/gpt-transcribe",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 1.0,
+        "macro_cer": 1.0,
+        "pooled_wer": 1.0,
+        "pooled_cer": 1.0,
+        "noun_spans": {
+          "correct": 0,
+          "expected": 10,
+          "predicted": 0,
+          "recall": 0.0,
+          "precision": null
+        },
+        "latency": {
+          "n": 0,
+          "p50_ms": null,
+          "p95_ms": null,
+          "min_ms": null,
+          "max_ms": null
+        },
+        "failures_or_empty": 5,
+        "reported_usd": 0,
+        "unknown_cost_calls": 5,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "before",
+        "model": "parakeet-tdt-0.6b-v3-int8",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.25466960146255035,
+        "macro_cer": 0.0710880669411606,
+        "pooled_wer": 0.04895986551796596,
+        "pooled_cer": 0.02038279890628884,
+        "noun_spans": {
+          "correct": 60,
+          "expected": 94,
+          "predicted": 61,
+          "recall": 0.6382978723404256,
+          "precision": 0.9836065573770492
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 3611.7921249824576,
+          "p95_ms": 33117.808416020125,
+          "min_ms": 684.3984160223044,
+          "max_ms": 33117.808416020125
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "before",
+        "model": "parakeet-tdt-0.6b-v3-int8",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.12338461538461538,
+        "macro_cer": 0.049300090149199595,
+        "pooled_wer": 0.08208955223880597,
+        "pooled_cer": 0.036395147313691506,
+        "noun_spans": {
+          "correct": 3,
+          "expected": 10,
+          "predicted": 3,
+          "recall": 0.3,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 3624.8700419673696,
+          "p95_ms": 4449.979583965614,
+          "min_ms": 3251.198125013616,
+          "max_ms": 4449.979583965614
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "after",
+        "model": "deepgram/nova-3",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.08353142228271877,
+        "macro_cer": 0.04444777351883221,
+        "pooled_wer": 0.06841552990556138,
+        "pooled_cer": 0.03136962465821526,
+        "noun_spans": {
+          "correct": 61,
+          "expected": 104,
+          "predicted": 66,
+          "recall": 0.5865384615384616,
+          "precision": 0.9242424242424242
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 1361.7379585048184,
+          "p95_ms": 6956.271749979351,
+          "min_ms": 618.7457079649903,
+          "max_ms": 6956.271749979351
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.14733233333340187,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "after",
+        "model": "deepgram/nova-3",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.12338461538461538,
+        "macro_cer": 0.04791147241914577,
+        "pooled_wer": 0.08208955223880597,
+        "pooled_cer": 0.038128249566724434,
+        "noun_spans": {
+          "correct": 3,
+          "expected": 10,
+          "predicted": 3,
+          "recall": 0.3,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 744.2456670105457,
+          "p95_ms": 1100.9163749986328,
+          "min_ms": 533.9354169555008,
+          "max_ms": 1100.9163749986328
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.0034864400000016215,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "after",
+        "model": "elevenlabs/scribe-v2",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.11225072135919544,
+        "macro_cer": 0.09546196867907075,
+        "pooled_wer": 0.05519412381951731,
+        "pooled_cer": 0.034253044991300025,
+        "noun_spans": {
+          "correct": 78,
+          "expected": 104,
+          "predicted": 78,
+          "recall": 0.75,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 1961.0821249953005,
+          "p95_ms": 12032.142666983418,
+          "min_ms": 565.2236249879934,
+          "max_ms": 12032.142666983418
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.12563222222219939,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "after",
+        "model": "elevenlabs/scribe-v2",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.046857142857142854,
+        "macro_cer": 0.021205545509342977,
+        "pooled_wer": 0.029850746268656716,
+        "pooled_cer": 0.01559792027729636,
+        "noun_spans": {
+          "correct": 7,
+          "expected": 10,
+          "predicted": 7,
+          "recall": 0.7,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 1067.034249950666,
+          "p95_ms": 5129.568291013129,
+          "min_ms": 810.5719159939326,
+          "max_ms": 5129.568291013129
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.002972933333332793,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "after",
+        "model": "microsoft/mai-transcribe-2",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.004134947564747726,
+        "macro_cer": 3.97456279809221e-05,
+        "pooled_wer": 0.00440713536201469,
+        "pooled_cer": 9.942828734775044e-05,
+        "noun_spans": {
+          "correct": 77,
+          "expected": 104,
+          "predicted": 77,
+          "recall": 0.7403846153846154,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 1277.3153540038038,
+          "p95_ms": 7948.951999947894,
+          "min_ms": 491.93329201079905,
+          "max_ms": 7948.951999947894
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.05733333333333333,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Reference-source lane; near-zero silver WER is circular, not independent quality evidence."
+      },
+      {
+        "phase": "after",
+        "model": "microsoft/mai-transcribe-2",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.025978021978021976,
+        "macro_cer": 0.005253938026425984,
+        "pooled_wer": 0.022388059701492536,
+        "pooled_cer": 0.005199306759098787,
+        "noun_spans": {
+          "correct": 7,
+          "expected": 10,
+          "predicted": 7,
+          "recall": 0.7,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 874.1400000290014,
+          "p95_ms": 1230.630708974786,
+          "min_ms": 534.9895840045065,
+          "max_ms": 1230.630708974786
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0.001388888888888889,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "after",
+        "model": "openai/gpt-transcribe",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.8846577908051658,
+        "macro_cer": 0.8797503769215226,
+        "pooled_wer": 0.5922350472193074,
+        "pooled_cer": 0.5764354958985831,
+        "noun_spans": {
+          "correct": 18,
+          "expected": 104,
+          "predicted": 18,
+          "recall": 0.17307692307692307,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 2,
+          "p50_ms": 18362.9597084946,
+          "p95_ms": 19318.53512499947,
+          "min_ms": 17407.38429198973,
+          "max_ms": 19318.53512499947
+        },
+        "failures_or_empty": 14,
+        "reported_usd": 0.062775,
+        "unknown_cost_calls": 14,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "after",
+        "model": "openai/gpt-transcribe",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 1.0,
+        "macro_cer": 1.0,
+        "pooled_wer": 1.0,
+        "pooled_cer": 1.0,
+        "noun_spans": {
+          "correct": 0,
+          "expected": 10,
+          "predicted": 0,
+          "recall": 0.0,
+          "precision": null
+        },
+        "latency": {
+          "n": 0,
+          "p50_ms": null,
+          "p95_ms": null,
+          "min_ms": null,
+          "max_ms": null
+        },
+        "failures_or_empty": 5,
+        "reported_usd": 0,
+        "unknown_cost_calls": 5,
+        "reference_bias": "Independent licensed public references."
+      },
+      {
+        "phase": "after",
+        "model": "parakeet-tdt-0.6b-v3-int8",
+        "category": "dictation",
+        "clips": 16,
+        "macro_wer": 0.2559921716903122,
+        "macro_cer": 0.0710880669411606,
+        "pooled_wer": 0.050786988457502624,
+        "pooled_cer": 0.02038279890628884,
+        "noun_spans": {
+          "correct": 61,
+          "expected": 104,
+          "predicted": 61,
+          "recall": 0.5865384615384616,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 16,
+          "p50_ms": 3611.7921249824576,
+          "p95_ms": 33117.808416020125,
+          "min_ms": 684.3984160223044,
+          "max_ms": 33117.808416020125
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Shared provisional silver reference, not operator-adjudicated."
+      },
+      {
+        "phase": "after",
+        "model": "parakeet-tdt-0.6b-v3-int8",
+        "category": "public-speech",
+        "clips": 5,
+        "macro_wer": 0.12338461538461538,
+        "macro_cer": 0.049300090149199595,
+        "pooled_wer": 0.08208955223880597,
+        "pooled_cer": 0.036395147313691506,
+        "noun_spans": {
+          "correct": 3,
+          "expected": 10,
+          "predicted": 3,
+          "recall": 0.3,
+          "precision": 1.0
+        },
+        "latency": {
+          "n": 5,
+          "p50_ms": 3624.8700419673696,
+          "p95_ms": 4449.979583965614,
+          "min_ms": 3251.198125013616,
+          "max_ms": 4449.979583965614
+        },
+        "failures_or_empty": 0,
+        "reported_usd": 0,
+        "unknown_cost_calls": 0,
+        "reference_bias": "Independent licensed public references."
+      }
+    ],
+    "after_operator_adjudication": null,
+    "historical_native_runtime_latency": {
+      "all": {
+        "n": 15,
+        "stt": {
+          "n": 15,
+          "p50_ms": 1970,
+          "p95_ms": 13245,
+          "min_ms": 241,
+          "max_ms": 13245
+        }
+      },
+      "short_audio": {
+        "n": 5,
+        "p50_ms": 327,
+        "p95_ms": 831,
+        "min_ms": 241,
+        "max_ms": 831
+      },
+      "long_audio": {
+        "n": 10,
+        "p50_ms": 4147.0,
+        "p95_ms": 13245,
+        "min_ms": 1566,
+        "max_ms": 13245
+      },
+      "scope": "Historical real-runtime STT timings, not new paired measurements, not release-to-delivery proof."
+    },
+    "note": "MAI is the private silver-reference source: its near-zero silver WER is circular and cannot be used as independent model superiority evidence. Public-reference scores remain separate."
+  },
+  "cleanup": {
+    "untransformed_control": {
+      "model": "fixed Parakeet hypotheses, no cleanup call",
+      "word_ratio": 1.0,
+      "noun_spans": {
+        "correct": 61,
+        "expected": 104,
+        "predicted": 61,
+        "recall": 0.5865384615384616,
+        "precision": 1.0
+      },
+      "api_cost_usd": 0.0,
+      "readability": "not separately blind-scored"
+    },
+    "arms": [
+      {
+        "arm": "fast--current",
+        "model": "deepseek/deepseek-v4.1-flash-1017:nitro",
+        "reasoning_effort": "low",
+        "prompt": "current",
+        "submitted_calls": 56,
+        "normal_stop_calls": 53,
+        "http_or_request_failures": 3,
+        "private_speech": {
+          "n": 16,
+          "completed": 14,
+          "fidelity_failed_outputs": 1,
+          "readability": {
+            "n": 14,
+            "mean": 3.7857142857142856,
+            "min": 3,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.8493549038987284,
+            "pooled_word_ratio": 0.8726607872660788
+          },
+          "noun_spans": {
+            "correct": 99,
+            "expected": 104,
+            "predicted": 103,
+            "recall": 0.9519230769230769,
+            "precision": 0.9611650485436893
+          },
+          "latency": {
+            "n": 14,
+            "p50_ms": 2155.880062520737,
+            "p95_ms": 21200.23316697916,
+            "min_ms": 391.1888750153594,
+            "max_ms": 21200.23316697916
+          },
+          "short_audio_latency": {
+            "n": 5,
+            "p50_ms": 781.2468340271153,
+            "p95_ms": 1255.659666028805,
+            "min_ms": 391.1888750153594,
+            "max_ms": 1255.659666028805
+          },
+          "long_audio_latency": {
+            "n": 9,
+            "p50_ms": 9448.86162498733,
+            "p95_ms": 21200.23316697916,
+            "min_ms": 1092.6526249968447,
+            "max_ms": 21200.23316697916
+          },
+          "cost": {
+            "reported_usd": 0.040313996,
+            "unknown_cost_calls": 2,
+            "usd_per_1000_takes": null,
+            "mix_n": 16,
+            "status": "unknown_total_reported_sum_is_lower_bound"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 2,
+          "strict_exact_accepted": 25
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 6
+        },
+        "all_successful_call_latency": {
+          "n": 53,
+          "p50_ms": 762.379125051666,
+          "p95_ms": 12595.760333992075,
+          "min_ms": 312.66170798335224,
+          "max_ms": 21200.23316697916
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.049933252,
+          "unknown_cost_calls": 3,
+          "usd_per_1000_takes": null,
+          "mix_n": 56,
+          "status": "unknown_total_reported_sum_is_lower_bound"
+        },
+        "fidelity_failure_classes": {
+          "spurious_empty_input_output": 6,
+          "distinct_detail_omitted": 2,
+          "literal_identifier_changed": 1
+        },
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "fast--hone",
+        "model": "deepseek/deepseek-v4.1-flash-1017:nitro",
+        "reasoning_effort": "low",
+        "prompt": "hone",
+        "submitted_calls": 56,
+        "normal_stop_calls": 55,
+        "http_or_request_failures": 1,
+        "private_speech": {
+          "n": 16,
+          "completed": 15,
+          "fidelity_failed_outputs": 1,
+          "readability": {
+            "n": 15,
+            "mean": 4.4,
+            "min": 3,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.7906421675187385,
+            "pooled_word_ratio": 0.75
+          },
+          "noun_spans": {
+            "correct": 99,
+            "expected": 104,
+            "predicted": 104,
+            "recall": 0.9519230769230769,
+            "precision": 0.9519230769230769
+          },
+          "latency": {
+            "n": 15,
+            "p50_ms": 2691.279792052228,
+            "p95_ms": 13472.017084015533,
+            "min_ms": 457.73816597647965,
+            "max_ms": 13472.017084015533
+          },
+          "short_audio_latency": {
+            "n": 5,
+            "p50_ms": 808.7633749819361,
+            "p95_ms": 2363.349583989475,
+            "min_ms": 457.73816597647965,
+            "max_ms": 2363.349583989475
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 3231.0089165112004,
+            "p95_ms": 13472.017084015533,
+            "min_ms": 1214.5770419738255,
+            "max_ms": 13472.017084015533
+          },
+          "cost": {
+            "reported_usd": 0.021102876,
+            "unknown_cost_calls": 1,
+            "usd_per_1000_takes": null,
+            "mix_n": 16,
+            "status": "unknown_total_reported_sum_is_lower_bound"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 1,
+          "strict_exact_accepted": 18
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 2
+        },
+        "all_successful_call_latency": {
+          "n": 55,
+          "p50_ms": 571.7850420041941,
+          "p95_ms": 5963.547000021208,
+          "min_ms": 240.4403749969788,
+          "max_ms": 13472.017084015533
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.026767164,
+          "unknown_cost_calls": 1,
+          "usd_per_1000_takes": null,
+          "mix_n": 56,
+          "status": "unknown_total_reported_sum_is_lower_bound"
+        },
+        "fidelity_failure_classes": {
+          "spurious_empty_input_output": 2,
+          "negation_qualification_strengthened": 1,
+          "source_treated_as_instruction": 1,
+          "source_content_discarded": 1
+        },
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "fast--hone-final",
+        "model": "deepseek/deepseek-v4.1-flash-1017:nitro",
+        "reasoning_effort": "low",
+        "prompt": "hone-final",
+        "submitted_calls": 56,
+        "normal_stop_calls": 56,
+        "http_or_request_failures": 0,
+        "private_speech": {
+          "n": 16,
+          "completed": 16,
+          "fidelity_failed_outputs": 1,
+          "readability": {
+            "n": 16,
+            "mean": 4.3125,
+            "min": 3,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.7980399335026201,
+            "pooled_word_ratio": 0.7598917117867555
+          },
+          "noun_spans": {
+            "correct": 98,
+            "expected": 104,
+            "predicted": 102,
+            "recall": 0.9423076923076923,
+            "precision": 0.9607843137254902
+          },
+          "latency": {
+            "n": 16,
+            "p50_ms": 1563.941333501134,
+            "p95_ms": 6909.752500010654,
+            "min_ms": 425.5589580279775,
+            "max_ms": 6909.752500010654
+          },
+          "short_audio_latency": {
+            "n": 6,
+            "p50_ms": 791.2217080011033,
+            "p95_ms": 1516.8494580429979,
+            "min_ms": 425.5589580279775,
+            "max_ms": 1516.8494580429979
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 2834.2048754857387,
+            "p95_ms": 6909.752500010654,
+            "min_ms": 867.440541042015,
+            "max_ms": 6909.752500010654
+          },
+          "cost": {
+            "reported_usd": 0.01686264,
+            "unknown_cost_calls": 0,
+            "usd_per_1000_takes": 1.0539150000000002,
+            "mix_n": 16,
+            "status": "reported"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 0,
+          "strict_exact_accepted": 25
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 2
+        },
+        "all_successful_call_latency": {
+          "n": 56,
+          "p50_ms": 715.229666500818,
+          "p95_ms": 3617.5677920109592,
+          "min_ms": 403.8670000154525,
+          "max_ms": 6909.752500010654
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.022400392,
+          "unknown_cost_calls": 0,
+          "usd_per_1000_takes": 0.400007,
+          "mix_n": 56,
+          "status": "reported"
+        },
+        "fidelity_failure_classes": {
+          "spurious_empty_input_output": 2,
+          "stated_preference_broadened": 1
+        },
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "gemini--current",
+        "model": "google/gemini-3.6-flash",
+        "reasoning_effort": null,
+        "prompt": "current",
+        "submitted_calls": 56,
+        "normal_stop_calls": 56,
+        "http_or_request_failures": 0,
+        "private_speech": {
+          "n": 16,
+          "completed": 16,
+          "fidelity_failed_outputs": 0,
+          "readability": {
+            "n": 16,
+            "mean": 3.6875,
+            "min": 3,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.8670605197975662,
+            "pooled_word_ratio": 0.8812994585589338
+          },
+          "noun_spans": {
+            "correct": 102,
+            "expected": 104,
+            "predicted": 106,
+            "recall": 0.9807692307692307,
+            "precision": 0.9622641509433962
+          },
+          "latency": {
+            "n": 16,
+            "p50_ms": 10258.986875007395,
+            "p95_ms": 28656.054334016517,
+            "min_ms": 1326.2540839496069,
+            "max_ms": 28656.054334016517
+          },
+          "short_audio_latency": {
+            "n": 6,
+            "p50_ms": 4365.101562987547,
+            "p95_ms": 5835.4768750141375,
+            "min_ms": 1326.2540839496069,
+            "max_ms": 5835.4768750141375
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 14808.197270991514,
+            "p95_ms": 28656.054334016517,
+            "min_ms": 9385.302916984074,
+            "max_ms": 28656.054334016517
+          },
+          "cost": {
+            "reported_usd": 0.15148125,
+            "unknown_cost_calls": 0,
+            "usd_per_1000_takes": 9.467578125000001,
+            "mix_n": 16,
+            "status": "reported"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 1,
+          "strict_exact_accepted": 26
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 0
+        },
+        "all_successful_call_latency": {
+          "n": 56,
+          "p50_ms": 2382.82583351247,
+          "p95_ms": 18529.581875016447,
+          "min_ms": 1190.6193329486996,
+          "max_ms": 28656.054334016517
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.20356275,
+          "unknown_cost_calls": 0,
+          "usd_per_1000_takes": 3.6350491071428572,
+          "mix_n": 56,
+          "status": "reported"
+        },
+        "fidelity_failure_classes": {
+          "literal_identifier_changed": 1
+        },
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "gemini--hone",
+        "model": "google/gemini-3.6-flash",
+        "reasoning_effort": null,
+        "prompt": "hone",
+        "submitted_calls": 56,
+        "normal_stop_calls": 56,
+        "http_or_request_failures": 0,
+        "private_speech": {
+          "n": 16,
+          "completed": 16,
+          "fidelity_failed_outputs": 5,
+          "readability": {
+            "n": 16,
+            "mean": 5,
+            "min": 5,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.6512261336045784,
+            "pooled_word_ratio": 0.5562265722615577
+          },
+          "noun_spans": {
+            "correct": 94,
+            "expected": 104,
+            "predicted": 98,
+            "recall": 0.9038461538461539,
+            "precision": 0.9591836734693877
+          },
+          "latency": {
+            "n": 16,
+            "p50_ms": 3347.012104000896,
+            "p95_ms": 20070.959458011203,
+            "min_ms": 1274.5018750429153,
+            "max_ms": 20070.959458011203
+          },
+          "short_audio_latency": {
+            "n": 6,
+            "p50_ms": 1755.858812481165,
+            "p95_ms": 2088.109791977331,
+            "min_ms": 1274.5018750429153,
+            "max_ms": 2088.109791977331
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 7004.499249975197,
+            "p95_ms": 20070.959458011203,
+            "min_ms": 2519.429250038229,
+            "max_ms": 20070.959458011203
+          },
+          "cost": {
+            "reported_usd": 0.07408725000000001,
+            "unknown_cost_calls": 0,
+            "usd_per_1000_takes": 4.630453125000001,
+            "mix_n": 16,
+            "status": "reported"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 1,
+          "strict_exact_accepted": 18
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 0
+        },
+        "all_successful_call_latency": {
+          "n": 56,
+          "p50_ms": 1887.7080625097733,
+          "p95_ms": 13873.689416970592,
+          "min_ms": 1028.1257079914212,
+          "max_ms": 20070.959458011203
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.11234625,
+          "unknown_cost_calls": 0,
+          "usd_per_1000_takes": 2.006183035714286,
+          "mix_n": 56,
+          "status": "reported"
+        },
+        "fidelity_failure_classes": {
+          "number_or_alternative_omitted": 1,
+          "qualification_strengthened": 3,
+          "invented_performance_detail": 1,
+          "hypothesis_changed_to_fact": 1,
+          "speech_act_or_modality_strengthened": 1,
+          "literal_identifier_changed": 1
+        },
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "gemini--hone-final",
+        "model": "google/gemini-3.6-flash",
+        "reasoning_effort": null,
+        "prompt": "hone-final",
+        "submitted_calls": 56,
+        "normal_stop_calls": 56,
+        "http_or_request_failures": 0,
+        "private_speech": {
+          "n": 16,
+          "completed": 16,
+          "fidelity_failed_outputs": 4,
+          "readability": {
+            "n": 16,
+            "mean": 5,
+            "min": 5,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.6775890248938377,
+            "pooled_word_ratio": 0.5391503540191587
+          },
+          "noun_spans": {
+            "correct": 96,
+            "expected": 104,
+            "predicted": 101,
+            "recall": 0.9230769230769231,
+            "precision": 0.9504950495049505
+          },
+          "latency": {
+            "n": 16,
+            "p50_ms": 4062.4049580073915,
+            "p95_ms": 15997.810082975775,
+            "min_ms": 1372.6949580013752,
+            "max_ms": 15997.810082975775
+          },
+          "short_audio_latency": {
+            "n": 6,
+            "p50_ms": 1990.1335414906498,
+            "p95_ms": 3035.661792033352,
+            "min_ms": 1372.6949580013752,
+            "max_ms": 3035.661792033352
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 8191.359749995172,
+            "p95_ms": 15997.810082975775,
+            "min_ms": 3268.1236670468934,
+            "max_ms": 15997.810082975775
+          },
+          "cost": {
+            "reported_usd": 0.0759645,
+            "unknown_cost_calls": 0,
+            "usd_per_1000_takes": 4.74778125,
+            "mix_n": 16,
+            "status": "reported"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 0,
+          "strict_exact_accepted": 21
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 0
+        },
+        "all_successful_call_latency": {
+          "n": 56,
+          "p50_ms": 1927.7812914806418,
+          "p95_ms": 12777.934958983678,
+          "min_ms": 1139.669291966129,
+          "max_ms": 15997.810082975775
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.12332475,
+          "unknown_cost_calls": 0,
+          "usd_per_1000_takes": 2.2022276785714285,
+          "mix_n": 56,
+          "status": "reported"
+        },
+        "fidelity_failure_classes": {
+          "distinct_example_details_omitted": 1,
+          "negated_condition_omitted": 1,
+          "qualification_strengthened": 2,
+          "distinct_detail_omitted": 1,
+          "hypothesis_changed_to_fact": 1
+        },
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "sol--current",
+        "model": "openai/gpt-6.1-sol",
+        "reasoning_effort": "low",
+        "prompt": "current",
+        "submitted_calls": 56,
+        "normal_stop_calls": 56,
+        "http_or_request_failures": 0,
+        "private_speech": {
+          "n": 16,
+          "completed": 16,
+          "fidelity_failed_outputs": 0,
+          "readability": {
+            "n": 16,
+            "mean": 3.6875,
+            "min": 3,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.8786237568213466,
+            "pooled_word_ratio": 0.8946272386505623
+          },
+          "noun_spans": {
+            "correct": 104,
+            "expected": 104,
+            "predicted": 108,
+            "recall": 1.0,
+            "precision": 0.9629629629629629
+          },
+          "latency": {
+            "n": 16,
+            "p50_ms": 2830.2378124790266,
+            "p95_ms": 9132.887125015259,
+            "min_ms": 1581.9894999731332,
+            "max_ms": 9132.887125015259
+          },
+          "short_audio_latency": {
+            "n": 6,
+            "p50_ms": 1697.3882085003424,
+            "p95_ms": 2028.6351660033688,
+            "min_ms": 1581.9894999731332,
+            "max_ms": 2028.6351660033688
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 4060.174771002494,
+            "p95_ms": 9132.887125015259,
+            "min_ms": 1783.3262080093846,
+            "max_ms": 9132.887125015259
+          },
+          "cost": {
+            "reported_usd": 0.0834395,
+            "unknown_cost_calls": 0,
+            "usd_per_1000_takes": 5.21496875,
+            "mix_n": 16,
+            "status": "reported"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 0,
+          "strict_exact_accepted": 28
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 0
+        },
+        "all_successful_call_latency": {
+          "n": 56,
+          "p50_ms": 1749.8762294999324,
+          "p95_ms": 6320.250333053991,
+          "min_ms": 1358.460416959133,
+          "max_ms": 9132.887125015259
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.1343915,
+          "unknown_cost_calls": 0,
+          "usd_per_1000_takes": 2.3998482142857145,
+          "mix_n": 56,
+          "status": "reported"
+        },
+        "fidelity_failure_classes": {},
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "sol--hone",
+        "model": "openai/gpt-6.1-sol",
+        "reasoning_effort": "low",
+        "prompt": "hone",
+        "submitted_calls": 56,
+        "normal_stop_calls": 56,
+        "http_or_request_failures": 0,
+        "private_speech": {
+          "n": 16,
+          "completed": 16,
+          "fidelity_failed_outputs": 1,
+          "readability": {
+            "n": 16,
+            "mean": 4.9375,
+            "min": 4,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.6955101295517669,
+            "pooled_word_ratio": 0.635985006247397
+          },
+          "noun_spans": {
+            "correct": 99,
+            "expected": 104,
+            "predicted": 104,
+            "recall": 0.9519230769230769,
+            "precision": 0.9519230769230769
+          },
+          "latency": {
+            "n": 16,
+            "p50_ms": 2523.4938125067856,
+            "p95_ms": 10646.88383298926,
+            "min_ms": 1169.5081669604406,
+            "max_ms": 10646.88383298926
+          },
+          "short_audio_latency": {
+            "n": 6,
+            "p50_ms": 1507.8962709812913,
+            "p95_ms": 1636.8784999940544,
+            "min_ms": 1169.5081669604406,
+            "max_ms": 1636.8784999940544
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 3998.948187509086,
+            "p95_ms": 10646.88383298926,
+            "min_ms": 1788.5477080126293,
+            "max_ms": 10646.88383298926
+          },
+          "cost": {
+            "reported_usd": 0.0654635,
+            "unknown_cost_calls": 0,
+            "usd_per_1000_takes": 4.09146875,
+            "mix_n": 16,
+            "status": "reported"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 0,
+          "strict_exact_accepted": 21
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 0
+        },
+        "all_successful_call_latency": {
+          "n": 56,
+          "p50_ms": 1516.059478977695,
+          "p95_ms": 7311.0190000152215,
+          "min_ms": 1169.5081669604406,
+          "max_ms": 10646.88383298926
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.1074055,
+          "unknown_cost_calls": 0,
+          "usd_per_1000_takes": 1.9179553571428571,
+          "mix_n": 56,
+          "status": "reported"
+        },
+        "fidelity_failure_classes": {
+          "minimum_constraint_softened": 1
+        },
+        "eligible_final_arm": false
+      },
+      {
+        "arm": "sol--hone-final",
+        "model": "openai/gpt-6.1-sol",
+        "reasoning_effort": "low",
+        "prompt": "hone-final",
+        "submitted_calls": 56,
+        "normal_stop_calls": 56,
+        "http_or_request_failures": 0,
+        "private_speech": {
+          "n": 16,
+          "completed": 16,
+          "fidelity_failed_outputs": 0,
+          "readability": {
+            "n": 16,
+            "mean": 4.9375,
+            "min": 4,
+            "max": 5
+          },
+          "compression": {
+            "macro_word_ratio": 0.6945950339604664,
+            "pooled_word_ratio": 0.6382757184506456
+          },
+          "noun_spans": {
+            "correct": 96,
+            "expected": 104,
+            "predicted": 100,
+            "recall": 0.9230769230769231,
+            "precision": 0.96
+          },
+          "latency": {
+            "n": 16,
+            "p50_ms": 3038.5743959632237,
+            "p95_ms": 12219.571792054921,
+            "min_ms": 1587.7851669793017,
+            "max_ms": 12219.571792054921
+          },
+          "short_audio_latency": {
+            "n": 6,
+            "p50_ms": 1797.3848545516375,
+            "p95_ms": 2326.927207992412,
+            "min_ms": 1587.7851669793017,
+            "max_ms": 2326.927207992412
+          },
+          "long_audio_latency": {
+            "n": 10,
+            "p50_ms": 4204.780040978221,
+            "p95_ms": 12219.571792054921,
+            "min_ms": 1707.3005000129342,
+            "max_ms": 12219.571792054921
+          },
+          "cost": {
+            "reported_usd": 0.0710855,
+            "unknown_cost_calls": 0,
+            "usd_per_1000_takes": 4.44284375,
+            "mix_n": 16,
+            "status": "reported"
+          },
+          "incident_name_corrected": true
+        },
+        "behavior": {
+          "n": 32,
+          "fidelity_failed_outputs": 0,
+          "strict_exact_accepted": 23
+        },
+        "empty_controls": {
+          "n": 8,
+          "spurious_outputs": 0
+        },
+        "all_successful_call_latency": {
+          "n": 56,
+          "p50_ms": 1802.400500542717,
+          "p95_ms": 7665.249291982036,
+          "min_ms": 1405.4991669836454,
+          "max_ms": 12219.571792054921
+        },
+        "all_mix_cost": {
+          "reported_usd": 0.1257275,
+          "unknown_cost_calls": 0,
+          "usd_per_1000_takes": 2.2451339285714282,
+          "mix_n": 56,
+          "status": "reported"
+        },
+        "fidelity_failure_classes": {},
+        "eligible_final_arm": true
+      }
+    ],
+    "qualified_arm": "sol--hone-final",
+    "offline_cold_local_plus_selected_cleanup_latency_proxy": {
+      "n": 16,
+      "p50_ms": 5784.895541495644,
+      "p95_ms": 40783.05770800216,
+      "min_ms": 2357.3059589834884,
+      "max_ms": 40783.05770800216
+    },
+    "proxy_scope": "Arithmetic sum of separate cold CLI STT and cleanup requests; not measured capture-release-to-delivery."
+  },
+  "accounting": {
+    "commission_id": "operator-2026-11-02-hone-clean",
+    "commission_cap_usd": 6.0,
+    "openrouter_key_usage_before_usd": 0.153994397,
+    "openrouter_key_usage_after_usd": 1.467801619,
+    "openrouter_actual_commission_spend_usd": 1.313807222,
+    "openai_actual_commission_spend_usd": 0.0,
+    "total_actual_commission_spend_usd": 1.313807222,
+    "reported_usage_cost_sum_usd": 1.3138072646667145,
+    "per_call_unknown_cost_flags": 31,
+    "paid_requests": 620,
+    "accounting": "Authoritative key counter; append-only aggregate reconciliation approved by conductor; individual unknown flags preserved, no failed-call retries.",
+    "absolute_eval_key_batch_ceiling_usd": 4.5,
+    "eval_key_limit_usd": 5.0,
+    "unreconciled_individual_liability_usd": 5.997407545,
+    "final_aggregate_reconciled_offset_usd": 4.683600323,
+    "openai_accounting": "No paid request submitted. The free read-only model-metadata probe was refused with HTTP 401 before any audio upload.",
+    "final_counter_observed_utc": "2026-11-02T21:59:38.308381+00:00",
+    "earlier_post_inference_checkpoint_usd": 1.293057114,
+    "counter_update_without_new_paid_submissions_usd": 0.020750108,
+    "counter_note": "A final free metadata read found higher usage without any further study submissions. The final counter supersedes the earlier aggregate checkpoint, which remains in the append-only journal."
+  },
+  "exceptions": {
+    "routed_gpt_transcribe": {
+      "calls": 29,
+      "provider_http_401_failures": 27,
+      "retries": 0,
+      "interpretation": "Unavailable route on most pairs, not evidence that the underlying model has low transcription quality."
+    },
+    "direct_openai": {
+      "read_only_model_probe_status": 401,
+      "paid_inference_calls": 0,
+      "study_spend_usd": 0.0,
+      "action": "Stopped the refused route before audio upload."
+    },
+    "local_gemma": {
+      "status": "withdrawn_by_operator",
+      "completed_result_files": 33,
+      "initial_planned_calls": 108,
+      "promotion_eligible": false,
+      "reason": "Operator stopped local inference due host memory pressure. Preserve partial results; do not interpret the incomplete arm as a completed quality comparison."
+    },
+    "initial_hone_prompt": "Rejected on observed fidelity failures; a focused fidelity-first revision was frozen before its evaluation on the same private set and two additional synthetic regressions. Initial failures remain in the receipt."
+  },
+  "recommendation": {
+    "claim_type": "inferred",
+    "daily_cleanup": {
+      "endpoint": "https://openrouter.ai/api/v1",
+      "model": "openai/gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "timeout_ms": 30000,
+      "passes": 1,
+      "min_chars": 0,
+      "instructions": "",
+      "decision_model": "unset",
+      "credential": "Use the operator-owned daily credential; no live app, configuration, or keyring changes were made."
+    },
+    "why": "Only the final Sol arm completed all 56 cases with zero observed hard fidelity or empty-input failures. The incident name was corrected. The earlier Hone candidate is rejected, not silently re-scored.",
+    "stt": "Keep local Parakeet v3 int8 as the default. MAI-Transcribe-2 is the strongest viable cloud alternative in these observations, but silver-reference selection bias, five public clips, and cold local timings do not justify a default switch before operator adjudication.",
+    "local_cleanup": "Withdrawn by operator after memory pressure; no promotion claim."
+  },
+  "limitations": [
+    "[MEASURED] The private speech set has 16 takes, not 24 successful speech dictations; eight selected nonempty WAVs are noise controls. One operator, English-only, mostly technical/project speech.",
+    "[UNVERIFIED] No audio was independently listened to and no operator adjudication has happened. Before/after scores are agent silver phases, not human ground truth.",
+    "[MEASURED] Strict noun precision retains four unresolved silver-reference mismatches instead of changing the gold after seeing the winning output.",
+    "[INFERRED] The observed improvements support this operator profile only; one repetition and a single human-agent grader do not establish population reliability or a stable tail latency.",
+    "[MEASURED] Local STT timings are cold CLI processes including load/archive/output; historical warm-path timings are separate and not a fresh controlled cloud comparison.",
+    "[UNVERIFIED] Live app release-to-text, clipboard delivery, and the new compiled artifact were not exercised in this private study. Hosted CI and the ordinary review gate remain required before merge.",
+    "[MEASURED] Counter lookups occur outside model request timing and pace later requests; provider routing, cache state, network conditions, and host load were not controlled.",
+    "[MEASURED] The operator withdrew local-gemma after memory pressure; no further local models, STT, builds/tests, VMs, or browser automation ran after that hold.",
+    "[MEASURED] Public receipts contain aggregates, public model metadata, and hashes only. Audio, text, original take IDs, vocabulary strings, per-call outputs, and adjudication choices remain private."
+  ],
+  "primary_sources": [
+    "https://github.com/misty-step/hone/blob/2d6ae6cf909d606900192b770791e1719a3e3244/public/system-prompt.md",
+    "https://github.com/misty-step/hone/blob/2d6ae6cf909d606900192b770791e1719a3e3244/public/profiles.json",
+    "https://github.com/misty-step/hone/blob/2d6ae6cf909d606900192b770791e1719a3e3244/eval/REPORT.md",
+    "https://openrouter.ai/docs/api/api-reference/stt/create-transcription",
+    "https://openrouter.ai/docs/guides/routing/provider-selection",
+    "https://openrouter.ai/api/v1/models?output_modalities=transcription",
+    "https://developers.openai.com/api/docs/models/gpt-transcribe"
+  ],
+  "verification": {
+    "claim_type": "measured",
+    "rustfmt": "cargo fmt --all --check passed; no compile",
+    "staged_secret_scan": "gitleaks protect --staged --no-banner: no leaks found",
+    "staged_file_secret_scan": "TruffleHog filesystem scan of the eight staged files: zero findings; no network verification, concurrency 1",
+    "staged_privacy_review": "All staged changed lines manually reviewed. No retained audio/text, original take IDs, private vocabulary, per-take output, or adjudication choices. New behavior inputs are synthetic.",
+    "product_checks": "Hosted CI required. Local compile/tests/clippy and live release-to-delivery checks intentionally not run under operator hold.",
+    "hooks": "Per-command core.hooksPath=/dev/null authorized for these commits and push only; persistent Git config unchanged."
+  }
+}
