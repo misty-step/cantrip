@@ -439,7 +439,7 @@ impl MicrophoneAccess {
         let state = match self.authorization {
             MicrophoneAuthorization::Authorized => "authorized".to_owned(),
             MicrophoneAuthorization::NotDetermined => {
-                "not requested; choose Allow Microphone Access in the Cantrip menu or Settings"
+                "not requested; start dictation to request access, or choose Allow Microphone Access in the Cantrip menu or Settings"
                     .to_owned()
             }
             MicrophoneAuthorization::Requesting => {
