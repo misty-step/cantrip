@@ -1860,7 +1860,6 @@ impl Instrument {
         width: u32,
         height: u32,
         scale: u32,
-        backing: Backing,
     ) {
         let mut canvas = Canvas {
             bytes,
@@ -1875,7 +1874,6 @@ impl Instrument {
             self.palette,
             &presentation.frame,
             presentation.container_width,
-            backing,
         );
         canvas.fade(presentation.alpha);
     }
@@ -1901,16 +1899,6 @@ impl Instrument {
     }
 }
 
-/// Who draws the container behind the field and captions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Backing {
-    /// The painter, as the palette's surface inside a border.
-    Painted,
-    /// The native surface: the macOS panel's system material.
-    #[cfg(any(target_os = "macos", test))]
-    Native,
-}
-
 struct Canvas<'a> {
     bytes: &'a mut [u8],
     width: u32,
@@ -1927,7 +1915,6 @@ impl Canvas<'_> {
         palette: Palette,
         frame: &TrackFrame,
         container_width: f32,
-        backing: Backing,
     ) {
         self.bytes.fill(0);
         let Some(kind) = model.kind else {
@@ -1940,28 +1927,26 @@ impl Canvas<'_> {
             container_width,
         );
         // A non-default target owns the border, a surface wash and the active field;
-        // the default flow keeps the theme's own colors. The field and label read
-        // on the palette's surfaces like the theme's own colors.
+        // the default flow keeps the theme's own colors. Text and the field read on
+        // the washed surface as the theme's own colors read on its surface.
         let route = model.route.as_ref();
-        let (border, surface, active) = match route {
-            Some(route) => (
-                route.handoff.color,
-                mix(palette.surface, route.handoff.color, ROUTE_WASH),
-                palette.legible(route.handoff.color),
-            ),
-            None => (palette.border, palette.surface, palette.accent),
+        let (palette, border, active) = match route {
+            Some(route) => {
+                let color = route.handoff.color;
+                let palette = palette.on_surface(mix(palette.surface, color, ROUTE_WASH));
+                (palette, color, palette.legible(color))
+            }
+            None => (palette, palette.border, palette.accent),
         };
-        if backing == Backing::Painted {
-            self.rect(left, top, container_width, body_height, border, 1.0);
-            self.rect(
-                left + 1.0,
-                top + 1.0,
-                container_width - 2.0,
-                body_height - 2.0,
-                surface,
-                1.0,
-            );
-        }
+        self.rect(left, top, container_width, body_height, border, 1.0);
+        self.rect(
+            left + 1.0,
+            top + 1.0,
+            container_width - 2.0,
+            body_height - 2.0,
+            palette.surface,
+            1.0,
+        );
         if kind == Kind::Attention {
             self.rect(left, top, 2.0, body_height, palette.attention, 1.0);
         }
@@ -2801,13 +2786,7 @@ mod tests {
         ((front + FRONTIER_RADIUS).ceil() as usize).min(CELLS)
     }
 
-    fn raster_hud(
-        model: &Model,
-        now: Instant,
-        width: u32,
-        scale: f32,
-        backing: Backing,
-    ) -> (Vec<u8>, u32) {
+    fn raster_hud(model: &Model, now: Instant, width: u32, scale: f32) -> (Vec<u8>, u32) {
         let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
         let container_width = CONTAINER_WIDTH.min(width as f32 - 12.0);
         let height = (layout_height(model, &font, container_width) as f32 * scale).round() as u32;
@@ -2832,7 +2811,6 @@ mod tests {
             },
             &model.frame(now),
             container_width,
-            backing,
         );
         (bytes, width)
     }
@@ -2848,7 +2826,7 @@ mod tests {
         };
         // Capsule top border at scale 1 (BGRA), right of any attention rail.
         let border = |model: &Model| {
-            let (bytes, width) = raster_hud(model, now, SURFACE_WIDTH, 1.0, Backing::Painted);
+            let (bytes, width) = raster_hud(model, now, SURFACE_WIDTH, 1.0);
             let x = (SURFACE_WIDTH - CONTAINER_WIDTH as u32) / 2 + 10;
             let index = ((6 * width + x) * 4) as usize;
             [bytes[index + 2], bytes[index + 1], bytes[index]]
@@ -2891,45 +2869,68 @@ mod tests {
         assert_eq!(border(&model), [0, 255, 0]);
     }
 
+    /// AppKit's Light and Dark palettes, resolved as the panel resolves its
+    /// view's appearance, each with the page of its own polarity: white and
+    /// black.
+    #[cfg(target_os = "macos")]
+    fn appkit_palettes() -> [(Palette, [u8; 3]); 2] {
+        use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
+        // SAFETY: framework constants, valid for the process lifetime.
+        let names = unsafe { [NSAppearanceNameAqua, NSAppearanceNameDarkAqua] };
+        let [light, dark] = names.map(|name| {
+            theme::resolve(&NSAppearance::appearanceNamed(name).expect("a system appearance"))
+        });
+        // A failed resolution falls back to Tokyo Night.
+        assert!(light != Palette::default() && dark != Palette::default());
+        assert_ne!(light.surface, dark.surface);
+        [(light, [255; 3]), (dark, [0; 3])]
+    }
+
+    /// `model` painted at 1x with `palette`, as BGRA bytes, and its container's
+    /// `[left, top, width, height]`.
+    #[cfg(target_os = "macos")]
+    fn painted(model: &Model, palette: Palette, now: Instant) -> (Vec<u8>, [u32; 4]) {
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let height = layout_height(model, &font, CONTAINER_WIDTH);
+        let mut bytes = vec![0; (SURFACE_WIDTH * height * 4) as usize];
+        Canvas {
+            bytes: &mut bytes,
+            width: SURFACE_WIDTH,
+            height,
+            scale: 1.0,
+            alpha: 1.0,
+        }
+        .paint_hud(model, &font, palette, &model.frame(now), CONTAINER_WIDTH);
+        let container = container_rect(SURFACE_WIDTH as f32, height as f32, CONTAINER_WIDTH)
+            .map(|value| value as u32);
+        (bytes, container)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn rgb_at(bytes: &[u8], x: u32, y: u32) -> [u8; 3] {
+        let index = ((y * SURFACE_WIDTH + x) * 4) as usize;
+        [bytes[index + 2], bytes[index + 1], bytes[index]]
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
-    fn a_native_backing_leaves_the_container_to_the_surface_and_keeps_its_content() {
+    fn the_default_frame_reaches_3_to_1_on_its_surface_and_the_page() {
+        use crate::theme::contrast_ratio;
         let now = Instant::now();
-        let kaylee = ipc::Handoff {
-            name: "kaylee".to_owned(),
-            label: "Kaylee".to_owned(),
-            color: [0xe6, 0x8b, 0xd5],
-        };
-        for handoff in [None, Some(&kaylee)] {
+        for (palette, page) in appkit_palettes() {
             for state in [ScreenshotState::Recording, ScreenshotState::DeliveryFailed] {
-                let model = screenshot_model(state, now, handoff);
-                let (painted, width) =
-                    raster_hud(&model, now, SURFACE_WIDTH, 2.0, Backing::Painted);
-                let (native, _) = raster_hud(&model, now, SURFACE_WIDTH, 2.0, Backing::Native);
-                let height = (native.len() / 4) as u32 / width;
-                let [left, top, container_width, body_height] =
-                    container_rect(SURFACE_WIDTH as f32, height as f32 / 2.0, CONTAINER_WIDTH);
-                let alpha = |bytes: &[u8], x: f32, y: f32| {
-                    bytes[(((y * 2.0) as u32 * width + (x * 2.0) as u32) * 4 + 3) as usize]
-                };
-                // The border and the surface beside the captions belong to the material.
-                for (x, y) in [
-                    (left + 10.0, top),
-                    (left + container_width - 4.0, top + body_height - 4.0),
-                ] {
-                    assert_eq!(alpha(&painted, x, y), 255, "{state:?} {handoff:?}");
-                    assert_eq!(alpha(&native, x, y), 0, "{state:?} {handoff:?}");
-                }
-                // Lit cells, the rail and glyphs cover their pixels exactly as before.
-                let covered: Vec<_> = native
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .zip(painted.as_chunks::<4>().0)
-                    .filter(|(native, _)| native[3] == 255)
-                    .collect();
-                assert!(!covered.is_empty(), "{state:?} {handoff:?}");
-                for (native, painted) in covered {
-                    assert_eq!(native, painted, "{state:?} {handoff:?}");
+                let model = screenshot_model(state, now, None);
+                let (bytes, [left, top, width, body_height]) = painted(&model, palette, now);
+                // The top edge right of any attention rail, and the surface beside the captions.
+                let frame = rgb_at(&bytes, left + 10, top);
+                let surface = rgb_at(&bytes, left + width - 4, top + body_height - 4);
+                assert_eq!(surface, palette.surface, "{state:?}");
+                for behind in [surface, page] {
+                    let ratio = contrast_ratio(frame, behind);
+                    assert!(
+                        ratio >= 3.0,
+                        "{state:?}: {frame:?} on {behind:?} reads {ratio}:1"
+                    );
                 }
             }
         }
@@ -2937,68 +2938,65 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_handoff_field_and_label_read_on_the_palettes_surfaces() {
+    fn a_handoff_take_reads_at_4_5_to_1_on_its_washed_surface() {
+        use crate::theme::contrast_ratio;
         let now = Instant::now();
-        let kaylee = ipc::Handoff {
-            name: "kaylee".to_owned(),
-            label: "Kaylee".to_owned(),
-            color: [0xe6, 0x8b, 0xd5],
-        };
-        // Light glass, on which the theme's pink target is too faint as given.
-        let palette = Palette {
-            background: [255; 3],
-            surface: [255; 3],
-            foreground: [38; 3],
-            ..Palette::default()
-        }
-        .translucent(0.8);
-        let label = mix(kaylee.color, palette.foreground, ROUTE_LABEL_LIFT);
-        let (field, label_on_glass) = (palette.legible(kaylee.color), palette.legible(label));
-        assert_ne!(field, kaylee.color);
-        assert_ne!(label_on_glass, label);
-        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
-        for state in [ScreenshotState::Recording, ScreenshotState::Sent] {
-            let model = screenshot_model(state, now, Some(&kaylee));
-            let height = layout_height(&model, &font, CONTAINER_WIDTH);
-            let mut bytes = vec![0; (SURFACE_WIDTH * height * 4) as usize];
-            Canvas {
-                bytes: &mut bytes,
-                width: SURFACE_WIDTH,
-                height,
-                scale: 1.0,
-                alpha: 1.0,
-            }
-            .paint_hud(
-                &model,
-                &font,
-                palette,
-                &model.frame(now),
-                CONTAINER_WIDTH,
-                Backing::Native,
-            );
-            // Field cells and glyph edges are partly covered; their color is
-            // the premultiplied pixel over its coverage.
-            let drawn: Vec<[f32; 3]> = bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .filter(|pixel| pixel[3] >= 128)
-                .map(|pixel| {
-                    [pixel[2], pixel[1], pixel[0]]
-                        .map(|channel| f32::from(channel) * 255.0 / f32::from(pixel[3]))
-                })
-                .collect();
-            let shows = |color: [u8; 3]| {
-                drawn.iter().any(|pixel| {
-                    pixel
-                        .iter()
-                        .zip(color)
-                        .all(|(drawn, given)| (drawn - f32::from(given)).abs() <= 2.0)
-                })
-            };
-            for (fitted, given) in [(field, kaylee.color), (label_on_glass, label)] {
-                assert!(shows(fitted), "{state:?} {fitted:?}");
-                assert!(!shows(given), "{state:?} {given:?}");
+        for (palette, _) in appkit_palettes() {
+            for slot in 0..24 {
+                let color = palette.target(slot);
+                let washed = mix(palette.surface, color, ROUTE_WASH);
+                let handoff = ipc::Handoff {
+                    name: "kaylee".to_owned(),
+                    label: "Kaylee".to_owned(),
+                    color,
+                };
+                // Recording lights cells of the field's middle row fully; a failed
+                // handoff draws the attention rail.
+                for state in [ScreenshotState::Recording, ScreenshotState::DeliveryFailed] {
+                    let model = screenshot_model(state, now, Some(&handoff));
+                    let (bytes, [left, top, width, body_height]) = painted(&model, palette, now);
+                    let pixel = |x: u32, y: u32| rgb_at(&bytes, x, y);
+                    // The wash fills the container beside the captions.
+                    assert_eq!(
+                        pixel(left + width - 4, top + body_height - 4),
+                        washed,
+                        "slot {slot} {state:?}"
+                    );
+                    let drawn = if state == ScreenshotState::Recording {
+                        let lit = |column: &TrackColumn| {
+                            (column.opacities[ROWS / 2] * 255.0).round() == 255.0
+                        };
+                        assert!(model.frame(now).columns.iter().any(lit));
+                        // The middle row's most contrasting pixel inside the edge: a lit cell.
+                        let middle = top + (ROUTE_HEADER + TRACK_HEIGHT / 2.0) as u32;
+                        (left + 1..left + width - 1)
+                            .map(|x| pixel(x, middle))
+                            .max_by(|a, b| {
+                                contrast_ratio(*a, washed).total_cmp(&contrast_ratio(*b, washed))
+                            })
+                            .unwrap()
+                    } else {
+                        pixel(left + 1, top + body_height / 2)
+                    };
+                    let ratio = contrast_ratio(drawn, washed);
+                    assert!(
+                        ratio >= 4.5,
+                        "slot {slot} {state:?}: {drawn:?} on {washed:?} reads {ratio}:1"
+                    );
+                }
+                // The label and captions take their colors from the same fitted palette,
+                // and an interaction notice's divider takes its frame color.
+                let fitted = palette.on_surface(washed);
+                let label = fitted.legible(mix(color, fitted.foreground, ROUTE_LABEL_LIFT));
+                for (drawn, minimum) in
+                    [(fitted.foreground, 4.5), (label, 4.5), (fitted.border, 3.0)]
+                {
+                    let ratio = contrast_ratio(drawn, washed);
+                    assert!(
+                        ratio >= minimum,
+                        "slot {slot}: {drawn:?} on {washed:?} reads {ratio}:1"
+                    );
+                }
             }
         }
     }
@@ -3035,8 +3033,7 @@ mod tests {
             for width in [80, 240, SURFACE_WIDTH] {
                 for scale in [1.0, 1.25, 2.0] {
                     model.caption = unlabelled.clone();
-                    let (plain, physical_width) =
-                        raster_hud(&model, now, width, scale, Backing::Painted);
+                    let (plain, physical_width) = raster_hud(&model, now, width, scale);
                     let bounds = grid_bounds(&plain, physical_width, scale);
                     let container = CONTAINER_WIDTH.min(width as f32 - 12.0);
                     let left = ((width as f32 - container) / 2.0 + 6.0) * scale;
@@ -3052,7 +3049,7 @@ mod tests {
                     assert_eq!(bounds[1], (11.5 * scale).round() as u32);
                     assert_eq!(bounds[3], (44.5 * scale).round() as u32);
                     model.caption = Caption::title("Finishing text…");
-                    let (labelled, _) = raster_hud(&model, now, width, scale, Backing::Painted);
+                    let (labelled, _) = raster_hud(&model, now, width, scale);
                     let track_end = (45.5 * scale).floor() as usize * physical_width as usize * 4;
                     assert_eq!(
                         &plain[..track_end],

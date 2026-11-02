@@ -111,26 +111,27 @@ impl Palette {
         color
     }
 
-    /// This palette for a container that shows its background at `opacity`
-    /// over whatever is behind it. Background and surface become that
-    /// container over black and over white, the darkest and lightest it can
-    /// look, and the text and field colors are refitted to read at 4.5:1 on
-    /// both.
-    #[cfg(any(target_os = "macos", test))]
-    pub fn translucent(self, opacity: f32) -> Self {
-        let over = |behind: f32| {
-            self.background.map(|channel| {
-                (f32::from(channel) * opacity + behind * (1.0 - opacity)).round() as u8
-            })
-        };
-        let backgrounds = [over(0.0), over(255.0)];
+    /// A 1-point frame or divider in `color` on this palette's background and
+    /// surface: on macOS, adjusted only in lightness to reach WCAG's 3:1
+    /// non-text contrast on both; Omarchy's colors are drawn as the theme
+    /// gives them.
+    pub fn visible(&self, color: [u8; 3]) -> [u8; 3] {
+        #[cfg(target_os = "macos")]
+        let color = contrasting(color, [self.background, self.surface], NON_TEXT_CONTRAST);
+        color
+    }
+
+    /// This palette with `surface` behind its text, such as a handoff take's
+    /// washed container: on macOS its text, field and frame colors are refitted
+    /// to read there; Omarchy's colors are drawn as the theme gives them.
+    pub fn on_surface(self, surface: [u8; 3]) -> Self {
+        let palette = Self { surface, ..self };
         Self {
-            background: backgrounds[0],
-            surface: backgrounds[1],
-            foreground: legible(self.foreground, backgrounds),
-            accent: legible(self.accent, backgrounds),
-            attention: legible(self.attention, backgrounds),
-            ..self
+            border: palette.visible(self.border),
+            foreground: palette.legible(self.foreground),
+            accent: palette.legible(self.accent),
+            attention: palette.legible(self.attention),
+            ..palette
         }
     }
 }
@@ -195,11 +196,31 @@ fn contrast(a: f32, b: f32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
+/// The WCAG contrast ratio of two sRGB colors.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
+    contrast(luminance(a), luminance(b))
+}
+
+/// WCAG 2's minimum contrast for text (1.4.3).
+#[cfg(any(target_os = "macos", test))]
+const TEXT_CONTRAST: f32 = 4.5;
+/// WCAG 2's minimum contrast for a component's boundary (1.4.11).
+#[cfg(target_os = "macos")]
+const NON_TEXT_CONTRAST: f32 = 3.0;
+
 /// Native semantic accents are not necessarily text colors. Preserve the hue
 /// and saturation, adjusting only lightness to reach 4.5:1 on both native
 /// surfaces. AppKit resolves both surfaces from the same light/dark appearance.
 #[cfg(any(target_os = "macos", test))]
 fn legible(color: [u8; 3], backgrounds: [[u8; 3]; 2]) -> [u8; 3] {
+    contrasting(color, backgrounds, TEXT_CONTRAST)
+}
+
+/// `color` with only its lightness moved, as little as eight-bit channels
+/// allow, to reach `minimum` contrast on both `backgrounds`.
+#[cfg(any(target_os = "macos", test))]
+fn contrasting(color: [u8; 3], backgrounds: [[u8; 3]; 2], minimum: f32) -> [u8; 3] {
     let backgrounds = backgrounds.map(luminance);
     let minimum_contrast = |value: f32| {
         backgrounds
@@ -207,7 +228,7 @@ fn legible(color: [u8; 3], backgrounds: [[u8; 3]; 2]) -> [u8; 3] {
             .map(|&background| contrast(value, background))
             .fold(f32::INFINITY, f32::min)
     };
-    let passes = |color| minimum_contrast(luminance(color)) >= 4.5;
+    let passes = |color| minimum_contrast(luminance(color)) >= minimum;
     if passes(color) {
         return color;
     }
@@ -334,7 +355,7 @@ fn hex_rgb(text: &str) -> Option<[u8; 3]> {
 /// increased contrast and the operator's accent color, flattened to opaque sRGB.
 #[cfg(target_os = "macos")]
 mod native {
-    use super::{legible, Palette};
+    use super::{contrasting, legible, Palette, NON_TEXT_CONTRAST};
     use block2::StackBlock;
     use objc2::{rc::Retained, MainThreadMarker};
     use objc2_app_kit::{NSAppearance, NSApplication, NSColor, NSColorSpace};
@@ -392,7 +413,12 @@ mod native {
         Some(Palette {
             background,
             surface,
-            border: flat(NSColor::separatorColor(), surface)?,
+            // AppKit's separator is decorative and too faint to frame the panel.
+            border: contrasting(
+                flat(NSColor::separatorColor(), surface)?,
+                [background, surface],
+                NON_TEXT_CONTRAST,
+            ),
             foreground: flat(NSColor::labelColor(), surface)?,
             accent: legible(
                 flat(NSColor::controlAccentColor(), surface)?,
@@ -414,7 +440,7 @@ mod native {
 
 #[cfg(test)]
 mod contrast_tests {
-    use super::{contrast, hsl, hue_distance, legible, luminance, Palette};
+    use super::{contrast, hsl, hue_distance, legible, luminance};
 
     #[test]
     fn native_accents_remain_readable_on_light_and_dark_surfaces() {
@@ -437,30 +463,6 @@ mod contrast_tests {
                     .all(|&background| contrast(luminance(original), luminance(background)) >= 4.5)
                 {
                     assert_eq!(adjusted, original);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_translucent_container_keeps_its_text_readable_over_any_backdrop() {
-        // AppKit's Light and Dark window background and label color.
-        for (background, foreground) in [([255; 3], [38; 3]), ([30; 3], [221; 3])] {
-            let palette = Palette {
-                background,
-                surface: background,
-                foreground,
-                accent: legible([0, 122, 255], [background; 2]),
-                attention: legible([255, 141, 40], [background; 2]),
-                ..Palette::default()
-            }
-            .translucent(0.8);
-            for behind in (0..=255).step_by(15) {
-                let container = background
-                    .map(|channel| (f32::from(channel) * 0.8 + behind as f32 * 0.2).round() as u8);
-                for color in [palette.foreground, palette.accent, palette.attention] {
-                    let ratio = contrast(luminance(color), luminance(container));
-                    assert!(ratio >= 4.5, "{color:?} on {container:?}: {ratio}");
                 }
             }
         }
