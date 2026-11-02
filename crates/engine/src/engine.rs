@@ -1093,19 +1093,6 @@ fn start_recording(
             Some("postproc-model-unset"),
         );
     }
-    if config.stt.endpoint.is_none() && !local_model_ready(&config.stt) {
-        let mut outcome = setup_failure(
-            "Local model unavailable — run: cantrip models pull",
-            "local-model-unavailable",
-        );
-        outcome.event_id = daemon.event_id();
-        daemon.outcome = Some(outcome);
-        return daemon.reply(
-            false,
-            "Local model unavailable — run: cantrip models pull",
-            Some("local-model-unavailable"),
-        );
-    }
     let take_id = recovery::new_id();
     let handoff = config
         .selected_handoff
@@ -1218,6 +1205,19 @@ fn begin_capture(
     operation: Operation,
     config: Box<Config>,
 ) -> CommandReply {
+    if config.stt.endpoint.is_none() && !local_model_ready(&config.stt) {
+        let mut outcome = setup_failure(
+            "Local model unavailable — run: cantrip models pull",
+            "local-model-unavailable",
+        );
+        outcome.event_id = daemon.event_id();
+        daemon.outcome = Some(outcome);
+        return daemon.reply(
+            false,
+            "Local model unavailable — run: cantrip models pull",
+            Some("local-model-unavailable"),
+        );
+    }
     let take_id = &operation.identity.take_id;
     let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
     match daemon
