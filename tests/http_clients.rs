@@ -233,6 +233,15 @@ fn refine_two_passes_chains_output() {
     );
 
     let pass2: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_ne!(
+        pass2["messages"][0]["content"], pass1["messages"][0]["content"],
+        "pass two must send the proofread contract, not repeat refinement"
+    );
+    assert_ne!(
+        pass2["messages"][0]["content"],
+        postproc::build_system_prompt(&vocabulary, ""),
+        "removing custom instructions must not disguise a repeated refine prompt"
+    );
     assert!(pass2["messages"][0]["content"]
         .as_str()
         .expect("proofread system prompt")
