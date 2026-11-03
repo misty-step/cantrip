@@ -217,18 +217,9 @@ they are not production transcription deadlines.
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`
   must be on `PATH`; the hooks fail closed when either scanner is missing.
-- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): independent
-  `./scripts/check rust` and `./scripts/check contracts` tiers run on standard
-  hosted Linux runners. Required `check` accepts only both successes; the full
-  secret scan and checkout-free [PR title](.github/workflows/pr-title.yml)
-  validation remain separate required checks; metadata edits do not recompile.
-  Master and twice-daily runs also qualify both native Mac architectures.
-- **Native macOS CI** ([`.github/workflows/macos.yml`](.github/workflows/macos.yml)):
-  arm64 workspace, development packaging and relocated public-fixture proof on
-  PRs; the same proof on arm64 and Intel before master can publish a release.
-  [Decision 0035](docs/decisions/0035-bounded-ci-feedback.md) records the tiers,
-  cache policy and measured latency. Check actual run results; workflow
-  definitions alone do not establish a platform pass.
+- **CI and publication policy:** [Decision 0035](docs/decisions/0035-bounded-ci-feedback.md)
+  owns the tiers, runner/caching choices, scheduling and release barriers.
+  Workflow definitions live in [`.github/workflows/`](.github/workflows/).
 - **Website and documentation source:** [`site/`](site/). The five user guides
   below are canonical Markdown, rendered by the site rather than copied into
   a second web manual. Website release data comes from published release assets,

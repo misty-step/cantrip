@@ -116,9 +116,7 @@ def require_release_source(revision, version, *, publishing=False):
         raise ReleaseError("candidate cannot replace an equal or newer published version")
 
 
-def check_site_promotion():
-    revision = head()
-    require_ancestor(revision, github("git/ref/heads/master")["object"]["sha"])
+def deployed_site_source():
     config = json.loads((ROOT / "site/wrangler.jsonc").read_text())
     base = (f"https://api.cloudflare.com/client/v4/accounts/{config['account_id']}"
             f"/workers/scripts/{config['name']}")
@@ -154,6 +152,19 @@ def check_site_promotion():
         source = "ad4fac9f31ce0acebee1bcdab5117fb45a6d5127"
     else:
         raise ReleaseError("website has no trusted source metadata; recover explicitly before promotion")
+    return source, prior
+
+
+def site_refresh_source():
+    source, _ = deployed_site_source()
+    require_ancestor(source, github("git/ref/heads/master")["object"]["sha"])
+    emit(source_revision=source)
+
+
+def check_site_promotion():
+    revision = head()
+    require_ancestor(revision, github("git/ref/heads/master")["object"]["sha"])
+    source, prior = deployed_site_source()
     require_ancestor(source, revision)
     emit(deployed_source=source, candidate_source=revision, prior_version=prior)
 
@@ -626,6 +637,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("decide", help="prepare a reviewable release PR, or select its merged candidate")
     commands.add_parser("check-site-promotion", help="require deployed-source <= tested-source <= master")
+    commands.add_parser("site-refresh-source", help="select the already-deployed source for release-data refresh")
     for name in ("assemble", "finalize", "publish"):
         command = commands.add_parser(name)
         command.add_argument("--directory", type=Path, required=True)
@@ -637,6 +649,8 @@ def main():
             decide()
         elif args.command == "check-site-promotion":
             check_site_promotion()
+        elif args.command == "site-refresh-source":
+            site_refresh_source()
         elif args.command == "assemble":
             assemble(args.directory.resolve())
         elif args.command == "finalize":

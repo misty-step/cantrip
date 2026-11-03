@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: cantrip-macos-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: cantrip-macos-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,8 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PRs exercise the fast native host. CI calls both hosts on master and
-        # waits for them before release; scheduled CI refreshes cold caches.
+        # Tier policy: docs/decisions/0035-bounded-ci-feedback.md
         runner: ${{ fromJSON(github.event_name == 'pull_request' && '["macos-15"]' || '["macos-15","macos-15-intel"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

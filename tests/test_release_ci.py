@@ -2,6 +2,8 @@
 
 import os
 from pathlib import Path
+import re
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -88,6 +90,117 @@ class CheckTiers(unittest.TestCase):
                         env={**os.environ, "RUST_RESULT": rust, "CONTRACTS_RESULT": contracts},
                     )
                     self.assertEqual(result.returncode == 0, rust == contracts == "success")
+
+
+class WorkflowDispatch(unittest.TestCase):
+    @staticmethod
+    def workflow(name):
+        return (ROOT / ".github/workflows" / name).read_text()
+
+    @classmethod
+    def concurrency(cls, name):
+        block = cls.workflow(name).split("\nconcurrency:\n", 1)[1].split("\n\n", 1)[0]
+        return dict(
+            line.strip().split(": ", 1)
+            for line in block.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+
+    @classmethod
+    def job(cls, workflow, name):
+        match = re.search(
+            rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [^\s]|\Z)",
+            cls.workflow(workflow),
+        )
+        if match is None:
+            raise AssertionError(f"{workflow} has no {name} job")
+        return match.group(1)
+
+    def test_pushes_and_schedules_cannot_replace_a_pending_release_run(self):
+        for workflow in ("ci.yml", "macos.yml"):
+            with self.subTest(workflow=workflow):
+                policy = self.concurrency(workflow)
+                # Bind the grouping expression for A, release R, a later push
+                # and a schedule. The old github.ref grouping collides here.
+                groups = {
+                    policy["group"].replace(
+                        "${{ github.event.pull_request.number || github.run_id }}", str(run)
+                    )
+                    for run in (101, 102, 103, 104)
+                }
+                self.assertEqual(len(groups), 4)
+                self.assertEqual(
+                    policy["cancel-in-progress"],
+                    "${{ github.event_name == 'pull_request' }}",
+                )
+
+        writer = self.concurrency("release.yml")
+        self.assertEqual(writer["group"], "cantrip-release")
+        self.assertEqual(writer["cancel-in-progress"], "false")
+        self.assertEqual(writer["queue"], "max")
+
+        # GitHub's documented single-pending policy loses R when C arrives.
+        # Exercise the same bounded trace using the workflow's actual policy.
+        def pending_after_later_pushes(queue):
+            pending = ["merged-release"]
+            for event in ("later-push", "schedule", "another-push"):
+                if event == "schedule":
+                    continue
+                if queue == "single":
+                    pending[:] = [event]
+                else:
+                    pending.append(event)
+            return pending
+
+        self.assertIn("merged-release", pending_after_later_pushes(writer["queue"]))
+        self.assertNotIn("merged-release", pending_after_later_pushes("single"))
+
+    def test_website_uses_fast_gates_and_refreshes_after_publication(self):
+        website = self.job("ci.yml", "website")
+        self.assertIn("needs: [check, secret-scan]", website)
+        self.assertIn("uses: ./.github/workflows/site.yml", website)
+        refresh = self.job("release.yml", "website")
+        self.assertIn("needs: publish", refresh)
+        self.assertIn("uses: ./.github/workflows/site.yml", refresh)
+        self.assertIn("refresh-release-data: true", refresh)
+        site = self.workflow("site.yml")
+        self.assertIn("run: python3 scripts/release site-refresh-source", site)
+        self.assertIn("ref: ${{ steps.website-source.outputs.source_revision }}", site)
+        self.assertNotIn("\n  workflow_run:", self.workflow("site.yml"))
+
+    def test_only_the_named_existing_secret_reaches_master_website_calls(self):
+        guard = (
+            "github.ref == 'refs/heads/master' && "
+            "contains(fromJSON('[\"push\",\"workflow_dispatch\"]'), github.event_name)"
+        )
+        for workflow, job in (
+            ("ci.yml", "website"), ("ci.yml", "release"), ("release.yml", "website"),
+        ):
+            with self.subTest(workflow=workflow, job=job):
+                body = self.job(workflow, job)
+                self.assertIn(f"if: {guard}", body)
+                field, value = body.split("\n    secrets:\n", 1)[1].strip().split(": ", 1)
+                self.assertEqual(field, "CLOUDFLARE_API_TOKEN")
+                self.assertEqual(value, "${{ secrets." + "CLOUDFLARE_API_TOKEN }}")
+        for workflow in ("ci.yml", "release.yml", "site.yml"):
+            self.assertNotIn("secrets: inherit", self.workflow(workflow))
+        deploy = self.workflow("site.yml").split(
+            "- name: Deploy the verified static build\n", 1
+        )[1]
+        self.assertIn(
+            "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'",
+            deploy,
+        )
+
+    def test_website_watchdog_exceeds_all_edge_wait_budgets(self):
+        verify = runpy.run_path(str(ROOT / "scripts/verify-site"))
+        wait = verify["wait_for_page"].__defaults__[0]
+        fetch = verify["fetch"].__defaults__[0]
+        site = self.job("site.yml", "site")
+        watchdog = int(re.search(r"(?m)^    timeout-minutes: (\d+)$", site).group(1)) * 60
+        pages = len(re.findall(r"(?m)^\s+scripts/verify-site ", site))
+        self.assertGreater(pages, 0)
+        self.assertGreater(watchdog, pages * (wait + fetch) + 5 * 60)
 
 
 if __name__ == "__main__":
