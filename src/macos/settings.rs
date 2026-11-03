@@ -623,6 +623,8 @@ impl SettingsWindow {
             state.apply = Some(send(ipc::Command::Reload));
         }
         drop(state);
+        // Saving may adopt a default mode chosen from the menu or `cantrip mode`.
+        self.show_modes();
         self.show_form_state();
     }
 
@@ -1196,6 +1198,17 @@ impl SettingsWindow {
                 line
             })
             .collect();
+        // One group, so AppKit keeps the radio buttons exclusive: each description
+        // close under its title, the next choice set apart.
+        let mut choices: Vec<&NSView> = Vec::with_capacity(2 * modes.len());
+        for (radio, description) in modes.iter().zip(&descriptions) {
+            choices.push(radio);
+            choices.push(description);
+        }
+        let mode_group = ui::column(mtm, &choices, 2.0);
+        for description in descriptions.iter().take(descriptions.len() - 1) {
+            mode_group.setCustomSpacing_afterView(8.0, description);
+        }
         let pipeline = NSTextField::wrappingLabelWithString(&NSString::new(), mtm);
         pipeline.setPreferredMaxLayoutWidth(CONTROL);
         let columns = ui::row(
@@ -1227,7 +1240,7 @@ impl SettingsWindow {
         let pp_key = ui::field(mtm, "none", CONTROL);
         let provider_note = ui::note(
             mtm,
-            "Clean and Elevate share this endpoint and key. The key ID names a key saved in your keychain, not the key itself.",
+            "Shared by Clean and Elevate; names a keychain item, not a key.",
             CONTROL,
         );
         let pp_timeout = ui::field(mtm, "", NUMBER);
@@ -1247,16 +1260,11 @@ impl SettingsWindow {
             "Shorter transcripts skip Clean's model; 0 never skips.",
             CONTROL,
         );
-        let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 88.0, false);
+        let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 66.0, false);
         let modes_form = ui::form(
             mtm,
             &[
-                (Some("Mode:"), &modes[0]),
-                (None, &descriptions[0]),
-                (None, &modes[1]),
-                (None, &descriptions[1]),
-                (None, &modes[2]),
-                (None, &descriptions[2]),
+                (Some("Mode:"), &mode_group),
                 (Some("Pipeline:"), &pipeline),
                 (None, &columns),
                 (Some("Clean:"), &clean_row),
