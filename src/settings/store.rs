@@ -7,7 +7,7 @@
 //! toolkit; both platform windows share it.
 
 use anyhow::{Context, Result};
-use cantrip_engine::config::Config;
+use cantrip_engine::config::{Config, VocabularyEntry};
 use cantrip_engine::delivery::InjectionMode;
 use cantrip_engine::paths;
 use std::fs;
@@ -105,11 +105,33 @@ pub(crate) fn save_config_preserving(
     set_or_remove(root, "audio_source", config.audio_source.as_deref());
     #[cfg(target_os = "macos")]
     set_or_remove(root, "hotkey", config.hotkey.as_deref());
-    let mut vocab = toml_edit::Array::new();
-    for term in &config.vocabulary {
-        vocab.push(term.as_str());
+    let original: Config = toml::from_str(&existing)?;
+    if config.vocabulary != original.vocabulary {
+        let old = root.get("vocabulary").and_then(toml_edit::Item::as_array);
+        let mut vocab = toml_edit::Array::new();
+        for entry in &config.vocabulary {
+            if let VocabularyEntry::Term(term) = entry {
+                vocab.push(term.as_str());
+            } else if let Some(value) = original
+                .vocabulary
+                .iter()
+                .position(|old| old == entry)
+                .and_then(|index| old.and_then(|array| array.get(index)))
+            {
+                vocab.push_formatted(value.clone());
+            } else if let VocabularyEntry::Aliased { term, aliases } = entry {
+                let mut table = toml_edit::InlineTable::new();
+                table.insert("term", term.as_str().into());
+                let mut values = toml_edit::Array::new();
+                for alias in aliases {
+                    values.push(alias.as_str());
+                }
+                table.insert("aliases", values.into());
+                vocab.push(table);
+            }
+        }
+        set_preserving_decor(root, "vocabulary", toml_edit::value(vocab));
     }
-    set_preserving_decor(root, "vocabulary", toml_edit::value(vocab));
 
     let hud = ensure_table(root, "hud")?;
     set_preserving_decor(hud, "labels", toml_edit::value(config.hud.labels));

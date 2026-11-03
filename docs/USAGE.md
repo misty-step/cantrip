@@ -279,13 +279,19 @@ are deliberate choices after a successful trial, not prerequisites.
   On Mac, use **Quit Cantrip** and wait for the app-owned engine to exit;
   an externally owned daemon must be stopped through its own owner.
 
-`toggle` and `start` accept `--postproc clean|raw`. The mode chosen at capture
-start overrides `[postproc].enabled` for that take; using a different flag to
-stop does not change that take's mode. Without a flag, the configured policy
-applies. Two shortcuts can run `toggle --postproc raw` and
-`toggle --postproc clean`, but configure a working cleanup endpoint/model
-[before using the clean shortcut](CONFIGURATION.md#postproc--cleanup).
-An explicit clean request does not install or start an LLM service.
+`toggle` and `start` accept `--postproc clean|raw`. **Raw** delivers the
+recognizer's output without aliases or LLM cleanup. **Clean** applies
+[vocabulary aliases](CONFIGURATION.md#vocabulary--spellings-and-aliases), then
+any configured opt-in LLM cleanup. Aliases still apply when cleanup is absent,
+skipped, fails, or times out. Clean also corrects a deliberately spoken or quoted
+alias; Raw is the escape when you want to keep that spelling.
+
+The mode chosen at capture start overrides `[postproc].enabled` for that take;
+using a different flag to stop does not change its mode. Without a flag, the
+configured policy applies. Two shortcuts can run `toggle --postproc raw` and
+`toggle --postproc clean`. An explicit Clean request does not install or start
+an LLM service; [configure one deliberately](CONFIGURATION.md#postproc--cleanup)
+only if you also want LLM cleanup.
 
 Cloud transcription waits for a response, a real failure, or cancellation; a
 slow response is not a failure. Twenty-minute takes and valid responses arriving

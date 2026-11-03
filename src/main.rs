@@ -18,9 +18,9 @@ use cantrip_engine::{config::Config, keys, paths, pipeline, recovery, telemetry}
 /// Per-dictation post-processing request, overriding [postproc].enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PostprocMode {
-    /// Run transcript cleanup for this dictation.
+    /// Apply vocabulary aliases, then any configured LLM cleanup.
     Clean,
-    /// Skip transcript cleanup for this dictation.
+    /// Deliver recognizer output without aliases or LLM cleanup.
     Raw,
 }
 
@@ -387,7 +387,7 @@ const CONFIG_HEADER: &str = "injection = \"clipboard\"   # copy locally, then pa
 
 const CONFIG_TEMPLATE: &str = r#"keep_warm = true
 # audio_source = "…"      # optional native device ID (PipeWire target on Linux)
-vocabulary = []           # exact-spelling terms for postproc + cloud STT
+vocabulary = []           # strings or { term = "Cantrip", aliases = ["Gantrip"] }
 
 [hud]
 labels = false            # always show state captions
@@ -404,14 +404,14 @@ model = "parakeet-tdt-0.6b-v3-int8"   # local registry name
 [postproc]
 enabled = false
 endpoint = "http://localhost:11434/v1"
-model = ""                # required when enabled
+model = ""                # empty = Clean applies aliases without LLM cleanup
 # api_key_id = "openai"   # keyring entry; omit for local endpoints
 timeout_ms = 30000
 passes = 1                # cleanup rounds; 2 adds a proofread pass
 min_chars = 40            # skip cleanup under this length; 0 = never skip
 instructions = ""         # optional extra style guidance
 # Per-dictation override (two hotkeys): `cantrip toggle --postproc clean|raw`
-# forces cleanup on/off for that capture, regardless of `enabled` above.
+# selects Raw or Clean for that capture, regardless of `enabled` above.
 "#;
 
 fn run_config(command: ConfigCommand) -> Result<()> {
@@ -1166,8 +1166,8 @@ fn cleanup_diagnosis(config: &Config) -> String {
     if !config.postproc.enabled {
         return "cleanup: disabled (raw transcript is delivered)".to_owned();
     }
-    if config.postproc.endpoint.trim().is_empty() {
-        return "cleanup: blocked (endpoint is empty) — run: cantrip settings".to_owned();
+    if config.postproc.endpoint.trim().is_empty() || config.postproc.model.trim().is_empty() {
+        return "cleanup: disabled (Clean applies local vocabulary aliases only)".to_owned();
     }
     if config.postproc.timeout_ms == 0 {
         return "cleanup: blocked (timeout_ms is zero) — run: cantrip settings".to_owned();

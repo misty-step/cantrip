@@ -1048,7 +1048,11 @@ impl SettingsWindow {
         let delivery = ui::popup(mtm, target, changed);
         let delivery_note = Message::new(mtm, CONTROL);
         let vocabulary = ui::field(mtm, "PipeWire, Parakeet", CONTROL);
-        let vocabulary_note = ui::note(mtm, "Exact spellings, separated by commas.", CONTROL);
+        let vocabulary_note = ui::note(
+            mtm,
+            "Comma-separated terms. File-defined aliases are kept separately.",
+            CONTROL,
+        );
         let keep_warm = ui::checkbox(
             mtm,
             "Keep the speech model loaded for faster dictation",

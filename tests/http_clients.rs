@@ -139,7 +139,13 @@ fn refine_round_trip_sends_contract_request_and_strips_model_wrappers() {
     // This test pins the single-round wire contract; the multi-round chain is
     // covered by `refine_two_passes_chains_output`.
     cfg.passes = 1;
-    let vocabulary = vec!["Cantrip".to_owned(), "PipeWire".to_owned()];
+    let vocabulary = vec![
+        cantrip_engine::config::VocabularyEntry::Aliased {
+            term: "Cantrip".into(),
+            aliases: vec!["PRIVATE-ALIAS-MARKER".into()],
+        },
+        "PipeWire".into(),
+    ];
 
     let refined = postproc::refine(
         "hello cantrip world",
@@ -174,6 +180,7 @@ fn refine_round_trip_sends_contract_request_and_strips_model_wrappers() {
         .as_str()
         .expect("system prompt");
     assert!(system.contains("Cantrip, PipeWire"));
+    assert!(!system.contains("PRIVATE-ALIAS-MARKER"));
     assert!(system.contains("Keep numerals as digits."));
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(
@@ -215,7 +222,9 @@ fn refine_two_passes_chains_output() {
     let cfg = postproc_config(endpoint); // passes = 2
     let first = "Initial text. The Exa AP and the CL expose methods.";
 
-    let vocabulary = vec!["Cantrip".to_owned(), "API".to_owned(), "CLI".to_owned()];
+    let terms = ["Cantrip", "API", "CLI"];
+    let vocabulary: Vec<cantrip_engine::config::VocabularyEntry> =
+        terms.iter().map(|term| (*term).into()).collect();
     let refined = postproc::refine(first, &cfg, &vocabulary, None, None)
         .expect("two-pass refine should succeed");
     assert_eq!(
@@ -239,13 +248,13 @@ fn refine_two_passes_chains_output() {
     );
     assert_ne!(
         pass2["messages"][0]["content"],
-        postproc::build_system_prompt(&vocabulary, ""),
+        postproc::build_system_prompt(terms, ""),
         "removing custom instructions must not disguise a repeated refine prompt"
     );
     assert!(pass2["messages"][0]["content"]
         .as_str()
         .expect("proofread system prompt")
-        .contains(&vocabulary.join(", ")));
+        .contains(&terms.join(", ")));
     // The source of pass 2 is chained from pass 1's output.
     assert_eq!(
         pass2["messages"][1]["content"],
@@ -310,7 +319,10 @@ fn refine_decision_triage_skips_when_clean() {
     cfg.decision_model = Some("typesafe/jev-1.13".to_owned());
     cfg.decision_endpoint = Some(decision_endpoint);
 
-    let vocabulary = vec!["Cantrip".to_owned()];
+    let vocabulary = vec![cantrip_engine::config::VocabularyEntry::Aliased {
+        term: "Cantrip".to_owned(),
+        aliases: vec!["PRIVATE-ALIAS-MARKER".to_owned()],
+    }];
     let res = postproc::refine("This text is already clean.", &cfg, &vocabulary, None, None)
         .expect("refine should succeed via decision triage");
     assert_eq!(res.text, "This text is already clean.");
@@ -319,6 +331,7 @@ fn refine_decision_triage_skips_when_clean() {
     let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body["state"]["source"], "This text is already clean.");
     assert_eq!(body["state"]["vocabulary"], serde_json::json!(["Cantrip"]));
+    assert!(!String::from_utf8_lossy(&request.body).contains("PRIVATE-ALIAS-MARKER"));
 }
 
 #[test]
@@ -339,7 +352,10 @@ fn refine_decision_watchdog_rejects_answered_question() {
     cfg.decision_endpoint = Some(endpoint);
 
     let source = "what time is the meeting tomorrow";
-    let vocabulary = vec!["Cantrip".to_owned()];
+    let vocabulary = vec![cantrip_engine::config::VocabularyEntry::Aliased {
+        term: "Cantrip".to_owned(),
+        aliases: vec!["PRIVATE-ALIAS-MARKER".to_owned()],
+    }];
     let res = postproc::refine(source, &cfg, &vocabulary, None, None)
         .expect("refine should succeed with fallback");
     assert_eq!(res.text, "what time is the meeting tomorrow");
@@ -352,8 +368,10 @@ fn refine_decision_watchdog_rejects_answered_question() {
     );
     assert_eq!(
         watchdog["state"]["vocabulary"],
-        serde_json::json!(vocabulary)
+        serde_json::json!(["Cantrip"])
     );
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains("PRIVATE-ALIAS-MARKER"));
+    assert!(!String::from_utf8_lossy(&requests[2].body).contains("PRIVATE-ALIAS-MARKER"));
 }
 
 #[test]
@@ -727,7 +745,10 @@ fn transcribe_remote_round_trip_preserves_short_wav() {
         &fixture.path,
         &endpoint,
         "whisper-large-v3-turbo",
-        &["Cantrip".to_owned()],
+        &[cantrip_engine::config::VocabularyEntry::Aliased {
+            term: "Cantrip".into(),
+            aliases: vec!["PRIVATE-ALIAS-MARKER".into()],
+        }],
         Some("sk-cloud"),
         None,
         |chunk| progress.push(chunk),
@@ -756,6 +777,7 @@ fn transcribe_remote_round_trip_preserves_short_wav() {
     assert_eq!(request.header("authorization"), Some("Bearer sk-cloud"));
     assert_eq!(request.part("model"), b"whisper-large-v3-turbo");
     assert_eq!(request.part("prompt"), b"Cantrip");
+    assert!(!String::from_utf8_lossy(&request.body).contains("PRIVATE-ALIAS-MARKER"));
     assert_eq!(request.part("response_format"), b"json");
     assert_eq!(request.part("file"), original);
     let decoded = hound::WavReader::new(Cursor::new(request.part("file")))
@@ -783,7 +805,7 @@ fn assert_bounded_transcription(
         &fixture.path,
         &endpoint,
         "test-stt-model",
-        &["Cantrip".to_owned(), "Parakeet".to_owned()],
+        &["Cantrip".into(), "Parakeet".into()],
         Some("sk-private-http-test"),
         None,
         |chunk| progress.push(chunk),
@@ -936,7 +958,7 @@ fn transcribe_remote_keeps_partial_text_and_progress_without_leaking_failure_bod
             &fixture.path,
             &endpoint,
             "test-stt-model",
-            &["Cantrip".to_owned(), "Parakeet".to_owned()],
+            &["Cantrip".into(), "Parakeet".into()],
             Some("sk-private-http-test"),
             None,
             |chunk| progress.push(chunk),
@@ -1106,6 +1128,80 @@ fn cloud_payment_and_unknown_connection_do_not_invent_budget_evidence() {
         Some(&stt::CloudFailure::Connection)
     );
     assert!(!error.to_string().contains("budget"));
+}
+
+#[test]
+fn transcribe_cli_delivers_aliases_in_clean_without_an_llm_and_preserves_raw() {
+    for clean in [false, true] {
+        let fixture = WavFixture::new(native_spec(), 160);
+        let (endpoint, server) = mock_server(ok_json(r#"{"text":"Gantrip"}"#));
+        let root = fixture.path.with_extension("alias-xdg");
+        let config_dir = root.join("config/cantrip");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let cfg = cantrip_engine::config::Config {
+            vocabulary: vec![cantrip_engine::config::VocabularyEntry::Aliased {
+                term: "Cantrip".into(),
+                aliases: vec!["Gantrip".into()],
+            }],
+            stt: cantrip_engine::config::SttConfig {
+                endpoint: Some(endpoint),
+                model: "test-stt".into(),
+                api_key_id: None,
+            },
+            postproc: PostprocConfig {
+                enabled: clean,
+                endpoint: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        std::fs::write(
+            config_dir.join("config.toml"),
+            toml::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cantrip"))
+            .arg("transcribe")
+            .arg(&fixture.path)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let expected = if clean { "Cantrip" } else { "Gantrip" };
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
+        let diagnostic = String::from_utf8(output.stderr).unwrap();
+        assert!(!diagnostic.contains("Gantrip"));
+        let request = server.join().unwrap();
+        assert_eq!(request.part("prompt"), b"Cantrip");
+        let path = std::fs::read_dir(root.join("state/cantrip/transcripts"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["raw_transcript"], "Gantrip");
+        assert_eq!(saved["alias_substitutions"], usize::from(clean));
+        assert_eq!(
+            saved["postprocessed_transcript"],
+            if clean {
+                serde_json::json!("Cantrip")
+            } else {
+                serde_json::Value::Null
+            }
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]

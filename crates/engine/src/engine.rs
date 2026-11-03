@@ -1080,19 +1080,6 @@ fn start_recording(
     if !daemon.worker_available {
         return daemon.reject("Transcription worker unavailable.", "stt-failed");
     }
-    if postproc == Some(true) && daemon.config.postproc.model.trim().is_empty() {
-        let mut outcome = setup_failure(
-            "Post-processing requested but [postproc].model is not set.",
-            "postproc-model-unset",
-        );
-        outcome.event_id = daemon.event_id();
-        daemon.outcome = Some(outcome);
-        return daemon.reply(
-            false,
-            "Post-processing requested but [postproc].model is not set.",
-            Some("postproc-model-unset"),
-        );
-    }
     if config.stt.endpoint.is_none() && !local_model_ready(&config.stt) {
         let mut outcome = setup_failure(
             "Local model unavailable — run: cantrip models pull",

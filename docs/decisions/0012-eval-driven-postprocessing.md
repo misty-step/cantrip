@@ -43,9 +43,10 @@ The operator's `vocabulary` supplies canonical spellings for intended names and
 acronyms, including clear missing-letter or missing-space recognition errors.
 Capitalization alone does not make an ordinary spoken acronym a literal
 identifier. Vocabulary does not authorize replacing ordinary words, literal
-quoted misspellings, identifiers, or versions. Corrections use this LLM pass;
-there is no local alias table or decoder biasing. Raw bypasses cleanup and
-returns the recognizer's hypothesis, not a guarantee of verbatim recognition.
+quoted misspellings, identifiers, or versions. The LLM pass receives canonical
+spellings only, never alias lists. Raw bypasses cleanup and aliases and returns
+the recognizer's hypothesis, not a guarantee of verbatim recognition. There is
+no decoder biasing.
 
 The first pass refines; optional later passes only proofread the refined text,
 without compressing it again. Local STT stays the default, cleanup stays off
@@ -70,10 +71,30 @@ written-form rule until a candidate passes with repeated private takes and
 idiom protection. The [receipt](../../eval/baselines/2026-11-03-clean-digits/run.json)
 owns the counts, prompt hashes, and spend.
 
+### Vocabulary aliases (2026-11-02)
+
+Raw and Clean are the existing per-take contracts, selected at capture start
+by `--postproc raw|clean` or the configured `[postproc].enabled` default.
+Clean first applies operator-owned vocabulary aliases, then any configured
+opt-in LLM cleanup. Each canonical term owns its aliases in the same vocabulary
+entry; plain strings remain valid.
+
+Alias matching is case-insensitive, exact whole-phrase matching. Select the
+longest non-overlapping matches and emit canonical spellings without fuzzy
+matching or cascading replacements. The aliased text survives absent/skipped
+cleanup and cleanup failures or timeouts. History retains the recognizer's
+`raw_transcript`, the resulting text, and a substitution count; operational
+logs contain counts only.
+
+This deterministic rule cannot disambiguate a deliberately spoken or quoted
+alias: Clean also corrects `"Gantrip"` when the speaker meant that spelling.
+Raw is the escape. Decoder biasing, app routing, and additional modes are not
+part of this rule.
+
 ## Consequences
 
 Production accepts nonempty text after protocol cleanup; request and response
-failures still return raw text. Synthetic behavior cases distinguish cleanup,
+failures still return the alias-corrected source text. Synthetic behavior cases distinguish cleanup,
 role, content, and formatting, with latency/cost compared only after fidelity.
 Public/synthetic data may be explicitly published; local JSON stays authoritative.
 [Opt-in structured runtime decisions](0026-typesafe-system-one-decisions.md)

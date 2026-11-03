@@ -886,7 +886,7 @@ fn candidate_vocabulary(vocabulary: &[String], text: &str) -> Vec<String> {
 fn filtered_instructions(config: &EvalConfig, lane: &PostprocLane, text: &str) -> Option<String> {
     (lane.vocabulary_mode == VocabularyMode::CandidateFiltered).then(|| {
         postproc::build_system_prompt(
-            &candidate_vocabulary(&config.vocabulary, text),
+            candidate_vocabulary(&config.vocabulary, text),
             &config.instructions,
         )
     })

@@ -2,7 +2,7 @@
 //! post-processing. Shared by the daemon worker and `cantrip transcribe`.
 
 use crate::archive;
-use crate::config::{PostprocConfig, SttConfig};
+use crate::config::{PostprocConfig, SttConfig, VocabularyEntry};
 use crate::models;
 use crate::postproc::{self, RefinementUsage};
 use crate::stt::{self, Transcriber};
@@ -20,7 +20,7 @@ pub enum PostprocStatus {
     Off,
     /// LLM cleanup succeeded, taking `ms`.
     Applied { ms: u128 },
-    /// Cleanup failed after `ms`; the raw transcript is preserved.
+    /// Cleanup failed after `ms`; deterministic alias corrections are preserved.
     Failed { ms: u128 },
     /// Enabled, but the transcript was under `min_chars`.
     SkippedShort { chars: usize },
@@ -133,7 +133,7 @@ impl SttBackend {
 
 /// Outcome of running one WAV through the backend.
 pub struct Outcome {
-    /// Final text: post-processed, raw on cleanup failure, or the STT error.
+    /// Final text: aliased/cleaned in Clean, recognizer output in Raw, or the STT error.
     pub text: Result<String, String>,
     /// Wall time of the STT stage only.
     pub stt_elapsed: Duration,
@@ -193,14 +193,13 @@ pub fn should_run_postproc(cfg: &PostprocConfig, chars: usize) -> bool {
 /// keeps completed cloud text and retries only its exact remaining frames;
 /// other formats or failures before any useful prefix retry the whole take.
 ///
-/// A post-processing failure never drops the dictation: the raw text is
-/// returned with `PostprocStatus::Failed`. Short transcripts under
-/// `postproc.min_chars` skip cleanup and return the raw text.
+/// Clean applies vocabulary aliases before optional LLM cleanup. A cleanup
+/// failure or skip preserves the aliased text. Raw bypasses both stages.
 pub fn run(
     cache: &mut TranscriberCache,
     wav: &Path,
     stt_cfg: &SttConfig,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     postproc_cfg: &PostprocConfig,
     context: RunContext<'_>,
     on_stage: impl FnMut(Stage),
@@ -224,7 +223,7 @@ pub fn run(
 struct Pipeline<'a> {
     wav: &'a Path,
     stt_cfg: &'a SttConfig,
-    vocabulary: &'a [String],
+    vocabulary: &'a [VocabularyEntry],
     postproc_cfg: &'a PostprocConfig,
     context: RunContext<'a>,
 }
@@ -393,17 +392,28 @@ impl Pipeline<'_> {
             }
         };
 
-        let (postproc, processed, postproc_usage) = if cancelled {
+        let (aliased, alias_substitutions) = if postproc_cfg.enabled && !cancelled {
+            crate::vocabulary::apply(&raw, vocabulary)
+        } else {
+            (std::borrow::Cow::Borrowed(raw.as_str()), 0)
+        };
+        if alias_substitutions > 0 {
+            tracing::info!("[Postproc] alias_substitutions={alias_substitutions}");
+        }
+        let (postproc, mut processed, postproc_usage) = if cancelled {
             (PostprocStatus::Off, None, None)
         } else {
             cleanup(
-                &raw,
+                &aliased,
                 postproc_cfg,
                 vocabulary,
                 context.cancel,
                 &mut on_stage,
             )
         };
+        if processed.is_none() && alias_substitutions > 0 {
+            processed = Some(aliased.into_owned());
+        }
         cancelled |= stt::is_cancelled(context.cancel);
         if cancelled {
             on_stage(Stage::Cancelling);
@@ -424,6 +434,7 @@ impl Pipeline<'_> {
             source: context.source.as_str(),
             raw_transcript: &raw,
             postprocessed_transcript: processed.as_deref(),
+            alias_substitutions,
             audio_duration_ms,
             pipeline_elapsed_ms: duration_ms(pipeline_started.elapsed().as_millis()),
             stt_model: if local_fallback {
@@ -564,11 +575,14 @@ fn duration_ms(ms: u128) -> u64 {
 fn cleanup(
     raw: &str,
     cfg: &PostprocConfig,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     cancel: Option<&AtomicBool>,
     on_stage: &mut dyn FnMut(Stage),
 ) -> (PostprocStatus, Option<String>, Option<RefinementUsage>) {
     if stt::is_cancelled(cancel) || raw.trim().is_empty() || !cfg.enabled {
+        return (PostprocStatus::Off, None, None);
+    }
+    if cfg.model.trim().is_empty() || cfg.endpoint.trim().is_empty() {
         return (PostprocStatus::Off, None, None);
     }
     let chars = raw.chars().count();
@@ -617,7 +631,7 @@ fn transcribe(
     cache: &mut TranscriberCache,
     wav: &Path,
     stt_cfg: &SttConfig,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     suffix: Option<&stt::NativeSuffix>,
     cancel: Option<&AtomicBool>,
     on_stage: &mut dyn FnMut(Stage),
@@ -813,6 +827,49 @@ mod tests {
             panic!("transcript was not durably archived: {:?}", outcome.archive);
         };
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn cleanup_failure_and_short_skip_never_undo_aliases() {
+        let recording = Recording::new(1);
+        let stt_cfg = SttConfig::default();
+        let entries = [VocabularyEntry::Aliased {
+            term: "Cantrip".into(),
+            aliases: vec!["Gantrip".into()],
+        }];
+        for case in ["short", "failed"] {
+            let cfg = PostprocConfig {
+                enabled: true,
+                model: "test".into(),
+                endpoint: "not-an-http-url".into(),
+                min_chars: if case == "short" { 40 } else { 0 },
+                ..Default::default()
+            };
+            let mut pipeline = recording.pipeline(&stt_cfg, &cfg, None);
+            pipeline.vocabulary = &entries;
+            let outcome = pipeline.run(
+                |_| {},
+                |_, _, _, _| {
+                    Ok(stt::RemoteAttempt::whole(stt::Transcript::Complete(
+                        "Gantrip".into(),
+                    )))
+                },
+                |entry| recording.save(entry),
+            );
+            assert_eq!(outcome.text.as_ref().unwrap(), "Cantrip", "{case}");
+            let saved = record(&outcome);
+            assert_eq!(saved["raw_transcript"], "Gantrip", "{case}");
+            assert_eq!(archive::final_text(&saved), Some("Cantrip"), "{case}");
+            assert_eq!(saved["alias_substitutions"], 1, "{case}");
+            if case == "failed" {
+                assert!(matches!(outcome.postproc, PostprocStatus::Failed { .. }));
+            } else {
+                assert!(matches!(
+                    outcome.postproc,
+                    PostprocStatus::SkippedShort { .. }
+                ));
+            }
+        }
     }
 
     fn partial(text: &str) -> stt::Transcript {

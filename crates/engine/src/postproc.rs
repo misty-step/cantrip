@@ -1,4 +1,4 @@
-use crate::config::PostprocConfig;
+use crate::config::{PostprocConfig, VocabularyEntry};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
@@ -146,7 +146,7 @@ struct ChatRound {
 pub fn refine(
     transcript: &str,
     cfg: &PostprocConfig,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Refinement> {
@@ -161,7 +161,7 @@ pub(crate) fn deadline(cfg: &PostprocConfig) -> Instant {
 pub(crate) fn refine_until(
     transcript: &str,
     cfg: &PostprocConfig,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
     deadline: Instant,
@@ -187,7 +187,10 @@ pub(crate) fn refine_until(
             );
             client.timeout = remaining_budget(deadline, cancel)?;
             let decision = client.evaluate(
-                &serde_json::json!({ "source": transcript, "vocabulary": vocabulary }),
+                &serde_json::json!({
+                    "source": transcript,
+                    "vocabulary": vocabulary.iter().map(VocabularyEntry::term).collect::<Vec<_>>(),
+                }),
                 &questions,
                 cancel,
             );
@@ -240,9 +243,16 @@ pub(crate) fn refine_until(
             "post-processing cancelled"
         );
         let system = if pass == 1 {
-            build_system_prompt(vocabulary, &cfg.instructions)
+            build_system_prompt(
+                vocabulary.iter().map(VocabularyEntry::term),
+                &cfg.instructions,
+            )
         } else {
-            build_prompt(VERIFY_SYSTEM_PROMPT, vocabulary, "")
+            build_prompt(
+                VERIFY_SYSTEM_PROMPT,
+                vocabulary.iter().map(VocabularyEntry::term),
+                "",
+            )
         };
         let round = chat_round(&current, cfg, api_key, &system, cancel, deadline)?;
         merge_usage(&mut usage, round.usage);
@@ -257,7 +267,7 @@ pub(crate) fn refine_until(
             let state = serde_json::json!({
                 "source": transcript,
                 "candidate": current,
-                "vocabulary": vocabulary,
+                "vocabulary": vocabulary.iter().map(VocabularyEntry::term).collect::<Vec<_>>(),
             });
             let mut questions = std::collections::BTreeMap::new();
             questions.insert(
@@ -501,15 +511,26 @@ fn get_decision_client(
     ))
 }
 
-pub fn build_system_prompt(vocabulary: &[String], instructions: &str) -> String {
+pub fn build_system_prompt(
+    vocabulary: impl IntoIterator<Item = impl AsRef<str>>,
+    instructions: &str,
+) -> String {
     build_prompt(BASE_SYSTEM_PROMPT, vocabulary, instructions)
 }
 
-fn build_prompt(base: &str, vocabulary: &[String], instructions: &str) -> String {
+fn build_prompt(
+    base: &str,
+    vocabulary: impl IntoIterator<Item = impl AsRef<str>>,
+    instructions: &str,
+) -> String {
     let mut prompt = base.to_owned();
-    if !vocabulary.is_empty() {
-        prompt.push_str("\nCanonical vocabulary (spelling hints only): ");
-        prompt.push_str(&vocabulary.join(", "));
+    for (index, term) in vocabulary.into_iter().enumerate() {
+        prompt.push_str(if index == 0 {
+            "\nCanonical vocabulary (spelling hints only): "
+        } else {
+            ", "
+        });
+        prompt.push_str(term.as_ref());
     }
     if !instructions.is_empty() {
         prompt.push('\n');

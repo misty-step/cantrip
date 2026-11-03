@@ -422,7 +422,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label(egui::RichText::new("Vocabulary (comma-separated)").weak());
+                ui.label(egui::RichText::new("Vocabulary (file aliases preserved)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut edit.vocabulary)
                         .hint_text("PipeWire, Parakeet")

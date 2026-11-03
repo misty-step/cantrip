@@ -10,7 +10,7 @@ use crate::actions;
 use crate::inject::{self, DeliveryGuard};
 use anyhow::{anyhow, Result};
 use cantrip_engine::config::{
-    Config, HandoffTarget, HudConfig, PostprocConfig, SttConfig, TelemetryConfig,
+    Config, HandoffTarget, HudConfig, PostprocConfig, SttConfig, TelemetryConfig, VocabularyEntry,
 };
 use cantrip_engine::delivery::{InjectionFailureKind, InjectionMode};
 use cantrip_engine::{ipc, recovery};
@@ -45,6 +45,8 @@ pub(crate) struct Editable {
     /// to the compositor, so the value is only carried through saves there.
     pub(crate) hotkey: String,
     pub(crate) vocabulary: String,
+    /// Aliased entries are file-only; structured saves preserve them verbatim.
+    file_vocabulary: Vec<VocabularyEntry>,
     pub(crate) stt_model: String,
     pub(crate) stt_endpoint: String,
     pub(crate) stt_key: String,
@@ -77,7 +79,16 @@ impl Editable {
             keep_warm: cfg.keep_warm,
             audio_source: cfg.audio_source.clone().unwrap_or_default(),
             hotkey: cfg.hotkey.clone().unwrap_or_default(),
-            vocabulary: cfg.vocabulary.join(", "),
+            vocabulary: cfg
+                .vocabulary
+                .iter()
+                .filter_map(|entry| match entry {
+                    VocabularyEntry::Term(term) => Some(term.as_str()),
+                    VocabularyEntry::Aliased { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            file_vocabulary: cfg.vocabulary.clone(),
             stt_model: cfg.stt.model.clone(),
             stt_endpoint: cfg.stt.endpoint.clone().unwrap_or_default(),
             stt_key: cfg.stt.api_key_id.clone().unwrap_or_default(),
@@ -100,18 +111,26 @@ impl Editable {
     }
 
     pub(crate) fn to_config(&self) -> Config {
+        let mut terms = self
+            .vocabulary
+            .split(',')
+            .map(str::trim)
+            .filter(|term| !term.is_empty())
+            .map(|term| VocabularyEntry::Term(term.to_owned()));
+        let mut vocabulary = Vec::with_capacity(self.file_vocabulary.len());
+        for entry in &self.file_vocabulary {
+            match entry {
+                VocabularyEntry::Term(_) => vocabulary.extend(terms.next()),
+                VocabularyEntry::Aliased { .. } => vocabulary.push(entry.clone()),
+            }
+        }
+        vocabulary.extend(terms);
         Config {
             injection: self.injection,
             keep_warm: self.keep_warm,
             audio_source: non_empty(self.audio_source.trim()),
             hotkey: non_empty(self.hotkey.trim()),
-            vocabulary: self
-                .vocabulary
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            vocabulary,
             stt: SttConfig {
                 model: self.stt_model.trim().to_owned(),
                 endpoint: non_empty(self.stt_endpoint.trim()),
@@ -882,8 +901,43 @@ mod tests {
         edit.vocabulary = "PipeWire, ,Canary,Parakeet".to_owned();
         assert_eq!(
             edit.to_config().vocabulary,
-            vec!["PipeWire", "Canary", "Parakeet"]
+            vec![
+                VocabularyEntry::from("PipeWire"),
+                "Canary".into(),
+                "Parakeet".into()
+            ]
         );
+    }
+
+    #[test]
+    fn settings_saves_preserve_file_aliases_when_other_terms_change_or_are_cleared() {
+        let fixture = ConfigFixture::new();
+        let alias = r#"{ term = "Cantrip", aliases = ["Gantrip", "can trip"] }"#;
+        fs::write(
+            fixture.path(),
+            format!("vocabulary = [\"PipeWire\", {alias}]\n"),
+        )
+        .unwrap();
+        let original = match store::load_editable_config(&fixture.path()) {
+            EditableConfigLoad::Ready { config, .. } => config,
+            EditableConfigLoad::Blocked { .. } => panic!("valid alias config"),
+        };
+        let mut form = SettingsForm::load(fixture.path());
+        assert_eq!(form.edit.vocabulary, "PipeWire");
+        form.edit.vocabulary = "Parakeet, PipeWire".into();
+        assert!(form.save().is_some());
+        let saved = fs::read_to_string(fixture.path()).unwrap();
+        let config: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(config.vocabulary[1], original.vocabulary[1]);
+        assert!(saved.contains(alias));
+
+        let mut form = SettingsForm::load(fixture.path());
+        form.edit.vocabulary.clear();
+        assert!(form.save().is_some());
+        let saved = fs::read_to_string(fixture.path()).unwrap();
+        let config: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(config.vocabulary, [original.vocabulary[1].clone()]);
+        assert!(saved.contains(alias));
     }
 
     #[test]

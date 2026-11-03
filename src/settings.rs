@@ -138,7 +138,7 @@ pub(crate) mod fixture {
             keep_warm: false,
             audio_source: Some("alsa_input.pci-0000_00_1f.3".to_owned()),
             hotkey: None,
-            vocabulary: vec!["PipeWire".to_owned(), "Parakeet".to_owned()],
+            vocabulary: vec!["PipeWire".into(), "Parakeet".into()],
             stt: SttConfig {
                 model: "parakeet-tdt-0.6b-v3-int8".to_owned(),
                 endpoint: None,

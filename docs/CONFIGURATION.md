@@ -42,7 +42,7 @@ existing file wholesale with the example. Enable cleanup only after the
 injection = "auto"        # auto | paste | type | clipboard — how finished text is delivered
 keep_warm = true          # preload the local STT model at startup; restart to apply
 # audio_source = "…"      # optional PipeWire node; omit for the default input
-vocabulary = ["PipeWire", "Parakeet"]   # canonical-name hints for cleanup + cloud STT
+vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip"] }]   # canonical spellings; aliases correct Clean output locally
 
 [stt]
 model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
@@ -51,9 +51,9 @@ model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
 # api_key_id = "openai"
 
 [postproc]
-enabled = false           # deliver raw recognition; cleanup is an explicit opt-in
+enabled = false           # Raw by default; true selects Clean (aliases, then optional cleanup)
 endpoint = "http://localhost:11434/v1"    # does not install or start an endpoint
-model = ""               # choose a model served by your endpoint before enabling
+model = ""               # empty = Clean applies aliases without LLM cleanup
 timeout_ms = 30000
 passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
 min_chars = 40            # skip cleanup under this length; 0 = never skip
@@ -99,6 +99,40 @@ after selecting a device or granting access.
 requires a restart through the [existing startup owner](DESKTOP.md#keep-one-startup-owner),
 not a second daemon. Models remain in the same data directory across
 configuration changes; see [storage locations](PRIVACY.md#storage-locations).
+
+## `vocabulary` — spellings and aliases
+
+Each entry owns one canonical spelling. A plain string supplies only that
+spelling; an inline table can also supply explicit recognition aliases:
+
+```toml
+vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip"] }]
+```
+
+Existing string-only lists need no migration. Canonical spellings alone reach
+the cloud STT prompt and every cleanup prompt. Local STT does
+not use recognition hints; aliases correct its output after recognition.
+Alias lists stay local.
+
+Clean applies exact, case-insensitive whole-phrase aliases before any optional
+LLM cleanup. The longest non-overlapping match wins and emits the canonical
+spelling; there is no fuzzy matching. `"can trip"` is unchanged unless that
+exact phrase is listed as an alias. Empty aliases, aliases equal to another
+entry's canonical spelling, and aliases shared across terms are rejected
+case-insensitively.
+
+Raw bypasses aliases and LLM cleanup. `[postproc].enabled` selects the default
+mode; [`start`/`toggle --postproc clean|raw`](USAGE.md#everyday-controls) override
+it for one take. Clean still applies aliases without a cleanup endpoint/model,
+on short takes, and when cleanup fails or times out. A deliberately spoken alias,
+including a quoted `"Gantrip"`, is also corrected in Clean; choose Raw to preserve
+the recognizer's spelling. The policy belongs to
+[Decision 0012](decisions/0012-eval-driven-postprocessing.md).
+
+Settings on Linux and macOS edit plain-string terms. Entries with a `term`
+table remain file-only and survive every Settings save, including clearing the
+plain terms. Edit those entries with `config edit`; Settings preserves their
+aliases rather than flattening them into strings.
 
 ## `[stt]` — transcription
 
@@ -228,8 +262,8 @@ local until deliberately removed.
 
 ## `[postproc]` — cleanup
 
-Cleanup is **off by default**. Configure it only after ordinary local dictation
-works:
+LLM cleanup is **off by default**. Clean can apply aliases alone; configure an
+LLM only after ordinary local dictation works:
 
 1. Choose a local or remote OpenAI-compatible chat endpoint and a model it
    actually serves. Cantrip does not install or launch Ollama or download its
@@ -253,9 +287,9 @@ model = "qwen3:8b"
 ```
 
 Apply these fields to your existing `[postproc]` table; do not add a duplicate
-table or replace unrelated settings. A `--postproc clean` capture also needs
-this usable endpoint/model, even when the saved default is disabled. The
-[per-take controls](USAGE.md#everyday-controls) explain clean/raw shortcuts.
+table or replace unrelated settings. Clean uses the LLM only when both endpoint
+and model are nonempty. Without either, Clean performs local alias correction
+alone. The [per-take controls](USAGE.md#everyday-controls) explain Raw/Clean shortcuts.
 
 Clean uses the [Hone-style refinement contract](decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02):
 it actively tightens and restructures speech, rather than preserving its wording.
@@ -274,15 +308,16 @@ guidance to the fixed contract; keep it short and do not redefine the task.
   watchdog, including DNS, connections, and response bodies. There is no hidden
   five-second cleanup inference clamp; individual native keyring reads still
   have their independent five-second maximum and can use less when the shared
-  budget is nearly spent. An unfinished chain returns raw STT text. A watchdog
-  timeout after completed passes preserves the candidate under its existing
-  fail-open policy. No subsequent request starts after cancellation or budget
+  budget is nearly spent. An unfinished chain returns the alias-corrected
+  transcript. A watchdog timeout after completed passes preserves the candidate
+  under its existing fail-open policy. No subsequent request starts after cancellation or budget
   expiry, and a cancelled result is never delivered. This cleanup budget is
   separate from cloud STT's waiting policy.
-- **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
-  many characters (default 40). Short takes skip both refinement and vocabulary
-  correction. Lower thresholds also admit short noise annotations and filler;
-  choose one using the [evaluation evidence](EVALUATION.md#2026-11-02-operator-refinement-study).
+- **`min_chars`.** Skip LLM cleanup when the alias-corrected transcript has fewer
+  than this many characters (default 40). Short takes skip LLM refinement but
+  still receive vocabulary aliases in Clean. Lower thresholds also admit short
+  noise annotations and filler; choose one using the
+  [evaluation evidence](EVALUATION.md#2026-11-02-operator-refinement-study).
 - **Local.** The default endpoint address is Ollama at `localhost:11434`, but
   its presence in the file does not mean a service is installed or running.
   `qwen3:8b` is a local option; use a model your endpoint actually serves.
@@ -299,7 +334,7 @@ guidance to the fixed contract; keep it short and do not redefine the task.
   watchdog verification. Disabled when unset. When enabled, clean takes
   bypass generative cleanup to reduce latency and token spend; post-cleanup
   watchdog verification rejects "answer-to-question" hallucinations and falls
-  back to the raw transcript ([ADR 0026](decisions/0026-typesafe-system-one-decisions.md)).
+  back to the alias-corrected transcript ([ADR 0026](decisions/0026-typesafe-system-one-decisions.md)).
   Review the [decision-endpoint content boundary](PRIVACY.md#what-leaves-the-machine)
   before opting in. The triage/watchdog models have not been evaluated against
   the Hone-style contract; a decision model is **not recommended with Clean yet**.
@@ -310,7 +345,7 @@ guidance to the fixed contract; keep it short and do not redefine the task.
 - **`decision_api_key_id`.** Keyring credential ID for decision calls. When unset,
   defaults to `openrouter` in the OS keyring for OpenRouter models or `typesafe`
   otherwise, falling back to the runtime cleanup credential.
-- A postproc failure never drops a dictation: the raw transcript is used.
+- A postproc failure never drops a dictation: the alias-corrected transcript is used.
 
 ## `[handoff.NAME]` — named local commands (US-011)
 

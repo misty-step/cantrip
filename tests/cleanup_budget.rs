@@ -1,6 +1,6 @@
 //! Optional cleanup honors its configured shared budget and preserves usable text.
 
-use cantrip_engine::config::{Config, PostprocConfig, SttConfig};
+use cantrip_engine::config::{Config, PostprocConfig, SttConfig, VocabularyEntry};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const RAW: &str = "preserve these original dictated words";
+const RAW: &str = "preserve these original Gantrip dictated words";
+const ALIASED: &str = "preserve these original Cantrip dictated words";
 const CLEAN: &str = "A cleanup candidate, not the original words.";
 const CHAT: &str =
     r#"{"choices":[{"message":{"content":"A cleanup candidate, not the original words."}}]}"#;
@@ -78,6 +79,10 @@ fn assert_budget_outcome(
             }
             let mut body = vec![0; content_length.unwrap()];
             reader.read_exact(&mut body).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&body).contains("Gantrip"),
+                "cleanup and decisions must receive the aliased source, never alias rules"
+            );
             drop(reader);
             match reply {
                 Reply::Json(delay, body) => {
@@ -114,6 +119,10 @@ fn assert_budget_outcome(
     let config_dir = root.0.join("config/cantrip");
     std::fs::create_dir_all(&config_dir).unwrap();
     let cfg = Config {
+        vocabulary: vec![VocabularyEntry::Aliased {
+            term: "Cantrip".into(),
+            aliases: vec!["Gantrip".into()],
+        }],
         stt: SttConfig {
             endpoint: Some(endpoint.clone()),
             model: "test-stt".to_owned(),
@@ -174,21 +183,15 @@ fn assert_budget_outcome(
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&records[0]).unwrap()).unwrap();
     assert_eq!(saved["raw_transcript"], RAW);
-    assert_eq!(
-        saved["postprocessed_transcript"],
-        if expected == RAW {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::String(expected.to_owned())
-        }
-    );
+    assert_eq!(saved["alias_substitutions"], 1);
+    assert_eq!(saved["postprocessed_transcript"], expected);
     assert!(wav.is_file());
 }
 
 fn stt_reply() -> Reply {
     Reply::Json(
         Duration::ZERO,
-        r#"{"text":"preserve these original dictated words"}"#,
+        r#"{"text":"preserve these original Gantrip dictated words"}"#,
     )
 }
 
@@ -205,7 +208,13 @@ fn cleanup_honors_an_explicit_budget_above_five_seconds() {
 
 #[test]
 fn cleanup_body_honors_a_smaller_explicit_budget() {
-    assert_budget_outcome(1_000, 1, false, vec![stt_reply(), Reply::StalledBody], RAW);
+    assert_budget_outcome(
+        1_000,
+        1,
+        false,
+        vec![stt_reply(), Reply::StalledBody],
+        ALIASED,
+    );
 }
 
 #[test]
@@ -219,18 +228,18 @@ fn cleanup_passes_share_one_budget_and_discard_an_unfinished_chain() {
             Reply::Json(Duration::from_millis(1_200), CHAT),
             Reply::Json(Duration::from_millis(1_200), CHAT),
         ],
-        RAW,
+        ALIASED,
     );
 }
 
 #[test]
-fn cleanup_triage_timeout_returns_raw_without_starting_a_pass() {
+fn cleanup_triage_timeout_preserves_aliases_without_starting_a_pass() {
     assert_budget_outcome(
         1_000,
         1,
         true,
         vec![stt_reply(), Reply::StalledHeaders],
-        RAW,
+        ALIASED,
     );
 }
 
