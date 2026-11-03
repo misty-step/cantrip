@@ -217,4 +217,4 @@ mod tests {
     }
 }
 
-// QA255 throwaway probe: clean push 3 (never merge).
+// QA255 throwaway probe: superseded push S1 (never merge).

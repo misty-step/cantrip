@@ -378,10 +378,4 @@ mod tests {
             "http://custom:8080"
         );
     }
-
-    #[test]
-    fn qa255_rustfmt_probe() {
-        let   spaced :u32= "1".parse().unwrap();
-        assert_eq!(spaced, 1, "QA255 rustfmt-only probe");
-    }
 }
