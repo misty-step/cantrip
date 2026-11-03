@@ -54,6 +54,7 @@ fn status_recommends_recovery_only_for_confirmed_undelivered_or_incomplete_takes
                 completeness,
                 delivery,
                 cleanup: Cleanup::Off,
+                alias_substitutions: 0,
                 error: None,
                 cloud_failure: Some(CloudFailure::Timeout),
                 artifacts: Artifacts {

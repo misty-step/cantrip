@@ -135,6 +135,7 @@ impl SttBackend {
 pub struct Outcome {
     /// Final text: aliased/cleaned in Clean, recognizer output in Raw, or the STT error.
     pub text: Result<String, String>,
+    pub alias_substitutions: usize,
     /// Wall time of the STT stage only.
     pub stt_elapsed: Duration,
     pub postproc: PostprocStatus,
@@ -379,6 +380,7 @@ impl Pipeline<'_> {
             Err(error) => {
                 return Outcome {
                     text: Err(error),
+                    alias_substitutions: 0,
                     stt_elapsed,
                     postproc: PostprocStatus::Off,
                     postproc_usage: None,
@@ -485,6 +487,7 @@ impl Pipeline<'_> {
 
         Outcome {
             text: Ok(text),
+            alias_substitutions,
             stt_elapsed,
             postproc,
             postproc_usage,
@@ -834,6 +837,30 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_failure_without_aliases_reports_no_substitutions() {
+        let recording = Recording::new(1);
+        let stt_cfg = SttConfig::default();
+        let cfg = PostprocConfig {
+            enabled: true,
+            model: "test".into(),
+            min_chars: 0,
+            ..Default::default()
+        };
+        let outcome = recording.pipeline(&stt_cfg, &cfg, None).run(
+            |_| {},
+            |_, _, _, _| {
+                Ok(stt::RemoteAttempt::whole(stt::Transcript::Complete(
+                    "Original text".into(),
+                )))
+            },
+            |entry| recording.save(entry),
+        );
+        assert_eq!(outcome.text.as_ref().unwrap(), "Original text");
+        assert_eq!(outcome.alias_substitutions, 0);
+        assert!(matches!(outcome.postproc, PostprocStatus::Failed { .. }));
+    }
+
+    #[test]
     fn cleanup_failure_and_short_skip_never_undo_aliases() {
         let recording = Recording::new(1);
         let stt_cfg = SttConfig::default();
@@ -866,6 +893,7 @@ mod tests {
                 |entry| recording.save(entry),
             );
             assert_eq!(outcome.text.as_ref().unwrap(), "Cantrip", "{case}");
+            assert_eq!(outcome.alias_substitutions, 1, "{case}");
             let saved = record(&outcome);
             assert_eq!(saved["raw_transcript"], "Gantrip", "{case}");
             assert_eq!(archive::final_text(&saved), Some("Cantrip"), "{case}");

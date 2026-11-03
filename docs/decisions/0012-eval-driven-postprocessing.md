@@ -89,11 +89,14 @@ terms after that normalization. Aliases equal to their own normalized term are
 valid, so case-only aliases such as `Daybook` / `daybook` can correct capitalization.
 
 Matching is exact whole-phrase matching on word boundaries. Select the longest
-non-overlapping matches and emit canonical spellings without fuzzy matching or
-cascading replacements. Skip spans already equal to the canonical spelling byte
-for byte; they do not count as substitutions. The aliased text survives absent
-or skipped cleanup and cleanup failures or timeouts. History retains the recognizer's `raw_transcript`,
-the resulting text, and a substitution count; operational logs contain counts only.
+non-overlapping matches and emit trimmed canonical spellings without fuzzy
+matching or cascading replacements. Spans already equal to the trimmed canonical
+spelling byte for byte still consume their span in the longest-match scan,
+but stay unchanged and do not count as substitutions. The aliased text survives
+absent or skipped cleanup and cleanup failures or timeouts. History retains the
+recognizer's `raw_transcript`, the resulting text, and a substitution count;
+operational logs contain counts only. Cleanup-failure feedback calls the text
+alias-corrected only when at least one substitution was applied.
 
 This deterministic rule cannot disambiguate a deliberately spoken or quoted
 alias: Clean also corrects `"Gantrip"` when the speaker meant that spelling.

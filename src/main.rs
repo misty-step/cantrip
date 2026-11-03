@@ -757,7 +757,14 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
     match &outcome.text {
         Ok(text) => {
             if matches!(outcome.postproc, pipeline::PostprocStatus::Failed { .. }) {
-                eprintln!("post-processing failed; showing the alias-corrected transcript");
+                eprintln!(
+                    "post-processing failed; showing the {} transcript",
+                    if outcome.alias_substitutions > 0 {
+                        "alias-corrected"
+                    } else {
+                        "original"
+                    }
+                );
             }
             println!("{text}");
             if outcome.partial {

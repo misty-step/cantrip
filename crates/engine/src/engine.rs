@@ -1655,6 +1655,7 @@ fn setup_failure(message: &str, error: &str) -> TerminalOutcome {
         completeness: Completeness::Failed,
         delivery: Delivery::None,
         cleanup: Cleanup::Off,
+        alias_substitutions: 0,
         error: Some(error.to_owned()),
         cloud_failure: None,
         artifacts: Artifacts::default(),
@@ -1910,6 +1911,7 @@ impl WorkerContext<'_> {
             completeness,
             delivery,
             cleanup: Cleanup::Off,
+            alias_substitutions: 0,
             error: None,
             cloud_failure: None,
             artifacts: facts(self.id()),
@@ -2242,6 +2244,7 @@ fn finish_audio(
     };
     let mut outcome = context.outcome(completeness, Delivery::None);
     outcome.cleanup = cleanup_from(&pipeline.postproc);
+    outcome.alias_substitutions = pipeline.alias_substitutions;
     let mut saved = persist_attempt(
         context.id(),
         duration_ms,
@@ -2340,7 +2343,11 @@ fn finish_audio(
     if outcome.cleanup == Cleanup::Failed {
         outcome
             .message
-            .push_str(" Cleanup was unavailable; alias-corrected text was used.");
+            .push_str(if pipeline.alias_substitutions > 0 {
+                " Cleanup was unavailable; alias-corrected text was used."
+            } else {
+                " Cleanup was unavailable; original text was used."
+            });
     }
     let archive_failed = matches!(pipeline.archive, pipeline::ArchiveStatus::Failed(_));
     storage_warning(&mut outcome, saved.warning);
@@ -3172,6 +3179,7 @@ mod tests {
                     completeness: Completeness::Complete,
                     delivery: Delivery::Pasted,
                     cleanup: Cleanup::Off,
+                    alias_substitutions: 0,
                     error: None,
                     cloud_failure: None,
                     artifacts: Artifacts::default(),
@@ -3204,6 +3212,7 @@ mod tests {
             completeness: Completeness::Partial,
             delivery: Delivery::Copied,
             cleanup: Cleanup::Off,
+            alias_substitutions: 0,
             error: Some("stt-partial".to_owned()),
             cloud_failure: None,
             artifacts: Artifacts {

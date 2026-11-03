@@ -197,6 +197,8 @@ pub struct TerminalOutcome {
     pub completeness: Completeness,
     pub delivery: Delivery,
     pub cleanup: Cleanup,
+    #[serde(default)]
+    pub alias_substitutions: usize,
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_failure: Option<crate::stt::CloudFailure>,
@@ -797,12 +799,31 @@ mod tests {
             completeness,
             delivery,
             cleanup: Cleanup::Off,
+            alias_substitutions: 0,
             error: None,
             cloud_failure: None,
             artifacts: Artifacts::default(),
             dismissed: false,
             handoff: None,
         }
+    }
+
+    #[test]
+    fn terminal_outcome_preserves_alias_counts_and_defaults_older_wire_data_to_zero() {
+        let mut original = outcome(Completeness::Complete, Delivery::Copied);
+        original.alias_substitutions = 2;
+        let mut wire = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            serde_json::from_value::<TerminalOutcome>(wire.clone()).unwrap(),
+            original
+        );
+        wire.as_object_mut().unwrap().remove("alias_substitutions");
+        assert_eq!(
+            serde_json::from_value::<TerminalOutcome>(wire)
+                .unwrap()
+                .alias_substitutions,
+            0
+        );
     }
 
     #[test]

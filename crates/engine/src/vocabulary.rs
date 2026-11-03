@@ -135,13 +135,11 @@ pub fn apply<'a>(text: &'a str, entries: &[VocabularyEntry]) -> (Cow<'a, str>, u
             for (start, character) in text.char_indices() {
                 if !character.is_whitespace() && !before.is_some_and(word_character) {
                     if let Some(end) = phrase_end(&text[start..], &folded) {
-                        if &text[start..start + end] != entry.term() {
-                            matches.push(Match {
-                                start,
-                                end: start + end,
-                                term: entry.term(),
-                            });
-                        }
+                        matches.push(Match {
+                            start,
+                            end: start + end,
+                            term: entry.term().trim(),
+                        });
                     }
                 }
                 before = Some(character);
@@ -165,7 +163,11 @@ pub fn apply<'a>(text: &'a str, entries: &[VocabularyEntry]) -> (Cow<'a, str>, u
         matches.swap(selected, index);
         selected += 1;
     }
-    if selected == 0 {
+    let substitutions = matches[..selected]
+        .iter()
+        .filter(|matched| &text[matched.start..matched.end] != matched.term)
+        .count();
+    if substitutions == 0 {
         return (Cow::Borrowed(text), 0);
     }
     matches.truncate(selected);
@@ -178,7 +180,7 @@ pub fn apply<'a>(text: &'a str, entries: &[VocabularyEntry]) -> (Cow<'a, str>, u
         cursor = matched.end;
     }
     output.push_str(&text[cursor..]);
-    (Cow::Owned(output), selected)
+    (Cow::Owned(output), substitutions)
 }
 
 fn word_character(character: char) -> bool {
@@ -306,5 +308,26 @@ mod tests {
             apply("Daybook daybook DAYBOOK", &entries),
             (Cow::Owned("Daybook Daybook Daybook".into()), 2)
         );
+    }
+
+    #[test]
+    fn canonical_phrases_block_shorter_overlapping_aliases_without_substitutions() {
+        let entries = [
+            aliases("Kube Proxy", &["kube proxy"]),
+            aliases("Kubernetes", &["kube"]),
+        ];
+        validate(&entries).unwrap();
+        assert_eq!(
+            apply("Kube Proxy", &entries),
+            (Cow::Borrowed("Kube Proxy"), 0)
+        );
+    }
+
+    #[test]
+    fn canonical_terms_are_trimmed_before_emission_and_no_op_comparison() {
+        let entries = [aliases(" Tern ", &["fern", "tern"])];
+        validate(&entries).unwrap();
+        assert_eq!(apply("fern", &entries), (Cow::Owned("Tern".into()), 1));
+        assert_eq!(apply("Tern", &entries), (Cow::Borrowed("Tern"), 0));
     }
 }
