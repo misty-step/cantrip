@@ -380,8 +380,8 @@ mod tests {
     }
 
     #[test]
-    fn qa255_deliberately_failing_probe() {
-        let observed: u32 = "2".parse().unwrap();
-        assert_eq!(observed, 3, "QA255 deliberate unit-test failure");
+    fn qa255_clippy_warning_probe() {
+        let values: Vec<u32> = "1,2".split(',').map(|v| v.parse().unwrap()).collect();
+        assert!(values.len() != 0, "QA255 clippy-only probe");
     }
 }
