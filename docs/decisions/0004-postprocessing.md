@@ -21,8 +21,9 @@ runtime; local versus cloud is the configured endpoint.
 ## Consequences
 
 Cleanup stays opt-in, with vocabulary shared across dictation lanes. Protocol,
-HTTP, timeout, and empty-output failures return raw text with visible failure
-feedback. Logs contain counts and latency, never transcript or response bodies.
+HTTP, timeout, and empty-output failures preserve the pre-LLM source with visible
+failure feedback under [Raw/Clean](0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02).
+Logs contain counts and latency, never transcript or response bodies.
 Default cleanup is one pass; short-text skipping avoids unnecessary requests.
 See [configuration](../CONFIGURATION.md#postproc--cleanup) for current settings.
 

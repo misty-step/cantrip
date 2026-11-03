@@ -1,5 +1,6 @@
 //! User configuration for the cantrip daemon.
 
+pub use crate::vocabulary::VocabularyEntry;
 use crate::{delivery::InjectionMode, models, paths};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,8 @@ pub struct Config {
     /// macOS global toggle shortcut; None uses the native client's default.
     /// Linux shortcuts remain owned by the compositor.
     pub hotkey: Option<String>,
-    pub vocabulary: Vec<String>,
+    #[serde(deserialize_with = "crate::vocabulary::deserialize_entries")]
+    pub vocabulary: Vec<VocabularyEntry>,
     pub stt: SttConfig,
     pub postproc: PostprocConfig,
     pub telemetry: TelemetryConfig,
@@ -40,7 +42,7 @@ pub struct HandoffTarget {
     #[serde(default)]
     pub label: Option<String>,
     /// Keeps this target's takes on this computer: the installed local model transcribes
-    /// them, cleanup never runs, and a missing local model refuses the take before capture.
+    /// them, LLM cleanup never runs, and a missing local model refuses capture.
     #[serde(default)]
     pub local_only: bool,
 }
@@ -97,7 +99,7 @@ pub struct PostprocConfig {
     pub reasoning_effort: Option<String>,
     pub timeout_ms: u64,
     pub passes: u8,
-    /// Skip cleanup when the raw transcript has fewer than this many chars.
+    /// Skip LLM cleanup when the alias-corrected transcript has fewer than this many chars.
     /// `0` disables the skip. Default 40 covers short commands without a cloud round-trip.
     pub min_chars: usize,
     pub instructions: String,
@@ -208,7 +210,14 @@ impl Config {
         Ok(config)
     }
 
+    /// Keep Raw/Clean selection while preventing STT, cleanup, and decision provider calls.
+    pub fn restrict_to_local(&mut self) {
+        self.stt = SttConfig::default();
+        self.postproc.model.clear();
+    }
+
     pub fn validate(&self) -> Result<()> {
+        crate::vocabulary::validate(&self.vocabulary)?;
         for (name, target) in &self.handoff {
             if !valid_handoff_name(name) {
                 bail!("handoff target name must match [a-z0-9_-]{{1,32}}: {name}");
@@ -227,9 +236,6 @@ impl Config {
                     bail!("handoff.{name}.label must be 1-32 printable characters");
                 }
             }
-        }
-        if self.postproc.enabled && self.postproc.model.trim().is_empty() {
-            bail!("postproc.enabled = true requires postproc.model");
         }
         if !(1..=3).contains(&self.postproc.passes) {
             bail!(
@@ -330,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_enabled_postproc_without_model() {
+    fn clean_without_a_cleanup_model_is_valid_for_local_aliases() {
         let config = Config {
             postproc: PostprocConfig {
                 enabled: true,
@@ -338,12 +344,87 @@ mod tests {
             },
             ..Config::default()
         };
-        let error = config
+        config
             .validate()
-            .expect_err("empty postproc model must fail");
-        assert!(error
-            .to_string()
-            .contains("postproc.enabled = true requires postproc.model"));
+            .expect("Clean can apply aliases without an LLM");
+    }
+
+    #[test]
+    fn vocabulary_accepts_plain_and_mixed_entries_and_round_trips() {
+        for text in [
+            r#"vocabulary = ["PipeWire", "Cantrip"]"#,
+            r#"vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip", "can trip"] }]"#,
+            r#"vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["cantrip"] }]"#,
+        ] {
+            let config: Config = toml::from_str(text).unwrap();
+            config.validate().unwrap();
+            assert_eq!(
+                config
+                    .vocabulary
+                    .iter()
+                    .map(VocabularyEntry::term)
+                    .collect::<Vec<_>>(),
+                ["PipeWire", "Cantrip"]
+            );
+            let saved = toml::to_string(&config).unwrap();
+            assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn vocabulary_rejects_empty_conflicting_and_duplicate_aliases() {
+        for (entries, expected) in [
+            (r#"[{ term = "Cantrip", aliases = ["  "] }]"#, "empty alias"),
+            (
+                r#"[{ term = "  ", aliases = ["Gantrip"] }]"#,
+                "empty canonical term",
+            ),
+            (
+                r#"["PipeWire", { term = "Cantrip", aliases = ["PIPEWIRE"] }]"#,
+                "a canonical term",
+            ),
+            (
+                r#"[{ term = "Cantrip", aliases = ["Gantrip"] }, { term = "Other", aliases = ["GANTRIP"] }]"#,
+                "duplicates an alias",
+            ),
+        ] {
+            let config: Config = toml::from_str(&format!("vocabulary = {entries}")).unwrap();
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("Gantrip") && !error.contains("PIPEWIRE"));
+        }
+    }
+
+    #[test]
+    fn vocabulary_shape_errors_name_the_entry_and_shape_without_echoing_values() {
+        for (text, index) in [
+            (r#"vocabulary = ["PRIVATE-CANONICAL", 7]"#, 2),
+            (
+                r#"vocabulary = ["PRIVATE-CANONICAL", { term = "PRIVATE-TERM", aliases = "PRIVATE-ALIAS" }]"#,
+                2,
+            ),
+            (
+                r#"vocabulary = [{ term = 7, aliases = ["PRIVATE-ALIAS"] }]"#,
+                1,
+            ),
+            (
+                r#"vocabulary = ["PRIVATE-CANONICAL", { term = "PRIVATE-TERM", alias = ["PRIVATE-ALIAS"] }]"#,
+                2,
+            ),
+        ] {
+            let error = toml::from_str::<Config>(text).unwrap_err();
+            let message = error.message();
+            assert!(
+                message.contains(&format!("vocabulary entry {index}")),
+                "{message}"
+            );
+            assert!(
+                message.contains("string or { term = string, aliases = [string, ...] }"),
+                "{message}"
+            );
+            assert!(!message.contains("PRIVATE-"), "{message}");
+            assert!(!message.contains("untagged enum"), "{message}");
+        }
     }
 
     #[test]

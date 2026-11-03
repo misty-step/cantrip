@@ -1,4 +1,4 @@
-use crate::config::PostprocConfig;
+use crate::config::{PostprocConfig, VocabularyEntry};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
@@ -141,12 +141,12 @@ struct ChatRound {
 /// Refine a transcript through an OpenAI-compatible chat completion endpoint.
 /// Runs `cfg.passes` rounds in a chain: each later round re-reads the previous
 /// output and fixes residual speech-recognition errors the earlier round left.
-/// Cancellation or budget exhaustion during generative passes leaves the raw
-/// transcript intact; a timed-out watchdog preserves the completed candidate.
+/// Cancellation or budget exhaustion during generative passes preserves the
+/// supplied source (already aliased in Clean); a timed-out watchdog keeps the candidate.
 pub fn refine(
     transcript: &str,
     cfg: &PostprocConfig,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
 ) -> Result<Refinement> {
@@ -161,7 +161,7 @@ pub(crate) fn deadline(cfg: &PostprocConfig) -> Instant {
 pub(crate) fn refine_until(
     transcript: &str,
     cfg: &PostprocConfig,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
     deadline: Instant,
@@ -172,7 +172,7 @@ pub(crate) fn refine_until(
 
     // Pre-cleanup triage gatekeeper (ADR 0026):
     // If an opt-in decision model is configured, evaluate whether generative cleanup
-    // is required. If the raw transcript is already clean (needs_cleanup < 0.20),
+    // is required. If the supplied transcript is already clean (needs_cleanup < 0.20),
     // bypass generative passes to save latency and token cost.
     if let Some(mut client) = get_decision_client(cfg, api_key, deadline, cancel) {
         if !crate::stt::is_cancelled(cancel) {
@@ -187,7 +187,10 @@ pub(crate) fn refine_until(
             );
             client.timeout = remaining_budget(deadline, cancel)?;
             let decision = client.evaluate(
-                &serde_json::json!({ "source": transcript, "vocabulary": vocabulary }),
+                &serde_json::json!({
+                    "source": transcript,
+                    "vocabulary": vocabulary.iter().map(VocabularyEntry::term).collect::<Vec<_>>(),
+                }),
                 &questions,
                 cancel,
             );
@@ -240,9 +243,16 @@ pub(crate) fn refine_until(
             "post-processing cancelled"
         );
         let system = if pass == 1 {
-            build_system_prompt(vocabulary, &cfg.instructions)
+            build_system_prompt(
+                vocabulary.iter().map(VocabularyEntry::term),
+                &cfg.instructions,
+            )
         } else {
-            build_prompt(VERIFY_SYSTEM_PROMPT, vocabulary, "")
+            build_prompt(
+                VERIFY_SYSTEM_PROMPT,
+                vocabulary.iter().map(VocabularyEntry::term),
+                "",
+            )
         };
         let round = chat_round(&current, cfg, api_key, &system, cancel, deadline)?;
         merge_usage(&mut usage, round.usage);
@@ -257,7 +267,7 @@ pub(crate) fn refine_until(
             let state = serde_json::json!({
                 "source": transcript,
                 "candidate": current,
-                "vocabulary": vocabulary,
+                "vocabulary": vocabulary.iter().map(VocabularyEntry::term).collect::<Vec<_>>(),
             });
             let mut questions = std::collections::BTreeMap::new();
             questions.insert(
@@ -296,7 +306,7 @@ pub(crate) fn refine_until(
                         (Some(ans_prob), Some(fidelity)) => {
                             if ans_prob > 0.60 || fidelity < 0.5 {
                                 tracing::warn!(
-                                    "[Postproc] decision watchdog rejected cleanup: answer-to-question detected (ans_p={:.2}, fidelity={:.1}) ms={}; falling back to raw transcript",
+                                    "[Postproc] decision watchdog rejected cleanup: answer-to-question detected (ans_p={:.2}, fidelity={:.1}) ms={}; falling back to pre-LLM source",
                                     ans_prob,
                                     fidelity,
                                     started.elapsed().as_millis()
@@ -501,15 +511,26 @@ fn get_decision_client(
     ))
 }
 
-pub fn build_system_prompt(vocabulary: &[String], instructions: &str) -> String {
+pub fn build_system_prompt(
+    vocabulary: impl IntoIterator<Item = impl AsRef<str>>,
+    instructions: &str,
+) -> String {
     build_prompt(BASE_SYSTEM_PROMPT, vocabulary, instructions)
 }
 
-fn build_prompt(base: &str, vocabulary: &[String], instructions: &str) -> String {
+fn build_prompt(
+    base: &str,
+    vocabulary: impl IntoIterator<Item = impl AsRef<str>>,
+    instructions: &str,
+) -> String {
     let mut prompt = base.to_owned();
-    if !vocabulary.is_empty() {
-        prompt.push_str("\nCanonical vocabulary (spelling hints only): ");
-        prompt.push_str(&vocabulary.join(", "));
+    for (index, term) in vocabulary.into_iter().enumerate() {
+        prompt.push_str(if index == 0 {
+            "\nCanonical vocabulary (spelling hints only): "
+        } else {
+            ", "
+        });
+        prompt.push_str(term.as_ref());
     }
     if !instructions.is_empty() {
         prompt.push('\n');

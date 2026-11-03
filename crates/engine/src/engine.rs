@@ -1065,33 +1065,9 @@ fn start_recording(
     } else {
         None
     };
-    if postproc == Some(true)
-        && selected_handoff
-            .as_ref()
-            .is_some_and(|(_, target)| target.local_only)
-    {
-        let message = "This target keeps takes on this computer, so cleanup is off.";
-        let mut outcome = setup_failure(message, "handoff-local-only");
-        outcome.event_id = daemon.event_id();
-        daemon.outcome = Some(outcome);
-        return daemon.reply(false, message, Some("handoff-local-only"));
-    }
     let config = take_config(&daemon.config, postproc, selected_handoff);
     if !daemon.worker_available {
         return daemon.reject("Transcription worker unavailable.", "stt-failed");
-    }
-    if postproc == Some(true) && daemon.config.postproc.model.trim().is_empty() {
-        let mut outcome = setup_failure(
-            "Post-processing requested but [postproc].model is not set.",
-            "postproc-model-unset",
-        );
-        outcome.event_id = daemon.event_id();
-        daemon.outcome = Some(outcome);
-        return daemon.reply(
-            false,
-            "Post-processing requested but [postproc].model is not set.",
-            Some("postproc-model-unset"),
-        );
     }
     if config.stt.endpoint.is_none() && !local_model_ready(&config.stt) {
         let mut outcome = setup_failure(
@@ -1296,9 +1272,7 @@ fn begin_capture(
     }
 }
 
-/// The configuration one take runs with, fixed when it starts. A local-only target pins the
-/// take to the installed local model with cleanup off, whatever the configured cloud lanes are,
-/// so its audio and words never leave this computer (US-011).
+/// Start-time mode and destination snapshot. Local restriction is shared with recovery/CLI.
 fn take_config(
     base: &Config,
     postproc: Option<bool>,
@@ -1312,8 +1286,7 @@ fn take_config(
         .as_ref()
         .is_some_and(|(_, target)| target.local_only)
     {
-        config.stt = SttConfig::default();
-        config.postproc.enabled = false;
+        config.restrict_to_local();
     }
     config.selected_handoff = handoff;
     config
@@ -1485,8 +1458,7 @@ fn recover_take(
     };
     let mut config = daemon.config.clone();
     if local {
-        config.stt = SttConfig::default();
-        config.postproc.enabled = false;
+        config.restrict_to_local();
         if !local_model_ready(&config.stt) {
             let mut outcome = setup_failure(
                 "Local model unavailable — run: cantrip models pull",
@@ -1683,6 +1655,7 @@ fn setup_failure(message: &str, error: &str) -> TerminalOutcome {
         completeness: Completeness::Failed,
         delivery: Delivery::None,
         cleanup: Cleanup::Off,
+        alias_substitutions: 0,
         error: Some(error.to_owned()),
         cloud_failure: None,
         artifacts: Artifacts::default(),
@@ -1938,6 +1911,7 @@ impl WorkerContext<'_> {
             completeness,
             delivery,
             cleanup: Cleanup::Off,
+            alias_substitutions: 0,
             error: None,
             cloud_failure: None,
             artifacts: facts(self.id()),
@@ -2270,6 +2244,7 @@ fn finish_audio(
     };
     let mut outcome = context.outcome(completeness, Delivery::None);
     outcome.cleanup = cleanup_from(&pipeline.postproc);
+    outcome.alias_substitutions = pipeline.alias_substitutions;
     let mut saved = persist_attempt(
         context.id(),
         duration_ms,
@@ -2368,7 +2343,11 @@ fn finish_audio(
     if outcome.cleanup == Cleanup::Failed {
         outcome
             .message
-            .push_str(" Cleanup was unavailable; original text was used.");
+            .push_str(if pipeline.alias_substitutions > 0 {
+                " Cleanup was unavailable; alias-corrected text was used."
+            } else {
+                " Cleanup was unavailable; original text was used."
+            });
     }
     let archive_failed = matches!(pipeline.archive, pipeline::ArchiveStatus::Failed(_));
     storage_warning(&mut outcome, saved.warning);
@@ -3200,6 +3179,7 @@ mod tests {
                     completeness: Completeness::Complete,
                     delivery: Delivery::Pasted,
                     cleanup: Cleanup::Off,
+                    alias_substitutions: 0,
                     error: None,
                     cloud_failure: None,
                     artifacts: Artifacts::default(),
@@ -3232,6 +3212,7 @@ mod tests {
             completeness: Completeness::Partial,
             delivery: Delivery::Copied,
             cleanup: Cleanup::Off,
+            alias_substitutions: 0,
             error: Some("stt-partial".to_owned()),
             cloud_failure: None,
             artifacts: Artifacts {
@@ -3730,11 +3711,12 @@ mod tests {
     fn a_local_only_target_keeps_its_take_off_every_cloud_lane() {
         let base = cloud_config_with("pile", true);
         let pile = Some(("pile".to_owned(), base.handoff["pile"].clone()));
-        for postproc in [None, Some(false)] {
+        for postproc in [None, Some(false), Some(true)] {
             let take = take_config(&base, postproc, pile.clone());
             assert_eq!(take.stt, SttConfig::default());
             assert!(take.stt.endpoint.is_none());
-            assert!(!take.postproc.enabled);
+            assert_eq!(take.postproc.enabled, postproc.unwrap_or(true));
+            assert!(take.postproc.model.is_empty());
             assert_eq!(take.selected_handoff, pile);
         }
         // Another target, and the desktop, keep the configured cloud lanes.
@@ -3749,30 +3731,43 @@ mod tests {
     }
 
     #[test]
-    fn a_local_only_target_refuses_cleanup_before_capture() {
-        let mut daemon = Daemon::new(
-            cloud_config_with("pile", true),
-            Vec::new(),
-            true,
-            Arc::new(TestPlatform),
-        );
+    fn start_clean_without_a_model_reaches_capture_and_snapshots_clean() {
+        struct CapturingPlatform;
+        impl Platform for CapturingPlatform {
+            fn start_recording(&self, _: &Path, _: Option<&str>) -> Result<Box<dyn Recorder>> {
+                Ok(Box::new(FakeRecorder::default()))
+            }
+            fn prepare_delivery(&self) {}
+            fn delivery_permit(&self) -> Arc<dyn DeliveryPermit> {
+                Arc::new(TestPermit)
+            }
+            fn handoff_color(&self, _: usize) -> [u8; 3] {
+                [0; 3]
+            }
+            fn sender_identity(&self, _: &UnixStream) -> String {
+                "test-client".into()
+            }
+        }
+        let mut config = cloud_config_with("pile", false);
+        config.postproc.enabled = false;
+        config.postproc.model.clear();
+        let mut daemon = Daemon::new(config, Vec::new(), true, Arc::new(CapturingPlatform));
         let (sender, receiver) = mpsc::channel();
         let reply = execute(
-            Command::Toggle {
+            Command::Start {
                 postproc: Some(true),
-                handoff: Some("pile".to_owned()),
+                handoff: None,
             },
             &mut daemon,
-            Path::new("/does-not-exist"),
+            Path::new("/unused-capture-path"),
             &sender,
         );
-        assert!(!reply.ok);
-        assert_eq!(reply.error.as_deref(), Some("handoff-local-only"));
-        assert!(matches!(daemon.state, State::Idle));
-        assert_eq!(
-            daemon.outcome.as_ref().unwrap().error.as_deref(),
-            Some("handoff-local-only")
-        );
+        assert!(reply.ok, "{:?}", reply.error);
+        let State::Recording { config, .. } = &daemon.state else {
+            panic!("capture did not start")
+        };
+        assert!(config.postproc.enabled);
+        assert!(config.postproc.model.is_empty());
         assert!(receiver.try_recv().is_err());
     }
 
@@ -3791,8 +3786,9 @@ mod tests {
 
     #[test]
     fn only_a_local_only_target_is_told_its_take_stayed_local() {
-        let (root, target) =
-            handoff_fixture("printf '%s' \"${CANTRIP_LOCAL_ONLY-unset}\" > \"$1\"");
+        let (root, target) = handoff_fixture(
+            "cat > /dev/null\nprintf '%s' \"${CANTRIP_LOCAL_ONLY-unset}\" > \"$1\"",
+        );
         let seen = root.join("seen");
         for (local_only, expected) in [(true, "1"), (false, "unset")] {
             let target = crate::config::HandoffTarget {

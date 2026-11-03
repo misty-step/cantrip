@@ -20,6 +20,7 @@ pub(crate) struct Entry<'a> {
     pub source: &'static str,
     pub raw_transcript: &'a str,
     pub postprocessed_transcript: Option<&'a str>,
+    pub alias_substitutions: usize,
     pub audio_duration_ms: Option<u64>,
     pub pipeline_elapsed_ms: u64,
     pub stt_model: &'a str,
@@ -56,6 +57,7 @@ struct Record<'a> {
     stt: SttRecord<'a>,
     postproc: PostprocRecord<'a>,
     raw_transcript: &'a str,
+    alias_substitutions: usize,
     postprocessed_transcript: Option<&'a str>,
 }
 
@@ -172,6 +174,7 @@ pub(crate) fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
                 }),
         },
         raw_transcript: entry.raw_transcript,
+        alias_substitutions: entry.alias_substitutions,
         postprocessed_transcript: entry.postprocessed_transcript,
     };
     let incoming = serde_json::to_value(record).context("serializing transcript history")?;
@@ -713,6 +716,7 @@ mod tests {
             source: "dictation",
             raw_transcript: raw,
             postprocessed_transcript: cleaned,
+            alias_substitutions: 0,
             audio_duration_ms: Some(1_500),
             pipeline_elapsed_ms: 49,
             stt_model: "parakeet-test",

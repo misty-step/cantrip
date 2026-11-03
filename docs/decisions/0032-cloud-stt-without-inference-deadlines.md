@@ -66,7 +66,8 @@ independent lookup guard within that shared maximum.
   connections, optional decisions, and response bodies; no later cleanup request
   starts after cancellation or budget expiry. Credential reads also respect
   their independent five-second maximum, not a hidden inference clamp on the
-  overall cleanup chain. An unfinished generative chain preserves raw STT text.
+  overall cleanup chain. An unfinished generative chain preserves the aliased Clean
+  input, as defined by [Raw/Clean](0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02).
   A watchdog failure or timeout after completed passes preserves the candidate
   under the existing fail-open contract. Cancelling the take prevents delivery
   of either result.
@@ -86,7 +87,8 @@ Acceptance examples:
 - With `postproc.timeout_ms = 30000`, cleanup inference is not cut off at five
   seconds; credentials, DNS, triage, passes, and watchdog share the configured
   thirty seconds, not thirty seconds per request. Individual credential reads
-  remain independently bounded. Raw/watchdog preservation remains unchanged.
+  remain independently bounded. Clean's aliased input and watchdog candidate are
+  preserved at the same failure boundaries; Raw still delivers recognizer text.
 
 Revisit if: the operator explicitly authorizes a different waiting policy after
 reviewing its effect on long dictation and valid slow cloud responses.

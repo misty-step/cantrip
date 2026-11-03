@@ -7,12 +7,12 @@
   "cantrip.raw": {
     "label": "Toggle raw dictation",
     "action": "cantrip toggle --postproc raw",
-    "description": "Same action as Super+R; skips transcript cleanup"
+    "description": "Same action as Super+R; delivers recognizer text without aliases or LLM cleanup"
   },
   "cantrip.clean": {
     "label": "Toggle clean dictation",
     "action": "cantrip toggle --postproc clean",
-    "description": "Same action as Super+Shift+R; requests configured cleanup"
+    "description": "Same action as Super+Shift+R; applies vocabulary aliases, then any configured LLM cleanup"
   },
   "cantrip.stop": {
     "label": "Stop recording",

@@ -422,7 +422,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label(egui::RichText::new("Vocabulary (comma-separated)").weak());
+                ui.label(egui::RichText::new("Vocabulary (file aliases preserved)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut edit.vocabulary)
                         .hint_text("PipeWire, Parakeet")
@@ -465,6 +465,9 @@ impl SettingsApp {
     fn postproc_section(&mut self, ui: &mut egui::Ui) {
         let edit = &mut self.form.edit;
         ui.checkbox(&mut edit.pp_enabled, "Clean up the transcript");
+        if let Some(note) = edit.cleanup_note() {
+            ui.label(egui::RichText::new(note).weak());
+        }
         ui.add_space(4.0);
         egui::Grid::new("postproc")
             .num_columns(2)

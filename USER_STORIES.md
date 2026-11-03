@@ -137,12 +137,13 @@ Evidence: `crates/engine/src/recovery.rs`, `crates/engine/src/archive.rs`, `src/
 Statement: When I dictate spontaneous speech, I want optional cleanup to tighten and restructure my words into concise prose, so I can use the result without editing away repetition or losing meaning.
 
 Criteria:
-1. WHERE postproc is enabled in configuration, THE SYSTEM SHALL refine raw transcripts through the configured OpenAI-compatible endpoint.
+1. WHERE Clean is selected by `[postproc].enabled` or a per-take override, THE SYSTEM SHALL apply configured vocabulary aliases after recognition, then refine the text through the configured OpenAI-compatible endpoint when an endpoint and model are configured. Raw SHALL bypass aliases and LLM cleanup.
 2. THE SYSTEM SHALL apply the [Clean refinement contract](docs/decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02), preserving the speaker's speech acts and factual content while refining wording and structure.
-3. IF cleanup fails or returns an empty response, THEN THE SYSTEM SHALL fall back to delivering the raw speech-to-text transcript.
+3. IF cleanup is absent, skipped, fails, or returns an empty response, THEN THE SYSTEM SHALL deliver the alias-corrected transcript in Clean.
 4. WHERE cleanup runs, THE SYSTEM SHALL share explicit `postproc.timeout_ms` across native credential waits, DNS, triage, generative passes, and watchdog without a hidden five-second cleanup inference clamp. Native credential waits SHALL also respect their independent five-second maximum and honor cancellation promptly without accumulating outstanding native lookups across takes.
-5. IF the generative chain cannot finish, THEN THE SYSTEM SHALL preserve raw text; IF only the optional watchdog becomes unavailable after completed passes, THEN THE SYSTEM SHALL preserve the completed candidate.
+5. IF the generative chain cannot finish, THEN THE SYSTEM SHALL preserve the alias-corrected text; IF only the optional watchdog becomes unavailable after completed passes, THEN THE SYSTEM SHALL preserve the completed candidate.
 6. IF the take is cancelled or the shared cleanup budget expires, THEN THE SYSTEM SHALL prevent subsequent cleanup requests; a cancelled take SHALL NOT deliver either result.
+7. THE SYSTEM SHALL retain the recognizer hypothesis as `raw_transcript`, store the delivered result and alias substitution count, and pass canonical vocabulary terms only to provider prompts.
 
 No-gos: no automatic enabling of cloud cleanup without explicit configuration.
 
@@ -153,9 +154,9 @@ Evidence: `crates/engine/src/postproc.rs`, `tests/http_clients.rs`
 Statement: When I dictate clear, error-free prose, I want a fast System One decision check to bypass the generative model, so I receive my text with minimal latency and zero unnecessary token spend.
 
 Criteria:
-1. WHERE postproc.decision_model is configured, THE SYSTEM SHALL evaluate the raw transcript with a structured decision triage question before generative passes.
-2. WHEN decision triage determines the transcript is already clean with high confidence, THE SYSTEM SHALL bypass the generative model and deliver the raw transcript immediately.
-3. IF the decision triage request fails or times out, THEN THE SYSTEM SHALL fail open and proceed with the standard post-processing pipeline within the remaining shared `postproc.timeout_ms`; IF no budget remains, THEN THE SYSTEM SHALL preserve raw STT text.
+1. WHERE postproc.decision_model is configured, THE SYSTEM SHALL evaluate the alias-corrected transcript with a structured decision triage question before generative passes.
+2. WHEN decision triage determines the transcript is already clean with high confidence, THE SYSTEM SHALL bypass the generative model and deliver that transcript immediately.
+3. IF the decision triage request fails or times out, THEN THE SYSTEM SHALL fail open and proceed with the standard post-processing pipeline within the remaining shared `postproc.timeout_ms`; IF no budget remains, THEN THE SYSTEM SHALL preserve the alias-corrected text.
 
 No-gos: no blocking the user's dictation on decision endpoint errors.
 
@@ -167,7 +168,7 @@ Statement: When an LLM cleanup model answers a dictated question instead of tran
 
 Criteria:
 1. WHERE postproc.decision_model is configured and generative cleanup has produced a candidate, THE SYSTEM SHALL evaluate candidate fidelity against the source transcript using structured decision questions.
-2. WHEN the decision watchdog detects an answer-to-question failure or severe content distortion, THE SYSTEM SHALL reject the candidate and deliver the raw speech-to-text transcript.
+2. WHEN the decision watchdog detects an answer-to-question failure or severe content distortion, THE SYSTEM SHALL reject the candidate and deliver the alias-corrected source transcript.
 3. IF the decision watchdog request fails, times out, or returns incomplete answer keys, THEN THE SYSTEM SHALL fail open and deliver the generated candidate.
 
 No-gos: no silent adoption of answered questions or distorted text.
@@ -207,7 +208,7 @@ Criteria:
 7. WHEN a target sets `label`, THE SYSTEM SHALL show that label instead of the target name in delivery messages.
 8. WHILE a handoff take records, processes, or shows its outcome, THE SYSTEM SHALL tint the HUD in that target's own theme-derived color and show "to LABEL" in its upper left, use the same color and words in the bar widget and actions window, and leave default takes unchanged.
 
-9. WHEN a target sets `local_only`, THE SYSTEM SHALL transcribe its takes with the installed default local model only, SHALL NOT run cleanup or any cloud attempt for them, SHALL refuse the take before capture if the local model is missing or cleanup was asked for, and SHALL run its command with `CANTRIP_LOCAL_ONLY=1`, which no other target's command sees.
+9. WHEN a target sets `local_only`, THE SYSTEM SHALL apply the [local-only content policy](docs/decisions/0030-local-only-handoff-targets.md), preserving the take's Raw/Clean selection with no LLM or cloud recognition, SHALL refuse capture if the local model is missing, and SHALL run its command with `CANTRIP_LOCAL_ONLY=1`, which no other target's command sees.
 
 No-gos: no transcript or child output in logs or telemetry; no desktop fallback; no destination indicator on default takes.
 

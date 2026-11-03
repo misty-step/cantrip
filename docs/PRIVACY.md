@@ -28,6 +28,11 @@ not enable telemetry in the desktop app.
 | Optional decision model | Setting `[postproc].decision_model` sends source transcript text, vocabulary, model selection, and decision criteria to the decision endpoint for triage, even when generative cleanup is bypassed. The watchdog also sends the candidate cleanup text. This includes **TypeSafe-native decision models**, not only OpenRouter models. These decision calls send no audio. |
 | Opt-in telemetry | Enabling `[telemetry]` sends operational metadata to the configured Langfuse endpoint, never audio or transcript text. |
 
+Vocabulary hints contain canonical spellings only, never the configured alias
+lists. Alias substitution runs on this machine in Clean before optional cleanup;
+it adds no network request. Any later opted-in cleanup receives the resulting
+text, not the alias rules.
+
 Cloud providers have their own retention and account policies. Cantrip does not
 make those policies local by using an OpenAI-compatible API. Review the endpoint
 and model before [enabling a cloud feature](CONFIGURATION.md).
@@ -42,12 +47,12 @@ fallback attempts the whole take once. It never silently downloads weights or
 switches providers. Fallback cannot undo audio already sent to the configured
 provider and keeps your configured cleanup policy.
 
-An explicit `recover --local` or `transcribe --local` uses installed Parakeet
-and disables cleanup **for that operation**. It does not change your saved
-configuration or disable separately opted-in telemetry. `--local` is therefore
-not an all-network-off switch. To keep content local, use local STT and leave
-remote cleanup off; leave telemetry disabled as well when you want no telemetry
-traffic. Downloads and software updates are separate network actions.
+Named `local_only` targets and explicit `recover --local` / `transcribe --local`
+follow the [local-only content policy](decisions/0030-local-only-handoff-targets.md),
+which preserves configured Raw/Clean selection without LLM or decision requests.
+This does not change saved configuration or disable separately opted-in
+metadata telemetry, so `--local` is not an all-network-off switch. Downloads and
+software updates are separate network actions.
 
 ## Storage locations
 
@@ -131,12 +136,14 @@ warnings before recording more or relying on recovery.
 ## Transcript history
 
 Every successful STT result is archived locally, including empty and partial
-results and results from `transcribe` or `recover`. A JSON record links raw and
-post-processed text under one stable take ID. It also records:
+results and results from `transcribe` or `recover`. A JSON record keeps the
+recognizer's hypothesis as `raw_transcript`; `postprocessed_transcript` holds
+alias-corrected or LLM-cleaned text when present. It also records:
 
 - completion time, source, audio duration, and pipeline latency;
 - selected STT model, local/cloud/mixed backend, latency, and completeness;
 - the original cloud model in `stt.fallback_from_model` when local completion contributes;
+- the number of deterministic alias substitutions as `alias_substitutions`;
 - cleanup model, status, latency, passes, prompt version, custom instructions,
   and available token and provider-reported billing usage.
 

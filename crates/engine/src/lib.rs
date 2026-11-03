@@ -4,6 +4,7 @@
 //! window systems and application startup remain outside this crate.
 
 mod archive;
+pub mod vocabulary;
 
 pub mod audio;
 pub mod config;

@@ -1196,10 +1196,11 @@ fn present_outcome(
         },
     }
     if outcome.cleanup == Cleanup::Failed && (delivered || copied) {
-        caption.title = if copied {
-            "Original text copied. Cleanup unavailable."
-        } else {
-            "Original text sent. Cleanup unavailable."
+        caption.title = match (copied, outcome.alias_substitutions > 0) {
+            (true, true) => "Alias-corrected text copied. Cleanup unavailable.",
+            (false, true) => "Alias-corrected text sent. Cleanup unavailable.",
+            (true, false) => "Original text copied. Cleanup unavailable.",
+            (false, false) => "Original text sent. Cleanup unavailable.",
         }
         .to_owned();
     }
@@ -2394,6 +2395,7 @@ fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOu
         completeness,
         delivery,
         cleanup: Cleanup::Off,
+        alias_substitutions: 0,
         error: None,
         cloud_failure: None,
         artifacts: ipc::Artifacts::default(),
@@ -3838,6 +3840,32 @@ mod tests {
             model.kind.is_none(),
             "repeated outcomes must neither rearm nor replay success"
         );
+    }
+
+    #[test]
+    fn cleanup_failure_caption_describes_the_delivered_alias_corrected_text() {
+        let now = Instant::now();
+        let status = preview_snapshot(StateKind::Idle);
+        for delivery in [
+            Delivery::Copied,
+            Delivery::Typed,
+            Delivery::Pasted,
+            Delivery::HandedOff,
+        ] {
+            for substitutions in [0, 1] {
+                let mut outcome = preview_outcome(Completeness::Complete, delivery);
+                outcome.cleanup = Cleanup::Failed;
+                outcome.alias_substitutions = substitutions;
+                let view = present_outcome(&outcome, &status, now, false);
+                let expected = match (delivery == Delivery::Copied, substitutions > 0) {
+                    (true, true) => "Alias-corrected text copied. Cleanup unavailable.",
+                    (false, true) => "Alias-corrected text sent. Cleanup unavailable.",
+                    (true, false) => "Original text copied. Cleanup unavailable.",
+                    (false, false) => "Original text sent. Cleanup unavailable.",
+                };
+                assert_eq!(view.caption.title, expected);
+            }
+        }
     }
 
     #[test]

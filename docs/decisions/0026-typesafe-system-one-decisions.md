@@ -25,8 +25,9 @@ commands as system or agent actions.
 Runtime decisions are disabled by default and send text only to the configured
 provider when opted in. Keys stay in the OS keyring; logs exclude content.
 Errors, timeouts, and ambiguous probabilities fail open, preserving the standard
-pipeline and speaker's words. A high-confidence role/fact failure returns raw
-STT text. Evaluation uses public/synthetic data only; judge passes never override
+pipeline and speaker's words. A high-confidence role/fact failure returns the
+pre-LLM source under [Raw/Clean](0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02).
+Evaluation uses public/synthetic data only; judge passes never override
 deterministic protocol failures or the reviewed exact oracle.
 
 Revisit if: evidence shows these bounded decisions cannot preserve the fail-open

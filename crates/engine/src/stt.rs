@@ -1,6 +1,7 @@
 //! Local Parakeet inference and bounded OpenAI-compatible WAV transcription.
 //! Native capture uses low-energy splits; remote chunks retain source audio
 //! frames and format rather than resampling or quantizing the recording.
+use crate::config::VocabularyEntry;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -668,7 +669,7 @@ pub fn transcribe_remote(
     wav: &Path,
     endpoint: &str,
     model: &str,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
     on_progress: impl FnMut(ChunkProgress),
@@ -692,7 +693,7 @@ pub(crate) fn transcribe_cloud(
     wav: &Path,
     endpoint: &str,
     model: &str,
-    vocabulary: &[String],
+    vocabulary: &[VocabularyEntry],
     api_key: Option<&str>,
     cancel: Option<&AtomicBool>,
     on_progress: impl FnMut(ChunkProgress),
@@ -714,7 +715,7 @@ pub(crate) fn transcribe_cloud(
 struct RemoteConfig<'a> {
     endpoint: &'a str,
     model: &'a str,
-    vocabulary: &'a [String],
+    vocabulary: &'a [VocabularyEntry],
     api_key: Option<&'a str>,
 }
 
@@ -1179,12 +1180,23 @@ pub fn classify_failure(error: &str) -> &'static str {
     "Transcription failed"
 }
 
-fn build_multipart_prefix(model: &str, vocabulary: &[String]) -> Vec<u8> {
-    let fields_len = model.len() + vocabulary.iter().map(|word| word.len() + 2).sum::<usize>();
+fn build_multipart_prefix(model: &str, vocabulary: &[VocabularyEntry]) -> Vec<u8> {
+    let fields_len = model.len()
+        + vocabulary
+            .iter()
+            .map(|word| word.term().len() + 2)
+            .sum::<usize>();
     let mut body = Vec::with_capacity(fields_len + 512);
     append_multipart_field(&mut body, "model", model);
     if !vocabulary.is_empty() {
-        append_multipart_field(&mut body, "prompt", &vocabulary.join(", "));
+        let mut prompt = String::with_capacity(fields_len - model.len());
+        for (index, entry) in vocabulary.iter().enumerate() {
+            if index > 0 {
+                prompt.push_str(", ");
+            }
+            prompt.push_str(entry.term());
+        }
+        append_multipart_field(&mut body, "prompt", &prompt);
     }
     append_multipart_field(&mut body, "response_format", "json");
 

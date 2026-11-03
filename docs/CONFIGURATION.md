@@ -34,15 +34,16 @@ operations, not in-flight inference. `audio_source` applies to the next capture.
 
 This Linux example keeps the local-first defaults: Parakeet is selected but its
 weights must be [downloaded deliberately](USAGE.md#2-download-the-local-model-deliberately);
-cleanup remains disabled with no cleanup model selected. Do not replace an
-existing file wholesale with the example. Enable cleanup only after the
-[endpoint, model, and any credential are ready](#postproc--cleanup).
+cleanup remains disabled with no cleanup model selected. Setting `enabled = true`
+without a model selects alias-only Clean. Do not replace an existing file wholesale
+with the example. Prepare the [endpoint, model, and any credential](#postproc--cleanup)
+before selecting a model for LLM cleanup.
 
 ```toml
 injection = "auto"        # auto | paste | type | clipboard — how finished text is delivered
 keep_warm = true          # preload the local STT model at startup; restart to apply
 # audio_source = "…"      # optional PipeWire node; omit for the default input
-vocabulary = ["PipeWire", "Parakeet"]   # canonical-name hints for cleanup + cloud STT
+vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip"] }]
 
 [stt]
 model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
@@ -51,12 +52,12 @@ model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
 # api_key_id = "openai"
 
 [postproc]
-enabled = false           # deliver raw recognition; cleanup is an explicit opt-in
+enabled = false           # false = Raw; true = Clean (see Decision 0012)
 endpoint = "http://localhost:11434/v1"    # does not install or start an endpoint
-model = ""               # choose a model served by your endpoint before enabling
+model = ""               # optional LLM model served by your endpoint
 timeout_ms = 30000
 passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
-min_chars = 40            # skip cleanup under this length; 0 = never skip
+min_chars = 40            # skip LLM cleanup under this length; 0 = never skip
 # reasoning_effort = "low" # optional: low | medium | high | none (for providers supporting reasoning.effort)
 instructions = ""         # optional extra style guidance
 
@@ -99,6 +100,25 @@ after selecting a device or granting access.
 requires a restart through the [existing startup owner](DESKTOP.md#keep-one-startup-owner),
 not a second daemon. Models remain in the same data directory across
 configuration changes; see [storage locations](PRIVACY.md#storage-locations).
+
+## `vocabulary` — spellings and aliases
+
+Each entry owns one canonical spelling. A plain string supplies only that
+spelling; an inline table can also supply explicit recognition aliases:
+
+```toml
+vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip"] }]
+```
+
+Existing string-only lists need no migration. See
+[Decision 0012](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02)
+for Raw/Clean behavior, alias matching and validation rules, and the
+deliberately-spoken-alias limitation.
+
+Settings on Linux and macOS edit plain-string terms. Entries with a `term`
+table remain file-only and survive every Settings save, including clearing the
+plain terms. Edit those entries with `config edit`; Settings preserves their
+aliases rather than flattening them into strings.
 
 ## `[stt]` — transcription
 
@@ -221,15 +241,17 @@ Cantrip does not change provider limits, accounts or credentials, or retry cloud
 requests automatically in response to this feedback.
 
 For selected-recording retries and the per-operation `--local` override, see
-[recovery](USAGE.md#recovery). Explicit local recovery/file transcription skips
-cleanup without rewriting this file, but does not disable independently opted-in
-metadata telemetry. [Retained audio and plaintext history](PRIVACY.md) remain
-local until deliberately removed.
+[recovery](USAGE.md#recovery) and the
+[local-only content policy](decisions/0030-local-only-handoff-targets.md).
+[Retained audio and plaintext history](PRIVACY.md) remain local until deliberately removed.
 
 ## `[postproc]` — cleanup
 
-Cleanup is **off by default**. Configure it only after ordinary local dictation
-works:
+LLM cleanup is **off by default**. Configure it only after ordinary local
+dictation works:
+
+With no cleanup model, `enabled = true` selects alias-only Clean and makes no
+LLM or decision requests. The steps below enable the optional LLM pass.
 
 1. Choose a local or remote OpenAI-compatible chat endpoint and a model it
    actually serves. Cantrip does not install or launch Ollama or download its
@@ -238,8 +260,8 @@ works:
 2. Set `[postproc].endpoint` and `model` in the existing configuration. If the
    provider requires a credential, store it with `key set ID` and set the
    matching `api_key_id`; never paste the key into the file.
-3. Only then set `enabled = true`, save/reload, and make a harmless attended
-   trial. Read `cleanup` in the settled outcome. `doctor` describes configuration
+3. Set `enabled = true`, save/reload, and make a harmless attended trial.
+   Read `cleanup` in the settled outcome. `doctor` describes configuration
    and available prerequisites; it does not prove that the endpoint is running,
    the credential works, or the selected model is usable.
 
@@ -253,9 +275,9 @@ model = "qwen3:8b"
 ```
 
 Apply these fields to your existing `[postproc]` table; do not add a duplicate
-table or replace unrelated settings. A `--postproc clean` capture also needs
-this usable endpoint/model, even when the saved default is disabled. The
-[per-take controls](USAGE.md#everyday-controls) explain clean/raw shortcuts.
+table or replace unrelated settings. See [Raw/Clean](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02)
+for model/endpoint behavior and the [per-take controls](USAGE.md#everyday-controls)
+for shortcut syntax.
 
 Clean uses the [Hone-style refinement contract](decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02):
 it actively tightens and restructures speech, rather than preserving its wording.
@@ -274,15 +296,12 @@ guidance to the fixed contract; keep it short and do not redefine the task.
   watchdog, including DNS, connections, and response bodies. There is no hidden
   five-second cleanup inference clamp; individual native keyring reads still
   have their independent five-second maximum and can use less when the shared
-  budget is nearly spent. An unfinished chain returns raw STT text. A watchdog
-  timeout after completed passes preserves the candidate under its existing
-  fail-open policy. No subsequent request starts after cancellation or budget
-  expiry, and a cancelled result is never delivered. This cleanup budget is
-  separate from cloud STT's waiting policy.
-- **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
-  many characters (default 40). Short takes skip both refinement and vocabulary
-  correction. Lower thresholds also admit short noise annotations and filler;
-  choose one using the [evaluation evidence](EVALUATION.md#2026-11-02-operator-refinement-study).
+  budget is nearly spent. See [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md)
+  for failure/cancellation behavior and the boundary with cloud STT waiting.
+- **`min_chars`.** Skip LLM cleanup when its input has fewer than this many
+  characters (default 40). Lower thresholds admit short noise annotations and
+  filler; choose one using the
+  [evaluation evidence](EVALUATION.md#2026-11-02-operator-refinement-study).
 - **Local.** The default endpoint address is Ollama at `localhost:11434`, but
   its presence in the file does not mean a service is installed or running.
   `qwen3:8b` is a local option; use a model your endpoint actually serves.
@@ -298,8 +317,8 @@ guidance to the fixed contract; keep it short and do not redefine the task.
   `typesafe/jev-1.13` or `jev-latest`) for pre-cleanup triage and post-cleanup
   watchdog verification. Disabled when unset. When enabled, clean takes
   bypass generative cleanup to reduce latency and token spend; post-cleanup
-  watchdog verification rejects "answer-to-question" hallucinations and falls
-  back to the raw transcript ([ADR 0026](decisions/0026-typesafe-system-one-decisions.md)).
+  watchdog verification rejects "answer-to-question" hallucinations under
+  [ADR 0026](decisions/0026-typesafe-system-one-decisions.md).
   Review the [decision-endpoint content boundary](PRIVACY.md#what-leaves-the-machine)
   before opting in. The triage/watchdog models have not been evaluated against
   the Hone-style contract; a decision model is **not recommended with Clean yet**.
@@ -310,7 +329,6 @@ guidance to the fixed contract; keep it short and do not redefine the task.
 - **`decision_api_key_id`.** Keyring credential ID for decision calls. When unset,
   defaults to `openrouter` in the OS keyring for OpenRouter models or `typesafe`
   otherwise, falling back to the runtime cleanup credential.
-- A postproc failure never drops a dictation: the raw transcript is used.
 
 ## `[handoff.NAME]` — named local commands (US-011)
 
@@ -370,15 +388,10 @@ label = "Pile"
 local_only = true
 ```
 
-Its takes are transcribed by the installed default local model
-(`parakeet-tdt-0.6b-v3-int8`) whatever `[stt]` names, cleanup never runs, and
-there is no cloud attempt to fall back from. A missing local model refuses the
-take before recording (`local-model-unavailable`), and asking such a target for
-`--postproc clean` refuses it too (`handoff-local-only`). Other targets and the
-desktop keep the configured lanes. Its command runs with `CANTRIP_LOCAL_ONLY=1`
-(other targets never see that variable), so a receiver can refuse any take that
-was not kept local. See
-[ADR 0030](decisions/0030-local-only-handoff-targets.md).
+The [local-only content policy](decisions/0030-local-only-handoff-targets.md)
+defines recognition, Raw/Clean selection, and the missing-model refusal for
+this target. Its command runs with `CANTRIP_LOCAL_ONLY=1` (other targets never
+see that variable), so a receiver can refuse a take not kept local.
 
 ## Transcript history
 
@@ -388,12 +401,6 @@ history, including successful takes. The canonical
 record fields, local inspection, durability limits, and exact
 [Forget semantics](PRIVACY.md#what-forget-deletes). This is retained data, not an
 ephemeral cache; changing configuration does not erase it.
-
-## `vocabulary`
-
-Exact-spelling terms injected into the postproc system prompt (and the cloud
-STT prompt) so technical names like `PipeWire` survive cleanup. Add jargon
-you dictate often.
 
 ## `injection`
 
