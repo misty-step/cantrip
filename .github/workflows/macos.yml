@@ -97,12 +97,14 @@ jobs:
               output.write(f"path={path}\n")
           print(json.dumps(identity, indent=2, sort_keys=True))
           PY
-      - name: Cache the pinned Intel CPU runtime
+      - name: Restore the pinned Intel CPU runtime
         if: matrix.architecture == 'x86_64'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: runtime-cache-restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ steps.runtime-cache.outputs.path }}
           key: ${{ steps.runtime-cache.outputs.key }}
+      # A cache hit still goes through the script's fail-closed integrity checks.
       - name: Prepare the pinned CPU runtime omitted by upstream Intel prebuilts
         if: matrix.architecture == 'x86_64'
         env:
@@ -111,6 +113,13 @@ jobs:
         run: |
           python3 scripts/prepare-macos-runtime --target "$TARGET" \
             --output "$RUNTIME_OUTPUT" --github-env "$GITHUB_ENV"
+      # Preserve a validated runtime even if a later, unrelated app check fails.
+      - name: Save the validated Intel CPU runtime
+        if: matrix.architecture == 'x86_64' && steps.runtime-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.runtime-cache.outputs.path }}
+          key: ${{ steps.runtime-cache.outputs.key }}
       - name: Check every crate and native target against the lockfile
         run: |
           cargo fmt --all --check

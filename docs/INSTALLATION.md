@@ -310,8 +310,10 @@ Native macOS CI persists that Intel runtime tree with an exact-key
 minimum macOS, runner image, Xcode/SDK/compiler and CMake identities, and the
 preparation script hash. Preparation still runs after restoration and rejects
 an identity mismatch, modified source, or changed archive; there is no partial-key
-fallback. Both architectures retain formatting, Clippy for every workspace target,
-workspace tests, the eval example, Python release tests, and relocated-app proof.
+fallback. The validated runtime is saved immediately, so a later app-verification
+failure does not discard a successful source build. Both architectures retain
+formatting, Clippy for every workspace target, workspace tests, the eval example,
+Python release tests, and relocated-app proof.
 Clippy also compiles the targets previously compiled by a separate `cargo check`.
 
 Cache schema 2 rejects older/incomplete caches. For standalone preparation,
