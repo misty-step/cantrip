@@ -233,13 +233,14 @@ pub(crate) fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
     }
     // Retrying never changes the take's start-time selection, including when
     // a completed archive replaces an audio-only recovery record.
-    let selection = existing.as_ref().map(ModeSelection::from_record).unwrap_or_else(|| {
-        ModeSelection {
+    let selection = existing
+        .as_ref()
+        .map(ModeSelection::from_record)
+        .unwrap_or_else(|| ModeSelection {
             mode: entry.mode,
             model: entry.mode_model.cloned(),
             inferred: false,
-        }
-    });
+        });
     let mut result = if preserve {
         existing.context("missing preserved transcript")?
     } else {
@@ -325,21 +326,32 @@ impl ModeSelection {
     }
 
     pub(crate) fn from_record(record: &Value) -> Self {
-        if let Some(mode) = record.get("mode")
+        if let Some(mode) = record
+            .get("mode")
             .and_then(|value| serde_json::from_value::<Mode>(value.clone()).ok())
         {
             return Self {
                 mode,
-                model: record.get("mode_model")
+                model: record
+                    .get("mode_model")
                     .and_then(|value| serde_json::from_value(value.clone()).ok()),
-                inferred: record.get("mode_inferred").and_then(Value::as_bool).unwrap_or(false),
+                inferred: record
+                    .get("mode_inferred")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             };
         }
         let clean = matches!(
             record.pointer("/postproc/status").and_then(Value::as_str),
             Some("applied" | "failed" | "skipped_short")
-        ) || record.get("alias_substitutions").and_then(Value::as_u64).unwrap_or(0) > 0
-            || record.get("postprocessed_transcript").is_some_and(Value::is_string);
+        ) || record
+            .get("alias_substitutions")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+            || record
+                .get("postprocessed_transcript")
+                .is_some_and(Value::is_string);
         Self {
             mode: if clean { Mode::Clean } else { Mode::Raw },
             // Legacy archives do not identify a route/effort selection. Never
@@ -797,7 +809,11 @@ mod tests {
         Entry {
             take_id: None,
             source: "dictation",
-            mode: if cleaned.is_some() { Mode::Clean } else { Mode::Raw },
+            mode: if cleaned.is_some() {
+                Mode::Clean
+            } else {
+                Mode::Raw
+            },
             mode_model: None,
             raw_transcript: raw,
             postprocessed_transcript: cleaned,
@@ -1004,7 +1020,10 @@ mod tests {
         let root = test_root("mode-recovery");
         for mode in Mode::ALL {
             let id = new_id();
-            let selected = ModeSelection::capture(&PostprocConfig { mode, ..Default::default() });
+            let selected = ModeSelection::capture(&PostprocConfig {
+                mode,
+                ..Default::default()
+            });
             {
                 let store = Store::open(&root).unwrap();
                 let mut audio_only = json!({

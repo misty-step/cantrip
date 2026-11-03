@@ -194,8 +194,9 @@ fn refine_round_trip_sends_contract_request_and_strips_model_wrappers() {
 
 #[test]
 fn elevate_sends_verbatim_operator_prompt_and_its_own_model_in_one_pass() {
-    let (endpoint, server) =
-        mock_server(ok_json(r#"{"choices":[{"message":{"content":"Adjust the leading in Cantrip."}}]}"#));
+    let (endpoint, server) = mock_server(ok_json(
+        r#"{"choices":[{"message":{"content":"Adjust the leading in Cantrip."}}]}"#,
+    ));
     let mut cfg = postproc_config(endpoint);
     cfg.mode = Mode::Elevate;
     cfg.passes = 3;
@@ -1243,7 +1244,11 @@ fn transcribe_cli_delivers_aliases_in_clean_and_elevate_without_llm_and_preserve
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let expected = if mode == Mode::Raw { "Gantrip" } else { "Cantrip" };
+        let expected = if mode == Mode::Raw {
+            "Gantrip"
+        } else {
+            "Cantrip"
+        };
         assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
         let diagnostic = String::from_utf8(output.stderr).unwrap();
         assert!(!diagnostic.contains("Gantrip"));

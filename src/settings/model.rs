@@ -99,7 +99,12 @@ impl Editable {
             stt_key: cfg.stt.api_key_id.clone().unwrap_or_default(),
             mode: cfg.postproc.mode,
             clean_model: cfg.postproc.clean.model.clone(),
-            clean_effort: cfg.postproc.clean.reasoning_effort.clone().unwrap_or_default(),
+            clean_effort: cfg
+                .postproc
+                .clean
+                .reasoning_effort
+                .clone()
+                .unwrap_or_default(),
             elevate_model: cfg.postproc.elevate.model.clone(),
             elevate_effort: cfg
                 .postproc
@@ -1010,7 +1015,10 @@ mod tests {
             model: "llama3.3:70b".to_owned(),
             reasoning_effort: None,
         };
-        assert_eq!((config.postproc.clean, config.postproc.elevate), (qwen, llama));
+        assert_eq!(
+            (config.postproc.clean, config.postproc.elevate),
+            (qwen, llama)
+        );
     }
 
     #[test]

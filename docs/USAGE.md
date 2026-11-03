@@ -292,6 +292,16 @@ and which LLM follows them. Recording and processing HUDs show the active take's
 mode and pipeline. A default change while a take is active applies only to the
 next take.
 
+The scriptable equivalent persists the same default and reloads a running daemon:
+
+```sh
+cantrip mode elevate
+cantrip mode --cycle        # Raw → Clean → Elevate → Raw
+```
+
+Bind `cantrip mode --cycle` to one optional compositor or shell-based shortcut
+when switching the default is easier than maintaining three recording shortcuts.
+
 A per-take flag overrides `[postproc].mode` without changing the saved default.
 The mode is fixed at capture start; a different flag used to stop cannot change
 it. For separate compositor bindings or shell-based shortcuts, use:

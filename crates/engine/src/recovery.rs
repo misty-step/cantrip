@@ -85,7 +85,11 @@ pub(crate) fn selection(id: &str) -> Result<ModeSelection> {
     let store = Store::open(&paths::transcript_history_dir()?)?;
     // Audio remains recoverable when its old JSON is missing or corrupt.
     get_in(&store, id)?;
-    Ok(store.read_record(id).ok().flatten().as_ref()
+    Ok(store
+        .read_record(id)
+        .ok()
+        .flatten()
+        .as_ref()
         .map(ModeSelection::from_record)
         .unwrap_or_else(|| ModeSelection::from_record(&Value::Null)))
 }
@@ -133,7 +137,13 @@ pub(crate) fn persist_with_config(
 ) -> Result<Take> {
     persist_selected_in(
         &Store::open(&paths::transcript_history_dir()?)?,
-        id, duration_ms, text, wav, partial, unresolved, Some(postproc),
+        id,
+        duration_ms,
+        text,
+        wav,
+        partial,
+        unresolved,
+        Some(postproc),
     )
 }
 
@@ -360,9 +370,14 @@ fn persist_selected_in(
         // A start-time mode snapshot can repair unreadable metadata before STT;
         // record_for_update preserves the original corrupt bytes privately.
         let existing = store.record_for_update(id, complete || postproc.is_some())?;
-        let selection = existing.as_ref().map(ModeSelection::from_record)
-            .unwrap_or_else(|| postproc.map(ModeSelection::capture)
-                .unwrap_or_else(|| ModeSelection::from_record(&Value::Null)));
+        let selection = existing
+            .as_ref()
+            .map(ModeSelection::from_record)
+            .unwrap_or_else(|| {
+                postproc
+                    .map(ModeSelection::capture)
+                    .unwrap_or_else(|| ModeSelection::from_record(&Value::Null))
+            });
         let mut record = existing.unwrap_or_else(|| {
             json!({
                 "schema_version": archive::SCHEMA_VERSION,
@@ -628,12 +643,14 @@ fn import_runtime_in(runtime: &Path, history: &Path) -> Result<()> {
             // An interrupted audio publication may have no readable JSON.
             // Publish an explicitly inferred selection before consuming its
             // runtime original; never borrow today's configured default.
-            let mut record = store.record_for_update(id, true)?.unwrap_or_else(|| json!({
-                "schema_version": archive::SCHEMA_VERSION,
-                "session_id": id,
-                "source": "recovery",
-                "recovery": { "created_at_unix_ms": archive::now_ms(), "unresolved": true },
-            }));
+            let mut record = store.record_for_update(id, true)?.unwrap_or_else(|| {
+                json!({
+                    "schema_version": archive::SCHEMA_VERSION,
+                    "session_id": id,
+                    "source": "recovery",
+                    "recovery": { "created_at_unix_ms": archive::now_ms(), "unresolved": true },
+                })
+            });
             let selection = ModeSelection::from_record(&record);
             selection.write_to(&mut record);
             record["schema_version"] = json!(archive::SCHEMA_VERSION);
@@ -832,16 +849,35 @@ mod tests {
             let id = new_id();
             let original = PostprocConfig {
                 mode,
-                clean: ModeModelConfig { model: "original-clean".into(), reasoning_effort: None },
-                elevate: ModeModelConfig { model: "original-elevate".into(), reasoning_effort: Some("high".into()) },
+                clean: ModeModelConfig {
+                    model: "original-clean".into(),
+                    reasoning_effort: None,
+                },
+                elevate: ModeModelConfig {
+                    model: "original-elevate".into(),
+                    reasoning_effort: Some("high".into()),
+                },
                 ..Default::default()
             };
             // Audio-only persistence happens before STT can fail or be cancelled.
-            persist_selected_in(&store, &id, 10, None, Some(&fixture.wav), false, true, Some(&original)).unwrap();
+            persist_selected_in(
+                &store,
+                &id,
+                10,
+                None,
+                Some(&fixture.wav),
+                false,
+                true,
+                Some(&original),
+            )
+            .unwrap();
             let before = ModeSelection::from_record(&store.read_record(&id).unwrap().unwrap());
             assert_eq!(before, ModeSelection::capture(&original));
             assert!(!before.inferred);
-            let mut live = PostprocConfig { mode: Mode::Elevate, ..Default::default() };
+            let mut live = PostprocConfig {
+                mode: Mode::Elevate,
+                ..Default::default()
+            };
             live.clean.model = "changed-clean".into();
             live.elevate.model = "changed-elevate".into();
             before.apply_to(&mut live);
@@ -849,8 +885,13 @@ mod tests {
             if mode != Mode::Raw {
                 assert_eq!(live.model_config(), original.model_config());
             }
-            for (text, partial) in [(None, false), (Some("cancelled partial"), true), (Some("completed recovery"), false)] {
-                persist_selected_in(&store, &id, 10, text, None, partial, true, Some(&live)).unwrap();
+            for (text, partial) in [
+                (None, false),
+                (Some("cancelled partial"), true),
+                (Some("completed recovery"), false),
+            ] {
+                persist_selected_in(&store, &id, 10, text, None, partial, true, Some(&live))
+                    .unwrap();
                 let after = ModeSelection::from_record(&store.read_record(&id).unwrap().unwrap());
                 assert_eq!(after, before);
             }
@@ -865,8 +906,14 @@ mod tests {
         let store = fixture.store();
         for (evidence, expected) in [
             (json!({"postproc": {"status": "off"}}), Mode::Raw),
-            (json!({"postproc": {"status": "failed", "model": "old-model"}}), Mode::Clean),
-            (json!({"postproc": {"status": "skipped_short"}}), Mode::Clean),
+            (
+                json!({"postproc": {"status": "failed", "model": "old-model"}}),
+                Mode::Clean,
+            ),
+            (
+                json!({"postproc": {"status": "skipped_short"}}),
+                Mode::Clean,
+            ),
             (json!({"alias_substitutions": 1}), Mode::Clean),
             (json!({}), Mode::Raw),
         ] {
@@ -875,7 +922,10 @@ mod tests {
             old["session_id"] = json!(id);
             old["raw_transcript"] = json!("old words");
             store.write_record(&id, &old).unwrap();
-            let live = PostprocConfig { mode: Mode::Elevate, ..Default::default() };
+            let live = PostprocConfig {
+                mode: Mode::Elevate,
+                ..Default::default()
+            };
             persist_selected_in(&store, &id, 10, None, None, false, true, Some(&live)).unwrap();
             let record = store.read_record(&id).unwrap().unwrap();
             let selection = ModeSelection::from_record(&record);
@@ -1378,8 +1428,21 @@ mod tests {
         fs::set_permissions(&old_runtime, fs::Permissions::from_mode(0o644)).unwrap();
         {
             let store = fixture.store();
-            let selected = PostprocConfig { mode: crate::config::Mode::Elevate, ..Default::default() };
-            persist_selected_in(&store, &queued_id, 10, None, None, false, true, Some(&selected)).unwrap();
+            let selected = PostprocConfig {
+                mode: crate::config::Mode::Elevate,
+                ..Default::default()
+            };
+            persist_selected_in(
+                &store,
+                &queued_id,
+                10,
+                None,
+                None,
+                false,
+                true,
+                Some(&selected),
+            )
+            .unwrap();
             persist_in(
                 &store,
                 &unrelated_id,
@@ -1406,7 +1469,10 @@ mod tests {
                 if id == &queued_id {
                     assert_eq!(selection.mode, crate::config::Mode::Elevate);
                     assert!(!selection.inferred);
-                    assert_eq!(selection.model, Some(crate::config::ModeModelConfig::default()));
+                    assert_eq!(
+                        selection.model,
+                        Some(crate::config::ModeModelConfig::default())
+                    );
                 } else {
                     assert_eq!(selection.mode, crate::config::Mode::Raw);
                     assert!(selection.inferred);

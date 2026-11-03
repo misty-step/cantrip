@@ -186,35 +186,51 @@ fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
 fn private_out(path: &Path, fresh: bool) -> Result<()> {
     ensure!(path.is_absolute(), "--out must be absolute private scratch");
     if fresh {
-        fs::DirBuilder::new().mode(0o700).create(path)
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path)
             .context("--out must be a fresh private directory")?;
     }
     let out = fs::canonicalize(path)?;
     let repo = fs::canonicalize(std::env::current_dir()?)?;
-    ensure!(!out.starts_with(repo), "private outputs must be outside the repository");
+    ensure!(
+        !out.starts_with(repo),
+        "private outputs must be outside the repository"
+    );
     use std::os::unix::fs::MetadataExt;
     let metadata = fs::symlink_metadata(path)?;
-    ensure!(metadata.is_dir() && !metadata.file_type().is_symlink()
-        && metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0,
-        "--out must be an owner-only directory");
+    ensure!(
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.mode() & 0o077 == 0,
+        "--out must be an owner-only directory"
+    );
     Ok(())
 }
 
 fn broker_accounting(endpoint: &str) -> Result<Value> {
-    let port = endpoint.strip_prefix("http://127.0.0.1:")
+    let port = endpoint
+        .strip_prefix("http://127.0.0.1:")
         .and_then(|suffix| suffix.strip_suffix("/api/v1"))
         .and_then(|port| port.parse::<u16>().ok())
         .filter(|port| *port > 0);
-    ensure!(port.is_some(), "--endpoint must be a loopback credential broker");
+    ensure!(
+        port.is_some(),
+        "--endpoint must be a loopback credential broker"
+    );
     let response = ureq::get(&format!("{endpoint}/accounting"))
         .timeout(std::time::Duration::from_secs(30))
-        .call().map_err(|_| anyhow!("credential_broker_accounting_unavailable"))?;
+        .call()
+        .map_err(|_| anyhow!("credential_broker_accounting_unavailable"))?;
     let accounting: Value = serde_json::from_reader(response.into_reader())
         .map_err(|_| anyhow!("credential_broker_accounting_shape"))?;
-    ensure!(accounting["model"] == MODEL
-        && accounting["reasoning_effort"] == "low"
-        && accounting["absolute_key_ceiling_usd"].as_f64() == Some(KEY_CEILING_USD),
-        "credential broker does not implement the authorized evaluation bounds");
+    ensure!(
+        accounting["model"] == MODEL
+            && accounting["reasoning_effort"] == "low"
+            && accounting["absolute_key_ceiling_usd"].as_f64() == Some(KEY_CEILING_USD),
+        "credential broker does not implement the authorized evaluation bounds"
+    );
     Ok(accounting)
 }
 
@@ -232,12 +248,20 @@ fn literal_present(text: &str, literal: &str) -> bool {
 
 fn deterministic(checks: &Checks, text: &str) -> BTreeSet<Failure> {
     let mut failures = BTreeSet::new();
-    if checks.exact.iter().any(|literal| !literal_present(text, literal)) {
+    if checks
+        .exact
+        .iter()
+        .any(|literal| !literal_present(text, literal))
+    {
         failures.insert(Failure::Literal);
     }
     if !checks.lexical_any.is_empty() {
         let lower = text.to_lowercase();
-        if !checks.lexical_any.iter().any(|term| literal_present(&lower, &term.to_lowercase())) {
+        if !checks
+            .lexical_any
+            .iter()
+            .any(|term| literal_present(&lower, &term.to_lowercase()))
+        {
             failures.insert(Failure::LexicalUpgrade);
         }
     }
@@ -252,7 +276,11 @@ fn summarize(receipt: &mut Receipt) {
     let reviewed = receipt.calls.iter().filter(|call| call.reviewed).count();
     let mut latencies: Vec<_> = receipt.calls.iter().map(|call| call.latency_ms).collect();
     latencies.sort_unstable();
-    let percentile = |percent: usize| latencies.get((count * percent).div_ceil(100).saturating_sub(1)).copied();
+    let percentile = |percent: usize| {
+        latencies
+            .get((count * percent).div_ceil(100).saturating_sub(1))
+            .copied()
+    };
     let known_cost: f64 = receipt.calls.iter().filter_map(|call| call.cost_usd).sum();
     receipt.summary = json!({
         "scheduled": receipt.inherited_cases + receipt.added_cases,
@@ -273,65 +301,125 @@ fn summarize(receipt: &mut Receipt) {
 
 fn apply_review(out: &Path, path: &Path) -> Result<()> {
     let mut receipt: Receipt = serde_json::from_slice(&fs::read(out.join("receipt.json"))?)?;
-    ensure!(receipt.semantic_reviewer.is_none(), "receipt already reviewed");
+    ensure!(
+        receipt.semantic_reviewer.is_none(),
+        "receipt already reviewed"
+    );
     let private: Vec<PrivateOutput> = serde_json::from_slice(&fs::read(out.join("private.json"))?)?;
     let review: Review = serde_json::from_slice(&fs::read(path)?)?;
-    ensure!(!review.reviewer.trim().is_empty(), "semantic reviewer must be identified");
-    ensure!(review.calls.len() == private.len(), "every completed output requires semantic review");
+    ensure!(
+        !review.reviewer.trim().is_empty(),
+        "semantic reviewer must be identified"
+    );
+    ensure!(
+        review.calls.len() == private.len(),
+        "every completed output requires semantic review"
+    );
     let mut seen = BTreeSet::new();
     for judgment in review.calls {
-        ensure!(seen.insert((judgment.case.clone(), judgment.iteration)), "duplicate semantic judgment");
-        let raw = private.iter().find(|raw| raw.case == judgment.case && raw.iteration == judgment.iteration)
+        ensure!(
+            seen.insert((judgment.case.clone(), judgment.iteration)),
+            "duplicate semantic judgment"
+        );
+        let raw = private
+            .iter()
+            .find(|raw| raw.case == judgment.case && raw.iteration == judgment.iteration)
             .ok_or_else(|| anyhow!("semantic judgment names an unknown output"))?;
-        ensure!(judgment.output_sha256 == raw.output_sha256 && raw.output_sha256 == hash(&raw.text),
-            "semantic judgment does not match retained output bytes");
-        let call = receipt.calls.iter_mut().find(|call| call.case == judgment.case && call.iteration == judgment.iteration)
+        ensure!(
+            judgment.output_sha256 == raw.output_sha256 && raw.output_sha256 == hash(&raw.text),
+            "semantic judgment does not match retained output bytes"
+        );
+        let call = receipt
+            .calls
+            .iter_mut()
+            .find(|call| call.case == judgment.case && call.iteration == judgment.iteration)
             .ok_or_else(|| anyhow!("semantic judgment has no call receipt"))?;
-        ensure!(call.output_sha256.as_ref() == Some(&raw.output_sha256), "call/output hash mismatch");
+        ensure!(
+            call.output_sha256.as_ref() == Some(&raw.output_sha256),
+            "call/output hash mismatch"
+        );
         call.failures.extend(judgment.failures);
         call.reviewed = true;
     }
     receipt.semantic_reviewer = Some(review.reviewer);
     summarize(&mut receipt);
     write_private(&out.join("receipt.json"), &receipt)?;
-    eprintln!("[eval] Elevate reviewed={} failed={} gate={}",
-        receipt.summary["reviewed"], receipt.summary["failed"], receipt.summary["gate"]);
+    eprintln!(
+        "[eval] Elevate reviewed={} failed={} gate={}",
+        receipt.summary["reviewed"], receipt.summary["failed"], receipt.summary["gate"]
+    );
     Ok(())
 }
 
 pub(super) fn run(args: &[String]) -> Result<()> {
-    let args = Args::try_parse_from(std::iter::once("behavior".to_owned()).chain(args.iter().cloned()))?;
+    let args =
+        Args::try_parse_from(std::iter::once("behavior".to_owned()).chain(args.iter().cloned()))?;
     ensure!(args.mode == "elevate", "this gate only evaluates Elevate");
     private_out(&args.out, args.review.is_none())?;
     if let Some(review) = &args.review {
         return apply_review(&args.out, review);
     }
-    ensure!(args.dry_run || args.allow_paid, "choose --dry-run or --allow-paid");
+    ensure!(
+        args.dry_run || args.allow_paid,
+        "choose --dry-run or --allow-paid"
+    );
     let source_revision = args.source_revision.as_deref().unwrap_or_default();
-    ensure!(source_revision.len() == 40 && source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "--source-revision must identify the built production source");
+    ensure!(
+        source_revision.len() == 40 && source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "--source-revision must identify the built production source"
+    );
     let manifest_bytes = fs::read(&args.postproc_manifest)?;
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
-    ensure!(manifest.schema == "cantrip.eval.elevate.v1", "unsupported Elevate corpus schema");
-    let included_path = args.postproc_manifest.parent().unwrap_or(Path::new(".")).join(&manifest.include);
+    ensure!(
+        manifest.schema == "cantrip.eval.elevate.v1",
+        "unsupported Elevate corpus schema"
+    );
+    let included_path = args
+        .postproc_manifest
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(&manifest.include);
     let included_bytes = fs::read(included_path)?;
     let mut included: Included = serde_json::from_slice(&included_bytes)?;
     let inherited_cases = included.cases.len();
     for (id, checks) in manifest.inherited_checks {
-        included.cases.iter_mut().find(|case| case.id == id)
-            .ok_or_else(|| anyhow!("checks name an unknown inherited case"))?.checks = checks;
+        included
+            .cases
+            .iter_mut()
+            .find(|case| case.id == id)
+            .ok_or_else(|| anyhow!("checks name an unknown inherited case"))?
+            .checks = checks;
     }
     let added_cases = manifest.cases.len();
-    ensure!(added_cases == 8 && inherited_cases > 0, "run all inherited cases plus eight Elevate cases");
+    ensure!(
+        added_cases == 8 && inherited_cases > 0,
+        "run all inherited cases plus eight Elevate cases"
+    );
     included.cases.extend(manifest.cases);
     let mut ids = BTreeSet::new();
     for case in &included.cases {
-        ensure!(!case.input.trim().is_empty() && ids.insert(&case.id), "empty or duplicate case");
-        ensure!(case.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'), "invalid public case ID");
-        ensure!(case.checks.exact.iter().all(|literal| !literal.is_empty() && literal_present(&case.input, literal)),
-            "protected literal must occur in its synthetic source");
+        ensure!(
+            !case.input.trim().is_empty() && ids.insert(&case.id),
+            "empty or duplicate case"
+        );
+        ensure!(
+            case.id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+            "invalid public case ID"
+        );
+        ensure!(
+            case.checks
+                .exact
+                .iter()
+                .all(|literal| !literal.is_empty() && literal_present(&case.input, literal)),
+            "protected literal must occur in its synthetic source"
+        );
     }
-    let mut cfg = PostprocConfig { mode: Mode::Elevate, ..PostprocConfig::default() };
+    let mut cfg = PostprocConfig {
+        mode: Mode::Elevate,
+        ..PostprocConfig::default()
+    };
     cfg.elevate.model = MODEL.to_owned();
     cfg.elevate.reasoning_effort = Some("low".to_owned());
     cfg.api_key_id = None;
@@ -339,7 +427,10 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     if let Some(endpoint) = &args.endpoint {
         cfg.endpoint = endpoint.clone();
     }
-    let prompt = postproc::build_mode_system_prompt(&cfg, manifest.vocabulary.iter().map(VocabularyEntry::term));
+    let prompt = postproc::build_mode_system_prompt(
+        &cfg,
+        manifest.vocabulary.iter().map(VocabularyEntry::term),
+    );
     let mut receipt = Receipt {
         schema: "cantrip.eval.elevate-receipt.v1".to_owned(),
         claim_type: "measured_unless_explicitly_unverified".to_owned(),
@@ -369,10 +460,16 @@ pub(super) fn run(args: &[String]) -> Result<()> {
     if args.dry_run {
         summarize(&mut receipt);
         write_private(&args.out.join("receipt.json"), &receipt)?;
-        eprintln!("[eval] Elevate dry-run inherited={} added={} paid_calls=0", inherited_cases, added_cases);
+        eprintln!(
+            "[eval] Elevate dry-run inherited={} added={} paid_calls=0",
+            inherited_cases, added_cases
+        );
         return Ok(());
     }
-    let endpoint = args.endpoint.as_deref().ok_or_else(|| anyhow!("--allow-paid requires the native credential broker --endpoint"))?;
+    let endpoint = args
+        .endpoint
+        .as_deref()
+        .ok_or_else(|| anyhow!("--allow-paid requires the native credential broker --endpoint"))?;
     receipt.accounting = broker_accounting(endpoint)?;
     for case in included.cases {
         let (source, substitutions) = vocabulary::apply(&case.input, &manifest.vocabulary);
@@ -381,10 +478,19 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         let refinement = postproc::refine(&source, &cfg, &manifest.vocabulary, None, None);
         let latency_ms = started.elapsed().as_millis();
         let mut call = Call {
-            case: case.id.clone(), category: case.category, iteration: 1, latency_ms,
-            input_tokens: None, output_tokens: None, reasoning_tokens: None, cost_usd: None,
-            alias_substitutions: substitutions, source_sha256: hash(&case.input),
-            output_sha256: None, failures: BTreeSet::new(), reviewed: false,
+            case: case.id.clone(),
+            category: case.category,
+            iteration: 1,
+            latency_ms,
+            input_tokens: None,
+            output_tokens: None,
+            reasoning_tokens: None,
+            cost_usd: None,
+            alias_substitutions: substitutions,
+            source_sha256: hash(&case.input),
+            output_sha256: None,
+            failures: BTreeSet::new(),
+            reviewed: false,
         };
         match refinement {
             Ok(refined) => {
@@ -397,25 +503,44 @@ pub(super) fn run(args: &[String]) -> Result<()> {
                 let output_hash = hash(&refined.text);
                 call.output_sha256 = Some(output_hash.clone());
                 call.failures = deterministic(&case.checks, &refined.text);
-                private.push(PrivateOutput { case: case.id, iteration: 1,
-                    alias_corrected_source: source.into_owned(), source: case.input, text: refined.text, output_sha256: output_hash });
+                private.push(PrivateOutput {
+                    case: case.id,
+                    iteration: 1,
+                    alias_corrected_source: source.into_owned(),
+                    source: case.input,
+                    text: refined.text,
+                    output_sha256: output_hash,
+                });
             }
-            Err(_) => { call.failures.insert(Failure::Request); }
+            Err(_) => {
+                call.failures.insert(Failure::Request);
+            }
         }
-        eprintln!("[eval] Elevate case={} iteration=1 ms={} deterministic_failures={}",
-            call.case, call.latency_ms, call.failures.len());
+        eprintln!(
+            "[eval] Elevate case={} iteration=1 ms={} deterministic_failures={}",
+            call.case,
+            call.latency_ms,
+            call.failures.len()
+        );
         let request_failed = call.failures.contains(&Failure::Request);
         receipt.calls.push(call);
         write_private(&args.out.join("private.json"), &private)?;
         let accounting = broker_accounting(endpoint);
-        if let Ok(value) = &accounting { receipt.accounting = value.clone(); }
+        if let Ok(value) = &accounting {
+            receipt.accounting = value.clone();
+        }
         summarize(&mut receipt);
         write_private(&args.out.join("receipt.json"), &receipt)?;
         accounting?;
-        if request_failed { break; } // Unknown charge or refused guard never starts another paid call.
+        if request_failed {
+            break;
+        } // Unknown charge or refused guard never starts another paid call.
     }
-    eprintln!("[eval] Elevate submitted={} review_required={} gate=unverified",
-        receipt.calls.len(), private.len());
+    eprintln!(
+        "[eval] Elevate submitted={} review_required={} gate=unverified",
+        receipt.calls.len(),
+        private.len()
+    );
     Ok(())
 }
 
@@ -425,7 +550,10 @@ mod tests {
 
     #[test]
     fn transformative_output_uses_literals_and_terms_not_clean_wording() {
-        let checks = Checks { exact: vec!["3".into(), "retry_take".into()], lexical_any: vec!["idempotent".into()] };
+        let checks = Checks {
+            exact: vec!["3".into(), "retry_take".into()],
+            lexical_any: vec!["idempotent".into()],
+        };
         assert!(deterministic(&checks, "Make retry_take idempotent; retain 3 workers.").is_empty());
         let failed = deterministic(&checks, "Retry the task with 13 workers.");
         assert!(failed.contains(&Failure::Literal));
@@ -438,7 +566,13 @@ mod tests {
         assert!(!literal_present("other_retry_take", "retry_take"));
         assert!(!literal_present("version 0.1.12", "12"));
         assert!(!literal_present("3.7 workers", "3"));
-        assert!(!literal_present("/var/lib/cantrip/takes.json.bak", "/var/lib/cantrip/takes.json"));
-        assert!(literal_present("Keep /var/lib/cantrip/takes.json.", "/var/lib/cantrip/takes.json"));
+        assert!(!literal_present(
+            "/var/lib/cantrip/takes.json.bak",
+            "/var/lib/cantrip/takes.json"
+        ));
+        assert!(literal_present(
+            "Keep /var/lib/cantrip/takes.json.",
+            "/var/lib/cantrip/takes.json"
+        ));
     }
 }

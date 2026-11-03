@@ -655,12 +655,9 @@ impl Model {
                 .as_ref()
                 .and_then(|result| result.route.as_ref())
         };
-        let current = self
-            .header
-            .as_ref()
-            .map_or((None, None), |header| {
-                (header.pipeline.as_ref(), header.handoff.as_ref())
-            });
+        let current = self.header.as_ref().map_or((None, None), |header| {
+            (header.pipeline.as_ref(), header.handoff.as_ref())
+        });
         if current != (pipeline, handoff) {
             self.header = Header::new(pipeline, handoff);
             self.header_revision = self.header_revision.wrapping_add(1);
@@ -3105,7 +3102,11 @@ mod tests {
             ScreenshotState::Sent,
             ScreenshotState::DeliveryFailed,
         ] {
-            assert_eq!(label(&screenshot_model(state, now, None)), elevate, "{state:?}");
+            assert_eq!(
+                label(&screenshot_model(state, now, None)),
+                elevate,
+                "{state:?}"
+            );
         }
         // A recovery runs the mode its recording was made with.
         assert_eq!(
@@ -3114,7 +3115,11 @@ mod tests {
         );
         // Idle and removing saved audio run no pipeline.
         for state in [ScreenshotState::Idle, ScreenshotState::RemovingRecording] {
-            assert_eq!(label(&screenshot_model(state, now, None)), None, "{state:?}");
+            assert_eq!(
+                label(&screenshot_model(state, now, None)),
+                None,
+                "{state:?}"
+            );
         }
         // An engine that reports no pipeline is never given one.
         let mut model = Model::new(now);

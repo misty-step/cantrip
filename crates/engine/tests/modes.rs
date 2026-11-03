@@ -2,8 +2,12 @@
 //! Only native capture/delivery and the provider are synthetic; no desktop is touched.
 
 use cantrip_engine::audio::{InputSignal, Pcm16WavWriter};
-use cantrip_engine::config::{Config, Mode, ModeModelConfig, PostprocConfig, SttConfig, VocabularyEntry};
-use cantrip_engine::delivery::{ClipboardFallback, InjectionFailure, InjectionMode, InjectionOutcome};
+use cantrip_engine::config::{
+    Config, Mode, ModeModelConfig, PostprocConfig, SttConfig, VocabularyEntry,
+};
+use cantrip_engine::delivery::{
+    ClipboardFallback, InjectionFailure, InjectionMode, InjectionOutcome,
+};
 use cantrip_engine::ipc::{self, Command, Completeness, StateKind, StatusSnapshot};
 use cantrip_engine::ports::{DeliveryPermit, Platform, Recorder};
 use cantrip_engine::{engine, paths, recovery};
@@ -25,14 +29,27 @@ struct SyntheticRecording(PathBuf);
 struct SyntheticClipboard(Arc<Mutex<Vec<String>>>);
 
 impl Recorder for SyntheticRecording {
-    fn input_signal(&mut self) -> Option<InputSignal> { None }
-    fn request_stop(&mut self) -> anyhow::Result<()> { Ok(()) }
-    fn stop(self: Box<Self>) -> anyhow::Result<PathBuf> { Ok(self.0) }
+    fn input_signal(&mut self) -> Option<InputSignal> {
+        None
+    }
+    fn request_stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn stop(self: Box<Self>) -> anyhow::Result<PathBuf> {
+        Ok(self.0)
+    }
 }
 
 impl DeliveryPermit for SyntheticClipboard {
-    fn clipboard_fallback(&self) -> ClipboardFallback { ClipboardFallback::ExplicitOnly }
-    fn deliver(&self, text: &str, mode: InjectionMode, _: &AtomicBool) -> Result<InjectionOutcome, InjectionFailure> {
+    fn clipboard_fallback(&self) -> ClipboardFallback {
+        ClipboardFallback::ExplicitOnly
+    }
+    fn deliver(
+        &self,
+        text: &str,
+        mode: InjectionMode,
+        _: &AtomicBool,
+    ) -> Result<InjectionOutcome, InjectionFailure> {
         assert_eq!(mode, InjectionMode::Clipboard);
         self.0.lock().push(text.to_owned());
         Ok(InjectionOutcome::Clipboard)
@@ -41,7 +58,11 @@ impl DeliveryPermit for SyntheticClipboard {
 
 impl Platform for SyntheticPlatform {
     fn start_recording(&self, path: &Path, _: Option<&str>) -> anyhow::Result<Box<dyn Recorder>> {
-        let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
         let mut writer = Pcm16WavWriter::new(file)?;
         writer.write_samples(&[22; 1_600])?;
         writer.finish()?;
@@ -52,15 +73,21 @@ impl Platform for SyntheticPlatform {
     fn delivery_permit(&self) -> Arc<dyn DeliveryPermit> {
         Arc::new(SyntheticClipboard(self.0.clone()))
     }
-    fn handoff_color(&self, _: usize) -> [u8; 3] { [0; 3] }
-    fn sender_identity(&self, _: &UnixStream) -> String { "synthetic-modes-test".into() }
+    fn handoff_color(&self, _: usize) -> [u8; 3] {
+        [0; 3]
+    }
+    fn sender_identity(&self, _: &UnixStream) -> String {
+        "synthetic-modes-test".into()
+    }
 }
 
 fn settled() -> StatusSnapshot {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let status = ipc::status().unwrap();
-        if status.state == StateKind::Idle { return status; }
+        if status.state == StateKind::Idle {
+            return status;
+        }
         assert!(Instant::now() < deadline, "mode workflow did not settle");
         thread::sleep(Duration::from_millis(20));
     }
@@ -92,16 +119,24 @@ fn exercise_modes() {
                     Err(error) => panic!("provider fixture accept: {error}"),
                 }
             };
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             let mut reader = BufReader::new(&stream);
             let mut line = String::new();
             reader.read_line(&mut line).unwrap();
-            assert_eq!(line.trim(), "POST /audio/transcriptions HTTP/1.1", "recorded alias-only models must not turn into live-default LLM calls");
+            assert_eq!(
+                line.trim(),
+                "POST /audio/transcriptions HTTP/1.1",
+                "recorded alias-only models must not turn into live-default LLM calls"
+            );
             let mut length = None;
             loop {
                 line.clear();
                 assert!(reader.read_line(&mut line).unwrap() > 0);
-                if line == "\r\n" { break; }
+                if line == "\r\n" {
+                    break;
+                }
                 if let Some((name, value)) = line.split_once(':') {
                     if name.eq_ignore_ascii_case("content-length") {
                         length = Some(value.trim().parse::<usize>().unwrap());
@@ -121,10 +156,17 @@ fn exercise_modes() {
             }
         }
     });
-    let alias_only = ModeModelConfig { model: String::new(), reasoning_effort: None };
+    let alias_only = ModeModelConfig {
+        model: String::new(),
+        reasoning_effort: None,
+    };
     let config = Config {
         injection: InjectionMode::Clipboard,
-        stt: SttConfig { model: "fixture-stt".into(), endpoint: Some(endpoint.clone()), api_key_id: None },
+        stt: SttConfig {
+            model: "fixture-stt".into(),
+            endpoint: Some(endpoint.clone()),
+            api_key_id: None,
+        },
         postproc: PostprocConfig {
             mode: Mode::Raw,
             endpoint,
@@ -133,24 +175,39 @@ fn exercise_modes() {
             elevate: alias_only,
             ..Default::default()
         },
-        vocabulary: vec![VocabularyEntry::Aliased { term: "Cantrip".into(), aliases: vec!["Gantrip".into()] }],
+        vocabulary: vec![VocabularyEntry::Aliased {
+            term: "Cantrip".into(),
+            aliases: vec!["Gantrip".into()],
+        }],
         ..Default::default()
     };
     let delivered = Arc::new(Mutex::new(Vec::new()));
     let platform = Arc::new(SyntheticPlatform(delivered.clone()));
     let (ready_tx, ready_rx) = mpsc::channel();
     let initial = config.clone();
-    let daemon = thread::spawn(move || engine::run(initial, false, platform, || ready_tx.send(()).unwrap()));
+    let daemon =
+        thread::spawn(move || engine::run(initial, false, platform, || ready_tx.send(()).unwrap()));
     ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
 
     for mode in Mode::ALL {
         save_and_reload(&config);
-        assert!(ipc::command(Command::Start { postproc: Some(mode), handoff: None }).unwrap().ok);
+        assert!(
+            ipc::command(Command::Start {
+                postproc: Some(mode),
+                handoff: None
+            })
+            .unwrap()
+            .ok
+        );
         let recording = ipc::status().unwrap();
         assert_eq!(recording.state, StateKind::Recording);
         assert_eq!(recording.pipeline.as_ref().unwrap().mode, mode);
         let mut live = config.clone();
-        live.postproc.mode = if mode == Mode::Raw { Mode::Elevate } else { Mode::Raw };
+        live.postproc.mode = if mode == Mode::Raw {
+            Mode::Elevate
+        } else {
+            Mode::Raw
+        };
         live.postproc.clean.model = "live-clean-must-not-run".into();
         live.postproc.elevate.model = "live-elevate-must-not-run".into();
         save_and_reload(&live);
@@ -160,26 +217,52 @@ fn exercise_modes() {
         assert_eq!(cancelled.completeness, Completeness::Cancelled);
         let id = cancelled.artifacts.take_id.unwrap();
         assert!(cancelled.artifacts.audio);
-        let record_path = paths::transcript_history_dir().unwrap().join(format!("{id}.json"));
-        let before: serde_json::Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        let record_path = paths::transcript_history_dir()
+            .unwrap()
+            .join(format!("{id}.json"));
+        let before: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
         assert_eq!(before["mode"], mode.as_str());
         assert_eq!(before["mode_inferred"], false);
 
         for failed in [false, true] {
-            assert!(ipc::command(Command::Recover { id: Some(id.clone()), local: false, clipboard: true }).unwrap().ok);
+            assert!(
+                ipc::command(Command::Recover {
+                    id: Some(id.clone()),
+                    local: false,
+                    clipboard: true
+                })
+                .unwrap()
+                .ok
+            );
             request_rx.recv_timeout(Duration::from_secs(10)).unwrap();
             let active = ipc::status().unwrap();
             assert_eq!(active.pipeline.as_ref().unwrap().mode, mode);
             assert_eq!(active.pipeline.as_ref().unwrap().llm_model, None);
             release_tx.send(()).unwrap();
             let outcome = settled().outcome.unwrap();
-            assert_eq!(outcome.completeness, if failed { Completeness::Failed } else { Completeness::Complete });
-            let after: serde_json::Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+            assert_eq!(
+                outcome.completeness,
+                if failed {
+                    Completeness::Failed
+                } else {
+                    Completeness::Complete
+                }
+            );
+            let after: serde_json::Value =
+                serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
             assert_eq!(after["mode"], before["mode"]);
             assert_eq!(after["mode_model"], before["mode_model"]);
             assert_eq!(after["mode_inferred"], false);
         }
-        assert_eq!(recovery::read_text(&id).unwrap(), if mode == Mode::Raw { "Gantrip" } else { "Cantrip" });
+        assert_eq!(
+            recovery::read_text(&id).unwrap(),
+            if mode == Mode::Raw {
+                "Gantrip"
+            } else {
+                "Cantrip"
+            }
+        );
     }
     assert_eq!(*delivered.lock(), ["Gantrip", "Cantrip", "Cantrip"]);
     engine::request_shutdown();
@@ -203,7 +286,11 @@ fn recorded_modes_drive_recovery_across_reload() {
     fs::create_dir(&root).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     let child = Process::new(std::env::current_exe().unwrap())
-        .args(["--exact", "recorded_modes_drive_recovery_across_reload", "--nocapture"])
+        .args([
+            "--exact",
+            "recorded_modes_drive_recovery_across_reload",
+            "--nocapture",
+        ])
         .env(CHILD, "1")
         .env("XDG_CONFIG_HOME", root.join("c"))
         .env("XDG_DATA_HOME", root.join("d"))
@@ -212,5 +299,10 @@ fn recorded_modes_drive_recovery_across_reload() {
         .output();
     fs::remove_dir_all(&root).unwrap();
     let child = child.unwrap();
-    assert!(child.status.success(), "{}{}", String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
+    assert!(
+        child.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr)
+    );
 }

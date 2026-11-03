@@ -458,7 +458,8 @@ impl Pipeline<'_> {
                 PostprocStatus::Failed { .. } => "failed",
                 PostprocStatus::SkippedShort { .. } => "skipped_short",
             },
-            postproc_model: attempted_postproc.then_some(postproc_cfg.model_config().model.as_str()),
+            postproc_model: attempted_postproc
+                .then_some(postproc_cfg.model_config().model.as_str()),
             postproc_elapsed_ms,
             postproc_passes: attempted_postproc.then_some(if postproc_cfg.mode == Mode::Elevate {
                 1
@@ -848,7 +849,10 @@ mod tests {
         let stt_cfg = SttConfig::default();
         let cfg = PostprocConfig {
             mode: Mode::Clean,
-            clean: crate::config::ModeModelConfig { model: "test".into(), reasoning_effort: None },
+            clean: crate::config::ModeModelConfig {
+                model: "test".into(),
+                reasoning_effort: None,
+            },
             endpoint: "not-an-http-url".into(),
             api_key_id: None,
             min_chars: 0,
@@ -877,8 +881,12 @@ mod tests {
             aliases: vec!["Gantrip".into()],
         }];
         for (mode, case) in [
-            (Mode::Clean, "short"), (Mode::Clean, "failed"), (Mode::Clean, "missing-endpoint"),
-            (Mode::Elevate, "short"), (Mode::Elevate, "failed"), (Mode::Elevate, "missing-endpoint"),
+            (Mode::Clean, "short"),
+            (Mode::Clean, "failed"),
+            (Mode::Clean, "missing-endpoint"),
+            (Mode::Elevate, "short"),
+            (Mode::Elevate, "failed"),
+            (Mode::Elevate, "missing-endpoint"),
         ] {
             let cfg = PostprocConfig {
                 mode,
@@ -953,7 +961,11 @@ mod tests {
             );
             assert_eq!(
                 outcome.text.as_ref().unwrap(),
-                if mode == Mode::Raw { "Gantrip" } else { "Cantrip" }
+                if mode == Mode::Raw {
+                    "Gantrip"
+                } else {
+                    "Cantrip"
+                }
             );
             assert_eq!(outcome.postproc, PostprocStatus::Off);
         }
@@ -1070,7 +1082,11 @@ mod tests {
         pipeline.vocabulary = &entries;
         let outcome = pipeline.run(
             |_| {},
-            |_, _, _, _| Ok(stt::RemoteAttempt::whole(stt::Transcript::Complete("Where is Gantrip?".into()))),
+            |_, _, _, _| {
+                Ok(stt::RemoteAttempt::whole(stt::Transcript::Complete(
+                    "Where is Gantrip?".into(),
+                )))
+            },
             |entry| recording.save(entry),
         );
         assert_eq!(outcome.text.as_deref(), Ok("Where can I find Cantrip?"));
@@ -1080,13 +1096,20 @@ mod tests {
         assert_eq!(requests.len(), 1);
         let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(request["model"], "elevate-only");
-        assert!(request["messages"].to_string().contains("Where is Cantrip?"));
-        assert!(!request["messages"].to_string().contains("CLEAN-ONLY-INSTRUCTION-MARKER"));
+        assert!(request["messages"]
+            .to_string()
+            .contains("Where is Cantrip?"));
+        assert!(!request["messages"]
+            .to_string()
+            .contains("CLEAN-ONLY-INSTRUCTION-MARKER"));
         let saved = record(&outcome);
         assert_eq!(saved["mode"], "elevate");
         assert_eq!(saved["mode_model"]["model"], "elevate-only");
         assert_eq!(saved["postproc"]["passes"], 1);
-        assert_eq!(saved["postproc"]["prompt_version"], postproc::prompt_version(Mode::Elevate));
+        assert_eq!(
+            saved["postproc"]["prompt_version"],
+            postproc::prompt_version(Mode::Elevate)
+        );
         assert!(saved["postproc"].get("custom_instructions").is_none());
     }
 
@@ -1108,7 +1131,10 @@ mod tests {
         let postproc_cfg = PostprocConfig {
             mode: Mode::Clean,
             endpoint,
-            clean: crate::config::ModeModelConfig { model: "configured-cleanup".to_owned(), reasoning_effort: None },
+            clean: crate::config::ModeModelConfig {
+                model: "configured-cleanup".to_owned(),
+                reasoning_effort: None,
+            },
             api_key_id: None,
             min_chars: 0,
             passes: 1,
@@ -1417,7 +1443,11 @@ mod tests {
             };
             let cancel = AtomicBool::new(false);
             let postproc_cfg = PostprocConfig {
-                mode: if case == "cancel-first" { Mode::Clean } else { Mode::Raw },
+                mode: if case == "cancel-first" {
+                    Mode::Clean
+                } else {
+                    Mode::Raw
+                },
                 min_chars: 0,
                 ..Default::default()
             };
@@ -1647,7 +1677,11 @@ mod tests {
             ..Default::default()
         };
         assert!(should_run_postproc(&no_floor, 1));
-        let elevate = PostprocConfig { mode: Mode::Elevate, min_chars: 10_000, ..Default::default() };
+        let elevate = PostprocConfig {
+            mode: Mode::Elevate,
+            min_chars: 10_000,
+            ..Default::default()
+        };
         assert!(should_run_postproc(&elevate, 1));
     }
 

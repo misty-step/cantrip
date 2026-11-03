@@ -13,7 +13,10 @@ use cantrip::{actions, daemon, hud, settings};
 use cantrip_engine::delivery::InjectionMode;
 use cantrip_engine::ipc::{self, Command};
 use cantrip_engine::models::{self, PARAKEET_V3_INT8};
-use cantrip_engine::{config::{Config, Mode}, keys, paths, pipeline, recovery, telemetry};
+use cantrip_engine::{
+    config::{Config, Mode},
+    keys, paths, pipeline, recovery, telemetry,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "cantrip", version, about = "Local-first dictation", arg_required_else_help = !cfg!(target_os = "macos"))]
@@ -136,7 +139,11 @@ enum CliCommand {
     Reload,
     /// Set the default dictation mode, or cycle Raw → Clean → Elevate → Raw.
     Mode {
-        #[arg(value_name = "MODE", required_unless_present = "cycle", conflicts_with = "cycle")]
+        #[arg(
+            value_name = "MODE",
+            required_unless_present = "cycle",
+            conflicts_with = "cycle"
+        )]
         mode: Option<Mode>,
         #[arg(long)]
         cycle: bool,
@@ -331,14 +338,12 @@ fn run(cli: Cli) -> Result<()> {
         #[cfg(not(target_os = "macos"))]
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
-        CliCommand::Toggle { postproc, handoff } => send_command(Command::Toggle {
-            postproc,
-            handoff,
-        }),
-        CliCommand::Start { postproc, handoff } => send_command(Command::Start {
-            postproc,
-            handoff,
-        }),
+        CliCommand::Toggle { postproc, handoff } => {
+            send_command(Command::Toggle { postproc, handoff })
+        }
+        CliCommand::Start { postproc, handoff } => {
+            send_command(Command::Start { postproc, handoff })
+        }
         CliCommand::Stop => send_command(Command::Stop),
         CliCommand::Cancel => send_command(Command::Cancel),
         CliCommand::Status { json } => print_status(json),
@@ -453,9 +458,13 @@ fn set_default_mode(mode: Option<Mode>, cycle: bool) -> Result<()> {
     };
     match ipc::command(Command::Reload) {
         Ok(reply) => anyhow::ensure!(reply.ok, "mode saved, but daemon reload failed"),
-        Err(error) if error.downcast_ref::<io::Error>().is_some_and(|error| {
-            matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused)
-        }) => {}
+        Err(error)
+            if error.downcast_ref::<io::Error>().is_some_and(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                )
+            }) => {}
         Err(error) => return Err(error).context("mode saved, but daemon reload failed"),
     }
     println!("{}", selected.as_str());
@@ -1202,7 +1211,10 @@ fn cleanup_diagnosis(config: &Config) -> String {
         return "cleanup: disabled (raw transcript is delivered)".to_owned();
     }
     if config.postproc.model_config().model.trim().is_empty() {
-        return format!("cleanup: {} applies vocabulary aliases only (no cleanup model)", config.postproc.mode.label());
+        return format!(
+            "cleanup: {} applies vocabulary aliases only (no cleanup model)",
+            config.postproc.mode.label()
+        );
     }
     if config.postproc.endpoint.trim().is_empty() {
         return "cleanup: blocked (endpoint is empty) — run: cantrip settings".to_owned();
@@ -1218,7 +1230,11 @@ fn cleanup_diagnosis(config: &Config) -> String {
         config.postproc.model_config().model,
         endpoint,
         credential_status(config.postproc.api_key_id.as_deref()),
-        if config.postproc.mode == Mode::Clean { config.postproc.min_chars } else { 0 }
+        if config.postproc.mode == Mode::Clean {
+            config.postproc.min_chars
+        } else {
+            0
+        }
     )
 }
 
@@ -1309,7 +1325,8 @@ mod tests {
     fn all_modes_are_available_as_take_overrides_and_persistent_defaults() {
         for mode in Mode::ALL {
             for command in ["start", "toggle"] {
-                let cli = Cli::try_parse_from(["cantrip", command, "--postproc", mode.as_str()]).unwrap();
+                let cli =
+                    Cli::try_parse_from(["cantrip", command, "--postproc", mode.as_str()]).unwrap();
                 match cli.command.unwrap() {
                     CliCommand::Start { postproc, .. } | CliCommand::Toggle { postproc, .. } => {
                         assert_eq!(postproc, Some(mode));
@@ -1318,10 +1335,18 @@ mod tests {
                 }
             }
             let cli = Cli::try_parse_from(["cantrip", "mode", mode.as_str()]).unwrap();
-            assert!(matches!(cli.command, Some(CliCommand::Mode { mode: Some(selected), cycle: false }) if selected == mode));
+            assert!(
+                matches!(cli.command, Some(CliCommand::Mode { mode: Some(selected), cycle: false }) if selected == mode)
+            );
         }
         let cli = Cli::try_parse_from(["cantrip", "mode", "--cycle"]).unwrap();
-        assert!(matches!(cli.command, Some(CliCommand::Mode { mode: None, cycle: true })));
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Mode {
+                mode: None,
+                cycle: true
+            })
+        ));
         assert!(Cli::try_parse_from(["cantrip", "mode"]).is_err());
         assert!(Cli::try_parse_from(["cantrip", "mode", "raw", "--cycle"]).is_err());
         assert!(Cli::try_parse_from(["cantrip", "toggle", "--postproc", "unknown"]).is_err());

@@ -192,7 +192,10 @@ pub fn save_default_mode(path: &Path, mode: Mode) -> Result<()> {
 /// from the last to the first, as [`save_default_mode`] does; returns it.
 pub fn cycle_default_mode(path: &Path) -> Result<Mode> {
     update_default_mode(path, |current| {
-        let index = Mode::ALL.iter().position(|mode| *mode == current).unwrap_or(0);
+        let index = Mode::ALL
+            .iter()
+            .position(|mode| *mode == current)
+            .unwrap_or(0);
         Mode::ALL[(index + 1) % Mode::ALL.len()]
     })
 }
@@ -236,7 +239,11 @@ fn write_modes(doc: &mut toml_edit::DocumentMut, wanted: &PostprocConfig) -> Res
     }
     if read_back(&doc.to_string())?.endpoint != wanted.endpoint {
         let postproc = ensure_table(doc.as_table_mut(), "postproc")?;
-        set_preserving_decor(postproc, "endpoint", toml_edit::value(wanted.endpoint.as_str()));
+        set_preserving_decor(
+            postproc,
+            "endpoint",
+            toml_edit::value(wanted.endpoint.as_str()),
+        );
     }
     // An absent credential id's default follows the endpoint; compare it afterwards.
     let current = read_back(&doc.to_string())?;
@@ -277,8 +284,7 @@ fn write_mode_model(
 
 /// The cleanup settings the engine would load from `text`.
 fn read_back(text: &str) -> Result<PostprocConfig> {
-    let config: Config =
-        toml::from_str(text).context("the edited configuration does not parse")?;
+    let config: Config = toml::from_str(text).context("the edited configuration does not parse")?;
     Ok(config.postproc)
 }
 

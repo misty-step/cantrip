@@ -118,8 +118,12 @@ impl Mode {
     pub const fn description(self) -> &'static str {
         match self {
             Self::Raw => "Recognizer output without aliases or LLM changes.",
-            Self::Clean => "Vocabulary aliases, then faithful cleanup that preserves your wording and intent.",
-            Self::Elevate => "Vocabulary aliases, then a clearer, more articulate version of what you said.",
+            Self::Clean => {
+                "Vocabulary aliases, then concise refinement that preserves your meaning."
+            }
+            Self::Elevate => {
+                "Vocabulary aliases, then a clearer, more articulate version of what you said."
+            }
         }
     }
 }
@@ -128,7 +132,9 @@ impl std::str::FromStr for Mode {
     type Err = &'static str;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
-        Self::ALL.into_iter().find(|mode| mode.as_str() == value)
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
             .ok_or("expected raw, clean, or elevate")
     }
 }
@@ -206,7 +212,8 @@ struct PostprocInput {
 fn present_optional_string<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(deserializer).map(|value| Some(value.filter(|s| !s.trim().is_empty())))
+    Option::<String>::deserialize(deserializer)
+        .map(|value| Some(value.filter(|s| !s.trim().is_empty())))
 }
 
 fn optional_nonempty_string<'de, D: serde::Deserializer<'de>>(
@@ -226,10 +233,16 @@ impl From<PostprocInput> for PostprocConfig {
     fn from(input: PostprocInput) -> Self {
         let mut config = Self::default();
         let legacy = input.mode.is_none()
-            && (input.enabled.is_some() || input.model.is_some() || input.reasoning_effort.is_some());
+            && (input.enabled.is_some()
+                || input.model.is_some()
+                || input.reasoning_effort.is_some());
         let legacy_model = input.model.is_some();
         config.mode = input.mode.unwrap_or_else(|| {
-            if input.enabled.unwrap_or(false) { Mode::Clean } else { Mode::Raw }
+            if input.enabled.unwrap_or(false) {
+                Mode::Clean
+            } else {
+                Mode::Raw
+            }
         });
         if let Some(clean) = input.clean {
             config.clean = clean;
@@ -254,13 +267,22 @@ impl From<PostprocInput> for PostprocConfig {
         }
         if let Some(key) = input.api_key_id {
             config.api_key_id = key;
-        } else if legacy || config.endpoint.trim_end_matches('/') != "https://openrouter.ai/api/v1" {
+        } else if legacy || config.endpoint.trim_end_matches('/') != "https://openrouter.ai/api/v1"
+        {
             config.api_key_id = None;
         }
-        if let Some(timeout) = input.timeout_ms { config.timeout_ms = timeout; }
-        if let Some(passes) = input.passes { config.passes = passes; }
-        if let Some(min_chars) = input.min_chars { config.min_chars = min_chars; }
-        if let Some(instructions) = input.instructions { config.instructions = instructions; }
+        if let Some(timeout) = input.timeout_ms {
+            config.timeout_ms = timeout;
+        }
+        if let Some(passes) = input.passes {
+            config.passes = passes;
+        }
+        if let Some(min_chars) = input.min_chars {
+            config.min_chars = min_chars;
+        }
+        if let Some(instructions) = input.instructions {
+            config.instructions = instructions;
+        }
         config.decision_model = input.decision_model;
         config.decision_endpoint = input.decision_endpoint;
         config.decision_api_key_id = input.decision_api_key_id;
@@ -290,12 +312,12 @@ pub struct PipelineDisplay {
 impl PipelineDisplay {
     pub fn label(&self) -> String {
         let stt_name = if self.stt_local && self.stt_model == models::PARAKEET_V3_INT8.dir_name {
-            "Parakeet"
+            "Parakeet v3"
         } else {
             self.stt_model.rsplit('/').next().unwrap_or(&self.stt_model)
         };
         let location = if self.stt_local { "local" } else { "cloud" };
-        let mut label = format!("{} · {stt_name} ({location})", self.mode.label());
+        let mut label = format!("{} · STT {stt_name} ({location})", self.mode.label());
         if self.mode != Mode::Raw {
             match &self.llm_model {
                 Some(model) => {
@@ -547,7 +569,10 @@ mod tests {
         let config = Config {
             postproc: PostprocConfig {
                 mode: Mode::Clean,
-                clean: ModeModelConfig { model: String::new(), reasoning_effort: None },
+                clean: ModeModelConfig {
+                    model: String::new(),
+                    reasoning_effort: None,
+                },
                 ..PostprocConfig::default()
             },
             ..Config::default()
@@ -560,7 +585,8 @@ mod tests {
     #[test]
     fn legacy_modes_preserve_opt_in_without_silently_enabling_a_cloud_model() {
         for (enabled, mode) in [(true, Mode::Clean), (false, Mode::Raw)] {
-            let config: Config = toml::from_str(&format!("[postproc]\nenabled = {enabled}\n")).unwrap();
+            let config: Config =
+                toml::from_str(&format!("[postproc]\nenabled = {enabled}\n")).unwrap();
             assert_eq!(config.postproc.mode, mode);
             assert!(config.postproc.clean.model.is_empty());
             assert_eq!(config.postproc.api_key_id, None);
@@ -589,12 +615,16 @@ reasoning_effort = ""
 model = "elevate-model"
 reasoning_effort = "medium"
 "#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(config.postproc.mode, Mode::Elevate);
         assert_eq!(config.postproc.clean.model, "clean-model");
         assert_eq!(config.postproc.clean.reasoning_effort, None);
         assert_eq!(config.postproc.model_config().model, "elevate-model");
-        assert_eq!(config.postproc.elevate.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            config.postproc.elevate.reasoning_effort.as_deref(),
+            Some("medium")
+        );
         let saved = toml::to_string(&config).unwrap();
         assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
         let value = serde_json::to_value(&config.postproc).unwrap();
@@ -608,9 +638,13 @@ reasoning_effort = "medium"
     fn legacy_model_and_effort_migrate_without_changing_its_implicit_local_route() {
         let config: Config = toml::from_str(
             "[postproc]\nenabled = true\nmodel = \"old-local\"\nreasoning_effort = \"high\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(config.postproc.clean.model, "old-local");
-        assert_eq!(config.postproc.clean.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            config.postproc.clean.reasoning_effort.as_deref(),
+            Some("high")
+        );
         assert_eq!(config.postproc.endpoint, "http://localhost:11434/v1");
         assert_eq!(config.postproc.elevate, ModeModelConfig::default());
         let saved = toml::to_string(&config).unwrap();
@@ -626,7 +660,8 @@ reasoning_effort = "medium"
         ] {
             let config: Config = toml::from_str(&format!(
                 "[postproc]\nmode = \"clean\"\nendpoint = \"{endpoint}\"\n",
-            )).unwrap();
+            ))
+            .unwrap();
             assert_eq!(config.postproc.api_key_id.as_deref(), key);
             let saved = toml::to_string(&config).unwrap();
             assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
@@ -638,17 +673,29 @@ reasoning_effort = "medium"
     #[test]
     fn pipeline_display_uses_the_selected_model_and_local_restriction_preserves_mode() {
         let mut config = Config::default();
-        assert_eq!(config.pipeline_display().label(), "Raw · Parakeet (local)");
+        assert_eq!(
+            config.pipeline_display().label(),
+            "Raw · STT Parakeet v3 (local)"
+        );
         config.postproc.mode = Mode::Clean;
-        assert_eq!(config.pipeline_display().label(), "Clean · Parakeet (local) → aliases → gpt-6.1-sol");
+        assert_eq!(
+            config.pipeline_display().label(),
+            "Clean · STT Parakeet v3 (local) → aliases → gpt-6.1-sol"
+        );
         config.postproc.elevate.model = "provider/articulate".into();
         config.postproc.mode = Mode::Elevate;
-        assert_eq!(config.pipeline_display().llm_model.as_deref(), Some("provider/articulate"));
+        assert_eq!(
+            config.pipeline_display().llm_model.as_deref(),
+            Some("provider/articulate")
+        );
         config.restrict_to_local();
         assert_eq!(config.postproc.mode, Mode::Elevate);
         assert!(config.postproc.clean.model.is_empty());
         assert!(config.postproc.elevate.model.is_empty());
-        assert_eq!(config.pipeline_display().label(), "Elevate · Parakeet (local) → aliases only");
+        assert_eq!(
+            config.pipeline_display().label(),
+            "Elevate · STT Parakeet v3 (local) → aliases only"
+        );
     }
 
     #[test]

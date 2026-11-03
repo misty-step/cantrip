@@ -1,6 +1,8 @@
 //! Optional cleanup honors its configured shared budget and preserves usable text.
 
-use cantrip_engine::config::{Config, Mode, ModeModelConfig, PostprocConfig, SttConfig, VocabularyEntry};
+use cantrip_engine::config::{
+    Config, Mode, ModeModelConfig, PostprocConfig, SttConfig, VocabularyEntry,
+};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -132,7 +134,10 @@ fn assert_budget_outcome(
             mode: Mode::Clean,
             endpoint: endpoint.clone(),
             api_key_id: None,
-            clean: ModeModelConfig { model: "test-cleanup".to_owned(), reasoning_effort: None },
+            clean: ModeModelConfig {
+                model: "test-cleanup".to_owned(),
+                reasoning_effort: None,
+            },
             timeout_ms,
             passes,
             min_chars: 0,

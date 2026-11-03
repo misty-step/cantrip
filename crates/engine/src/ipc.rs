@@ -1183,15 +1183,23 @@ mod tests {
         );
         for mode in Mode::ALL {
             for command in [
-                Command::Toggle { postproc: Some(mode), handoff: None },
-                Command::Start { postproc: Some(mode), handoff: None },
+                Command::Toggle {
+                    postproc: Some(mode),
+                    handoff: None,
+                },
+                Command::Start {
+                    postproc: Some(mode),
+                    handoff: None,
+                },
             ] {
                 let wire = serde_json::to_value(&command).unwrap();
                 assert_eq!(wire["postproc"], mode.as_str());
                 assert_eq!(serde_json::from_value::<Command>(wire).unwrap(), command);
             }
         }
-        assert!(serde_json::from_str::<Command>(r#"{"command":"start","postproc":"unknown"}"#).is_err());
+        assert!(
+            serde_json::from_str::<Command>(r#"{"command":"start","postproc":"unknown"}"#).is_err()
+        );
         assert!(serde_json::from_str::<Command>(r#"{"command":"start","postproc":true}"#).is_err());
         assert_eq!(
             serde_json::to_string(&Delivery::HandedOff).unwrap(),
