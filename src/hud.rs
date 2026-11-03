@@ -2455,6 +2455,11 @@ pub enum ScreenshotState {
 }
 
 fn preview_snapshot(state: StateKind) -> StatusSnapshot {
+    let mode = if state == StateKind::Idle {
+        Mode::Raw
+    } else {
+        Mode::Elevate
+    };
     StatusSnapshot {
         epoch: "preview-epoch".to_owned(),
         operation_id: if state == StateKind::Idle {
@@ -2487,14 +2492,7 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
         hud: cantrip_engine::config::HudConfig::default(),
         handoff: None,
         // An idle engine reports its configured default; a take, what it started with.
-        pipeline: Some(preview_pipeline(
-            if state == StateKind::Idle {
-                Mode::Raw
-            } else {
-                Mode::Elevate
-            },
-            None,
-        )),
+        pipeline: Some(preview_pipeline(mode, None)),
         microphone: None,
     }
 }
