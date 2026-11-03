@@ -1474,5 +1474,797 @@
       "inventory_has_more": false
     },
     "general_checks_run_by_this_slice": false
+  },
+  "comparison": {
+    "schema": "cantrip.eval.elevate-comparison.v1",
+    "run_id": "2026-11-03-elevate-ab",
+    "claim_type": "Measured execution/accounting; quality counts are independent blinded reviewer judgments, not builder labels.",
+    "source_revision": "8031836697718ca6f4eebb560fcdb94edb826b3c",
+    "precommit": {
+      "candidate_revision": "61dfe40",
+      "comparison_rule_revision": "f53020d",
+      "planned_upstream_submissions": 246,
+      "cases": 41,
+      "repeats": 3,
+      "model": "openai/gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "absolute_key_ceiling_usd": 4.5,
+      "primary": "One binary fidelity-failed outcome per output if any blind semantic fidelity category fails. No Clean wording oracle; numeric values, meaningful modality/conditions and literal content are protected, not unquoted number spelling, quotation wrappers or verbal filler.",
+      "fidelity_categories": [
+        "fact_added",
+        "fact_omitted",
+        "literal",
+        "modality",
+        "negation",
+        "number",
+        "speech_act"
+      ],
+      "lexical_floor_per_arm": "21/24 across the eight added cases and three repeats",
+      "selection": "Among complete arms meeting the lexical floor, choose fewer fidelity-failed outputs. Ties choose operator. Protocol failures never become passes.",
+      "historical_outputs_reused": 0,
+      "paid_retries_authorized": false
+    },
+    "aggregation_script_sha256": "8067234bfecb6f6d63f4bb7c48099f2918453b1a1943ae702fd814eb12e895da",
+    "ordering": "Shuffle case/repeat pairs, then randomize the two arm positions within every pair.",
+    "seed": 2026110301,
+    "corpus_sha256": "1317c0d6951b323a28c72a5cd670c993923a8122a5851f85886a4fba837a15db",
+    "inherited_corpus_sha256": "447c382098bdd4d0a20d34f909dcd57a81a1a6d6f80b70cc910e3d2d024f1885",
+    "operator_sha256": "0dadc03aaacd757190ce83f5ded06091d5bbb51c5912ecd123deec018a1d32c0",
+    "addendum_sha256": "05f0cc50c043c09663246229879f2edacadf2ebf4dc0dfbc25a5deb6d233b742",
+    "system_prompt_sha256": {
+      "candidate": [
+        "01637ab0f1d996936893659b4eda602399f1f2ebe7ac8e7baa38f55a342066b3"
+      ],
+      "operator": [
+        "5ef810baaac6da2d2983ef674010d5ef2d797ead46ed46bc871b93aa5ff67e0f"
+      ]
+    },
+    "blind_review": {
+      "reviewer": "ElevateMode.BlindFidelity",
+      "artifact_sha256": "9bab70e31fce09dd84e106a3da270ec1bfa117a3f9c0f78732f8757e9dd70587",
+      "judgments_sha256": "7d6d09f40c4cb9873290cf24465dbd1dab038533aad76e8d25743528c64d94ab",
+      "unique_items": 115,
+      "weighted_outputs": 246,
+      "decode_revealed_only_after_fixed_grades": true
+    },
+    "arms": {
+      "candidate": {
+        "outputs": 123,
+        "protocol_failures": 0,
+        "fidelity_failed_outputs": 22,
+        "fidelity_passed_outputs": 101,
+        "failure_categories": {
+          "fact_added": 3,
+          "fact_omitted": 3,
+          "literal": 12,
+          "modality": 4
+        },
+        "lexical_successes": 24,
+        "lexical_possible": 24,
+        "lexical_by_repeat": {
+          "1": 8,
+          "2": 8,
+          "3": 8
+        },
+        "lexical_by_case": {
+          "elevate-atomicity-question": 3,
+          "elevate-backpressure-hypothesis": 3,
+          "elevate-fricatives-evidence": 3,
+          "elevate-idempotent-directive": 3,
+          "elevate-instantiate-conditional": 3,
+          "elevate-invariant-numbers": 3,
+          "elevate-leading-question": 3,
+          "elevate-regression-negation": 3
+        },
+        "lexical_distinct_case_coverage": 8,
+        "qualifies": true,
+        "upstream_latency_ms": {
+          "n": 123,
+          "mean": 1718.2295284552845,
+          "p50": 1650.301,
+          "p95": 2415.733,
+          "min": 1100.405,
+          "max": 3999.515
+        },
+        "reported_cost_usd": 0.186296,
+        "input_tokens": 79728,
+        "output_tokens": 2684
+      },
+      "operator": {
+        "outputs": 123,
+        "protocol_failures": 0,
+        "fidelity_failed_outputs": 33,
+        "fidelity_passed_outputs": 90,
+        "failure_categories": {
+          "fact_added": 8,
+          "fact_omitted": 3,
+          "literal": 14,
+          "modality": 8
+        },
+        "lexical_successes": 24,
+        "lexical_possible": 24,
+        "lexical_by_repeat": {
+          "1": 8,
+          "2": 8,
+          "3": 8
+        },
+        "lexical_by_case": {
+          "elevate-atomicity-question": 3,
+          "elevate-backpressure-hypothesis": 3,
+          "elevate-fricatives-evidence": 3,
+          "elevate-idempotent-directive": 3,
+          "elevate-instantiate-conditional": 3,
+          "elevate-invariant-numbers": 3,
+          "elevate-leading-question": 3,
+          "elevate-regression-negation": 3
+        },
+        "lexical_distinct_case_coverage": 8,
+        "qualifies": true,
+        "upstream_latency_ms": {
+          "n": 123,
+          "mean": 1690.744219512195,
+          "p50": 1570.108,
+          "p95": 2351.69,
+          "min": 1164.884,
+          "max": 3241.908
+        },
+        "reported_cost_usd": 0.17516,
+        "input_tokens": 74070,
+        "output_tokens": 2702
+      }
+    },
+    "selected_arm": "candidate",
+    "accounting": {
+      "unique_scheduled_upstream_submissions": 246,
+      "historical_outputs_reused": 0,
+      "paid_retries": 0,
+      "reported_cost_usd": 0.361456,
+      "canonical_model": "openai/gpt-6.1-sol-20260929",
+      "key_usage_start_usd": 2.843343119,
+      "key_usage_end_usd": 3.204799119,
+      "absolute_key_ceiling_usd": 4.5,
+      "test_only_max_completion_tokens": 1024,
+      "provider_guards": {
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "max_price": {
+          "prompt": 2.0,
+          "completion": 10.0,
+          "request": 0.0
+        }
+      },
+      "counter_policy": "Read before and after every serial call; budget against max(counter high-water, initial usage plus all known provider charges). Reserve byte-bounded input plus 256 framing tokens and 1024 completion tokens at capped prices with a 10% margin. A backwards read never refunds room. Unknown liability halts; no paid retries.",
+      "local_completed_response_replays": 0,
+      "interruption": null
+    },
+    "failures": [
+      {
+        "case": "elevate-backpressure-hypothesis",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "f9ad8e8fbf2c0815e9956ca46745177f",
+        "output_sha256": "93a125fd5a502778cba5858c8a0518ad639469ec103c6dd41b51321935ee8afd",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "quoted-misspelling",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "1ce18919bcdb4b535d2f90035a171244",
+        "output_sha256": "c6f9d40a21b12550f8f1d901e1701f5a144b32e50e8dcfa7d5c9fd4e209a0330",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "538d2b3ea20ae55392b093c1bd232427",
+        "output_sha256": "524a86e526050ce62e586673230ee9771c983f4f142ebd028c878e428f648bcf",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "538d2b3ea20ae55392b093c1bd232427",
+        "output_sha256": "524a86e526050ce62e586673230ee9771c983f4f142ebd028c878e428f648bcf",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "b47c534459b358b2d29a458b3ea89c3f",
+        "output_sha256": "2d102da8afdde687df8300bfcc09eb194d4ad1d0687797e8d861c1dd67648636",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "47bdd40f009b8c7c0fdc40e90ee76b18",
+        "output_sha256": "80377996debb2944feaca190988c6d2bd19b2f21a738e7343fa23172ae617718",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "negation",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "fb47586dc74595fa58cb957bec1577f2",
+        "output_sha256": "b380ac41a4837f38b65766107d426b0c472b62e63c3930b14bce35946bc799f2",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "e1a8f624c8ec6d43acc72d720cec970c",
+        "output_sha256": "27b2758fe6e0909d2698fbd5f6415065e34ef4b3a7bdf4ab882a1f0ea95e797b",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "1b71cb227698ff8d200d745044c3561e",
+        "output_sha256": "9f2a80e1eae3a81945797e3b396fafc121d16ec49d8cbeab2a9b2a91480e3764",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "elevate-fricatives-evidence",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "0f2b264f416f3c7a5038b9d8b1623f4b",
+        "output_sha256": "5c79f9fa8706dc41ea2fcb4b52e179a04257e0027b3c381f12a121e17e59681f",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "0e7bc320ac59914e6c2dfa4ab8bf7d61",
+        "output_sha256": "edccd2fec2edc8ce3a766a74408b21488b34a7567a58fcfef08f2df440c98261",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "numbered-sequence",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "df09d85b5190a29012426e64e2069a61",
+        "output_sha256": "9ad111907d4e9c677be32fb7349b348975ceb8b924d0f5bd2c459844f53b83f7",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "elevate-fricatives-evidence",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "0f2b264f416f3c7a5038b9d8b1623f4b",
+        "output_sha256": "5c79f9fa8706dc41ea2fcb4b52e179a04257e0027b3c381f12a121e17e59681f",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-backpressure-hypothesis",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "41e4afc18000e1e5919603e8c7f45533",
+        "output_sha256": "7089df38da71984a639431817f7b46604e93afb19e296fea6ff4d23ebea26d74",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "quoted-misspelling",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "1ce18919bcdb4b535d2f90035a171244",
+        "output_sha256": "c6f9d40a21b12550f8f1d901e1701f5a144b32e50e8dcfa7d5c9fd4e209a0330",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "cab20c0c228ad13818aa47b32dbba495",
+        "output_sha256": "0b308f7707852682bf44938bade6b01cff781fa22f12c48611d0c294308d47ac",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "b47c534459b358b2d29a458b3ea89c3f",
+        "output_sha256": "2d102da8afdde687df8300bfcc09eb194d4ad1d0687797e8d861c1dd67648636",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "b47c534459b358b2d29a458b3ea89c3f",
+        "output_sha256": "2d102da8afdde687df8300bfcc09eb194d4ad1d0687797e8d861c1dd67648636",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "cab20c0c228ad13818aa47b32dbba495",
+        "output_sha256": "0b308f7707852682bf44938bade6b01cff781fa22f12c48611d0c294308d47ac",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "elevate-backpressure-hypothesis",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "f6b0f565dd1ee07f7898cdfed7c9165b",
+        "output_sha256": "b023c70c6ef9fadf3726f009a8b873217f3d8c47bac6a724a80bcd9fd5527d9b",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "negation",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "fb47586dc74595fa58cb957bec1577f2",
+        "output_sha256": "b380ac41a4837f38b65766107d426b0c472b62e63c3930b14bce35946bc799f2",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      }
+    ],
+    "sampling_provenance": {
+      "unique_provider_generations": 246,
+      "unique_original_production_bodies": 41,
+      "unique_effective_bodies": 82,
+      "private_numeric_calls_sha256": "1004c064728223c8a014165f252bf256a9b8f72f9a5eb2c561a513a35d60b780",
+      "private_production_receipt_sha256": "f9ff13abab0810a6ea60b249bcb981598694125ef9e4dc1f76ffd91721381c30",
+      "private_provider_receipt_sha256": "46864ca159c19132c507046c027b69680af138e32d88743a84daef31aa34d09f"
+    },
+    "limitations": [
+      "One precommitted 41-case x3-repeat x2-arm synthetic trial; no private dictation, native UI or reliability claim.",
+      "The same decision corpus informed the initial study and is not a held-out or independent dictation corpus.",
+      "Identical source/output pairs were deduplicated for blind judgment and then weighted back to every scheduled output.",
+      "Primary fidelity and lexical scores are the independent blind reviewer's judgments, not Clean wording or builder exact-number diagnostics.",
+      "The candidate system insertion and identical generation/price caps were broker-only transport changes; production postproc::refine generated every original request.",
+      "[INFERENCE] The blind artifact excludes full canonical-vocabulary context; literal grades on name/acronym and spoken-path cases need that context for interpretation. All fixed judgments are retained, with no post-unblinding regrading."
+    ],
+    "execution": {
+      "placement": "Fresh Boat Linux x86_64 worker for the assigned build and production-path inference; native macOS pass-env broker only for credential-bearing HTTPS.",
+      "worker_id": "bx_9rwx6d29",
+      "worker_flags": [
+        "--no-env",
+        "--no-snapshots",
+        "--no-monitoring",
+        "--type large",
+        "--ttl 1800"
+      ],
+      "source_revision": "8031836697718ca6f4eebb560fcdb94edb826b3c",
+      "build_command": "env CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup TMPDIR=/home/user/.cache/tmp/cantrip-elevate-ab rustup run 1.98.1 cargo build --locked --example eval --jobs 4",
+      "build_exit_code": 0,
+      "dry_run": {
+        "exit_code": 0,
+        "inherited_cases": 33,
+        "added_cases": 8,
+        "scheduled_slots": 246,
+        "paid_calls": 0
+      },
+      "paid_run": {
+        "exit_code": 0,
+        "remote_timeout_seconds": 1200,
+        "scheduled_slots": 246,
+        "completed_outputs": 246,
+        "native_cli_wall_seconds": 688.99
+      },
+      "fresh_draw_identity": "Each precommitted slot has its own opaque loopback endpoint. The native journal binds slot, arm, repeat and the exact production body hash; identical repeated bodies do not share upstream generations.",
+      "credential_placement": "Dedicated SPEECH_EVAL key injected only into the native broker by pass-env; never copied to a worker environment, file or snapshot.",
+      "worker_credential_environment_absent_probe": true,
+      "reverse_tunnel_closed_during_compilation": true,
+      "native_broker_and_reverse_tunnel_stopped": true,
+      "blind_artifact": {
+        "unique_items": 115,
+        "weighted_outputs": 246,
+        "whitelisted_fields_only": true,
+        "all_output_hashes_verified": true,
+        "owner_only_file_and_directory": true,
+        "arm_model_timing_cost_metadata_fields": false
+      },
+      "independent_grader_agent": "ElevateMode.BlindFidelity",
+      "worker_cleanup": {
+        "operation": "bdop_4f86ae2030ea45d989a6c79ff386a877",
+        "status": "completed",
+        "completed_at": "2026-11-03T20:39:47.870Z",
+        "absent_from_complete_inventory": true,
+        "inventory_has_more": false
+      },
+      "general_checks_linters_or_formatters_run_by_this_slice": false,
+      "local_cargo_builds_models_or_vms_run": false,
+      "sampling_protocol_proof": {
+        "unique_scheduled_slot_ids": 246,
+        "unique_provider_generation_ids": 246,
+        "unique_original_production_bodies": 41,
+        "unique_effective_bodies": 82,
+        "all_provider_replies_stop_completed": true,
+        "final_counter_reconciles_all_provider_charges": true,
+        "maximum_reserved_key_liability_usd": 3.222526119
+      },
+      "independent_grades_fixed_before_decode": true
+    }
   }
 }
