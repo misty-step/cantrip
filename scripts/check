@@ -1,36 +1,39 @@
 #!/usr/bin/env bash
-# Repository-owned clone-to-green command.
-#
-# Runs the same gates CI enforces, in order, and stops at the first red
-# gate:
-#   1. cargo fmt --all --check
-#   2. cargo clippy --workspace --locked --all-targets -- -D warnings
-#   3. cargo test --workspace --locked
-#   4. Offline evaluation example tests
-#   5. Installer, integration and release safety tests
+# Repository-owned clone-to-green command. CI runs the two independent tiers in
+# parallel; no argument runs their union locally and stops at the first red gate.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "── check: cargo fmt --all --check"
-cargo fmt --all --check
+tier="${1-all}"
+if [[ $# -gt 1 || ! "$tier" =~ ^(all|rust|contracts)$ ]]; then
+  echo "Usage: scripts/check [all|rust|contracts]" >&2
+  exit 2
+fi
 
-echo "── check: cargo clippy --workspace --locked --all-targets -- -D warnings"
-cargo clippy --workspace --locked --all-targets -- -D warnings
+if [[ "$tier" != contracts ]]; then
+  echo "── check: cargo fmt --all --check"
+  cargo fmt --all --check
 
-echo "── check: cargo test --workspace --locked"
-cargo test --workspace --locked
+  echo "── check: cargo clippy --workspace --locked --all-targets -- -D warnings"
+  cargo clippy --workspace --locked --all-targets -- -D warnings
 
-echo "── check: offline evaluation example"
-cargo test --locked --package cantrip --example eval
+  echo "── check: cargo test --workspace --locked"
+  cargo test --workspace --locked
 
-echo "── check: Omarchy installer"
-python3 -m unittest discover -s integrations/omarchy -p 'test_*.py'
+  echo "── check: offline evaluation example"
+  cargo test --locked --package cantrip --example eval
+fi
 
-echo "── check: release artifact and installer"
-python3 -m unittest discover -s tests -p 'test_release_*.py'
+if [[ "$tier" != rust ]]; then
+  echo "── check: Omarchy installer"
+  python3 -m unittest discover -s integrations/omarchy -p 'test_*.py'
 
-echo "── check: source installer"
-python3 -m unittest discover -s tests -p 'test_install_from_source.py'
+  echo "── check: release artifact and installer"
+  python3 -m unittest discover -s tests -p 'test_release_*.py'
 
-echo "── check: website deploy smoke"
-python3 -m unittest discover -s tests -p 'test_verify_site.py'
+  echo "── check: source installer"
+  python3 -m unittest discover -s tests -p 'test_install_from_source.py'
+
+  echo "── check: website deploy smoke"
+  python3 -m unittest discover -s tests -p 'test_verify_site.py'
+fi

@@ -4108,10 +4108,8 @@ mod tests {
 
     #[test]
     fn handoff_timeout_kills_child() {
-        HandoffTimeoutFixture::new(
-            "exec 3>\"$1\"\nprintf R >&3\nIFS= read -r release < \"$2\"",
-        )
-        .assert_timeout(1, "private words");
+        HandoffTimeoutFixture::new("exec 3>\"$1\"\nprintf R >&3\nIFS= read -r release < \"$2\"")
+            .assert_timeout(1, "private words");
     }
 
     #[test]

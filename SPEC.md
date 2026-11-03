@@ -45,6 +45,8 @@ Run `./scripts/check` and the downloaded-artifact procedure in
 isolated prior-artifact rollback and offline public-speech journey. Native Mac
 production distribution requires the separate real signing/notarization
 prerequisites in that guide; development CI is not production publication.
+The feedback and pre-release qualification boundary is recorded in
+[Decision 0035](docs/decisions/0035-bounded-ci-feedback.md).
 
 ## Identify and diagnose the public website
 

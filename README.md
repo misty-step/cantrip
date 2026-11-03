@@ -217,13 +217,17 @@ they are not production transcription deadlines.
 - **Local git hooks** (format + clippy on commit, tests + secret scan on push):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`
   must be on `PATH`; the hooks fail closed when either scanner is missing.
-- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): fmt, clippy
-  `-D warnings`, tests, secret scan, and on `master` the Landmark-prepared
-  verified Linux release.
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): independent
+  `./scripts/check rust` and `./scripts/check contracts` tiers run on standard
+  hosted Linux runners. Required `check` accepts only both successes; the full
+  secret scan and Conventional Commit title remain separate required checks.
+  Master and twice-daily runs also qualify both native Mac architectures.
 - **Native macOS CI** ([`.github/workflows/macos.yml`](.github/workflows/macos.yml)):
-  matching arm64/Intel workspace gates, explicit development packaging, and
-  relocated public-fixture verification. Check the actual run results; the
-  workflow definition alone does not establish a platform pass.
+  arm64 workspace, development packaging and relocated public-fixture proof on
+  PRs; the same proof on arm64 and Intel before master can publish a release.
+  [Decision 0035](docs/decisions/0035-bounded-ci-feedback.md) records the tiers,
+  cache policy and measured latency. Check actual run results; workflow
+  definitions alone do not establish a platform pass.
 - **Website and documentation source:** [`site/`](site/). The five user guides
   below are canonical Markdown, rendered by the site rather than copied into
   a second web manual. Website release data comes from published release assets,
