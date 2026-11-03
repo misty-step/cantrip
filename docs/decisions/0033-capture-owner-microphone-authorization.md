@@ -17,12 +17,21 @@ refused capture; granting from the menu left Settings behind instead
 runs the engine's Recorder — Cantrip.app when it owns the engine, or an external
 `cantrip daemon` — has an answer that matters.
 
+The accepted 2026-11-02 amendment follows the operator's “Prompt, then record”
+choice after [#208](https://github.com/misty-step/cantrip/issues/208): a ready
+first dictation press requests undetermined access and continues after Allow.
+It replaces the original start-never-asks rule while preserving capture-owner
+attribution and disclosure before the operator chooses Allow.
+
 ## Decision
 
 Every surface reads microphone authorization from the capture owner's status
-snapshot and asks for it with the owner's `allow-microphone` command, through the
-[Platform port](../../crates/engine/src/ports.rs). No client queries or requests
-in its own process, and there is no client-side fallback: without a reachable
+snapshot. Explicit Allow and an admitted first dictation press invoke the same
+capture-owner request function through the
+[Platform port](../../crates/engine/src/ports.rs). `allow-microphone` is the
+explicit Allow IPC command; a start or toggle calls the shared function rather
+than sending that command. No client queries or requests in its own process,
+and there is no client-side fallback: without a reachable
 owner its access is unknown. The owner's request never blocks its engine thread
 and reports `requesting` until the operator answers. Platforms without per-app
 authorization (Linux) report none and refuse the command as
@@ -44,9 +53,24 @@ started from a terminal.
 Settings, the menu and capture agree, including when the app is attached to an
 external daemon, whose grant goes to the app that started it. No surface can
 show or change access while no engine runs, and `doctor` then labels its own
-answer as this process only. The request stays an explicit operator action:
-start, status and polling never ask, and Recorder start keeps its own check.
-Owners that predate the field omit it and read as unreported.
+answer as this process only.
+
+After configuration and model admission, a macOS start or toggle with
+undetermined access requests it without blocking the engine. A missing local
+model fails before any prompt. The pending press reports microphone `requesting`;
+the requesting HUD, menu, and accepted start reply name any launcher grantee and
+show the existing shared-grant disclosure before the operator chooses Allow.
+Authorized continues that same press into recording; Cancel, Stop,
+or the matching toggle consumes the pending intent, so a later Allow cannot
+start it. Denied and Restricted end the press with their distinct failure
+classes and the named app's System Settings › Privacy & Security › Microphone
+guidance. The engine's `microphone_transition` table owns these edges; Recorder
+start retains its own authorization check.
+
+Status, polling, `doctor`, and opening Settings never request access. The
+explicit Allow controls remain available without starting a recording.
+Platforms without per-app authorization keep their existing start behavior.
+Owners that predate the status field omit it and read as unreported.
 
 Revisit if: macOS shares microphone authorization across a bundle's processes,
 or Cantrip records in more than one process.

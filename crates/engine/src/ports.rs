@@ -88,8 +88,8 @@ pub trait Platform: Send + Sync {
     }
     /// Start the operator's explicit microphone request in this process and
     /// return at once: the host awaits the answer off the engine thread and
-    /// reports `Requesting` meanwhile. Only the explicit command calls this,
-    /// never start, status or polling. The default has nothing to request.
+    /// reports `Requesting` meanwhile. Explicit Allow and a first dictation
+    /// press share this path; status and polling never call it.
     fn request_microphone_access(&self) -> Result<MicrophoneAuthorization> {
         Err(
             MicrophoneAccessUnsupported("This desktop has no microphone permission to request.")

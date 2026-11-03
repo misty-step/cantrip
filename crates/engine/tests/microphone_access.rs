@@ -1,18 +1,23 @@
-//! Microphone authorization belongs to the capture owner: status reports the
-//! owner's own answer, and only the explicit command asks for it.
+//! The public engine boundary: status never asks, explicit Allow never records,
+//! and a first press records only after authorization while its intent is live.
 
+use cantrip_engine::audio::{InputSignal, Pcm16WavWriter};
 use cantrip_engine::config::Config;
 use cantrip_engine::engine;
-use cantrip_engine::ipc::{self, Command, MicrophoneAuthorization, MicrophoneGrantee};
+use cantrip_engine::ipc::{
+    self, Command, Completeness, Delivery, MicrophoneAuthorization, MicrophoneGrantee, StateKind,
+    StatusSnapshot,
+};
+use cantrip_engine::pipeline::Stage;
 use cantrip_engine::ports::{DeliveryPermit, Platform, Recorder};
 use cantrip_engine::recovery;
 use parking_lot::Mutex;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as Process;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -21,6 +26,8 @@ use std::time::{Duration, Instant};
 struct PromptingOwner {
     authorization: Mutex<MicrophoneAuthorization>,
     requests: AtomicUsize,
+    starts: AtomicUsize,
+    fail_start: AtomicBool,
 }
 
 impl PromptingOwner {
@@ -33,11 +40,32 @@ impl PromptingOwner {
     fn requests(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
     }
+
+    fn starts(&self) -> usize {
+        self.starts.load(Ordering::SeqCst)
+    }
 }
 
 impl Platform for PromptingOwner {
-    fn start_recording(&self, _: &Path, _: Option<&str>) -> anyhow::Result<Box<dyn Recorder>> {
-        anyhow::bail!("microphone access not authorized")
+    fn start_recording(&self, path: &Path, _: Option<&str>) -> anyhow::Result<Box<dyn Recorder>> {
+        assert_eq!(
+            *self.authorization.lock(),
+            MicrophoneAuthorization::Authorized
+        );
+        if self.fail_start.load(Ordering::SeqCst) {
+            anyhow::bail!("injected capture startup refusal");
+        }
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
+        let mut writer = Pcm16WavWriter::new(file)?;
+        writer.write_samples(&[22; 1_600])?;
+        writer.finish()?;
+        writer.get_ref().sync_all()?;
+        Ok(Box::new(SyntheticRecording(path.to_owned())))
     }
 
     fn prepare_delivery(&self) {}
@@ -59,7 +87,7 @@ impl Platform for PromptingOwner {
     }
 
     fn microphone_grantee(&self) -> Option<MicrophoneGrantee> {
-        Some(MicrophoneGrantee::Cantrip)
+        Some(MicrophoneGrantee::Launcher(Some("Terminal".to_owned())))
     }
 
     fn request_microphone_access(&self) -> anyhow::Result<MicrophoneAuthorization> {
@@ -72,62 +100,252 @@ impl Platform for PromptingOwner {
     }
 }
 
+struct SyntheticRecording(PathBuf);
+
+impl Recorder for SyntheticRecording {
+    fn input_signal(&mut self) -> Option<InputSignal> {
+        None
+    }
+
+    fn request_stop(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn stop(self: Box<Self>) -> anyhow::Result<PathBuf> {
+        Ok(self.0)
+    }
+}
+
+fn wait_for(predicate: impl Fn(&StatusSnapshot) -> bool) -> StatusSnapshot {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = ipc::status().unwrap();
+        if predicate(&status) {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected owner transition never arrived: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn exercise_owner_authorization() {
     let owner = Arc::new(PromptingOwner {
         authorization: Mutex::new(MicrophoneAuthorization::NotDetermined),
         requests: AtomicUsize::new(0),
+        starts: AtomicUsize::new(0),
+        fail_start: AtomicBool::new(false),
     });
-    let mut config = Config::default();
-    // Reach native capture without a local model or a provider call.
-    config.stt.endpoint = Some("http://127.0.0.1:1/v1".to_owned());
     let platform: Arc<dyn Platform> = owner.clone();
     let (ready, started) = mpsc::channel();
     let daemon = std::thread::spawn(move || {
-        engine::run(config, false, platform, || ready.send(()).unwrap())
+        engine::run(Config::default(), false, platform, || {
+            ready.send(()).unwrap()
+        })
     });
     started.recv_timeout(Duration::from_secs(10)).unwrap();
 
-    let authorization = || {
-        ipc::status()
-            .unwrap()
-            .microphone
-            .map(|access| access.authorization)
+    let authorization = || ipc::status().unwrap().microphone.unwrap().authorization;
+    let press = || {
+        ipc::command(Command::Start {
+            postproc: None,
+            handoff: None,
+        })
+        .unwrap()
     };
+    assert_eq!(authorization(), MicrophoneAuthorization::NotDetermined);
+    assert_eq!(owner.requests(), 0, "status requested access");
+    let missing_model = press();
+    assert!(!missing_model.ok);
     assert_eq!(
-        authorization(),
-        Some(MicrophoneAuthorization::NotDetermined)
+        missing_model.error.as_deref(),
+        Some("local-model-unavailable")
     );
-    // Neither status nor a refused start asks for access.
-    let start = ipc::command(Command::Start {
-        postproc: None,
-        handoff: None,
-    })
-    .unwrap();
-    assert!(!start.ok);
-    assert_eq!(owner.requests(), 0);
+    assert_eq!(
+        owner.requests(),
+        0,
+        "missing model requested microphone access"
+    );
+
+    // Every captured take is cancelled, so the configured endpoint is never called.
+    let mut config = Config::default();
+    config.stt.endpoint = Some("http://127.0.0.1:1/v1".to_owned());
+    let config_file = cantrip_engine::paths::config_file().unwrap();
+    fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+    fs::write(config_file, toml::to_string(&config).unwrap()).unwrap();
+    assert!(ipc::command(Command::Reload).unwrap().ok);
 
     let allow = ipc::command(Command::AllowMicrophone).unwrap();
-    assert!(allow.ok, "{allow:?}");
+    assert!(allow.ok);
     assert_eq!(owner.requests(), 1);
-    assert_eq!(authorization(), Some(MicrophoneAuthorization::Requesting));
+    assert_eq!(authorization(), MicrophoneAuthorization::Requesting);
+    assert_eq!(owner.starts(), 0, "explicit Allow started a recording");
+    let adopted = press();
+    assert!(adopted.ok, "{adopted:?}");
+    assert!(adopted.message.as_ref().unwrap().contains("Terminal"));
+    assert!(adopted
+        .message
+        .as_ref()
+        .unwrap()
+        .contains("everything it runs"));
+    assert_eq!(
+        owner.requests(),
+        1,
+        "Start opened a second explicit-Allow prompt"
+    );
+    let adopted_id = ipc::status().unwrap().operation_id;
+    owner.answer(MicrophoneAuthorization::Authorized);
+    let recording = wait_for(|s| s.state == StateKind::Recording);
+    assert_eq!(recording.operation_id, adopted_id);
+    assert_eq!(owner.starts(), 1);
+    assert!(ipc::command(Command::Cancel).unwrap().ok);
+    wait_for(|s| s.state == StateKind::Idle);
+
+    // Already-authorized Start records without requesting again.
+    assert!(press().ok);
+    let authorized = ipc::status().unwrap();
+    assert_eq!(authorized.state, StateKind::Recording);
+    assert_ne!(authorized.operation_id, adopted_id);
+    assert_eq!(owner.requests(), 1);
+    assert_eq!(owner.starts(), 2);
+    assert!(ipc::command(Command::Cancel).unwrap().ok);
+    wait_for(|s| s.state == StateKind::Idle);
+
+    owner.answer(MicrophoneAuthorization::NotDetermined);
+    let start = press();
+    assert!(start.ok, "{start:?}");
+    assert_eq!(owner.requests(), 2);
+    assert_eq!(start.stage, Some(Stage::RequestingMicrophone));
+    let pending = ipc::status().unwrap();
+    assert_eq!(pending.state, StateKind::Processing);
+    assert!(pending.capabilities.cancel && pending.capabilities.stop);
+    assert_eq!(owner.starts(), 2);
+    assert!(ipc::command(Command::Ping).unwrap().ok);
+    assert!(!press().ok, "another Start replaced the pending press");
+    assert_eq!(owner.requests(), 2);
+    owner.answer(MicrophoneAuthorization::Authorized);
+    let recording = wait_for(|s| s.state == StateKind::Recording);
+    assert_eq!(recording.operation_id, pending.operation_id);
+    assert_eq!(
+        owner.starts(),
+        3,
+        "same press did not start exactly one recording"
+    );
+    assert!(ipc::command(Command::Cancel).unwrap().ok);
+    wait_for(|s| s.state == StateKind::Idle);
+    let takes = ipc::recordings().unwrap();
+    assert_eq!(takes.len(), 3);
+    assert!(takes.iter().all(|take| take.audio_available));
+
+    for cancel in [
+        Command::Cancel,
+        Command::Stop,
+        Command::Toggle {
+            postproc: None,
+            handoff: None,
+        },
+    ] {
+        owner.answer(MicrophoneAuthorization::NotDetermined);
+        assert!(press().ok);
+        let pending_id = ipc::status().unwrap().operation_id;
+        let requests = owner.requests();
+        let cancelled = ipc::command(cancel).unwrap();
+        assert!(cancelled.ok);
+        assert_eq!(cancelled.state, StateKind::Idle);
+        let outcome = cancelled.outcome.unwrap();
+        assert_eq!(outcome.operation_id, pending_id);
+        assert_eq!(outcome.completeness, Completeness::Cancelled);
+        assert_eq!(outcome.delivery, Delivery::Cancelled);
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.artifacts.take_id, None);
+        assert!(!outcome.artifacts.audio && !outcome.artifacts.text);
+        owner.answer(MicrophoneAuthorization::Authorized);
+        wait_for(|s| {
+            s.microphone.as_ref().unwrap().authorization == MicrophoneAuthorization::Authorized
+        });
+        assert_eq!(owner.starts(), 3, "late Allow revived cancelled intent");
+        assert_eq!(owner.requests(), requests, "polling requested access again");
+        assert_eq!(ipc::recordings().unwrap().len(), 3);
+    }
+
+    for (answer, class) in [
+        (MicrophoneAuthorization::Denied, "microphone-denied"),
+        (MicrophoneAuthorization::Restricted, "microphone-restricted"),
+    ] {
+        owner.answer(answer);
+        let requests = owner.requests();
+        let refused = press();
+        assert!(!refused.ok);
+        assert_eq!(refused.error.as_deref(), Some(class));
+        assert!(refused
+            .message
+            .unwrap()
+            .contains("System Settings › Privacy & Security › Microphone"));
+        assert_eq!(
+            owner.requests(),
+            requests,
+            "answered access was requested again"
+        );
+
+        owner.answer(MicrophoneAuthorization::NotDetermined);
+        assert!(press().ok);
+        owner.answer(answer);
+        let failed = wait_for(|s| s.state == StateKind::Idle);
+        let outcome = failed.outcome.unwrap();
+        assert_eq!(outcome.error.as_deref(), Some(class));
+        assert!(outcome
+            .message
+            .contains("System Settings › Privacy & Security › Microphone"));
+        assert_eq!(owner.starts(), 3);
+    }
+
+    owner.answer(MicrophoneAuthorization::NotDetermined);
+    assert!(press().ok);
+    let requests = owner.requests();
+    owner.answer(MicrophoneAuthorization::NotDetermined);
+    let unanswered = wait_for(|s| s.state == StateKind::Idle);
+    assert_eq!(
+        unanswered.outcome.unwrap().error.as_deref(),
+        Some("microphone-request-failed")
+    );
+    assert_eq!(
+        owner.requests(),
+        requests,
+        "an unanswered request was retried by polling"
+    );
 
     owner.answer(MicrophoneAuthorization::Authorized);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while authorization() != Some(MicrophoneAuthorization::Authorized) {
-        assert!(
-            Instant::now() < deadline,
-            "status never reported the owner's answer"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert_eq!(owner.requests(), 1);
+    owner.fail_start.store(true, Ordering::SeqCst);
+    assert!(!ipc::command(Command::Cancel).unwrap().ok);
+    let prior_notice = ipc::status().unwrap().notice;
+    let failed = press();
+    assert_eq!(failed.error.as_deref(), Some("capture-failed"));
+    assert!(failed.outcome.unwrap().operation_id.is_some());
+    assert_eq!(ipc::status().unwrap().notice, prior_notice);
+    assert_eq!(
+        owner.requests(),
+        requests,
+        "authorized startup failure requested access"
+    );
 
+    owner.answer(MicrophoneAuthorization::NotDetermined);
+    assert!(press().ok);
+    let pending_id = ipc::status().unwrap().operation_id;
+    owner.answer(MicrophoneAuthorization::Authorized);
+    let failed = wait_for(|s| s.state == StateKind::Idle).outcome.unwrap();
+    assert_eq!(failed.error.as_deref(), Some("capture-failed"));
+    assert_eq!(failed.operation_id, pending_id);
+    assert_eq!(failed.artifacts.take_id, None);
+    assert_eq!(owner.starts(), 3);
+    assert_eq!(ipc::recordings().unwrap().len(), 3);
     engine::request_shutdown();
     daemon.join().unwrap().unwrap();
 }
 
 #[test]
-fn status_follows_the_owners_answer_to_its_explicit_request() {
+fn first_press_follows_the_owner_answer_and_cancellation() {
     const CHILD: &str = "CANTRIP_MICROPHONE_ACCESS_TEST_CHILD";
     if std::env::var_os(CHILD).is_some() {
         exercise_owner_authorization();
@@ -145,7 +363,7 @@ fn status_follows_the_owners_answer_to_its_explicit_request() {
     let child = Process::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "status_follows_the_owners_answer_to_its_explicit_request",
+            "first_press_follows_the_owner_answer_and_cancellation",
             "--nocapture",
         ])
         .env(CHILD, "1")

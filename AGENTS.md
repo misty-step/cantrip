@@ -23,7 +23,7 @@ See the [steering list](docs/decisions/index.md); the platform boundary is
 - Dismissal acknowledges feedback, never deletes artifacts. Forget requires explicit confirmation and removes only the selected take's retained audio and incomplete text; complete archived text stays.
 - Automatic delivery requires uninterrupted verified destination/session history. Unknown focus, lock, suspend, or reconnection defers; potentially completed handoffs are uncertain and never retried through another backend.
 - The engine owns workflow, cancellation, config/IPC, and the durable archive/recovery store. The native host supplies `Platform`, `Recorder`, and `DeliveryPermit` mechanisms, not alternate policy or a per-OS workflow. Linux keeps its supervised Wayland HUD; the macOS app owns AppKit on the main thread and an engine std thread, or attaches without owning an existing daemon. macOS `daemon` is engine-only; app quit must not kill an externally owned daemon.
-- macOS permission setup is explicit: microphone access only; no Accessibility, Input Monitoring, or Screen Recording grants for supported capture/HUD/Carbon shortcut behavior. Open At Login is an explicit SMAppService choice, never enabled automatically.
+- macOS microphone requests and first-press continuation follow [Decision 0033](docs/decisions/0033-capture-owner-microphone-authorization.md). No Accessibility, Input Monitoring, or Screen Recording grants are needed for supported capture/HUD/Carbon shortcut behavior. Open At Login is an explicit SMAppService choice, never enabled automatically.
 - Keep the std-thread + mpsc process model; do not add an async runtime or a second durable work ledger.
 
 ## Proof

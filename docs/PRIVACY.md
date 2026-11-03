@@ -244,8 +244,12 @@ destination apps, or software running as you cannot retain or synchronize it.
 Existing Mac Auto/Paste/Type modes defer before opening the pasteboard or sending
 keys, including partial text; there is no automatic clipboard fallback. Explicit
 Copy is a separate consented action. The supported Mac workflow does not require
-Accessibility, Input Monitoring, or Screen Recording grants; microphone access
-is an explicit separate setup action.
+Accessibility, Input Monitoring, or Screen Recording grants. A ready first
+dictation press can request microphone access, then record after you choose
+Allow; the explicit Allow controls request access without starting a recording.
+The [capture-owner permission decision](decisions/0033-capture-owner-microphone-authorization.md)
+owns which app receives that grant, the shared-grant disclosure before Allow,
+and cancellation of a pending recording.
 
 Cantrip guards automatic keyboard delivery against changed or unverifiable
 focus/session history. A compositor or helper acknowledgement is not proof that

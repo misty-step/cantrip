@@ -85,9 +85,6 @@ const FAILURE_CONFIGURATION: u8 = 3;
 const FAILURE_DISCONTINUITY: u8 = 4;
 const FAILURE_RENDER: u8 = 5;
 const FIRST_SAMPLE_TIME: i64 = i64::MIN;
-/// An unanswered prompt keeps its request thread at most this long; an answer
-/// given later still reaches this process's authorization.
-const MICROPHONE_DECISION_WAIT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDevice {
@@ -277,14 +274,15 @@ fn await_microphone_decision() {
             &completion,
         );
     }
-    if receiver.recv_timeout(MICROPHONE_DECISION_WAIT).is_ok() {
-        tracing::info!(
-            "[Capture] microphone access answered state={:?}",
-            microphone_permission()
-        );
-    } else {
-        tracing::warn!("[Capture] microphone access unanswered class=microphone-request-timeout");
-    }
+    // One outstanding thread stays with the OS prompt, including after a pending
+    // recording is cancelled. A late answer must not expire a still-live press.
+    receiver
+        .recv()
+        .expect("the microphone completion block owns its sender");
+    tracing::info!(
+        "[Capture] microphone access answered state={:?}",
+        microphone_permission()
+    );
 }
 
 pub fn input_devices() -> Result<Vec<InputDevice>> {

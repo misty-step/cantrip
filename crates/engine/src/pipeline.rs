@@ -66,6 +66,8 @@ pub enum ArchiveStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Stage {
+    /// A dictation press is waiting for the capture owner's microphone grant.
+    RequestingMicrophone,
     /// Capture is stopping or its WAV is being finalized and retained.
     FinalizingAudio,
     /// Completed backend calls, not the chunk currently being attempted.
@@ -97,6 +99,7 @@ impl Stage {
 impl fmt::Display for Stage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RequestingMicrophone => formatter.write_str("requesting microphone access"),
             Self::FinalizingAudio => formatter.write_str("finalizing audio"),
             Self::Transcribing { completed, total } if *total > 1 => {
                 write!(formatter, "transcribing {completed}/{total}")

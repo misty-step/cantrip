@@ -218,18 +218,26 @@ Stopped audio and plaintext history are retained on Mac too; read
    never silently records another microphone. Microphone access belongs to the
    process that records, the app or the `daemon` it attached to, because macOS
    answers each process separately. Settings and the menu show that process's
-   answer, and Settings says when no Cantrip is running. Choose **Allow
-   Microphone Access…** in Settings or the menu, or
-   run `"$CANTRIP" microphone allow`: each asks the running Cantrip to show the
-   macOS prompt, which you answer deliberately. If the app is attached to a
-   `daemon` you started from a terminal, macOS asks for, and grants, that
-   terminal app instead, for example Terminal, and the grant covers everything
-   that app runs. Cantrip names that app before you choose Allow, and that app,
-   not Cantrip, is listed under Privacy & Security → Microphone. If denied,
-   review the named app's entry there; restricted access needs policy
-   resolution. Neither `doctor` nor an attempted recording grants
-   permission. Do not grant Accessibility, Input Monitoring, or Screen
-   Recording: this workflow needs none of them.
+   answer, and Settings says when no Cantrip is running. Once configuration and
+   the local model or configured recognition endpoint are ready, the first Start
+   or dictation shortcut asks for access if it has not been determined: answer
+   **Allow** to start recording from that same press. A missing local model fails
+   before asking. While the prompt is up,
+   **Cancel**, **Stop**, or the same shortcut cancels that pending recording;
+   answering Allow later will not start it. You can instead choose **Allow
+   Microphone Access…** in Settings or the menu, or run
+   `"$CANTRIP" microphone allow`, to request access without recording.
+   If the app is attached to a `daemon` you started from a terminal, macOS asks
+   for, and grants, that terminal app instead, for example Terminal, and the
+   grant covers everything that app runs. The start reply, requesting HUD, and
+   menu name that app and disclose the shared grant before you choose Allow.
+   That app, not Cantrip, is listed in
+   **System Settings › Privacy & Security › Microphone**. If denied, review
+   the named app there; restricted access needs policy resolution. Opening
+   Settings, `status`, polling, and `doctor` never ask for access. Only your
+   answer grants it.
+   Do not grant Accessibility, Input Monitoring, or Screen Recording:
+   this workflow needs none of them.
 5. Check **Dictation shortcut** in Settings → General. Its default is
    **Control+Option+Space** (`Control+Alt+Space` in configuration); it is editable.
    Inspect System Settings → Keyboard → Keyboard Shortcuts → Input Sources for

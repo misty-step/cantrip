@@ -772,6 +772,17 @@ impl Model {
                 let progress = stage.and_then(Stage::measured_progress);
                 let phase = WorkPhase::from_stage(stage);
                 let caption = match stage {
+                    Some(Stage::RequestingMicrophone) => match status.microphone.as_ref() {
+                        Some(access) => Caption {
+                            title: format!(
+                                "Allow microphone access for {} to start recording…",
+                                access.grantee.name()
+                            ),
+                            detail: access.grantee.disclosure().unwrap_or_default(),
+                            ..Caption::default()
+                        },
+                        None => Caption::title("Allow microphone access to start recording…"),
+                    },
                     Some(Stage::Cancelling) => {
                         Caption::title("Cancelling… Waiting for current work.")
                     }
@@ -2295,6 +2306,8 @@ pub enum ScreenshotState {
     MonitoringUnavailable,
     NoSignal,
     Working,
+    RequestingMicrophone,
+    RequestingMicrophoneLauncher,
     Transcribing,
     ProgressZero,
     Progress,
@@ -2459,7 +2472,23 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
     if state == ScreenshotState::RemovingRecording {
         processing.operation_kind = Some(ipc::OperationKind::Forget);
     }
+    if matches!(
+        state,
+        ScreenshotState::RequestingMicrophone | ScreenshotState::RequestingMicrophoneLauncher
+    ) {
+        processing.microphone = Some(ipc::MicrophoneAccess {
+            authorization: ipc::MicrophoneAuthorization::Requesting,
+            grantee: if state == ScreenshotState::RequestingMicrophoneLauncher {
+                ipc::MicrophoneGrantee::Launcher(Some("Terminal".to_owned()))
+            } else {
+                ipc::MicrophoneGrantee::Cantrip
+            },
+        });
+    }
     processing.stage = Some(match state {
+        ScreenshotState::RequestingMicrophone | ScreenshotState::RequestingMicrophoneLauncher => {
+            Stage::RequestingMicrophone
+        }
         ScreenshotState::FinalizingAudio => Stage::FinalizingAudio,
         ScreenshotState::RemovingRecording => Stage::RemovingRecording,
         ScreenshotState::Cleaning | ScreenshotState::ReducedMotionCleaning => Stage::CleaningUp,
@@ -2519,6 +2548,8 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
     if matches!(
         state,
         ScreenshotState::Working
+            | ScreenshotState::RequestingMicrophone
+            | ScreenshotState::RequestingMicrophoneLauncher
             | ScreenshotState::Transcribing
             | ScreenshotState::ProgressZero
             | ScreenshotState::Progress
@@ -2684,6 +2715,37 @@ mod tests {
             } else {
                 [[0; 2]; AUDIO_WAVEFORM_BINS]
             },
+        }
+    }
+
+    #[test]
+    fn microphone_prompt_stays_explicit_with_ordinary_captions_disabled() {
+        for grantee in [
+            ipc::MicrophoneGrantee::Cantrip,
+            ipc::MicrophoneGrantee::Launcher(Some("Terminal".to_owned())),
+            ipc::MicrophoneGrantee::Launcher(None),
+        ] {
+            let now = Instant::now();
+            let mut model = Model::new(now);
+            let mut status = preview_snapshot(StateKind::Processing);
+            status.stage = Some(Stage::RequestingMicrophone);
+            status.microphone = Some(ipc::MicrophoneAccess {
+                authorization: ipc::MicrophoneAuthorization::Requesting,
+                grantee: grantee.clone(),
+            });
+            status.hud.labels = false;
+            model.apply(status, now);
+            model.refresh(now + Duration::from_secs(1));
+            assert_eq!(model.kind, Some(Kind::Working));
+            assert!(model.caption.title.contains(grantee.name()));
+            assert!(model.caption.title.contains("recording"));
+            match grantee.disclosure() {
+                Some(disclosure) => {
+                    assert_eq!(model.caption.detail, disclosure);
+                    assert!(model.caption.detail.contains("everything it runs"));
+                }
+                None => assert!(model.caption.detail.is_empty()),
+            }
         }
     }
 
