@@ -1,0 +1,67 @@
+{
+  "schema": "cantrip.eval.elevate.v1",
+  "corpus_version": "2026-11-03-r1",
+  "include": "postproc-behavior.json",
+  "privacy": "Public synthetic cases only; no private takes or references.",
+  "vocabulary": ["API", "Cantrip", "HUD", "Parakeet", {"term": "PipeWire", "aliases": ["pipe wire"]}, "WAV"],
+  "grader": {
+    "deterministic": "Protected literal survival and requested lexical primitives; never Clean accepted-string matching.",
+    "semantic": "Review every output against its source: preserve each speech act without answering or executing; no invented or omitted distinct facts; preserve numeric values, negation, meaningful uncertainty, conditions, grammatical person, identifiers, paths, versions and quoted errors. Elevate may compress, restructure, remove verbal filler and use established domain terminology. Do not require Clean wording.",
+    "promotion": "Every inherited and added case must complete and receive semantic review. No speech-act, fact, numeric, negation, modality or literal failure is allowed. All eight added cases must demonstrate their specified lexical upgrade. One full pass first; repeats are optional and separately reported within the absolute key ceiling."
+  },
+  "inherited_checks": {
+    "names": { "exact": ["Sarah", "Javier", "Nguyen", "Tuesday"] },
+    "literal-identifiers-and-version": { "exact": ["gantrip_cache", "1.2.3", "1.3.0"] },
+    "quoted-misspelling": { "exact": ["Gantrip", "Cantrip"] }
+  },
+  "cases": [
+    {
+      "id": "elevate-leading-question",
+      "category": "speech-act",
+      "input": "how can we make the vertical space between lines smaller without changing the font size of 16 px or making the text harder to read",
+      "checks": { "exact": ["16"], "lexical_any": ["leading"] }
+    },
+    {
+      "id": "elevate-idempotent-directive",
+      "category": "speech-act",
+      "input": "make retry_take safe to run again so repeating the same operation does not create another copy and keep /var/lib/cantrip/takes.json unchanged",
+      "checks": { "exact": ["retry_take", "/var/lib/cantrip/takes.json"], "lexical_any": ["idempotent", "idempotency"] }
+    },
+    {
+      "id": "elevate-regression-negation",
+      "category": "fact-fidelity",
+      "input": "the bug that came back in release 3.7.2 is not fixed and the failed check does not necessarily mean that every recording is lost",
+      "checks": { "exact": ["3.7.2"], "lexical_any": ["regression"] }
+    },
+    {
+      "id": "elevate-backpressure-hypothesis",
+      "category": "fact-fidelity",
+      "input": "maybe the queue grows because producers add work faster than consumers can process it we have not measured that and we might need a way for consumers to slow producers down",
+      "checks": { "lexical_any": ["backpressure", "back-pressure"] }
+    },
+    {
+      "id": "elevate-invariant-numbers",
+      "category": "fact-fidelity",
+      "input": "the rule that must always hold is that there are at most 3 active workers and no more than 12 queued tasks do not change MAX_TAKES or version 0.1.12",
+      "checks": { "exact": ["3", "12", "MAX_TAKES", "0.1.12"], "lexical_any": ["invariant"] }
+    },
+    {
+      "id": "elevate-instantiate-conditional",
+      "category": "lexical-upgrade",
+      "input": "spin up a WorkerPool only if the operator chooses cloud mode otherwise keep the local path and do not deploy anything",
+      "checks": { "exact": ["WorkerPool"], "lexical_any": ["instantiate"] }
+    },
+    {
+      "id": "elevate-atomicity-question",
+      "category": "speech-act",
+      "input": "can we make the balance update and the transfer record happen together as one all or nothing operation without assuming the database already guarantees that",
+      "checks": { "lexical_any": ["atomic", "atomicity", "atomically"] }
+    },
+    {
+      "id": "elevate-fricatives-evidence",
+      "category": "lexical-upgrade",
+      "input": "the f and s sounds are made by pushing air through a narrow opening without vibrating the vocal cords those sounds confuse silence detection in our 48 kHz sample but we do not know why",
+      "checks": { "exact": ["48"], "lexical_any": ["fricatives", "fricative"] }
+    }
+  ]
+}
