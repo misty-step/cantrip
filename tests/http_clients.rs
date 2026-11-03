@@ -1,7 +1,7 @@
 //! HTTP round-trip contracts for post-processing and remote transcription
 //! against a local mock OpenAI-compatible server.
 
-use cantrip_engine::config::PostprocConfig;
+use cantrip_engine::config::{Mode, ModeModelConfig, PostprocConfig};
 use cantrip_engine::postproc;
 use cantrip_engine::stt;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -114,11 +114,14 @@ fn ok_json(body: &str) -> String {
 
 fn postproc_config(endpoint: String) -> PostprocConfig {
     PostprocConfig {
-        enabled: true,
+        mode: Mode::Clean,
         endpoint,
-        model: "test-model".to_owned(),
+        clean: ModeModelConfig {
+            model: "test-model".to_owned(),
+            reasoning_effort: None,
+        },
+        elevate: ModeModelConfig::default(),
         api_key_id: None,
-        reasoning_effort: None,
         timeout_ms: 5_000,
         passes: 2,
         min_chars: 0,
@@ -187,6 +190,64 @@ fn refine_round_trip_sends_contract_request_and_strips_model_wrappers() {
         body["messages"][1]["content"],
         "Source:\nhello cantrip world"
     );
+}
+
+#[test]
+fn elevate_sends_verbatim_operator_prompt_and_its_own_model_in_one_pass() {
+    let (endpoint, server) =
+        mock_server(ok_json(r#"{"choices":[{"message":{"content":"Adjust the leading in Cantrip."}}]}"#));
+    let mut cfg = postproc_config(endpoint);
+    cfg.mode = Mode::Elevate;
+    cfg.passes = 3;
+    cfg.elevate = ModeModelConfig {
+        model: "elevate-model".into(),
+        reasoning_effort: Some("low".into()),
+    };
+    cfg.instructions = "CLEAN-ONLY-GUIDANCE".into();
+    let vocabulary = vec![cantrip_engine::config::VocabularyEntry::Aliased {
+        term: "Cantrip".into(),
+        aliases: vec!["PRIVATE-ALIAS-MARKER".into()],
+    }];
+    let source = "adjust the vertical space between lines in Cantrip";
+    let refined = postproc::refine(source, &cfg, &vocabulary, None, None).unwrap();
+    assert_eq!(refined.text, "Adjust the leading in Cantrip.");
+    let request = server.join().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["model"], "elevate-model");
+    assert_eq!(body["reasoning"]["effort"], "low");
+    let system = body["messages"][0]["content"].as_str().unwrap();
+    assert!(system.starts_with(postproc::ELEVATE_SYSTEM_PROMPT));
+    assert!(system.contains("Cantrip"));
+    assert!(!system.contains("PRIVATE-ALIAS-MARKER"));
+    assert!(!system.contains("CLEAN-ONLY-GUIDANCE"));
+    assert_eq!(
+        body["messages"][1]["content"],
+        postproc::build_user_prompt(source)
+    );
+}
+
+#[test]
+fn elevate_bypasses_clean_triage_and_keeps_the_fidelity_watchdog() {
+    let (endpoint, server) = mock_server_multi(vec![
+        ok_json(r#"{"choices":[{"message":{"content":"Adjust the leading."}}]}"#),
+        ok_json(
+            r#"{"model":"typesafe/jev-1.13","answers":{"answered_question":{"type":"noul","noul":0.01},"content_fidelity":{"type":"score","score":1.0}}}"#,
+        ),
+    ]);
+    let mut cfg = postproc_config(endpoint.clone());
+    cfg.mode = Mode::Elevate;
+    cfg.decision_model = Some("typesafe/jev-1.13".into());
+    cfg.decision_endpoint = Some(endpoint);
+    let source = "adjust the vertical space between lines";
+    let result = postproc::refine(source, &cfg, &[], None, None).unwrap();
+    assert_eq!(result.text, "Adjust the leading.");
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(first["model"], cfg.elevate.model);
+    let watchdog: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(watchdog["state"]["source"], source);
+    assert_eq!(watchdog["state"]["candidate"], result.text);
 }
 
 /// Mock server accepting `n` sequential requests, answering each in order with
@@ -1131,8 +1192,8 @@ fn cloud_payment_and_unknown_connection_do_not_invent_budget_evidence() {
 }
 
 #[test]
-fn transcribe_cli_delivers_aliases_in_clean_without_an_llm_and_preserves_raw() {
-    for clean in [false, true] {
+fn transcribe_cli_delivers_aliases_in_clean_and_elevate_without_llm_and_preserves_raw() {
+    for mode in Mode::ALL {
         let fixture = WavFixture::new(native_spec(), 160);
         let (endpoint, server) = mock_server(ok_json(r#"{"text":"Gantrip"}"#));
         let root = fixture.path.with_extension("alias-xdg");
@@ -1149,8 +1210,16 @@ fn transcribe_cli_delivers_aliases_in_clean_without_an_llm_and_preserves_raw() {
                 api_key_id: None,
             },
             postproc: PostprocConfig {
-                enabled: clean,
+                mode,
                 endpoint: String::new(),
+                clean: ModeModelConfig {
+                    model: String::new(),
+                    reasoning_effort: None,
+                },
+                elevate: ModeModelConfig {
+                    model: String::new(),
+                    reasoning_effort: None,
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -1174,7 +1243,7 @@ fn transcribe_cli_delivers_aliases_in_clean_without_an_llm_and_preserves_raw() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let expected = if clean { "Cantrip" } else { "Gantrip" };
+        let expected = if mode == Mode::Raw { "Gantrip" } else { "Cantrip" };
         assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), expected);
         let diagnostic = String::from_utf8(output.stderr).unwrap();
         assert!(!diagnostic.contains("Gantrip"));
@@ -1191,10 +1260,10 @@ fn transcribe_cli_delivers_aliases_in_clean_without_an_llm_and_preserves_raw() {
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(saved["raw_transcript"], "Gantrip");
-        assert_eq!(saved["alias_substitutions"], usize::from(clean));
+        assert_eq!(saved["alias_substitutions"], usize::from(mode != Mode::Raw));
         assert_eq!(
             saved["postprocessed_transcript"],
-            if clean {
+            if mode != Mode::Raw {
                 serde_json::json!("Cantrip")
             } else {
                 serde_json::Value::Null
