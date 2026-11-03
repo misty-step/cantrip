@@ -216,3 +216,5 @@ mod tests {
         assert!(!error.contains("synthetic-private-credential"));
     }
 }
+
+// QA255 throwaway probe: clean push 1 (never merge).
