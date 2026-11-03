@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use caseless::Caseless;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -39,7 +40,11 @@ impl From<&str> for VocabularyEntry {
 pub(crate) fn validate(entries: &[VocabularyEntry]) -> Result<()> {
     let canonical: Vec<_> = entries
         .iter()
-        .map(|entry| entry.term().to_lowercase())
+        .map(|entry| {
+            normalize(entry.term())
+                .map(|(_, character)| character)
+                .collect::<String>()
+        })
         .collect();
     let mut owners = BTreeMap::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -47,17 +52,13 @@ pub(crate) fn validate(entries: &[VocabularyEntry]) -> Result<()> {
             bail!("vocabulary entry {} has an empty canonical term", index + 1);
         }
         for alias in entry.aliases() {
-            if alias.trim().is_empty() {
+            let folded: String = normalize(alias).map(|(_, character)| character).collect();
+            if folded.is_empty() {
                 bail!("vocabulary entry {} has an empty alias", index + 1);
             }
-            let folded = alias.to_lowercase();
-            if canonical
-                .iter()
-                .enumerate()
-                .any(|(other, term)| other != index && *term == folded)
-            {
+            if canonical.contains(&folded) {
                 bail!(
-                    "vocabulary entry {} has an alias equal to another canonical term",
+                    "vocabulary entry {} has an alias equal to a canonical term",
                     index + 1
                 );
             }
@@ -83,19 +84,18 @@ struct Match<'a> {
 }
 
 /// Select globally longest non-overlapping phrases; replacements never cascade.
-pub(crate) fn apply<'a>(text: &'a str, entries: &[VocabularyEntry]) -> (Cow<'a, str>, usize) {
+pub fn apply<'a>(text: &'a str, entries: &[VocabularyEntry]) -> (Cow<'a, str>, usize) {
     let mut matches = Vec::new();
     for entry in entries {
-        for alias in entry
-            .aliases()
-            .iter()
-            .map(|alias| alias.trim())
-            .filter(|alias| !alias.is_empty())
-        {
+        for alias in entry.aliases() {
+            let folded: Vec<_> = normalize(alias).map(|(_, character)| character).collect();
+            if folded.is_empty() {
+                continue;
+            }
             let mut before = None;
             for (start, character) in text.char_indices() {
-                if !before.is_some_and(word_character) {
-                    if let Some(end) = phrase_end(&text[start..], alias) {
+                if !character.is_whitespace() && !before.is_some_and(word_character) {
+                    if let Some(end) = phrase_end(&text[start..], &folded) {
                         matches.push(Match {
                             start,
                             end: start + end,
@@ -144,20 +144,35 @@ fn word_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
-fn phrase_end(text: &str, alias: &str) -> Option<usize> {
-    let mut expected = alias.chars().flat_map(char::to_lowercase).peekable();
-    for (offset, character) in text.char_indices() {
-        for folded in character.to_lowercase() {
-            if expected.next() != Some(folded) {
-                return None;
-            }
+/// Trim and full Unicode case fold, retaining original UTF-8 character ends.
+/// Validation and matching must use this same projection.
+fn normalize(text: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+    let leading = text.len() - text.trim_start().len();
+    text.trim()
+        .char_indices()
+        .flat_map(move |(offset, character)| {
+            let end = leading + offset + character.len_utf8();
+            std::iter::once(character)
+                .default_case_fold()
+                .map(move |folded| (end, folded))
+        })
+}
+
+fn phrase_end(text: &str, alias: &[char]) -> Option<usize> {
+    let mut source = normalize(text).peekable();
+    let mut end = 0;
+    for expected in alias {
+        let (offset, character) = source.next()?;
+        if character != *expected {
+            return None;
         }
-        if expected.peek().is_none() {
-            let end = offset + character.len_utf8();
-            return (!text[end..].chars().next().is_some_and(word_character)).then_some(end);
-        }
+        end = offset;
     }
-    None
+    // A match cannot consume only part of a multi-character fold such as ß → ss.
+    if source.peek().is_some_and(|(offset, _)| *offset == end) {
+        return None;
+    }
+    (!text[end..].chars().next().is_some_and(word_character)).then_some(end)
 }
 
 #[cfg(test)]
@@ -204,5 +219,39 @@ mod tests {
             apply("can trip", &[aliases("Cantrip", &["can trip"])]).0,
             "Cantrip"
         );
+    }
+
+    #[test]
+    fn validation_and_matching_share_trim_and_full_unicode_case_folding() {
+        for (alias, equivalent) in [
+            (" pipewire ", "PipeWire"),
+            (" ΟΔΟΣ ", "οδος"),
+            (" οδοσ ", "ΟΔΟΣ"),
+            (" Straße ", "STRASSE"),
+            (" ﬃ ", "FFI"),
+        ] {
+            let folded = |text: &str| {
+                normalize(text)
+                    .map(|(_, character)| character)
+                    .collect::<String>()
+            };
+            assert_eq!(folded(alias), folded(equivalent));
+            let entries = [aliases("Canonical", &[alias])];
+            validate(&entries).unwrap();
+            assert_eq!(
+                apply(equivalent, &entries),
+                (Cow::Owned("Canonical".into()), 1)
+            );
+
+            let canonical_conflict = [VocabularyEntry::from(equivalent), entries[0].clone()];
+            assert!(validate(&canonical_conflict).is_err(), "{alias}");
+            let duplicate = [entries[0].clone(), aliases("Other", &[equivalent])];
+            assert!(validate(&duplicate).is_err(), "{alias}");
+            assert!(
+                validate(&[aliases(equivalent, &[alias])]).is_err(),
+                "{alias}"
+            );
+        }
+        assert_eq!(apply("ß", &[aliases("Canonical", &["s"])]).1, 0);
     }
 }

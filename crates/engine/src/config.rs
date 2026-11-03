@@ -41,7 +41,7 @@ pub struct HandoffTarget {
     #[serde(default)]
     pub label: Option<String>,
     /// Keeps this target's takes on this computer: the installed local model transcribes
-    /// them, cleanup never runs, and a missing local model refuses the take before capture.
+    /// them, LLM cleanup never runs, and a missing local model refuses capture.
     #[serde(default)]
     pub local_only: bool,
 }
@@ -98,7 +98,7 @@ pub struct PostprocConfig {
     pub reasoning_effort: Option<String>,
     pub timeout_ms: u64,
     pub passes: u8,
-    /// Skip cleanup when the raw transcript has fewer than this many chars.
+    /// Skip LLM cleanup when the alias-corrected transcript has fewer than this many chars.
     /// `0` disables the skip. Default 40 covers short commands without a cloud round-trip.
     pub min_chars: usize,
     pub instructions: String,
@@ -207,6 +207,12 @@ impl Config {
             .validate()
             .with_context(|| format!("validating {}", path.display()))?;
         Ok(config)
+    }
+
+    /// Keep Raw/Clean selection while preventing STT, cleanup, and decision provider calls.
+    pub fn restrict_to_local(&mut self) {
+        self.stt = SttConfig::default();
+        self.postproc.model.clear();
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -368,8 +374,16 @@ mod tests {
         for (entries, expected) in [
             (r#"[{ term = "Cantrip", aliases = ["  "] }]"#, "empty alias"),
             (
+                r#"[{ term = "  ", aliases = ["Gantrip"] }]"#,
+                "empty canonical term",
+            ),
+            (
+                r#"[{ term = "PipeWire", aliases = [" pipewire "] }]"#,
+                "a canonical term",
+            ),
+            (
                 r#"["PipeWire", { term = "Cantrip", aliases = ["PIPEWIRE"] }]"#,
-                "another canonical term",
+                "a canonical term",
             ),
             (
                 r#"[{ term = "Cantrip", aliases = ["Gantrip"] }, { term = "Other", aliases = ["GANTRIP"] }]"#,

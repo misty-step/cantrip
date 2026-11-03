@@ -168,6 +168,7 @@ struct Views {
     stt_key: Retained<NSTextField>,
     // Cleanup
     cleanup: Retained<NSButton>,
+    cleanup_note: Message,
     pp_endpoint: Retained<NSTextField>,
     pp_model: Retained<NSTextField>,
     pp_key: Retained<NSTextField>,
@@ -251,8 +252,9 @@ define_class!(
     unsafe impl NSControlTextEditingDelegate for SettingsWindow {
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, _notification: &NSNotification) {
-            // Only the shortcut field reports its edits: its hint follows each keystroke.
+            let _ = self.collect();
             self.show_shortcut_hint();
+            self.show_form_state();
         }
     }
 
@@ -377,6 +379,7 @@ define_class!(
         fn form_changed(&self, _sender: Option<&AnyObject>) {
             let _ = self.collect();
             self.show_general();
+            self.show_form_state();
         }
     }
 );
@@ -483,6 +486,7 @@ impl SettingsWindow {
         // SAFETY: clearing a delegate or data source has no preconditions.
         unsafe {
             views.shortcut.setDelegate(None);
+            views.pp_model.setDelegate(None);
             views.table.setDataSource(None);
             views.table.setDelegate(None);
         }
@@ -881,6 +885,7 @@ impl SettingsWindow {
         let views = self.views();
         let state = self.state();
         let form = &state.form;
+        views.cleanup_note.show(form.edit.cleanup_note(), false);
         views.notice.show(
             form.notice.as_ref().map(|notice| notice.text.as_str()),
             form.notice.as_ref().is_some_and(|notice| !notice.ok),
@@ -1112,8 +1117,11 @@ impl SettingsWindow {
 
         // Cleanup
         let cleanup = ui::checkbox(mtm, "Clean up transcripts", target, changed);
+        let cleanup_note = Message::new(mtm, CONTROL);
         let pp_endpoint = ui::field(mtm, "", CONTROL);
         let pp_model = ui::field(mtm, "", CONTROL);
+        // SAFETY: teardown clears this delegate before the view is released.
+        unsafe { pp_model.setDelegate(Some(ProtocolObject::from_ref(self))) };
         let pp_key = ui::field(mtm, "openrouter", CONTROL);
         let pp_timeout = ui::field(mtm, "", NUMBER);
         let milliseconds = ui::label(mtm, "ms");
@@ -1137,6 +1145,7 @@ impl SettingsWindow {
             mtm,
             &[
                 (None, &cleanup),
+                (None, &cleanup_note.view),
                 (Some("Endpoint:"), &pp_endpoint),
                 (Some("Model:"), &pp_model),
                 (Some("API key ID:"), &pp_key),
@@ -1308,6 +1317,7 @@ impl SettingsWindow {
             stt_endpoint,
             stt_key,
             cleanup,
+            cleanup_note,
             pp_endpoint,
             pp_model,
             pp_key,

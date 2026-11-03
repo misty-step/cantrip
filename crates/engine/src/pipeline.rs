@@ -582,8 +582,12 @@ fn cleanup(
     if stt::is_cancelled(cancel) || raw.trim().is_empty() || !cfg.enabled {
         return (PostprocStatus::Off, None, None);
     }
-    if cfg.model.trim().is_empty() || cfg.endpoint.trim().is_empty() {
+    if cfg.model.trim().is_empty() {
         return (PostprocStatus::Off, None, None);
+    }
+    if cfg.endpoint.trim().is_empty() {
+        tracing::warn!("[Postproc] cleanup unavailable class=missing-endpoint");
+        return (PostprocStatus::Failed { ms: 0 }, None, None);
     }
     let chars = raw.chars().count();
     if !should_run_postproc(cfg, chars) {
@@ -837,11 +841,16 @@ mod tests {
             term: "Cantrip".into(),
             aliases: vec!["Gantrip".into()],
         }];
-        for case in ["short", "failed"] {
+        for case in ["short", "failed", "missing-endpoint"] {
             let cfg = PostprocConfig {
                 enabled: true,
                 model: "test".into(),
-                endpoint: "not-an-http-url".into(),
+                endpoint: if case == "missing-endpoint" {
+                    ""
+                } else {
+                    "not-an-http-url"
+                }
+                .into(),
                 min_chars: if case == "short" { 40 } else { 0 },
                 ..Default::default()
             };
@@ -861,7 +870,7 @@ mod tests {
             assert_eq!(saved["raw_transcript"], "Gantrip", "{case}");
             assert_eq!(archive::final_text(&saved), Some("Cantrip"), "{case}");
             assert_eq!(saved["alias_substitutions"], 1, "{case}");
-            if case == "failed" {
+            if case != "short" {
                 assert!(matches!(outcome.postproc, PostprocStatus::Failed { .. }));
             } else {
                 assert!(matches!(
@@ -869,6 +878,46 @@ mod tests {
                     PostprocStatus::SkippedShort { .. }
                 ));
             }
+        }
+    }
+
+    #[test]
+    fn local_restriction_keeps_aliases_in_clean_but_never_calls_cleanup_or_decisions() {
+        let recording = Recording::new(1);
+        for clean in [false, true] {
+            let mut config = crate::config::Config {
+                vocabulary: vec![VocabularyEntry::Aliased {
+                    term: "Cantrip".into(),
+                    aliases: vec!["Gantrip".into()],
+                }],
+                stt: cloud_config(),
+                postproc: PostprocConfig {
+                    enabled: clean,
+                    model: "cloud-cleanup".into(),
+                    decision_model: Some("decision-must-not-run".into()),
+                    min_chars: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            config.restrict_to_local();
+            let mut pipeline = recording.pipeline(&config.stt, &config.postproc, None);
+            pipeline.vocabulary = &config.vocabulary;
+            let outcome = pipeline.run(
+                |stage| assert_ne!(stage, Stage::CleaningUp),
+                |stt, _, _, _| {
+                    assert!(stt.endpoint.is_none());
+                    Ok(stt::RemoteAttempt::whole(stt::Transcript::Complete(
+                        "Gantrip".into(),
+                    )))
+                },
+                |entry| recording.save(entry),
+            );
+            assert_eq!(
+                outcome.text.as_ref().unwrap(),
+                if clean { "Cantrip" } else { "Gantrip" }
+            );
+            assert_eq!(outcome.postproc, PostprocStatus::Off);
         }
     }
 

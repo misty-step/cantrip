@@ -9,6 +9,7 @@ description = "Shared local-first dictation workflow and private recording histo
 [dependencies]
 anyhow = "1"
 base64 = "0.22.1"
+caseless = "0.2.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

@@ -156,6 +156,11 @@ impl Editable {
             selected_handoff: None,
         }
     }
+
+    pub(crate) fn cleanup_note(&self) -> Option<&'static str> {
+        (self.pp_enabled && self.pp_model.trim().is_empty())
+            .then_some("Clean applies vocabulary aliases only (no cleanup model).")
+    }
 }
 
 /// `Some(text)` for non-empty input, `None` for empty (an absent optional key).
@@ -907,6 +912,16 @@ mod tests {
                 "Parakeet".into()
             ]
         );
+    }
+
+    #[test]
+    fn aliases_only_note_follows_the_enabled_mode_and_model_field() {
+        let mut edit = Editable::from_config(&sample_config());
+        assert!(edit.cleanup_note().is_none());
+        edit.pp_model = "  ".into();
+        assert!(edit.cleanup_note().is_some());
+        edit.pp_enabled = false;
+        assert!(edit.cleanup_note().is_none());
     }
 
     #[test]

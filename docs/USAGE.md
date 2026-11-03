@@ -279,12 +279,10 @@ are deliberate choices after a successful trial, not prerequisites.
   On Mac, use **Quit Cantrip** and wait for the app-owned engine to exit;
   an externally owned daemon must be stopped through its own owner.
 
-`toggle` and `start` accept `--postproc clean|raw`. **Raw** delivers the
-recognizer's output without aliases or LLM cleanup. **Clean** applies
-[vocabulary aliases](CONFIGURATION.md#vocabulary--spellings-and-aliases), then
-any configured opt-in LLM cleanup. Aliases still apply when cleanup is absent,
-skipped, fails, or times out. Clean also corrects a deliberately spoken or quoted
-alias; Raw is the escape when you want to keep that spelling.
+`toggle` and `start` accept `--postproc clean|raw`.
+[Decision 0012](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02)
+owns the Raw/Clean text contract, matching rules, and deliberately-spoken-alias
+limitation. Configure aliases using the [`vocabulary` syntax](CONFIGURATION.md#vocabulary--spellings-and-aliases).
 
 The mode chosen at capture start overrides `[postproc].enabled` for that take;
 using a different flag to stop does not change its mode. Without a flag, the
@@ -319,7 +317,7 @@ operation finished.
 | `delivery: uncertain` | The clipboard or some keys may already have changed. Inspect the destination before retrying to avoid duplicates; Cantrip does not automatically retry an uncertain handoff. |
 | `completeness: partial` | Available text is incomplete. Keep the audio and recover the whole recording; a partial transcript is not a successful retry. |
 | `completeness: empty`, `failed`, or `cancelled` | No complete dictation was delivered. Read the notice and use the matching recording's available artifacts. |
-| `cleanup: failed` | The raw transcript is used rather than dropped. Repair cleanup configuration or leave it disabled. |
+| `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [Clean fallback contract](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02). Repair cleanup configuration or leave the LLM unconfigured. |
 | Storage warning | Delivery and durable retention are separate. Inspect storage before relying on recovery or recording more. |
 | Disconnected/unknown HUD or failed `ping` | Use desktop diagnostics; do not infer Ready or start a competing owner. |
 
@@ -392,12 +390,12 @@ For local recovery without changing your usual configuration:
 "$HOME/.local/bin/cantrip" recover --id RECORDING_ID --local --clipboard
 ```
 
-The explicit `--local` operation uses installed Parakeet and skips cleanup;
+The explicit `--local` operation follows the
+[local-only content policy](decisions/0030-local-only-handoff-targets.md);
 separately opted-in metadata telemetry remains enabled. A retry processes the
 whole recording again. Omit `--id` only when you deliberately want the newest
 unresolved take with retained audio. `last` similarly selects the latest saved
-transcript once when accepted; use an exact-ID copy when choosing a particular
-take matters.
+transcript once when accepted; use an exact-ID copy when choosing a particular take matters.
 
 Wait for the recovery outcome and inspect completeness before manual paste.
 Dismiss only acknowledges a notice. Successful delivery/recovery retains audio.

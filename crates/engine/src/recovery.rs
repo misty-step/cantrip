@@ -361,6 +361,7 @@ fn persist_in(
                     object.remove("stt");
                     object.remove("postproc");
                     object.remove("pipeline");
+                    object.remove("alias_substitutions");
                 }
                 record["source"] = json!("recovery");
                 record["raw_transcript"] = json!(text);
@@ -1120,6 +1121,42 @@ mod tests {
         assert_eq!(transcripts.len(), 1);
         assert_eq!(transcripts[0].take.id, id);
         assert!(!transcripts[0].take.unresolved);
+    }
+
+    #[test]
+    fn fallback_replacement_drops_alias_counts_with_other_provenance() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let id = new_id();
+        store
+            .write_record(
+                &id,
+                &json!({
+                    "session_id": id,
+                    "raw_transcript": "Gantrip",
+                    "postprocessed_transcript": "Cantrip",
+                    "alias_substitutions": 1,
+                    "stt": { "model": "prior-model" },
+                    "postproc": { "status": "applied" },
+                    "pipeline": { "elapsed_ms": 1 },
+                }),
+            )
+            .unwrap();
+        persist_in(
+            &store,
+            &id,
+            10,
+            Some("replacement words"),
+            None,
+            false,
+            false,
+        )
+        .unwrap();
+        let record = store.read_record(&id).unwrap().unwrap();
+        assert_eq!(archive::final_text(&record), Some("replacement words"));
+        for key in ["stt", "postproc", "pipeline", "alias_substitutions"] {
+            assert!(record.get(key).is_none(), "stale {key}");
+        }
     }
 
     #[test]

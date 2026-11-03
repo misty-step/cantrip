@@ -52,8 +52,10 @@ Each lane's `vocabulary_mode` is `global` (the default), `candidate-filtered`,
 for each source from matching token sequences, one-edit spelling candidates,
 and the baseline's spoken aliases; it does not rewrite the source. Common-word
 collisions remain candidates, so this is not semantic disambiguation. No-vocab
-mode keeps the cleanup prompt but omits vocabulary. Deterministic aliases
-perform only the documented token replacements, without an LLM or formatting.
+mode keeps the cleanup prompt but omits vocabulary. The deterministic-alias lane
+uses the shipped vocabulary matcher with the evaluation's explicit alias entries,
+without an LLM or formatting. Its rules are owned by
+[Decision 0012](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02).
 Custom full-prompt `instructions` cannot be combined with a non-global mode.
 
 Cloud cleanup requests match production: configured effort sends only

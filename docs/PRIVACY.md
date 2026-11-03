@@ -47,12 +47,12 @@ fallback attempts the whole take once. It never silently downloads weights or
 switches providers. Fallback cannot undo audio already sent to the configured
 provider and keeps your configured cleanup policy.
 
-An explicit `recover --local` or `transcribe --local` uses installed Parakeet
-and disables cleanup **for that operation**. It does not change your saved
-configuration or disable separately opted-in telemetry. `--local` is therefore
-not an all-network-off switch. To keep content local, use local STT and leave
-remote cleanup off; leave telemetry disabled as well when you want no telemetry
-traffic. Downloads and software updates are separate network actions.
+Named `local_only` targets and explicit `recover --local` / `transcribe --local`
+follow the [local-only content policy](decisions/0030-local-only-handoff-targets.md),
+which preserves Raw/Clean selection without LLM or decision requests.
+This does not change saved configuration or disable separately opted-in
+metadata telemetry, so `--local` is not an all-network-off switch. Downloads and
+software updates are separate network actions.
 
 ## Storage locations
 

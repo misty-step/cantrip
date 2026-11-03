@@ -14,10 +14,15 @@ owns this rule.
 
 ## Decision
 
-Snapshot local_only on the named target: use installed default local STT and
-disable cleanup before capture, with no cloud attempt or fallback. Refuse a
-missing local model and explicit --postproc clean before recording rather than
-silently dropping the requested option.
+Snapshot `local_only` on the named target: use installed default local STT and
+prevent every LLM cleanup and decision call, with no cloud attempt or fallback.
+Preserve the take's Raw/Clean selection. Local, deterministic aliases still run
+in Clean; Raw stays Raw. Explicit `--postproc clean` is accepted as alias-only
+Clean. Refuse a missing local model before recording.
+
+The same restriction applies to `recover --local` and `transcribe --local`,
+using their configured Raw/Clean selection without changing the saved config.
+This content restriction does not disable separately opted-in metadata telemetry.
 
 ## Consequences
 
@@ -25,7 +30,7 @@ Local-only commands receive CANTRIP_LOCAL_ONLY=1; other commands have it removed
 Handoff commands also receive CANTRIP_TAKE_AUDIO when retained audio is available.
 The pile keeps its own audio copy and transcribes in a networkless sandbox;
 Cantrip's text drives its own history/HUD, not the pile's transcript. Other
-routes keep configured lanes. Recovery remains caller-selected, so use --local
+routes keep configured lanes. Recovery remains caller-selected, so use `--local`
 for these takes. See [configuration](../CONFIGURATION.md).
 
 Revisit if: destination policy requires isolation beyond the target's lane

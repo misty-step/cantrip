@@ -75,16 +75,23 @@ owns the counts, prompt hashes, and spend.
 
 Raw and Clean are the existing per-take contracts, selected at capture start
 by `--postproc raw|clean` or the configured `[postproc].enabled` default.
-Clean first applies operator-owned vocabulary aliases, then any configured
-opt-in LLM cleanup. Each canonical term owns its aliases in the same vocabulary
-entry; plain strings remain valid.
+Raw delivers the recognizer hypothesis without substitutions or LLM cleanup.
+Clean first applies operator-owned vocabulary aliases, then optional LLM cleanup.
+Each canonical term owns its aliases in the same vocabulary entry; plain strings
+remain valid. No cleanup model means alias-only Clean. A model with an empty
+endpoint is a visible cleanup configuration failure, not alias-only mode.
 
-Alias matching is case-insensitive, exact whole-phrase matching. Select the
-longest non-overlapping matches and emit canonical spellings without fuzzy
-matching or cascading replacements. The aliased text survives absent/skipped
-cleanup and cleanup failures or timeouts. History retains the recognizer's
-`raw_transcript`, the resulting text, and a substitution count; operational
-logs contain counts only.
+Validation and matching share one normalization: trim surrounding whitespace
+and apply full Unicode default case folding, including final sigma and
+multi-character folds such as `ß` → `ss`. Reject empty aliases and table terms,
+aliases equal to any canonical term (including their own), and aliases shared
+across terms after that normalization.
+
+Matching is exact whole-phrase matching on word boundaries. Select the longest
+non-overlapping matches and emit canonical spellings without fuzzy matching or
+cascading replacements. The aliased text survives absent/skipped cleanup and
+cleanup failures or timeouts. History retains the recognizer's `raw_transcript`,
+the resulting text, and a substitution count; operational logs contain counts only.
 
 This deterministic rule cannot disambiguate a deliberately spoken or quoted
 alias: Clean also corrects `"Gantrip"` when the speaker meant that spelling.

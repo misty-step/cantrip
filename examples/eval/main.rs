@@ -27,7 +27,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use cantrip_engine::postproc;
+use cantrip_engine::{config::VocabularyEntry, postproc, vocabulary};
 
 use transcribe_rs::onnx::canary::{CanaryModel, CanaryParams};
 use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineParams, MoonshineVariant};
@@ -748,15 +748,24 @@ struct ChatUsage {
     #[serde(default)]
     completion_tokens: u64,
 }
-// Whole-token aliases are deliberately context-free: "brass tack" is corrupted.
-const VOCABULARY_ALIASES: &[(&[&str], &str)] = &[
-    (&["tac"], "Tach"),
-    (&["tack"], "Tach"),
-    (&["skry"], "Scry"),
-    (&["cue", "em", "dee"], "QMD"),
-    (&["f", "s", "r", "s"], "FSRS"),
-    (&["pipe", "wire"], "PipeWire"),
+const VOCABULARY_ALIASES: &[(&str, &[&str])] = &[
+    ("Tach", &["tac", "tack"]),
+    ("Scry", &["skry"]),
+    ("QMD", &["cue em dee"]),
+    ("FSRS", &["f s r s"]),
+    ("PipeWire", &["pipe wire"]),
 ];
+
+static ALIAS_VOCABULARY: std::sync::LazyLock<Vec<VocabularyEntry>> =
+    std::sync::LazyLock::new(|| {
+        VOCABULARY_ALIASES
+            .iter()
+            .map(|(term, aliases)| VocabularyEntry::Aliased {
+                term: (*term).into(),
+                aliases: aliases.iter().map(|alias| (*alias).into()).collect(),
+            })
+            .collect()
+    });
 
 fn word_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
@@ -772,39 +781,6 @@ fn word_spans(text: &str) -> Vec<(usize, usize)> {
         spans.push((start, text.len()));
     }
     spans
-}
-
-fn alias_matches(text: &str, spans: &[(usize, usize)], words: &[&str]) -> bool {
-    spans.len() >= words.len()
-        && spans
-            .iter()
-            .zip(words)
-            .all(|(&(start, end), word)| text[start..end].eq_ignore_ascii_case(word))
-        && spans[..words.len()]
-            .windows(2)
-            .all(|pair| text[pair[0].1..pair[1].0].chars().all(char::is_whitespace))
-}
-
-fn deterministic_aliases(text: &str) -> String {
-    let spans = word_spans(text);
-    let mut output = String::with_capacity(text.len());
-    let mut copied = 0;
-    let mut index = 0;
-    while index < spans.len() {
-        if let Some(&(words, replacement)) = VOCABULARY_ALIASES
-            .iter()
-            .find(|(words, _)| alias_matches(text, &spans[index..], words))
-        {
-            output.push_str(&text[copied..spans[index].0]);
-            output.push_str(replacement);
-            copied = spans[index + words.len() - 1].1;
-            index += words.len();
-        } else {
-            index += 1;
-        }
-    }
-    output.push_str(&text[copied..]);
-    output
 }
 
 fn within_one_edit(left: &str, right: &str) -> bool {
@@ -840,6 +816,21 @@ fn compact_word(text: &str) -> String {
         .collect()
 }
 
+// Candidate-filtered hints intentionally admit whitespace-separated spoken tokens.
+// This gate does not rewrite text; the deterministic lane uses vocabulary::apply.
+fn candidate_alias_matches(text: &str, spans: &[(usize, usize)], phrase: &str) -> bool {
+    let words = phrase.split(' ');
+    let count = words.clone().count();
+    spans.len() >= count
+        && spans
+            .iter()
+            .zip(words)
+            .all(|(&(start, end), word)| text[start..end].eq_ignore_ascii_case(word))
+        && spans[..count]
+            .windows(2)
+            .all(|pair| text[pair[0].1..pair[1].0].chars().all(char::is_whitespace))
+}
+
 /// A lexical candidate gate, not a semantic disambiguator. Matching common
 /// words and homophones remain candidates so the model must preserve context.
 fn candidate_vocabulary(vocabulary: &[String], text: &str) -> Vec<String> {
@@ -862,9 +853,12 @@ fn candidate_vocabulary(vocabulary: &[String], text: &str) -> Vec<String> {
             joined.push_str(&tokens[end]);
             candidates.push(joined.clone());
         }
-        for &(words, replacement) in VOCABULARY_ALIASES {
-            if alias_matches(text, &spans[index..], words) {
-                candidates.push(compact_word(replacement));
+        for &(term, aliases) in VOCABULARY_ALIASES {
+            if aliases
+                .iter()
+                .any(|alias| candidate_alias_matches(text, &spans[index..], alias))
+            {
+                candidates.push(compact_word(term));
             }
         }
     }
@@ -940,7 +934,9 @@ fn postproc_call(
 ) -> Result<(String, ChatUsage, u128)> {
     if lane.vocabulary_mode == VocabularyMode::DeterministicAliases {
         let start = Instant::now();
-        let output = deterministic_aliases(transcript);
+        let output = vocabulary::apply(transcript, &ALIAS_VOCABULARY)
+            .0
+            .into_owned();
         return Ok((
             output,
             ChatUsage {
@@ -2418,15 +2414,29 @@ mod tests {
     }
 
     #[test]
-    fn aliases_are_boundary_aware_but_not_context_aware() {
-        assert_eq!(
-            deterministic_aliases("TAC tack skry cue em dee f s r s pipe wire"),
-            "Tach Tach Scry QMD FSRS PipeWire"
-        );
-        assert_eq!(
-            deterministic_aliases("a brass tack, tacks, stack, cue em. dee"),
-            "a brass Tach, tacks, stack, cue em. dee"
-        );
+    fn deterministic_alias_lane_uses_shipped_replacement_without_a_provider() {
+        let lane = PostprocLane {
+            id: "aliases".into(),
+            endpoint: "must-not-be-used".into(),
+            model: String::new(),
+            marker: None,
+            scheme: None,
+            pricing: None,
+            instructions: None,
+            reasoning_effort: None,
+            vocabulary_mode: VocabularyMode::DeterministicAliases,
+            ollama_base: None,
+        };
+        let (output, usage, _) = postproc_call(
+            &ureq::Agent::new(),
+            &lane,
+            "TAC tack skry cue em dee f s r s pipe wire; cue  em dee",
+            "",
+        )
+        .unwrap();
+        assert_eq!(output, "Tach Tach Scry QMD FSRS PipeWire; cue  em dee");
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
     }
 
     #[test]

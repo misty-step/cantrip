@@ -141,8 +141,8 @@ struct ChatRound {
 /// Refine a transcript through an OpenAI-compatible chat completion endpoint.
 /// Runs `cfg.passes` rounds in a chain: each later round re-reads the previous
 /// output and fixes residual speech-recognition errors the earlier round left.
-/// Cancellation or budget exhaustion during generative passes leaves the raw
-/// transcript intact; a timed-out watchdog preserves the completed candidate.
+/// Cancellation or budget exhaustion during generative passes preserves the
+/// supplied source (already aliased in Clean); a timed-out watchdog keeps the candidate.
 pub fn refine(
     transcript: &str,
     cfg: &PostprocConfig,
@@ -172,7 +172,7 @@ pub(crate) fn refine_until(
 
     // Pre-cleanup triage gatekeeper (ADR 0026):
     // If an opt-in decision model is configured, evaluate whether generative cleanup
-    // is required. If the raw transcript is already clean (needs_cleanup < 0.20),
+    // is required. If the supplied transcript is already clean (needs_cleanup < 0.20),
     // bypass generative passes to save latency and token cost.
     if let Some(mut client) = get_decision_client(cfg, api_key, deadline, cancel) {
         if !crate::stt::is_cancelled(cancel) {
@@ -306,7 +306,7 @@ pub(crate) fn refine_until(
                         (Some(ans_prob), Some(fidelity)) => {
                             if ans_prob > 0.60 || fidelity < 0.5 {
                                 tracing::warn!(
-                                    "[Postproc] decision watchdog rejected cleanup: answer-to-question detected (ans_p={:.2}, fidelity={:.1}) ms={}; falling back to raw transcript",
+                                    "[Postproc] decision watchdog rejected cleanup: answer-to-question detected (ans_p={:.2}, fidelity={:.1}) ms={}; falling back to pre-LLM source",
                                     ans_prob,
                                     fidelity,
                                     started.elapsed().as_millis()

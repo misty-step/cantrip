@@ -133,7 +133,7 @@ enum CliCommand {
         /// Recover this exact take; omitted selects the newest unresolved audio.
         #[arg(long)]
         id: Option<String>,
-        /// Use installed local Parakeet without cloud STT or cleanup.
+        /// Use installed local Parakeet without cloud STT or LLM cleanup; keep Raw/Clean.
         #[arg(long)]
         local: bool,
         /// Copy the result without sending keys to the focused application.
@@ -159,7 +159,7 @@ enum CliCommand {
     /// Transcribe one WAV file and print the transcript.
     Transcribe {
         wav: PathBuf,
-        /// Use installed local Parakeet without cloud STT or cleanup.
+        /// Use installed local Parakeet without cloud STT or LLM cleanup; keep Raw/Clean.
         #[arg(long)]
         local: bool,
     },
@@ -408,7 +408,7 @@ model = ""                # empty = Clean applies aliases without LLM cleanup
 # api_key_id = "openai"   # keyring entry; omit for local endpoints
 timeout_ms = 30000
 passes = 1                # cleanup rounds; 2 adds a proofread pass
-min_chars = 40            # skip cleanup under this length; 0 = never skip
+min_chars = 40            # skip LLM cleanup under this length; 0 = never skip
 instructions = ""         # optional extra style guidance
 # Per-dictation override (two hotkeys): `cantrip toggle --postproc clean|raw`
 # selects Raw or Clean for that capture, regardless of `enabled` above.
@@ -708,8 +708,7 @@ fn enum_label(value: &impl serde::Serialize) -> String {
 fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
     let mut config = Config::load().context("loading configuration")?;
     if local {
-        config.stt = Default::default();
-        config.postproc.enabled = false;
+        config.restrict_to_local();
     }
     if config.stt.endpoint.is_none() {
         let spec = models::require(&config.stt.model)?;
@@ -758,7 +757,7 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
     match &outcome.text {
         Ok(text) => {
             if matches!(outcome.postproc, pipeline::PostprocStatus::Failed { .. }) {
-                eprintln!("post-processing failed; showing the raw transcript");
+                eprintln!("post-processing failed; showing the alias-corrected transcript");
             }
             println!("{text}");
             if outcome.partial {
@@ -1166,8 +1165,11 @@ fn cleanup_diagnosis(config: &Config) -> String {
     if !config.postproc.enabled {
         return "cleanup: disabled (raw transcript is delivered)".to_owned();
     }
-    if config.postproc.endpoint.trim().is_empty() || config.postproc.model.trim().is_empty() {
-        return "cleanup: disabled (Clean applies local vocabulary aliases only)".to_owned();
+    if config.postproc.model.trim().is_empty() {
+        return "cleanup: Clean applies vocabulary aliases only (no cleanup model)".to_owned();
+    }
+    if config.postproc.endpoint.trim().is_empty() {
+        return "cleanup: blocked (endpoint is empty) — run: cantrip settings".to_owned();
     }
     if config.postproc.timeout_ms == 0 {
         return "cleanup: blocked (timeout_ms is zero) — run: cantrip settings".to_owned();
@@ -1265,6 +1267,26 @@ fn endpoint_lane(origin: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_distinguishes_raw_alias_only_clean_and_a_missing_endpoint() {
+        let mut config = Config::default();
+        assert_eq!(
+            cleanup_diagnosis(&config),
+            "cleanup: disabled (raw transcript is delivered)"
+        );
+        config.postproc.enabled = true;
+        assert_eq!(
+            cleanup_diagnosis(&config),
+            "cleanup: Clean applies vocabulary aliases only (no cleanup model)"
+        );
+        config.postproc.model = "configured-model".into();
+        config.postproc.endpoint.clear();
+        assert_eq!(
+            cleanup_diagnosis(&config),
+            "cleanup: blocked (endpoint is empty) — run: cantrip settings"
+        );
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
