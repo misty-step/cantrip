@@ -18,6 +18,7 @@ pub struct Config {
     /// macOS global toggle shortcut; None uses the native client's default.
     /// Linux shortcuts remain owned by the compositor.
     pub hotkey: Option<String>,
+    #[serde(deserialize_with = "crate::vocabulary::deserialize_entries")]
     pub vocabulary: Vec<VocabularyEntry>,
     pub stt: SttConfig,
     pub postproc: PostprocConfig,
@@ -394,6 +395,34 @@ mod tests {
             let error = config.validate().unwrap_err().to_string();
             assert!(error.contains(expected), "{error}");
             assert!(!error.contains("Gantrip") && !error.contains("PIPEWIRE"));
+        }
+    }
+
+    #[test]
+    fn vocabulary_shape_errors_name_the_entry_and_shape_without_echoing_values() {
+        for (text, index) in [
+            (r#"vocabulary = ["PRIVATE-CANONICAL", 7]"#, 2),
+            (
+                r#"vocabulary = ["PRIVATE-CANONICAL", { term = "PRIVATE-TERM", aliases = "PRIVATE-ALIAS" }]"#,
+                2,
+            ),
+            (
+                r#"vocabulary = [{ term = 7, aliases = ["PRIVATE-ALIAS"] }]"#,
+                1,
+            ),
+        ] {
+            let error = toml::from_str::<Config>(text).unwrap_err();
+            let message = error.message();
+            assert!(
+                message.contains(&format!("vocabulary entry {index}")),
+                "{message}"
+            );
+            assert!(
+                message.contains("string or { term = string, aliases = [string, ...] }"),
+                "{message}"
+            );
+            assert!(!message.contains("PRIVATE-"), "{message}");
+            assert!(!message.contains("untagged enum"), "{message}");
         }
     }
 

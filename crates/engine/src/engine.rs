@@ -2340,7 +2340,7 @@ fn finish_audio(
     if outcome.cleanup == Cleanup::Failed {
         outcome
             .message
-            .push_str(" Cleanup was unavailable; original text was used.");
+            .push_str(" Cleanup was unavailable; alias-corrected text was used.");
     }
     let archive_failed = matches!(pipeline.archive, pipeline::ArchiveStatus::Failed(_));
     storage_warning(&mut outcome, saved.warning);

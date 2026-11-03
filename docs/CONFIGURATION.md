@@ -398,12 +398,6 @@ record fields, local inspection, durability limits, and exact
 [Forget semantics](PRIVACY.md#what-forget-deletes). This is retained data, not an
 ephemeral cache; changing configuration does not erase it.
 
-## `vocabulary`
-
-Exact-spelling terms injected into the postproc system prompt (and the cloud
-STT prompt) so technical names like `PipeWire` survive cleanup. Add jargon
-you dictate often.
-
 ## `injection`
 
 **Linux delivery modes (unchanged):**

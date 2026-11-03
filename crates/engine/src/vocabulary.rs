@@ -16,6 +16,41 @@ pub enum VocabularyEntry {
     },
 }
 
+pub(crate) fn deserialize_entries<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<VocabularyEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Entries;
+    impl<'de> serde::de::Visitor<'de> for Entries {
+        type Value = Vec<VocabularyEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(
+                "an array of strings or { term = string, aliases = [string, ...] } tables",
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut entries = Vec::with_capacity(sequence.size_hint().unwrap_or(0));
+            while let Some(entry) = sequence.next_element::<VocabularyEntry>().map_err(|_| {
+                <A::Error as serde::de::Error>::custom(format!(
+                    "vocabulary entry {}: expected a string or {{ term = string, aliases = [string, ...] }} (aliases optional)",
+                    entries.len() + 1,
+                ))
+            })? {
+                entries.push(entry);
+            }
+            Ok(entries)
+        }
+    }
+    deserializer.deserialize_seq(Entries)
+}
+
 impl VocabularyEntry {
     pub fn term(&self) -> &str {
         match self {
