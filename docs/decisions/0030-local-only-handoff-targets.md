@@ -14,17 +14,18 @@ owns this rule.
 
 ## Decision
 
-**Amendment (2026-11-03):** accept explicit `--postproc clean` as alias-only Clean
-instead of refusing it; local-only policy restricts providers, not Raw/Clean selection.
+**Amendment (2026-11-03):** accept explicit post-processing mode selection
+instead of refusing Clean; local-only policy restricts providers, not the
+[mode model](0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03).
 
 Snapshot `local_only` on the named target: use installed default local STT and
 prevent every LLM cleanup and decision call, with no cloud attempt or fallback.
-Preserve the take's Raw/Clean selection. Local, deterministic aliases still run
-in Clean; Raw stays Raw. Explicit `--postproc clean` is accepted as alias-only
-Clean. Refuse a missing local model before recording.
+Preserve the take's selected mode. Local, deterministic aliases still run in
+Clean and Elevate; Raw stays Raw. With provider models disabled, either LLM
+mode is alias-only. Refuse a missing local model before recording.
 
 The same restriction applies to `recover --local` and `transcribe --local`,
-using their configured Raw/Clean selection without changing the saved config.
+using the take's selected mode without changing the saved config.
 This content restriction does not disable separately opted-in metadata telemetry.
 
 ## Consequences

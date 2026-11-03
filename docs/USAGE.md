@@ -38,8 +38,8 @@ replacing it. Keep its XDG location, model settings, and credential ids intact.
 For this first local trial:
 
 - Keep `[stt].model = "parakeet-tdt-0.6b-v3-int8"` and no `[stt].endpoint`.
-- Keep `[postproc].enabled = false`. Leave cleanup off until you have explicitly
-  configured a usable endpoint and model.
+- Keep `[postproc].mode = "raw"`. Leave LLM processing off until you have
+  deliberately prepared its endpoint, model, and credential.
 - Leave telemetry disabled.
 - Choose **one delivery path** before starting the daemon:
   - **Supported direct Hyprland/logind desktop:** keep the default
@@ -279,17 +279,33 @@ are deliberate choices after a successful trial, not prerequisites.
   On Mac, use **Quit Cantrip** and wait for the app-owned engine to exit;
   an externally owned daemon must be stopped through its own owner.
 
-`toggle` and `start` accept `--postproc clean|raw`.
-[Decision 0012](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02)
-owns the Raw/Clean text contract, matching rules, and deliberately-spoken-alias
-limitation. Configure aliases using the [`vocabulary` syntax](CONFIGURATION.md#vocabulary--spellings-and-aliases).
+`toggle` and `start` accept `--postproc raw|clean|elevate`.
+[Decision 0012](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03)
+owns each mode's pipeline and text contract. Configure canonical spellings and
+aliases using the [`vocabulary` syntax](CONFIGURATION.md#vocabulary--spellings-and-aliases).
 
-The mode chosen at capture start overrides `[postproc].enabled` for that take;
-using a different flag to stop does not change its mode. Without a flag, the
-configured policy applies. Two shortcuts can run `toggle --postproc raw` and
-`toggle --postproc clean`. An explicit Clean request does not install or start
-an LLM service; [configure one deliberately](CONFIGURATION.md#postproc--cleanup)
-only if you also want LLM cleanup.
+On macOS, choose **Raw**, **Clean**, or **Elevate** from the Cantrip menu's mode
+picker. The checked item is the saved default. Settings has the same picker on
+macOS and Linux, plus the per-mode model controls. The description and ordered
+pipeline show which STT model runs locally or in the cloud, whether aliases run,
+and which LLM follows them. Recording and processing HUDs show the active take's
+mode and pipeline. A default change while a take is active applies only to the
+next take.
+
+A per-take flag overrides `[postproc].mode` without changing the saved default.
+The mode is fixed at capture start; a different flag used to stop cannot change
+it. For separate compositor bindings or shell-based shortcuts, use:
+
+```sh
+cantrip toggle --postproc raw
+cantrip toggle --postproc clean
+cantrip toggle --postproc elevate
+```
+
+The native macOS toggle shortcut uses the current saved default. Per-mode
+shortcuts need no additional Cantrip daemon: configure each shortcut to run its
+corresponding command. Prepare the [provider configuration](CONFIGURATION.md#postproc--cleanup)
+before choosing an LLM mode; selecting a mode does not install a service.
 
 Cloud transcription waits for a response, a real failure, or cancellation; a
 slow response is not a failure. Twenty-minute takes and valid responses arriving
@@ -317,7 +333,7 @@ operation finished.
 | `delivery: uncertain` | The clipboard or some keys may already have changed. Inspect the destination before retrying to avoid duplicates; Cantrip does not automatically retry an uncertain handoff. |
 | `completeness: partial` | Available text is incomplete. Keep the audio and recover the whole recording; a partial transcript is not a successful retry. |
 | `completeness: empty`, `failed`, or `cancelled` | No complete dictation was delivered. Read the notice and use the matching recording's available artifacts. |
-| `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [Clean fallback contract](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02). Repair cleanup configuration or leave the LLM unconfigured. |
+| `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [mode fallback contract](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03). Repair provider configuration or deliberately leave that mode's model empty for aliases only. |
 | Storage warning | Delivery and durable retention are separate. Inspect storage before relying on recovery or recording more. |
 | Disconnected/unknown HUD or failed `ping` | Use desktop diagnostics; do not infer Ready or start a competing owner. |
 
@@ -375,9 +391,10 @@ For the CLI, list metadata and choose an exact ID:
 "$HOME/.local/bin/cantrip" copy RECORDING_ID
 ```
 
-Copy uses saved text without retranscribing and never sends keys. For a retry
-with the configured transcription provider and cleanup policy, copying the
-result rather than typing it:
+Copy uses saved text without retranscribing and never sends keys. Recovery uses
+the take's recorded mode and model, not today's default mode, with the current
+transcription provider and shared LLM endpoint/credential. To copy the result
+rather than type it:
 
 ```sh
 "$HOME/.local/bin/cantrip" recover --id RECORDING_ID --clipboard

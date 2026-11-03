@@ -23,14 +23,14 @@ not enable telemetry in the desktop app.
 | Default local transcription | Installed Parakeet runs on CPU. Dictation audio and text are not sent to a provider. |
 | Model download | `models pull` downloads the registered model from `blob.handy.computer` and verifies its pinned checksum. It does not upload recordings. There is no automatic model download during dictation or fallback. |
 | Cloud transcription | Setting `[stt].endpoint` sends the selected recording's audio, model selection, and configured vocabulary to that endpoint. |
-| Local cleanup | An explicitly configured local endpoint receives transcript text, cleanup instructions, and vocabulary. Its own logging and networking policies are separate from Cantrip's. |
-| Cloud cleanup | Enabling a remote `[postproc].endpoint` sends transcript text, instructions, and vocabulary to that provider, even when speech recognition was local. |
-| Optional decision model | Setting `[postproc].decision_model` sends source transcript text, vocabulary, model selection, and decision criteria to the decision endpoint for triage, even when generative cleanup is bypassed. The watchdog also sends the candidate cleanup text. This includes **TypeSafe-native decision models**, not only OpenRouter models. These decision calls send no audio. |
+| Local Clean or Elevate | The configured local endpoint receives alias-corrected transcript text, the selected mode's system prompt, and canonical vocabulary spellings. Its own logging and networking policies are separate from Cantrip's. |
+| Cloud Clean or Elevate | Selecting either LLM mode with a remote `[postproc].endpoint` sends that text, system prompt, and vocabulary to the provider, even when STT was local. Elevate is not a local-only mode; its default provider configuration is shared with Clean. |
+| Optional decision model | Setting `[postproc].decision_model` permits Clean triage to send the source transcript, vocabulary, model selection, and decision criteria. A watchdog in either LLM mode also sends its candidate text. This includes **TypeSafe-native decision models**, not only OpenRouter models. Elevate skips pre-generation triage. These calls send no audio. |
 | Opt-in telemetry | Enabling `[telemetry]` sends operational metadata to the configured Langfuse endpoint, never audio or transcript text. |
 
 Vocabulary hints contain canonical spellings only, never the configured alias
-lists. Alias substitution runs on this machine in Clean before optional cleanup;
-it adds no network request. Any later opted-in cleanup receives the resulting
+lists. Alias substitution runs on this machine in Clean and Elevate before
+optional LLM work; it adds no network request. Any later opted-in LLM receives the resulting
 text, not the alias rules.
 
 Cloud providers have their own retention and account policies. Cantrip does not
@@ -49,7 +49,7 @@ provider and keeps your configured cleanup policy.
 
 Named `local_only` targets and explicit `recover --local` / `transcribe --local`
 follow the [local-only content policy](decisions/0030-local-only-handoff-targets.md),
-which preserves configured Raw/Clean selection without LLM or decision requests.
+which preserves the selected mode with no LLM or decision requests.
 This does not change saved configuration or disable separately opted-in
 metadata telemetry, so `--local` is not an all-network-off switch. Downloads and
 software updates are separate network actions.
@@ -140,7 +140,8 @@ results and results from `transcribe` or `recover`. A JSON record keeps the
 recognizer's hypothesis as `raw_transcript`; `postprocessed_transcript` holds
 alias-corrected or LLM-cleaned text when present. It also records:
 
-- completion time, source, audio duration, and pipeline latency;
+- completion time, source, audio duration, pipeline latency, and the take's
+  capture-time mode and selected mode model (including reasoning effort);
 - selected STT model, local/cloud/mixed backend, latency, and completeness;
 - the original cloud model in `stt.fallback_from_model` when local completion contributes;
 - the number of deterministic alias substitutions as `alias_substitutions`;
