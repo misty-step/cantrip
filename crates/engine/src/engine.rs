@@ -1,7 +1,7 @@
 //! One authoritative dictation state machine, hosted over private local IPC.
 
 use crate::audio::{self, InputSignal};
-use crate::config::{valid_handoff_name, Config, SttConfig, TelemetryConfig};
+use crate::config::{valid_handoff_name, Config, Mode, PipelineDisplay, PostprocConfig, SttConfig, TelemetryConfig};
 use crate::delivery::{
     ClipboardFallback, InjectionFailure, InjectionFailureKind, InjectionMode, InjectionOutcome,
 };
@@ -75,6 +75,7 @@ struct Operation {
     cancel: Arc<AtomicBool>,
     lifecycle: Arc<AtomicU8>,
     hud: crate::config::HudConfig,
+    pipeline: PipelineDisplay,
     /// Set only for a take started toward a named handoff target.
     handoff: Option<ipc::Handoff>,
     started: Instant,
@@ -319,6 +320,7 @@ impl Daemon {
             cancel: Arc::new(AtomicBool::new(false)),
             lifecycle: Arc::new(AtomicU8::new(CANCEL_OPEN)),
             hud: self.config.hud,
+            pipeline: self.config.pipeline_display(),
             handoff,
             started: Instant::now(),
         }
@@ -467,6 +469,10 @@ impl Daemon {
                 .operation()
                 .and_then(|operation| operation.handoff.clone()),
             microphone: self.microphone.clone(),
+            pipeline: Some(self.state.operation().map_or_else(
+                || self.config.pipeline_display(),
+                |operation| operation.pipeline.clone(),
+            )),
         }
     }
 }
@@ -1051,7 +1057,7 @@ fn execute(
 fn start_recording(
     daemon: &mut Daemon,
     runtime_dir: &Path,
-    postproc: Option<bool>,
+    postproc: Option<Mode>,
     handoff: Option<String>,
 ) -> CommandReply {
     let selected_handoff = if let Some(name) = handoff {
@@ -1087,7 +1093,8 @@ fn start_recording(
         .selected_handoff
         .as_ref()
         .map(|(name, target)| daemon.handoff_view(name, target));
-    let operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
+    let mut operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
+    operation.pipeline = config.pipeline_display();
     daemon.state = State::RequestingMicrophone {
         operation,
         config: Box::new(config),
@@ -1248,7 +1255,7 @@ fn begin_capture(
                 Ok(true) => {
                     let duration_ms = stt::wav_duration_ms(&wav).unwrap_or(0);
                     let saved =
-                        persist_attempt(take_id, duration_ms, None, Some(&wav), false, true);
+                        persist_attempt(take_id, duration_ms, None, Some(&wav), false, true, &config.postproc);
                     outcome.artifacts = saved.artifacts;
                     describe_artifacts(&mut outcome);
                     storage_warning(&mut outcome, saved.warning);
@@ -1275,12 +1282,12 @@ fn begin_capture(
 /// Start-time mode and destination snapshot. Local restriction is shared with recovery/CLI.
 fn take_config(
     base: &Config,
-    postproc: Option<bool>,
+    postproc: Option<Mode>,
     handoff: Option<(String, crate::config::HandoffTarget)>,
 ) -> Config {
     let mut config = base.clone();
-    if let Some(enabled) = postproc {
-        config.postproc.enabled = enabled;
+    if let Some(mode) = postproc {
+        config.postproc.mode = mode;
     }
     if handoff
         .as_ref()
@@ -1457,6 +1464,10 @@ fn recover_take(
         return daemon.reject(message, "no-recording");
     };
     let mut config = daemon.config.clone();
+    match recovery::selection(&take.id) {
+        Ok(selection) => selection.apply_to(&mut config.postproc),
+        Err(_) => return daemon.reject("That recording's mode could not be read.", "storage-failed"),
+    }
     if local {
         config.restrict_to_local();
         if !local_model_ready(&config.stt) {
@@ -1479,7 +1490,8 @@ fn recover_take(
     if clipboard {
         config.injection = InjectionMode::Clipboard;
     }
-    let operation = daemon.operation(take.id, Some(OperationKind::Recovery), None);
+    let mut operation = daemon.operation(take.id, Some(OperationKind::Recovery), None);
+    operation.pipeline = config.pipeline_display();
     let job = Job {
         operation: operation.clone(),
         config: Box::new(config),
@@ -1804,6 +1816,7 @@ fn shutdown_state(state: &mut State) {
             recorder,
             wav,
             started,
+            config,
             ..
         } => {
             tracing::info!("[Daemon] state recording -> retaining reason=shutdown");
@@ -1816,6 +1829,7 @@ fn shutdown_state(state: &mut State) {
                 Some(&wav),
                 false,
                 true,
+                &config.postproc,
             );
             if saved.warning {
                 tracing::warn!("[Capture] shutdown retention incomplete class=storage-failed");
@@ -1852,6 +1866,7 @@ fn retain_rejected_capture(job: Job) -> TerminalOutcome {
             Some(&wav),
             false,
             true,
+            &job.config.postproc,
         );
         if job.operation.cancel.load(Ordering::Acquire) {
             outcome.completeness = Completeness::Cancelled;
@@ -1984,7 +1999,7 @@ fn run_job(
                 // not a capture failure merely because no frames arrived.
                 let empty = error.is::<audio::EmptyRecording>();
                 let saved =
-                    persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
+                    persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true, &context.config.postproc);
                 let mut outcome = if empty && context.cancelled() {
                     context.outcome(Completeness::Cancelled, Delivery::Cancelled)
                 } else {
@@ -2071,6 +2086,7 @@ struct SavedArtifacts {
     warning: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_attempt(
     take_id: &str,
     duration_ms: u64,
@@ -2078,8 +2094,10 @@ fn persist_attempt(
     wav: Option<&Path>,
     partial: bool,
     unresolved: bool,
+    postproc: &PostprocConfig,
 ) -> SavedArtifacts {
-    let saved = recovery::persist(take_id, duration_ms, text, wav, partial, unresolved);
+    let saved = recovery::persist_with_config(take_id, duration_ms, text, wav, partial, unresolved, postproc);
+    let selection_saved = saved.is_ok();
     let mut saved = match saved {
         Ok(take) => {
             let artifacts = artifacts_for(take_id, Some(&take));
@@ -2127,9 +2145,9 @@ fn persist_attempt(
             }
         }
     }
-    saved.durable_audio &= !saved.audio_conflict;
+    saved.durable_audio &= !saved.audio_conflict && selection_saved;
     saved.durable_text &= !saved.audio_conflict;
-    saved.warning |= saved.audio_conflict;
+    saved.warning |= saved.audio_conflict || !selection_saved;
     saved
 }
 
@@ -2180,7 +2198,7 @@ fn process_audio(
     let runtime_source = source == pipeline::Source::Dictation;
     // Secure the full take before entering blocking inference. Recovery uses
     // the same immutable sidecar; no retry changes another recording's files.
-    let initial = persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
+    let initial = persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true, &context.config.postproc);
     if initial.audio_conflict {
         let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
         outcome.message =
@@ -2199,6 +2217,14 @@ fn process_audio(
         if runtime_source && initial.durable_audio {
             remove_runtime(&wav, &mut outcome);
         }
+        return (outcome, None);
+    }
+    if initial.warning {
+        let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
+        outcome.message = "Recording mode or audio could not be retained; transcription did not start.".to_owned();
+        outcome.artifacts = initial.artifacts;
+        describe_artifacts(&mut outcome);
+        storage_warning(&mut outcome, true);
         return (outcome, None);
     }
     let pipeline = pipeline::run(
@@ -2252,6 +2278,7 @@ fn finish_audio(
         Some(wav),
         pipeline.partial || cancelled,
         true,
+        &context.config.postproc,
     );
     let mut report = DeliveryReport::none();
     if completeness == Completeness::Cancelled {
@@ -2262,7 +2289,7 @@ fn finish_audio(
         if report.delivery == Delivery::Cancelled {
             outcome.completeness = Completeness::Cancelled;
             // Cancellation after successful STT is still an incomplete attempt.
-            saved = persist_attempt(context.id(), duration_ms, Some(text), Some(wav), true, true);
+            saved = persist_attempt(context.id(), duration_ms, Some(text), Some(wav), true, true, &context.config.postproc);
         } else if completeness == Completeness::Complete
             && report.delivered()
             && saved.durable_text
@@ -2399,7 +2426,7 @@ fn finish_audio(
                 Cleanup::Off => "off",
             },
             cleanup_ms,
-            cleanup_model: cleanup_ms.map(|_| context.config.postproc.model.clone()),
+            cleanup_model: cleanup_ms.map(|_| context.config.postproc.model_config().model.clone()),
             tokens_in: pipeline
                 .postproc_usage
                 .as_ref()
@@ -3698,8 +3725,11 @@ mod tests {
                 api_key_id: Some("cloud".to_owned()),
             },
             postproc: crate::config::PostprocConfig {
-                enabled: true,
-                model: "cleanup-model".to_owned(),
+                mode: Mode::Clean,
+                clean: crate::config::ModeModelConfig {
+                    model: "cleanup-model".to_owned(),
+                    reasoning_effort: None,
+                },
                 ..crate::config::PostprocConfig::default()
             },
             handoff: [(name.to_owned(), target)].into(),
@@ -3711,12 +3741,13 @@ mod tests {
     fn a_local_only_target_keeps_its_take_off_every_cloud_lane() {
         let base = cloud_config_with("pile", true);
         let pile = Some(("pile".to_owned(), base.handoff["pile"].clone()));
-        for postproc in [None, Some(false), Some(true)] {
+        for postproc in [None, Some(Mode::Raw), Some(Mode::Clean), Some(Mode::Elevate)] {
             let take = take_config(&base, postproc, pile.clone());
             assert_eq!(take.stt, SttConfig::default());
             assert!(take.stt.endpoint.is_none());
-            assert_eq!(take.postproc.enabled, postproc.unwrap_or(true));
-            assert!(take.postproc.model.is_empty());
+            assert_eq!(take.postproc.mode, postproc.unwrap_or(Mode::Clean));
+            assert!(take.postproc.clean.model.is_empty());
+            assert!(take.postproc.elevate.model.is_empty());
             assert_eq!(take.selected_handoff, pile);
         }
         // Another target, and the desktop, keep the configured cloud lanes.
@@ -3725,13 +3756,13 @@ mod tests {
         for handoff in [kaylee, None] {
             let take = take_config(&shared, None, handoff);
             assert_eq!(take.stt, shared.stt);
-            assert!(take.postproc.enabled);
+            assert_eq!(take.postproc.mode, Mode::Clean);
         }
-        assert!(!take_config(&shared, Some(false), None).postproc.enabled);
+        assert_eq!(take_config(&shared, Some(Mode::Raw), None).postproc.mode, Mode::Raw);
     }
 
     #[test]
-    fn start_clean_without_a_model_reaches_capture_and_snapshots_clean() {
+    fn start_overrides_freeze_mode_models_and_active_status_across_default_reload() {
         struct CapturingPlatform;
         impl Platform for CapturingPlatform {
             fn start_recording(&self, _: &Path, _: Option<&str>) -> Result<Box<dyn Recorder>> {
@@ -3748,27 +3779,39 @@ mod tests {
                 "test-client".into()
             }
         }
-        let mut config = cloud_config_with("pile", false);
-        config.postproc.enabled = false;
-        config.postproc.model.clear();
-        let mut daemon = Daemon::new(config, Vec::new(), true, Arc::new(CapturingPlatform));
-        let (sender, receiver) = mpsc::channel();
-        let reply = execute(
-            Command::Start {
-                postproc: Some(true),
-                handoff: None,
-            },
-            &mut daemon,
-            Path::new("/unused-capture-path"),
-            &sender,
-        );
-        assert!(reply.ok, "{:?}", reply.error);
-        let State::Recording { config, .. } = &daemon.state else {
-            panic!("capture did not start")
-        };
-        assert!(config.postproc.enabled);
-        assert!(config.postproc.model.is_empty());
-        assert!(receiver.try_recv().is_err());
+        for mode in Mode::ALL {
+            let mut config = cloud_config_with("pile", false);
+            config.postproc.mode = Mode::Raw;
+            // Clean's alias-only selection must reach capture too.
+            config.postproc.clean.model.clear();
+            config.postproc.elevate.model = "take-elevate-model".into();
+            let mut daemon = Daemon::new(config, Vec::new(), true, Arc::new(CapturingPlatform));
+            let (sender, receiver) = mpsc::channel();
+            let reply = execute(
+                Command::Start { postproc: Some(mode), handoff: None },
+                &mut daemon,
+                Path::new("/unused-capture-path"),
+                &sender,
+            );
+            assert!(reply.ok, "{:?}", reply.error);
+            let State::Recording { config, .. } = &daemon.state else {
+                panic!("capture did not start")
+            };
+            assert_eq!(config.postproc.mode, mode);
+            let selected = config.postproc.clone();
+            let display = config.pipeline_display();
+            assert_eq!(daemon.snapshot().pipeline.as_ref(), Some(&display));
+            // Reload replaces only this configured default. The active take
+            // and its display continue to own the start-time config.
+            daemon.config.postproc.mode = Mode::Elevate;
+            daemon.config.postproc.clean.model = "reloaded-clean".into();
+            daemon.config.postproc.elevate.model = "reloaded-elevate".into();
+            assert_eq!(daemon.snapshot().pipeline.as_ref(), Some(&display));
+            assert!(execute(Command::Stop, &mut daemon, Path::new("/unused"), &sender).ok);
+            let job = receiver.try_recv().expect("capture should reach its worker");
+            assert_eq!(job.config.postproc, selected);
+            assert_eq!(daemon.snapshot().pipeline.as_ref(), Some(&display));
+        }
     }
 
     struct CapturedLog(Arc<parking_lot::Mutex<Vec<u8>>>);

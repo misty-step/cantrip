@@ -86,21 +86,86 @@ pub struct SttConfig {
     pub api_key_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// The selected dictation transformation. This is the sole mode vocabulary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Raw,
+    Clean,
+    Elevate,
+}
+
+impl Mode {
+    pub const ALL: [Self; 3] = [Self::Raw, Self::Clean, Self::Elevate];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Clean => "clean",
+            Self::Elevate => "elevate",
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Raw => "Raw",
+            Self::Clean => "Clean",
+            Self::Elevate => "Elevate",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Raw => "Recognizer output without aliases or LLM changes.",
+            Self::Clean => "Vocabulary aliases, then faithful cleanup that preserves your wording and intent.",
+            Self::Elevate => "Vocabulary aliases, then a clearer, more articulate version of what you said.",
+        }
+    }
+}
+
+impl std::str::FromStr for Mode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == value)
+            .ok_or("expected raw, clean, or elevate")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
-pub struct PostprocConfig {
-    pub enabled: bool,
-    pub endpoint: String,
+pub struct ModeModelConfig {
     pub model: String,
-    pub api_key_id: Option<String>,
-    /// Reasoning effort for providers that support it (OpenRouter
-    /// `reasoning.effort`): e.g. low, medium, high. Omitted from the
-    /// request when unset; local endpoints ignore unknown fields.
+    /// OpenRouter reasoning effort; omitted from requests when unset.
+    #[serde(
+        deserialize_with = "optional_nonempty_string",
+        serialize_with = "empty_string_for_none"
+    )]
     pub reasoning_effort: Option<String>,
+}
+
+impl Default for ModeModelConfig {
+    fn default() -> Self {
+        Self {
+            model: "openai/gpt-6.1-sol".to_owned(),
+            reasoning_effort: Some("low".to_owned()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(from = "PostprocInput")]
+pub struct PostprocConfig {
+    pub mode: Mode,
+    pub clean: ModeModelConfig,
+    pub elevate: ModeModelConfig,
+    pub endpoint: String,
+    #[serde(serialize_with = "empty_string_for_none")]
+    pub api_key_id: Option<String>,
     pub timeout_ms: u64,
     pub passes: u8,
-    /// Skip LLM cleanup when the alias-corrected transcript has fewer than this many chars.
-    /// `0` disables the skip. Default 40 covers short commands without a cloud round-trip.
+    /// Clean only: skip LLM cleanup below this character count; 0 never skips.
     pub min_chars: usize,
     pub instructions: String,
     /// Optional TypeSafe System One decision model (e.g. "typesafe/jev-1.13" or "jev-latest")
@@ -113,6 +178,135 @@ pub struct PostprocConfig {
     /// Optional keyring ID for decision authentication. Defaults to "openrouter"
     /// for OpenRouter models or "typesafe" otherwise, falling back to api_key_id.
     pub decision_api_key_id: Option<String>,
+}
+
+/// Read old flat fields only at the configuration boundary. Serialization has
+/// no compatibility aliases, so saving a migrated config completes the cutover.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PostprocInput {
+    mode: Option<Mode>,
+    enabled: Option<bool>,
+    clean: Option<ModeModelConfig>,
+    elevate: Option<ModeModelConfig>,
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+    endpoint: Option<String>,
+    #[serde(deserialize_with = "present_optional_string")]
+    api_key_id: Option<Option<String>>,
+    timeout_ms: Option<u64>,
+    passes: Option<u8>,
+    min_chars: Option<usize>,
+    instructions: Option<String>,
+    decision_model: Option<String>,
+    decision_endpoint: Option<String>,
+    decision_api_key_id: Option<String>,
+}
+
+fn present_optional_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|value| Some(value.filter(|s| !s.trim().is_empty())))
+}
+
+fn optional_nonempty_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(|value| value.filter(|s| !s.trim().is_empty()))
+}
+
+fn empty_string_for_none<S: serde::Serializer>(
+    value: &Option<String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(value.as_deref().unwrap_or_default())
+}
+
+impl From<PostprocInput> for PostprocConfig {
+    fn from(input: PostprocInput) -> Self {
+        let mut config = Self::default();
+        let legacy = input.mode.is_none()
+            && (input.enabled.is_some() || input.model.is_some() || input.reasoning_effort.is_some());
+        let legacy_model = input.model.is_some();
+        config.mode = input.mode.unwrap_or_else(|| {
+            if input.enabled.unwrap_or(false) { Mode::Clean } else { Mode::Raw }
+        });
+        if let Some(clean) = input.clean {
+            config.clean = clean;
+        } else if let Some(model) = input.model {
+            config.clean = ModeModelConfig {
+                model,
+                reasoning_effort: input.reasoning_effort,
+            };
+        } else if legacy {
+            // Enabling aliases in an old config never silently opts into a
+            // newly supplied cloud model.
+            config.clean.model.clear();
+            config.clean.reasoning_effort = None;
+        }
+        if let Some(elevate) = input.elevate {
+            config.elevate = elevate;
+        }
+        if let Some(endpoint) = input.endpoint {
+            config.endpoint = endpoint;
+        } else if legacy_model {
+            config.endpoint = "http://localhost:11434/v1".to_owned();
+        }
+        if let Some(key) = input.api_key_id {
+            config.api_key_id = key;
+        } else if legacy || config.endpoint.trim_end_matches('/') != "https://openrouter.ai/api/v1" {
+            config.api_key_id = None;
+        }
+        if let Some(timeout) = input.timeout_ms { config.timeout_ms = timeout; }
+        if let Some(passes) = input.passes { config.passes = passes; }
+        if let Some(min_chars) = input.min_chars { config.min_chars = min_chars; }
+        if let Some(instructions) = input.instructions { config.instructions = instructions; }
+        config.decision_model = input.decision_model;
+        config.decision_endpoint = input.decision_endpoint;
+        config.decision_api_key_id = input.decision_api_key_id;
+        config
+    }
+}
+
+impl PostprocConfig {
+    /// Raw callers bypass post-processing before consulting a model.
+    pub fn model_config(&self) -> &ModeModelConfig {
+        match self.mode {
+            Mode::Raw | Mode::Clean => &self.clean,
+            Mode::Elevate => &self.elevate,
+        }
+    }
+}
+
+/// Engine-owned presentation of a configured or snapshotted take pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PipelineDisplay {
+    pub mode: Mode,
+    pub stt_model: String,
+    pub stt_local: bool,
+    pub llm_model: Option<String>,
+}
+
+impl PipelineDisplay {
+    pub fn label(&self) -> String {
+        let stt_name = if self.stt_local && self.stt_model == models::PARAKEET_V3_INT8.dir_name {
+            "Parakeet"
+        } else {
+            self.stt_model.rsplit('/').next().unwrap_or(&self.stt_model)
+        };
+        let location = if self.stt_local { "local" } else { "cloud" };
+        let mut label = format!("{} · {stt_name} ({location})", self.mode.label());
+        if self.mode != Mode::Raw {
+            match &self.llm_model {
+                Some(model) => {
+                    label.push_str(" → aliases → ");
+                    label.push_str(model.rsplit('/').next().unwrap_or(model));
+                }
+                None => label.push_str(" → aliases only"),
+            }
+        }
+        label
+    }
 }
 
 impl Default for Config {
@@ -173,11 +367,11 @@ impl Default for SttConfig {
 impl Default for PostprocConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            endpoint: "http://localhost:11434/v1".to_owned(),
-            model: String::new(),
-            api_key_id: None,
-            reasoning_effort: None,
+            mode: Mode::Raw,
+            clean: ModeModelConfig::default(),
+            elevate: ModeModelConfig::default(),
+            endpoint: "https://openrouter.ai/api/v1".to_owned(),
+            api_key_id: Some("openrouter".to_owned()),
             timeout_ms: 30_000,
             // One cleanup round is enough for modern instruct models; a second
             // pass doubles cloud latency for little gain on residual errors.
@@ -210,10 +404,23 @@ impl Config {
         Ok(config)
     }
 
-    /// Keep Raw/Clean selection while preventing STT, cleanup, and decision provider calls.
+    /// Preserve selection while preventing STT, cleanup, and decision provider calls.
     pub fn restrict_to_local(&mut self) {
         self.stt = SttConfig::default();
-        self.postproc.model.clear();
+        self.postproc.clean.model.clear();
+        self.postproc.elevate.model.clear();
+    }
+
+    pub fn pipeline_display(&self) -> PipelineDisplay {
+        PipelineDisplay {
+            mode: self.postproc.mode,
+            stt_model: self.stt.model.clone(),
+            stt_local: self.stt.endpoint.is_none(),
+            llm_model: (self.postproc.mode != Mode::Raw)
+                .then(|| self.postproc.model_config().model.trim())
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned),
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -322,8 +529,8 @@ mod tests {
     fn partial_postproc_table_uses_defaults() {
         let config: Config = toml::from_str("[postproc]\nenabled = true\nmodel = \"llama3\"")
             .expect("partial postproc table should parse");
-        assert!(config.postproc.enabled);
-        assert_eq!(config.postproc.model, "llama3");
+        assert_eq!(config.postproc.mode, Mode::Clean);
+        assert_eq!(config.postproc.clean.model, "llama3");
         assert_eq!(config.postproc.endpoint, "http://localhost:11434/v1");
         assert_eq!(config.postproc.timeout_ms, 30_000);
         assert_eq!(config.postproc.passes, 1);
@@ -339,7 +546,8 @@ mod tests {
     fn clean_without_a_cleanup_model_is_valid_for_local_aliases() {
         let config = Config {
             postproc: PostprocConfig {
-                enabled: true,
+                mode: Mode::Clean,
+                clean: ModeModelConfig { model: String::new(), reasoning_effort: None },
                 ..PostprocConfig::default()
             },
             ..Config::default()
@@ -347,6 +555,100 @@ mod tests {
         config
             .validate()
             .expect("Clean can apply aliases without an LLM");
+    }
+
+    #[test]
+    fn legacy_modes_preserve_opt_in_without_silently_enabling_a_cloud_model() {
+        for (enabled, mode) in [(true, Mode::Clean), (false, Mode::Raw)] {
+            let config: Config = toml::from_str(&format!("[postproc]\nenabled = {enabled}\n")).unwrap();
+            assert_eq!(config.postproc.mode, mode);
+            assert!(config.postproc.clean.model.is_empty());
+            assert_eq!(config.postproc.api_key_id, None);
+            let saved = toml::to_string(&config).unwrap();
+            assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
+            let postproc = serde_json::to_value(&config.postproc).unwrap();
+            assert!(postproc.get("enabled").is_none());
+            assert!(postproc.get("model").is_none());
+            assert!(postproc.get("reasoning_effort").is_none());
+        }
+    }
+
+    #[test]
+    fn explicit_mode_and_nested_model_win_and_modes_keep_independent_models() {
+        let config: Config = toml::from_str(
+            r#"[postproc]
+mode = "elevate"
+enabled = false
+model = "legacy"
+reasoning_effort = "high"
+endpoint = "https://openrouter.ai/api/v1"
+[postproc.clean]
+model = "clean-model"
+reasoning_effort = ""
+[postproc.elevate]
+model = "elevate-model"
+reasoning_effort = "medium"
+"#,
+        ).unwrap();
+        assert_eq!(config.postproc.mode, Mode::Elevate);
+        assert_eq!(config.postproc.clean.model, "clean-model");
+        assert_eq!(config.postproc.clean.reasoning_effort, None);
+        assert_eq!(config.postproc.model_config().model, "elevate-model");
+        assert_eq!(config.postproc.elevate.reasoning_effort.as_deref(), Some("medium"));
+        let saved = toml::to_string(&config).unwrap();
+        assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
+        let value = serde_json::to_value(&config.postproc).unwrap();
+        assert_eq!(value["mode"], "elevate");
+        for old in ["enabled", "model", "reasoning_effort"] {
+            assert!(value.get(old).is_none(), "obsolete owner: {old}");
+        }
+    }
+
+    #[test]
+    fn legacy_model_and_effort_migrate_without_changing_its_implicit_local_route() {
+        let config: Config = toml::from_str(
+            "[postproc]\nenabled = true\nmodel = \"old-local\"\nreasoning_effort = \"high\"\n",
+        ).unwrap();
+        assert_eq!(config.postproc.clean.model, "old-local");
+        assert_eq!(config.postproc.clean.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(config.postproc.endpoint, "http://localhost:11434/v1");
+        assert_eq!(config.postproc.elevate, ModeModelConfig::default());
+        let saved = toml::to_string(&config).unwrap();
+        assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
+    }
+
+    #[test]
+    fn only_the_default_provider_gets_an_implicit_keyring_id() {
+        for (endpoint, key) in [
+            ("https://openrouter.ai/api/v1", Some("openrouter")),
+            ("http://localhost:11434/v1", None),
+            ("https://other.example/v1", None),
+        ] {
+            let config: Config = toml::from_str(&format!(
+                "[postproc]\nmode = \"clean\"\nendpoint = \"{endpoint}\"\n",
+            )).unwrap();
+            assert_eq!(config.postproc.api_key_id.as_deref(), key);
+            let saved = toml::to_string(&config).unwrap();
+            assert_eq!(toml::from_str::<Config>(&saved).unwrap(), config);
+        }
+        let keyless: Config = toml::from_str("[postproc]\napi_key_id = \"\"\n").unwrap();
+        assert_eq!(keyless.postproc.api_key_id, None);
+    }
+
+    #[test]
+    fn pipeline_display_uses_the_selected_model_and_local_restriction_preserves_mode() {
+        let mut config = Config::default();
+        assert_eq!(config.pipeline_display().label(), "Raw · Parakeet (local)");
+        config.postproc.mode = Mode::Clean;
+        assert_eq!(config.pipeline_display().label(), "Clean · Parakeet (local) → aliases → gpt-6.1-sol");
+        config.postproc.elevate.model = "provider/articulate".into();
+        config.postproc.mode = Mode::Elevate;
+        assert_eq!(config.pipeline_display().llm_model.as_deref(), Some("provider/articulate"));
+        config.restrict_to_local();
+        assert_eq!(config.postproc.mode, Mode::Elevate);
+        assert!(config.postproc.clean.model.is_empty());
+        assert!(config.postproc.elevate.model.is_empty());
+        assert_eq!(config.pipeline_display().label(), "Elevate · Parakeet (local) → aliases only");
     }
 
     #[test]

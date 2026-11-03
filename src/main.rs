@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -13,16 +13,7 @@ use cantrip::{actions, daemon, hud, settings};
 use cantrip_engine::delivery::InjectionMode;
 use cantrip_engine::ipc::{self, Command};
 use cantrip_engine::models::{self, PARAKEET_V3_INT8};
-use cantrip_engine::{config::Config, keys, paths, pipeline, recovery, telemetry};
-
-/// Per-dictation post-processing request, overriding [postproc].enabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum PostprocMode {
-    /// Apply vocabulary aliases, then any configured LLM cleanup.
-    Clean,
-    /// Deliver recognizer output without aliases or LLM cleanup.
-    Raw,
-}
+use cantrip_engine::{config::{Config, Mode}, keys, paths, pipeline, recovery, telemetry};
 
 #[derive(Debug, Parser)]
 #[command(name = "cantrip", version, about = "Local-first dictation", arg_required_else_help = !cfg!(target_os = "macos"))]
@@ -82,17 +73,17 @@ enum CliCommand {
         screenshot: Option<PathBuf>,
     },
     Toggle {
-        /// Post-processing for this dictation: clean | raw (default: [postproc].enabled).
-        #[arg(long, value_enum)]
-        postproc: Option<PostprocMode>,
+        /// Mode for this take; defaults to [postproc].mode.
+        #[arg(long, value_name = "raw|clean|elevate")]
+        postproc: Option<Mode>,
         /// Deliver this take to a named local command instead of the desktop.
         #[arg(long, value_name = "NAME")]
         handoff: Option<String>,
     },
     Start {
-        /// Post-processing for this dictation: clean | raw (default: [postproc].enabled).
-        #[arg(long, value_enum)]
-        postproc: Option<PostprocMode>,
+        /// Mode for this take; defaults to [postproc].mode.
+        #[arg(long, value_name = "raw|clean|elevate")]
+        postproc: Option<Mode>,
         /// Deliver this take to a named local command instead of the desktop.
         #[arg(long, value_name = "NAME")]
         handoff: Option<String>,
@@ -133,7 +124,7 @@ enum CliCommand {
         /// Recover this exact take; omitted selects the newest unresolved audio.
         #[arg(long)]
         id: Option<String>,
-        /// Use installed local Parakeet without cloud STT or LLM cleanup; keep Raw/Clean.
+        /// Use installed local Parakeet without cloud STT or LLM changes; keep the take's mode.
         #[arg(long)]
         local: bool,
         /// Copy the result without sending keys to the focused application.
@@ -143,6 +134,13 @@ enum CliCommand {
     Ping,
     /// Re-read the config file in the running daemon.
     Reload,
+    /// Set the default dictation mode, or cycle Raw → Clean → Elevate → Raw.
+    Mode {
+        #[arg(value_name = "MODE", required_unless_present = "cycle", conflicts_with = "cycle")]
+        mode: Option<Mode>,
+        #[arg(long)]
+        cycle: bool,
+    },
     /// Microphone access for the running Cantrip, the process that records (macOS).
     Microphone {
         #[command(subcommand)]
@@ -159,7 +157,7 @@ enum CliCommand {
     /// Transcribe one WAV file and print the transcript.
     Transcribe {
         wav: PathBuf,
-        /// Use installed local Parakeet without cloud STT or LLM cleanup; keep Raw/Clean.
+        /// Use installed local Parakeet without cloud STT or LLM changes; keep the selected mode.
         #[arg(long)]
         local: bool,
     },
@@ -334,11 +332,11 @@ fn run(cli: Cli) -> Result<()> {
         CliCommand::Settings { screenshot } => settings::run(screenshot),
         CliCommand::Actions { screenshot, doctor } => actions::run(screenshot, doctor),
         CliCommand::Toggle { postproc, handoff } => send_command(Command::Toggle {
-            postproc: postproc.map(|mode| mode == PostprocMode::Clean),
+            postproc,
             handoff,
         }),
         CliCommand::Start { postproc, handoff } => send_command(Command::Start {
-            postproc: postproc.map(|mode| mode == PostprocMode::Clean),
+            postproc,
             handoff,
         }),
         CliCommand::Stop => send_command(Command::Stop),
@@ -365,6 +363,7 @@ fn run(cli: Cli) -> Result<()> {
             clipboard,
         }),
         CliCommand::Reload => send_command(Command::Reload),
+        CliCommand::Mode { mode, cycle } => set_default_mode(mode, cycle),
         CliCommand::Microphone { command } => match command {
             MicrophoneCommand::Allow => send_command(Command::AllowMicrophone),
         },
@@ -402,16 +401,23 @@ model = "parakeet-tdt-0.6b-v3-int8"   # local registry name
 # api_key_id = "groq"
 
 [postproc]
-enabled = false
-endpoint = "http://localhost:11434/v1"
-model = ""                # empty = Clean applies aliases without LLM cleanup
-# api_key_id = "openai"   # keyring entry; omit for local endpoints
+mode = "raw"              # raw | clean | elevate; cleanup remains opt-in
+endpoint = "https://openrouter.ai/api/v1"
+api_key_id = "openrouter"  # keyring entry; "" disables credentials for a local endpoint
 timeout_ms = 30000
-passes = 1                # cleanup rounds; 2 adds a proofread pass
-min_chars = 40            # skip LLM cleanup under this length; 0 = never skip
-instructions = ""         # optional extra style guidance
-# Per-dictation override (two hotkeys): `cantrip toggle --postproc clean|raw`
-# selects Raw or Clean for that capture, regardless of `enabled` above.
+passes = 1                # Clean only; Elevate always uses one pass
+min_chars = 40            # Clean only; 0 = never skip
+instructions = ""         # Clean-only additional style guidance
+# Per-take override: `cantrip toggle --postproc raw|clean|elevate`
+# Default mode: `cantrip mode clean` or `cantrip mode --cycle`
+
+[postproc.clean]
+model = "openai/gpt-6.1-sol" # "" = aliases only, without an LLM
+reasoning_effort = "low"   # "" omits reasoning effort
+
+[postproc.elevate]
+model = "openai/gpt-6.1-sol"
+reasoning_effort = "low"
 "#;
 
 fn run_config(command: ConfigCommand) -> Result<()> {
@@ -434,6 +440,26 @@ fn run_config(command: ConfigCommand) -> Result<()> {
         }
         ConfigCommand::Edit => edit_config(),
     }
+}
+
+fn set_default_mode(mode: Option<Mode>, cycle: bool) -> Result<()> {
+    let path = config_path()?;
+    let selected = if cycle {
+        settings::cycle_default_mode(&path)?
+    } else {
+        let mode = mode.context("choose a mode or --cycle")?;
+        settings::save_default_mode(&path, mode)?;
+        mode
+    };
+    match ipc::command(Command::Reload) {
+        Ok(reply) => anyhow::ensure!(reply.ok, "mode saved, but daemon reload failed"),
+        Err(error) if error.downcast_ref::<io::Error>().is_some_and(|error| {
+            matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused)
+        }) => {}
+        Err(error) => return Err(error).context("mode saved, but daemon reload failed"),
+    }
+    println!("{}", selected.as_str());
+    Ok(())
 }
 
 fn config_path() -> Result<PathBuf> {
@@ -589,6 +615,9 @@ fn print_status(json: bool) -> Result<()> {
         return Ok(());
     }
     println!("state: {}", status.state_name());
+    if let Some(pipeline) = &status.pipeline {
+        println!("pipeline: {}", pipeline.label());
+    }
     if status.state != ipc::StateKind::Idle {
         println!("elapsed: {}s", status.elapsed);
     }
@@ -830,7 +859,7 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         partial: outcome.partial,
         cleanup_state,
         cleanup_ms,
-        cleanup_model: attempted.then(|| config.postproc.model.clone()),
+        cleanup_model: attempted.then(|| config.postproc.model_config().model.clone()),
         tokens_in: outcome
             .postproc_usage
             .as_ref()
@@ -1169,11 +1198,11 @@ fn stt_diagnosis(config: &Config) -> String {
 }
 
 fn cleanup_diagnosis(config: &Config) -> String {
-    if !config.postproc.enabled {
+    if config.postproc.mode == Mode::Raw {
         return "cleanup: disabled (raw transcript is delivered)".to_owned();
     }
-    if config.postproc.model.trim().is_empty() {
-        return "cleanup: Clean applies vocabulary aliases only (no cleanup model)".to_owned();
+    if config.postproc.model_config().model.trim().is_empty() {
+        return format!("cleanup: {} applies vocabulary aliases only (no cleanup model)", config.postproc.mode.label());
     }
     if config.postproc.endpoint.trim().is_empty() {
         return "cleanup: blocked (endpoint is empty) — run: cantrip settings".to_owned();
@@ -1184,11 +1213,12 @@ fn cleanup_diagnosis(config: &Config) -> String {
     let endpoint = endpoint_origin(&config.postproc.endpoint);
     let lane = endpoint_lane(&endpoint);
     format!(
-        "cleanup: {lane} configured (model={}; endpoint={}; credential={}; min_chars={})",
-        config.postproc.model,
+        "cleanup: {} {lane} configured (model={}; endpoint={}; credential={}; min_chars={})",
+        config.postproc.mode.label(),
+        config.postproc.model_config().model,
         endpoint,
         credential_status(config.postproc.api_key_id.as_deref()),
-        config.postproc.min_chars
+        if config.postproc.mode == Mode::Clean { config.postproc.min_chars } else { 0 }
     )
 }
 
@@ -1276,18 +1306,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn all_modes_are_available_as_take_overrides_and_persistent_defaults() {
+        for mode in Mode::ALL {
+            for command in ["start", "toggle"] {
+                let cli = Cli::try_parse_from(["cantrip", command, "--postproc", mode.as_str()]).unwrap();
+                match cli.command.unwrap() {
+                    CliCommand::Start { postproc, .. } | CliCommand::Toggle { postproc, .. } => {
+                        assert_eq!(postproc, Some(mode));
+                    }
+                    _ => panic!("wrong take command"),
+                }
+            }
+            let cli = Cli::try_parse_from(["cantrip", "mode", mode.as_str()]).unwrap();
+            assert!(matches!(cli.command, Some(CliCommand::Mode { mode: Some(selected), cycle: false }) if selected == mode));
+        }
+        let cli = Cli::try_parse_from(["cantrip", "mode", "--cycle"]).unwrap();
+        assert!(matches!(cli.command, Some(CliCommand::Mode { mode: None, cycle: true })));
+        assert!(Cli::try_parse_from(["cantrip", "mode"]).is_err());
+        assert!(Cli::try_parse_from(["cantrip", "mode", "raw", "--cycle"]).is_err());
+        assert!(Cli::try_parse_from(["cantrip", "toggle", "--postproc", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn generated_configuration_keeps_cleanup_opt_in_and_both_mode_models_explicit() {
+        let template = format!("{CONFIG_HEADER}{CONFIG_TEMPLATE}");
+        let parsed: Config = toml::from_str(&template).unwrap();
+        assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
     fn doctor_distinguishes_raw_alias_only_clean_and_a_missing_endpoint() {
         let mut config = Config::default();
         assert_eq!(
             cleanup_diagnosis(&config),
             "cleanup: disabled (raw transcript is delivered)"
         );
-        config.postproc.enabled = true;
+        config.postproc.mode = Mode::Clean;
+        config.postproc.clean.model.clear();
         assert_eq!(
             cleanup_diagnosis(&config),
             "cleanup: Clean applies vocabulary aliases only (no cleanup model)"
         );
-        config.postproc.model = "configured-model".into();
+        config.postproc.clean.model = "configured-model".into();
         config.postproc.endpoint.clear();
         assert_eq!(
             cleanup_diagnosis(&config),

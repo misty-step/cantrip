@@ -2,7 +2,7 @@
 //! post-processing. Shared by the daemon worker and `cantrip transcribe`.
 
 use crate::archive;
-use crate::config::{PostprocConfig, SttConfig, VocabularyEntry};
+use crate::config::{Mode, PostprocConfig, SttConfig, VocabularyEntry};
 use crate::models;
 use crate::postproc::{self, RefinementUsage};
 use crate::stt::{self, Transcriber};
@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 /// Result of the optional post-processing pass on a transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PostprocStatus {
-    /// Not enabled, or no transcript to clean.
+    /// Raw mode, no selected model, or no transcript to transform.
     Off,
     /// LLM cleanup succeeded, taking `ms`.
     Applied { ms: u128 },
     /// Cleanup failed after `ms`; deterministic alias corrections are preserved.
     Failed { ms: u128 },
-    /// Enabled, but the transcript was under `min_chars`.
+    /// Clean mode, but the transcript was under `min_chars`.
     SkippedShort { chars: usize },
 }
 
@@ -133,7 +133,7 @@ impl SttBackend {
 
 /// Outcome of running one WAV through the backend.
 pub struct Outcome {
-    /// Final text: aliased/cleaned in Clean, recognizer output in Raw, or the STT error.
+    /// Final text: aliased/transformed in Clean/Elevate, recognizer output in Raw, or the STT error.
     pub text: Result<String, String>,
     pub alias_substitutions: usize,
     /// Wall time of the STT stage only.
@@ -178,11 +178,10 @@ pub type TranscriberCache = Option<(String, Transcriber)>;
 
 /// Whether the cleanup pass should run for a transcript of `chars` length.
 pub fn should_run_postproc(cfg: &PostprocConfig, chars: usize) -> bool {
-    if !cfg.enabled {
+    if cfg.mode == Mode::Raw {
         return false;
     }
-    // min_chars == 0 means never skip for length.
-    if cfg.min_chars > 0 && chars < cfg.min_chars {
+    if cfg.mode == Mode::Clean && cfg.min_chars > 0 && chars < cfg.min_chars {
         return false;
     }
     true
@@ -194,8 +193,8 @@ pub fn should_run_postproc(cfg: &PostprocConfig, chars: usize) -> bool {
 /// keeps completed cloud text and retries only its exact remaining frames;
 /// other formats or failures before any useful prefix retry the whole take.
 ///
-/// Clean applies vocabulary aliases before optional LLM cleanup. A cleanup
-/// failure or skip preserves the aliased text. Raw bypasses both stages.
+/// Clean and Elevate apply vocabulary aliases before their optional LLM pass.
+/// Failure or skip preserves aliased text. Raw bypasses both stages.
 pub fn run(
     cache: &mut TranscriberCache,
     wav: &Path,
@@ -394,7 +393,7 @@ impl Pipeline<'_> {
             }
         };
 
-        let (aliased, alias_substitutions) = if postproc_cfg.enabled && !cancelled {
+        let (aliased, alias_substitutions) = if postproc_cfg.mode != Mode::Raw && !cancelled {
             crate::vocabulary::apply(&raw, vocabulary)
         } else {
             (std::borrow::Cow::Borrowed(raw.as_str()), 0)
@@ -434,6 +433,8 @@ impl Pipeline<'_> {
         let archive = match save(archive::Entry {
             take_id: context.take_id,
             source: context.source.as_str(),
+            mode: postproc_cfg.mode,
+            mode_model: (postproc_cfg.mode != Mode::Raw).then(|| postproc_cfg.model_config()),
             raw_transcript: &raw,
             postprocessed_transcript: processed.as_deref(),
             alias_substitutions,
@@ -457,11 +458,16 @@ impl Pipeline<'_> {
                 PostprocStatus::Failed { .. } => "failed",
                 PostprocStatus::SkippedShort { .. } => "skipped_short",
             },
-            postproc_model: attempted_postproc.then_some(postproc_cfg.model.as_str()),
+            postproc_model: attempted_postproc.then_some(postproc_cfg.model_config().model.as_str()),
             postproc_elapsed_ms,
-            postproc_passes: attempted_postproc.then_some(postproc_cfg.passes.max(1)),
-            postproc_prompt_version: attempted_postproc.then_some(postproc::PROMPT_VERSION),
-            postproc_instructions: attempted_postproc
+            postproc_passes: attempted_postproc.then_some(if postproc_cfg.mode == Mode::Elevate {
+                1
+            } else {
+                postproc_cfg.passes.max(1)
+            }),
+            postproc_prompt_version: attempted_postproc
+                .then_some(postproc::prompt_version(postproc_cfg.mode)),
+            postproc_instructions: (attempted_postproc && postproc_cfg.mode == Mode::Clean)
                 .then_some(postproc_cfg.instructions.as_str())
                 .filter(|instructions| !instructions.is_empty()),
             postproc_prompt_tokens: postproc_usage.as_ref().map(|usage| usage.prompt_tokens),
@@ -582,10 +588,10 @@ fn cleanup(
     cancel: Option<&AtomicBool>,
     on_stage: &mut dyn FnMut(Stage),
 ) -> (PostprocStatus, Option<String>, Option<RefinementUsage>) {
-    if stt::is_cancelled(cancel) || raw.trim().is_empty() || !cfg.enabled {
+    if stt::is_cancelled(cancel) || raw.trim().is_empty() || cfg.mode == Mode::Raw {
         return (PostprocStatus::Off, None, None);
     }
-    if cfg.model.trim().is_empty() {
+    if cfg.model_config().model.trim().is_empty() {
         return (PostprocStatus::Off, None, None);
     }
     if cfg.endpoint.trim().is_empty() {
@@ -841,8 +847,10 @@ mod tests {
         let recording = Recording::new(1);
         let stt_cfg = SttConfig::default();
         let cfg = PostprocConfig {
-            enabled: true,
-            model: "test".into(),
+            mode: Mode::Clean,
+            clean: crate::config::ModeModelConfig { model: "test".into(), reasoning_effort: None },
+            endpoint: "not-an-http-url".into(),
+            api_key_id: None,
             min_chars: 0,
             ..Default::default()
         };
@@ -868,10 +876,13 @@ mod tests {
             term: "Cantrip".into(),
             aliases: vec!["Gantrip".into()],
         }];
-        for case in ["short", "failed", "missing-endpoint"] {
+        for (mode, case) in [
+            (Mode::Clean, "short"), (Mode::Clean, "failed"), (Mode::Clean, "missing-endpoint"),
+            (Mode::Elevate, "short"), (Mode::Elevate, "failed"), (Mode::Elevate, "missing-endpoint"),
+        ] {
             let cfg = PostprocConfig {
-                enabled: true,
-                model: "test".into(),
+                mode,
+                api_key_id: None,
                 endpoint: if case == "missing-endpoint" {
                     ""
                 } else {
@@ -898,7 +909,7 @@ mod tests {
             assert_eq!(saved["raw_transcript"], "Gantrip", "{case}");
             assert_eq!(archive::final_text(&saved), Some("Cantrip"), "{case}");
             assert_eq!(saved["alias_substitutions"], 1, "{case}");
-            if case != "short" {
+            if case != "short" || mode == Mode::Elevate {
                 assert!(matches!(outcome.postproc, PostprocStatus::Failed { .. }));
             } else {
                 assert!(matches!(
@@ -910,9 +921,9 @@ mod tests {
     }
 
     #[test]
-    fn local_restriction_keeps_aliases_in_clean_but_never_calls_cleanup_or_decisions() {
+    fn local_restriction_keeps_aliases_in_transforming_modes_without_provider_calls() {
         let recording = Recording::new(1);
-        for clean in [false, true] {
+        for mode in Mode::ALL {
             let mut config = crate::config::Config {
                 vocabulary: vec![VocabularyEntry::Aliased {
                     term: "Cantrip".into(),
@@ -920,8 +931,7 @@ mod tests {
                 }],
                 stt: cloud_config(),
                 postproc: PostprocConfig {
-                    enabled: clean,
-                    model: "cloud-cleanup".into(),
+                    mode,
                     decision_model: Some("decision-must-not-run".into()),
                     min_chars: 0,
                     ..Default::default()
@@ -943,7 +953,7 @@ mod tests {
             );
             assert_eq!(
                 outcome.text.as_ref().unwrap(),
-                if clean { "Cantrip" } else { "Gantrip" }
+                if mode == Mode::Raw { "Gantrip" } else { "Cantrip" }
             );
             assert_eq!(outcome.postproc, PostprocStatus::Off);
         }
@@ -1033,6 +1043,54 @@ mod tests {
     }
 
     #[test]
+    fn elevate_transforms_short_questions_once_with_its_selected_model() {
+        let recording = Recording::new(1);
+        let stt_cfg = SttConfig::default();
+        let entries = [VocabularyEntry::Aliased {
+            term: "Cantrip".into(),
+            aliases: vec!["Gantrip".into()],
+        }];
+        let (endpoint, server) = http_server(vec![json_response(
+            r#"{"choices":[{"message":{"content":"Where can I find Cantrip?"}}]}"#,
+        )]);
+        let cfg = PostprocConfig {
+            mode: Mode::Elevate,
+            endpoint,
+            api_key_id: None,
+            elevate: crate::config::ModeModelConfig {
+                model: "elevate-only".into(),
+                reasoning_effort: Some("low".into()),
+            },
+            passes: 3,
+            min_chars: 10_000,
+            instructions: "CLEAN-ONLY-INSTRUCTION-MARKER".into(),
+            ..Default::default()
+        };
+        let mut pipeline = recording.pipeline(&stt_cfg, &cfg, None);
+        pipeline.vocabulary = &entries;
+        let outcome = pipeline.run(
+            |_| {},
+            |_, _, _, _| Ok(stt::RemoteAttempt::whole(stt::Transcript::Complete("Where is Gantrip?".into()))),
+            |entry| recording.save(entry),
+        );
+        assert_eq!(outcome.text.as_deref(), Ok("Where can I find Cantrip?"));
+        assert_eq!(outcome.alias_substitutions, 1);
+        assert!(matches!(outcome.postproc, PostprocStatus::Applied { .. }));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(request["model"], "elevate-only");
+        assert!(request["messages"].to_string().contains("Where is Cantrip?"));
+        assert!(!request["messages"].to_string().contains("CLEAN-ONLY-INSTRUCTION-MARKER"));
+        let saved = record(&outcome);
+        assert_eq!(saved["mode"], "elevate");
+        assert_eq!(saved["mode_model"]["model"], "elevate-only");
+        assert_eq!(saved["postproc"]["passes"], 1);
+        assert_eq!(saved["postproc"]["prompt_version"], postproc::prompt_version(Mode::Elevate));
+        assert!(saved["postproc"].get("custom_instructions").is_none());
+    }
+
+    #[test]
     fn cloud_429_on_chunk_two_finishes_locally_before_one_cleanup() {
         let recording = Recording::new(70 * 16_000).with_oversized_metadata();
         let (endpoint, server) = http_server(vec![
@@ -1048,9 +1106,9 @@ mod tests {
             ..cloud_config()
         };
         let postproc_cfg = PostprocConfig {
-            enabled: true,
+            mode: Mode::Clean,
             endpoint,
-            model: "configured-cleanup".to_owned(),
+            clean: crate::config::ModeModelConfig { model: "configured-cleanup".to_owned(), reasoning_effort: None },
             api_key_id: None,
             min_chars: 0,
             passes: 1,
@@ -1256,7 +1314,7 @@ mod tests {
             ..cloud_config()
         };
         let postproc_cfg = PostprocConfig {
-            enabled: true,
+            mode: Mode::Clean,
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
             api_key_id: None,
             min_chars: 0,
@@ -1301,7 +1359,7 @@ mod tests {
         let recording = Recording::new(1);
         let cfg = cloud_config();
         let postproc_cfg = PostprocConfig {
-            enabled: true,
+            mode: Mode::Clean,
             min_chars: 0,
             ..Default::default()
         };
@@ -1359,7 +1417,7 @@ mod tests {
             };
             let cancel = AtomicBool::new(false);
             let postproc_cfg = PostprocConfig {
-                enabled: case == "cancel-first",
+                mode: if case == "cancel-first" { Mode::Clean } else { Mode::Raw },
                 min_chars: 0,
                 ..Default::default()
             };
@@ -1566,16 +1624,16 @@ mod tests {
     }
 
     #[test]
-    fn should_run_postproc_respects_enabled_and_min_chars() {
+    fn only_clean_applies_the_short_transcript_floor() {
         let off = PostprocConfig {
-            enabled: false,
+            mode: Mode::Raw,
             min_chars: 40,
             ..Default::default()
         };
         assert!(!should_run_postproc(&off, 100));
 
         let on = PostprocConfig {
-            enabled: true,
+            mode: Mode::Clean,
             min_chars: 40,
             ..Default::default()
         };
@@ -1584,11 +1642,13 @@ mod tests {
         assert!(should_run_postproc(&on, 41));
 
         let no_floor = PostprocConfig {
-            enabled: true,
+            mode: Mode::Clean,
             min_chars: 0,
             ..Default::default()
         };
         assert!(should_run_postproc(&no_floor, 1));
+        let elevate = PostprocConfig { mode: Mode::Elevate, min_chars: 10_000, ..Default::default() };
+        assert!(should_run_postproc(&elevate, 1));
     }
 
     #[test]
@@ -1596,7 +1656,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let cfg = PostprocConfig {
-            enabled: true,
+            mode: Mode::Clean,
             min_chars: 0,
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
             api_key_id: None,

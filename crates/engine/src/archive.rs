@@ -1,3 +1,4 @@
+use crate::config::{Mode, ModeModelConfig, PostprocConfig};
 use crate::paths;
 use anyhow::{ensure, Context, Result};
 use serde::Serialize;
@@ -12,12 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct Entry<'a> {
     pub take_id: Option<&'a str>,
     pub source: &'static str,
+    pub mode: Mode,
+    pub mode_model: Option<&'a ModeModelConfig>,
     pub raw_transcript: &'a str,
     pub postprocessed_transcript: Option<&'a str>,
     pub alias_substitutions: usize,
@@ -52,6 +55,9 @@ struct Record<'a> {
     session_id: &'a str,
     completed_at_unix_ms: u64,
     source: &'static str,
+    mode: Mode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode_model: Option<&'a ModeModelConfig>,
     audio: AudioRecord,
     pipeline: PipelineRecord,
     stt: SttRecord<'a>,
@@ -138,6 +144,8 @@ pub(crate) fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
         session_id,
         completed_at_unix_ms: now_ms(),
         source: entry.source,
+        mode: entry.mode,
+        mode_model: entry.mode_model,
         audio: AudioRecord {
             duration_ms: entry.audio_duration_ms,
         },
@@ -223,6 +231,15 @@ pub(crate) fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
             "stt_backend": origin.pointer("/stt/backend"),
         });
     }
+    // Retrying never changes the take's start-time selection, including when
+    // a completed archive replaces an audio-only recovery record.
+    let selection = existing.as_ref().map(ModeSelection::from_record).unwrap_or_else(|| {
+        ModeSelection {
+            mode: entry.mode,
+            model: entry.mode_model.cloned(),
+            inferred: false,
+        }
+    });
     let mut result = if preserve {
         existing.context("missing preserved transcript")?
     } else {
@@ -231,6 +248,7 @@ pub(crate) fn save_to(directory: &Path, entry: Entry<'_>) -> Result<PathBuf> {
     };
     result["schema_version"] = json!(SCHEMA_VERSION);
     result["recovery"] = recovery;
+    selection.write_to(&mut result);
     store.write_record(session_id, &result)?;
     Ok(directory.join(format!("{session_id}.json")))
 }
@@ -286,6 +304,71 @@ pub(crate) fn partial(record: &Value) -> bool {
         .or_else(|| record.pointer("/stt/partial"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Start-time mode/model, or a conservative, explicitly inferred legacy mode.
+/// Provider endpoint and key ID are intentionally read from current config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModeSelection {
+    pub mode: Mode,
+    pub model: Option<ModeModelConfig>,
+    pub inferred: bool,
+}
+
+impl ModeSelection {
+    pub(crate) fn capture(config: &PostprocConfig) -> Self {
+        Self {
+            mode: config.mode,
+            model: (config.mode != Mode::Raw).then(|| config.model_config().clone()),
+            inferred: false,
+        }
+    }
+
+    pub(crate) fn from_record(record: &Value) -> Self {
+        if let Some(mode) = record.get("mode")
+            .and_then(|value| serde_json::from_value::<Mode>(value.clone()).ok())
+        {
+            return Self {
+                mode,
+                model: record.get("mode_model")
+                    .and_then(|value| serde_json::from_value(value.clone()).ok()),
+                inferred: record.get("mode_inferred").and_then(Value::as_bool).unwrap_or(false),
+            };
+        }
+        let clean = matches!(
+            record.pointer("/postproc/status").and_then(Value::as_str),
+            Some("applied" | "failed" | "skipped_short")
+        ) || record.get("alias_substitutions").and_then(Value::as_u64).unwrap_or(0) > 0
+            || record.get("postprocessed_transcript").is_some_and(Value::is_string);
+        Self {
+            mode: if clean { Mode::Clean } else { Mode::Raw },
+            // Legacy archives do not identify a route/effort selection. Never
+            // silently opt their retry into the current default cloud model.
+            model: None,
+            inferred: true,
+        }
+    }
+
+    pub(crate) fn apply_to(&self, config: &mut PostprocConfig) {
+        config.mode = self.mode;
+        if self.mode != Mode::Raw {
+            let model = self.model.clone().unwrap_or_else(|| ModeModelConfig {
+                model: String::new(),
+                reasoning_effort: None,
+            });
+            match self.mode {
+                Mode::Clean => config.clean = model,
+                Mode::Elevate => config.elevate = model,
+                Mode::Raw => unreachable!(),
+            }
+        }
+    }
+
+    pub(crate) fn write_to(&self, record: &mut Value) {
+        record["mode"] = json!(self.mode);
+        record["mode_inferred"] = json!(self.inferred);
+        record["mode_model"] = json!(self.model);
+    }
 }
 
 /// One owner-private history directory. All mutations and reads hold its
@@ -412,7 +495,7 @@ impl Store {
         self.record_for_update(id, false)
     }
 
-    pub(crate) fn record_for_update(&self, id: &str, complete: bool) -> Result<Option<Value>> {
+    pub(crate) fn record_for_update(&self, id: &str, allow_repair: bool) -> Result<Option<Value>> {
         validate_id(id)?;
         let Some(mut file) = self.open_file(&format!("{id}.json"))? else {
             return Ok(None);
@@ -432,11 +515,11 @@ impl Store {
             }
             _ => {}
         }
-        ensure!(complete, "invalid transcript history JSON");
-        // Only a complete replacement may repair malformed metadata. The
-        // original bytes remain a private artifact, even if publication of
-        // the replacement fails. Content addressing avoids duplicate copies
-        // when the same interrupted repair is attempted again.
+        ensure!(allow_repair, "invalid transcript history JSON");
+        // Only a complete transcript or an explicit pre-STT mode snapshot may
+        // repair malformed metadata. Original bytes remain a private artifact,
+        // even if publication of the replacement fails.
+        // Content addressing deduplicates repeated interrupted repair attempts.
         let backup = self.preserve_corrupt_record(id, &mut file)?;
         Ok(Some(json!({
             "schema_version": SCHEMA_VERSION,
@@ -714,6 +797,8 @@ mod tests {
         Entry {
             take_id: None,
             source: "dictation",
+            mode: if cleaned.is_some() { Mode::Clean } else { Mode::Raw },
+            mode_model: None,
             raw_transcript: raw,
             postprocessed_transcript: cleaned,
             alias_substitutions: 0,
@@ -911,6 +996,39 @@ mod tests {
             final_text(&store.read_record(&id).unwrap().unwrap()),
             Some("previous durable evidence")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_archives_keep_the_audio_only_takes_original_selection() {
+        let root = test_root("mode-recovery");
+        for mode in Mode::ALL {
+            let id = new_id();
+            let selected = ModeSelection::capture(&PostprocConfig { mode, ..Default::default() });
+            {
+                let store = Store::open(&root).unwrap();
+                let mut audio_only = json!({
+                    "session_id": id,
+                    "source": "recovery",
+                    "recovery": { "unresolved": true },
+                });
+                selected.write_to(&mut audio_only);
+                store.write_record(&id, &audio_only).unwrap();
+            }
+            for partial in [true, false] {
+                let mut retry = entry("recovered words", None);
+                retry.take_id = Some(&id);
+                retry.source = "recover";
+                retry.mode = Mode::Clean;
+                retry.partial = partial;
+                save_to(&root, retry).unwrap();
+                let store = Store::open(&root).unwrap();
+                let record = store.read_record(&id).unwrap().unwrap();
+                assert_eq!(ModeSelection::from_record(&record), selected);
+                assert_eq!(record["mode"], mode.as_str());
+                assert_eq!(record["mode_inferred"], false);
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
