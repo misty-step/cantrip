@@ -1,6 +1,8 @@
 //! Passive, bottom-anchored status instrument shared by every desktop.
 //!
 //! A signed pixel instrument, fluid work states, and words for actionable exceptions.
+//! Above the field, a take is named by the pipeline it started with (mode,
+//! recognizer, aliases, model) as the engine reports it, never the current default.
 //! The engine owns operations, outcomes and acknowledgement. The HUD never sends
 //! mutations, takes focus, handles pointer input, or invents audio/progress.
 //! The model and software painter live here; `wayland` and `macos` only size,
@@ -9,6 +11,7 @@
 use ab_glyph::{point, Font, FontRef, ScaleFont};
 use anyhow::{Context, Result};
 use cantrip_engine::{
+    config::{Mode, PipelineDisplay},
     ipc::{
         self, AudioSignal, AudioWaveform, Cleanup, Completeness, Delivery, StateKind,
         StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
@@ -90,10 +93,14 @@ const SURFACE_WIDTH: u32 = 420;
 const SURFACE_HEIGHT: u32 = 56;
 const CONTAINER_WIDTH: f32 = 336.0;
 const TRACK_HEIGHT: f32 = 44.0;
-// A take headed to a non-default target: an upper-left "to <label>" row above the
-// field, and that target's color on the border, a surface wash and the active field.
-const ROUTE_HEADER: f32 = 15.0;
-const ROUTE_LABEL_SIZE: f32 = 11.0;
+// Above the field, the take the instrument shows: the pipeline it snapshotted, in
+// order, and toward a non-default target an upper-left "to <label>" row. That
+// target's color also takes the border, a surface wash and the active field.
+const HEADER_LABEL_SIZE: f32 = 11.0;
+/// One header row, the first of which also clears the field's top edge.
+const HEADER_ROW: f32 = HEADER_LABEL_SIZE + 5.0;
+/// Rows a long pipeline may wrap to before it is shortened with an ellipsis.
+const PIPELINE_ROWS: usize = 2;
 const ROUTE_WASH: f32 = 0.12;
 const ROUTE_LABEL_LIFT: f32 = 0.15;
 const CELLS: usize = AUDIO_WAVEFORM_BINS;
@@ -247,11 +254,28 @@ struct ResultView {
     route: Option<ipc::Handoff>,
 }
 
-/// How a take headed to a non-default target is named on the instrument.
-struct Route {
-    handoff: ipc::Handoff,
-    /// "to <label>", formatted once per take rather than per painted frame.
-    text: String,
+/// The take named above the field, formatted once per take rather than per
+/// painted frame.
+struct Header {
+    /// The pipeline the take snapshotted when it started.
+    pipeline: Option<PipelineDisplay>,
+    label: String,
+    /// A non-default target, named "to <label>".
+    handoff: Option<ipc::Handoff>,
+    route: String,
+}
+
+impl Header {
+    fn new(pipeline: Option<&PipelineDisplay>, handoff: Option<&ipc::Handoff>) -> Option<Self> {
+        (pipeline.is_some() || handoff.is_some()).then(|| Self {
+            label: pipeline.map(PipelineDisplay::label).unwrap_or_default(),
+            pipeline: pipeline.cloned(),
+            route: handoff
+                .map(|handoff| format!("to {}", handoff.label))
+                .unwrap_or_default(),
+            handoff: handoff.cloned(),
+        })
+    }
 }
 
 /// Signal absence at the beginning is actionable; silence after real input is
@@ -390,8 +414,10 @@ struct Model {
     desktop_reduced_motion: bool,
     track: TrackMotion,
     work: Option<WorkPresentation>,
-    route: Option<Route>,
-    route_revision: u64,
+    header: Option<Header>,
+    header_revision: u64,
+    /// The pipeline the watched take snapshotted, kept through its result.
+    take_pipeline: Option<PipelineDisplay>,
 }
 
 impl Model {
@@ -419,8 +445,9 @@ impl Model {
             desktop_reduced_motion: false,
             track: TrackMotion::new(now),
             work: None,
-            route: None,
-            route_revision: 0,
+            header: None,
+            header_revision: 0,
+            take_pipeline: None,
         }
     }
 
@@ -598,11 +625,28 @@ impl Model {
         self.refresh(now);
     }
 
-    /// Only a take headed to a non-default target is tinted and labelled: the active
-    /// take's target, else the presented outcome's. Reconciled on every refresh so an
-    /// expiring result cannot leave its tint on later idle feedback.
-    fn sync_route(&mut self) {
-        let route = if self.active() {
+    /// The header names only the take on the instrument: while it records or
+    /// processes, its snapshotted pipeline and any non-default target; then its
+    /// outcome's target, and its pipeline while that outcome is the one shown. An
+    /// idle engine reports the configured default, which never relabels a take.
+    /// Reconciled on every refresh so an expiring result cannot leave its tint or
+    /// label on later idle feedback.
+    fn sync_header(&mut self) {
+        let active = self.active();
+        if active {
+            let snapshotted = self.snapshot.as_ref().and_then(take_pipeline);
+            if self.take_pipeline.as_ref() != snapshotted {
+                self.take_pipeline = snapshotted.cloned();
+            }
+        }
+        let shown = active
+            || self.work.is_some()
+            || self
+                .result
+                .as_ref()
+                .is_some_and(|result| self.outcome_of_take(result));
+        let pipeline = self.take_pipeline.as_ref().filter(|_| shown);
+        let handoff = if active {
             self.snapshot
                 .as_ref()
                 .and_then(|status| status.handoff.as_ref())
@@ -611,13 +655,29 @@ impl Model {
                 .as_ref()
                 .and_then(|result| result.route.as_ref())
         };
-        if self.route.as_ref().map(|route| &route.handoff) != route {
-            self.route = route.map(|handoff| Route {
-                text: format!("to {}", handoff.label),
-                handoff: handoff.clone(),
+        let current = self
+            .header
+            .as_ref()
+            .map_or((None, None), |header| {
+                (header.pipeline.as_ref(), header.handoff.as_ref())
             });
-            self.route_revision = self.route_revision.wrapping_add(1);
+        if current != (pipeline, handoff) {
+            self.header = Header::new(pipeline, handoff);
+            self.header_revision = self.header_revision.wrapping_add(1);
         }
+    }
+
+    /// The presented result is the outcome of the take this instrument watched.
+    fn outcome_of_take(&self, result: &ResultView) -> bool {
+        result.event_id.is_some()
+            && self
+                .snapshot
+                .as_ref()
+                .and_then(|status| status.outcome.as_ref())
+                .is_some_and(|outcome| {
+                    result.event_id == Some(outcome.event_id)
+                        && outcome.operation_id == self.operation
+                })
     }
 
     fn refresh_connection(&mut self, last_status: Instant, now: Instant) {
@@ -688,7 +748,7 @@ impl Model {
         }) {
             self.result = None;
         }
-        self.sync_route();
+        self.sync_header();
         if let Some(since) = self.lost_since {
             if self.lost_active && now.duration_since(since) >= DISCONNECT_DELAY {
                 self.set_composition(
@@ -1076,7 +1136,7 @@ impl Model {
         RenderKey {
             kind: self.kind,
             caption_revision: self.caption_revision,
-            route_revision: self.route_revision,
+            header_revision: self.header_revision,
             interaction_event: self.interaction.as_ref().and(self.notice_event),
             opacities: std::array::from_fn(|index| {
                 frame.columns[index]
@@ -1101,6 +1161,18 @@ impl Model {
                 || (self.lost_since.is_none() || self.kind == Some(Kind::Attention))
                     && self.track.moving(now))
     }
+}
+
+/// The pipeline a running dictation, or the recovery of a saved take, started
+/// with. Removing audio or replaying saved text runs no pipeline, whatever
+/// default its snapshot reports.
+fn take_pipeline(status: &StatusSnapshot) -> Option<&PipelineDisplay> {
+    status.pipeline.as_ref().filter(|_| {
+        matches!(
+            status.operation_kind,
+            Some(ipc::OperationKind::Dictation | ipc::OperationKind::Recovery)
+        )
+    })
 }
 
 fn attention_outcome(outcome: &TerminalOutcome) -> bool {
@@ -1742,7 +1814,7 @@ pub fn run(
 struct RenderKey {
     kind: Option<Kind>,
     caption_revision: u64,
-    route_revision: u64,
+    header_revision: u64,
     interaction_event: Option<u64>,
     opacities: [[u8; ROWS]; CELLS],
     alpha: u8,
@@ -1941,10 +2013,11 @@ impl Canvas<'_> {
         // A non-default target owns the border, a surface wash and the active field;
         // the default flow keeps the theme's own colors. Text and the field read on
         // the washed surface as the theme's own colors read on its surface.
-        let route = model.route.as_ref();
-        let (palette, border, active) = match route {
-            Some(route) => {
-                let color = route.handoff.color;
+        let header = model.header.as_ref();
+        let handoff = header.and_then(|header| header.handoff.as_ref());
+        let (palette, border, active) = match handoff {
+            Some(handoff) => {
+                let color = handoff.color;
                 let palette = palette.on_surface(mix(palette.surface, color, ROUTE_WASH));
                 (palette, color, palette.legible(color))
             }
@@ -1967,23 +2040,35 @@ impl Canvas<'_> {
             Kind::Attention => palette.attention,
             Kind::Neutral => palette.foreground,
         };
-        let track_top = match route {
-            Some(route) => {
+        // The target in its own color, then the take's pipeline in the text color.
+        let track_top = match header {
+            Some(header) => {
+                let width = header_width(container_width);
+                let mut y = top + 5.0;
+                if let Some(handoff) = handoff {
+                    let ink = mix(handoff.color, palette.foreground, ROUTE_LABEL_LIFT);
+                    y += self.text(
+                        font,
+                        &header.route,
+                        left + 10.0,
+                        y,
+                        width,
+                        HEADER_LABEL_SIZE,
+                        1,
+                        palette.legible(ink),
+                    );
+                }
                 self.text(
                     font,
-                    &route.text,
+                    &header.label,
                     left + 10.0,
-                    top + 5.0,
-                    (container_width - 20.0).max(16.0),
-                    ROUTE_LABEL_SIZE,
-                    1,
-                    palette.legible(mix(
-                        route.handoff.color,
-                        palette.foreground,
-                        ROUTE_LABEL_LIFT,
-                    )),
+                    y,
+                    width,
+                    HEADER_LABEL_SIZE,
+                    PIPELINE_ROWS,
+                    palette.foreground,
                 );
-                top + ROUTE_HEADER
+                top + header_height(Some(header), font, container_width)
             }
             None => top,
         };
@@ -2227,12 +2312,39 @@ fn container_rect(width: f32, height: f32, container_width: f32) -> [f32; 4] {
 fn layout_height(model: &Model, font: &FontRef<'_>, container_width: f32) -> u32 {
     let text_width = (container_width - 32.0).max(16.0);
     let interaction = model.interaction.as_ref().map(|(text, _)| text.as_str());
-    let header = if model.route.is_some() {
-        ROUTE_HEADER as u32
-    } else {
-        0
+    SURFACE_HEIGHT
+        + header_height(model.header.as_ref(), font, container_width) as u32
+        + caption_height(font, &model.caption, interaction, text_width)
+}
+
+/// The header's logical height above the field: the target's row and the rows
+/// the pipeline wraps to. One row clears the field's top edge as a lone target
+/// row always has.
+fn header_height(header: Option<&Header>, font: &FontRef<'_>, container_width: f32) -> f32 {
+    let Some(header) = header else {
+        return 0.0;
     };
-    SURFACE_HEIGHT + header + caption_height(font, &model.caption, interaction, text_width)
+    let width = header_width(container_width);
+    let rows = text_rows(font, &header.route, width, HEADER_LABEL_SIZE, 1)
+        + text_rows(font, &header.label, width, HEADER_LABEL_SIZE, PIPELINE_ROWS);
+    rows as f32 * HEADER_ROW - 1.0
+}
+
+fn header_width(container_width: f32) -> f32 {
+    (container_width - 20.0).max(16.0)
+}
+
+/// The rows `text` takes at `size` within `width`, at most `max_lines`, as
+/// [`Canvas::text`] lays it out.
+fn text_rows(font: &FontRef<'_>, text: &str, width: f32, size: f32, max_lines: usize) -> usize {
+    let capacity = line_capacity(font, width, size);
+    let mut remaining = text.trim();
+    let mut rows = 0;
+    while rows < max_lines && !remaining.is_empty() {
+        remaining = wrap_line(remaining, capacity).1;
+        rows += 1;
+    }
+    rows
 }
 
 fn caption_height(
@@ -2242,13 +2354,7 @@ fn caption_height(
     width: f32,
 ) -> u32 {
     let measure = |text: &str, size: f32, max_lines: usize| {
-        let mut remaining = text.trim();
-        let mut rows = 0;
-        while rows < max_lines && !remaining.is_empty() {
-            remaining = wrap_line(remaining, line_capacity(font, width, size)).1;
-            rows += 1;
-        }
-        rows as f32 * (size + 5.0)
+        text_rows(font, text, width, size, max_lines) as f32 * (size + 5.0)
     };
     let mut height = measure(&caption.title, 12.0, 3);
     if !caption.detail.is_empty() {
@@ -2383,6 +2489,15 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
         },
         hud: cantrip_engine::config::HudConfig::default(),
         handoff: None,
+        // An idle engine reports its configured default; a take, what it started with.
+        pipeline: Some(preview_pipeline(
+            if state == StateKind::Idle {
+                Mode::Raw
+            } else {
+                Mode::Elevate
+            },
+            None,
+        )),
         microphone: None,
     }
 }
@@ -2401,6 +2516,36 @@ fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOu
         artifacts: ipc::Artifacts::default(),
         dismissed: false,
         handoff: None,
+    }
+}
+
+/// A pipeline as the engine reports it: local Parakeet, or a cloud recognizer by
+/// model, then aliases and the mode's model.
+fn preview_pipeline(mode: Mode, cloud_stt: Option<&str>) -> PipelineDisplay {
+    PipelineDisplay {
+        mode,
+        stt_model: cloud_stt
+            .unwrap_or(cantrip_engine::models::PARAKEET_V3_INT8.dir_name)
+            .to_owned(),
+        stt_local: cloud_stt.is_none(),
+        llm_model: (mode != Mode::Raw).then(|| "openai/gpt-6.1-sol".to_owned()),
+    }
+}
+
+/// What each composed take started with: Elevate, except the Clean a recovered
+/// take recorded, Clean behind cloud recognition, and Raw for a plain copy.
+fn screenshot_pipeline(state: ScreenshotState) -> PipelineDisplay {
+    match state {
+        ScreenshotState::Recovery => preview_pipeline(Mode::Clean, None),
+        ScreenshotState::CloudRecovered
+        | ScreenshotState::CloudPartial
+        | ScreenshotState::CloudPayment
+        | ScreenshotState::CloudBudget
+        | ScreenshotState::CloudConnection => {
+            preview_pipeline(Mode::Clean, Some("gpt-4o-mini-transcribe"))
+        }
+        ScreenshotState::Copied => preview_pipeline(Mode::Raw, None),
+        _ => preview_pipeline(Mode::Elevate, None),
     }
 }
 
@@ -2440,6 +2585,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
         _ => {}
     }
     recording.handoff = handoff.cloned();
+    recording.pipeline = Some(screenshot_pipeline(state));
     model.apply(recording, start);
     model.track.presented = model.track.frame(now);
     if matches!(
@@ -2543,6 +2689,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
         _ => now - Duration::from_secs(2),
     };
     processing.handoff = handoff.cloned();
+    processing.pipeline = Some(screenshot_pipeline(state));
     model.apply(processing, processing_at);
     if state == ScreenshotState::Settling {
         model.track.presented = model.frame(now);
@@ -2681,6 +2828,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
             waveform: SCREENSHOT_WAVEFORM,
         });
         next.handoff = handoff.cloned();
+        next.pipeline = Some(screenshot_pipeline(state));
         model.apply(next, now - Duration::from_millis(180));
     }
     let mut at = if state == ScreenshotState::Interrupted {
@@ -2904,33 +3052,81 @@ mod tests {
         ] {
             let default = screenshot_model(state, now, None);
             let routed = screenshot_model(state, now, Some(&kaylee));
-            assert!(default.route.is_none(), "{state:?}");
+            let target = |model: &Model| {
+                model
+                    .header
+                    .as_ref()
+                    .and_then(|header| header.handoff.clone())
+            };
+            assert_eq!(target(&default), None, "{state:?}");
+            assert_eq!(target(&routed), Some(kaylee.clone()), "{state:?}");
             assert_eq!(
-                routed.route.as_ref().map(|route| route.text.as_str()),
+                routed.header.as_ref().map(|header| header.route.as_str()),
                 Some("to Kaylee"),
                 "{state:?}"
             );
+            // The target's row sits above the same pipeline.
             assert_eq!(
                 layout_height(&routed, &font, CONTAINER_WIDTH),
-                layout_height(&default, &font, CONTAINER_WIDTH) + ROUTE_HEADER as u32,
+                layout_height(&default, &font, CONTAINER_WIDTH) + HEADER_ROW as u32,
                 "{state:?}"
             );
             assert_eq!(border(&default), [0, 255, 0], "{state:?}");
             assert_eq!(border(&routed), kaylee.color, "{state:?}");
         }
-        // An expiring Kaylee result must not leave its tint on later idle feedback.
+        // An expiring Kaylee result must not leave its tint or label on later idle feedback.
         let mut model = screenshot_model(ScreenshotState::Cancelled, now, Some(&kaylee));
         model.interaction = Some(("Nothing is recording.".to_owned(), now + NOTICE_HOLD * 3));
         model.refresh(now + NOTICE_HOLD * 2);
         assert!(model.result.is_none());
-        assert!(model.route.is_none());
+        assert!(model.header.is_none());
         // A Kaylee failure must not tint the next default take.
         let mut model = screenshot_model(ScreenshotState::DeliveryFailed, now, Some(&kaylee));
         let mut next = recording(0, Some(signal(true)));
         next.operation_id = Some("next-default-take".to_owned());
         model.apply(next, now + Duration::from_secs(1));
-        assert!(model.route.is_none());
+        assert!(model
+            .header
+            .as_ref()
+            .is_some_and(|header| header.handoff.is_none()));
         assert_eq!(border(&model), [0, 255, 0]);
+    }
+
+    #[test]
+    fn a_take_is_named_by_the_pipeline_it_started_with_never_the_default() {
+        let now = Instant::now();
+        let label = |model: &Model| model.header.as_ref().map(|header| header.label.clone());
+        let elevate = Some(preview_pipeline(Mode::Elevate, None).label());
+        // Recording, processing and the take's own outcome name the pipeline it
+        // started with, while the idle engine already reports a Raw default.
+        for state in [
+            ScreenshotState::Recording,
+            ScreenshotState::Cleaning,
+            ScreenshotState::Sent,
+            ScreenshotState::DeliveryFailed,
+        ] {
+            assert_eq!(label(&screenshot_model(state, now, None)), elevate, "{state:?}");
+        }
+        // A recovery runs the mode its recording was made with.
+        assert_eq!(
+            label(&screenshot_model(ScreenshotState::Recovery, now, None)),
+            Some(preview_pipeline(Mode::Clean, None).label())
+        );
+        // Idle and removing saved audio run no pipeline.
+        for state in [ScreenshotState::Idle, ScreenshotState::RemovingRecording] {
+            assert_eq!(label(&screenshot_model(state, now, None)), None, "{state:?}");
+        }
+        // An engine that reports no pipeline is never given one.
+        let mut model = Model::new(now);
+        let mut take = recording(1, Some(signal(true)));
+        take.pipeline = None;
+        model.apply(take, now);
+        assert!(model.header.is_none());
+        // The name leaves with the take's outcome.
+        let mut model = screenshot_model(ScreenshotState::Cancelled, now, None);
+        assert_eq!(label(&model), elevate);
+        model.refresh(now + NOTICE_HOLD * 2);
+        assert!(model.result.is_none() && model.header.is_none());
     }
 
     /// AppKit's Light and Dark palettes, resolved as the panel resolves its
@@ -3032,7 +3228,10 @@ mod tests {
                         };
                         assert!(model.frame(now).columns.iter().any(lit));
                         // The middle row's most contrasting pixel inside the edge: a lit cell.
-                        let middle = top + (ROUTE_HEADER + TRACK_HEIGHT / 2.0) as u32;
+                        let font =
+                            FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+                        let header = header_height(model.header.as_ref(), &font, CONTAINER_WIDTH);
+                        let middle = top + (header + TRACK_HEIGHT / 2.0) as u32;
                         (left + 1..left + width - 1)
                             .map(|x| pixel(x, middle))
                             .max_by(|a, b| {
@@ -3065,12 +3264,13 @@ mod tests {
         }
     }
 
-    fn grid_bounds(bytes: &[u8], width: u32, scale: f32) -> [u32; 4] {
+    /// The lit field's bounds above `track_end` logical points from the top.
+    fn grid_bounds(bytes: &[u8], width: u32, scale: f32, track_end: f32) -> [u32; 4] {
         let mut bounds = [width, u32::MAX, 0, 0];
         for (index, pixel) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let x = index as u32 % width;
             let y = index as u32 / width;
-            if y as f32 >= (6.0 + TRACK_HEIGHT) * scale {
+            if y as f32 >= track_end * scale {
                 break;
             }
             if pixel[0] > 0 && pixel[0] == pixel[1] && pixel[1] == pixel[2] {
@@ -3086,6 +3286,7 @@ mod tests {
     #[test]
     fn cleaning_and_success_fill_the_visualization_without_covering_border_or_caption() {
         let now = Instant::now();
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
         for state in [
             ScreenshotState::Cleaning,
             ScreenshotState::Sent,
@@ -3097,9 +3298,12 @@ mod tests {
             for width in [80, 240, SURFACE_WIDTH] {
                 for scale in [1.0, 1.25, 2.0] {
                     model.caption = unlabelled.clone();
-                    let (plain, physical_width) = raster_hud(&model, now, width, scale);
-                    let bounds = grid_bounds(&plain, physical_width, scale);
                     let container = CONTAINER_WIDTH.min(width as f32 - 12.0);
+                    // The field starts below the take's header, however it wraps.
+                    let header = header_height(model.header.as_ref(), &font, container);
+                    let (plain, physical_width) = raster_hud(&model, now, width, scale);
+                    let bounds =
+                        grid_bounds(&plain, physical_width, scale, 6.0 + header + TRACK_HEIGHT);
                     let left = ((width as f32 - container) / 2.0 + 6.0) * scale;
                     let right = width as f32 * scale - left;
                     assert!(
@@ -3110,11 +3314,12 @@ mod tests {
                         bounds[2] as f32 <= right + 0.5 && bounds[2] as f32 >= right - 2.0 * scale,
                         "{state:?} at {width}px/{scale}x has an unfilled right gutter: {bounds:?}"
                     );
-                    assert_eq!(bounds[1], (11.5 * scale).round() as u32);
-                    assert_eq!(bounds[3], (44.5 * scale).round() as u32);
+                    assert_eq!(bounds[1], ((11.5 + header) * scale).round() as u32);
+                    assert_eq!(bounds[3], ((44.5 + header) * scale).round() as u32);
                     model.caption = Caption::title("Finishing text…");
                     let (labelled, _) = raster_hud(&model, now, width, scale);
-                    let track_end = (45.5 * scale).floor() as usize * physical_width as usize * 4;
+                    let track_end =
+                        ((45.5 + header) * scale).floor() as usize * physical_width as usize * 4;
                     assert_eq!(
                         &plain[..track_end],
                         &labelled[..track_end],

@@ -1,18 +1,26 @@
-//! Reading and writing the configuration file for the Settings windows.
+//! Reading and writing the configuration file for the Settings windows and the
+//! default-mode controls.
 //!
 //! Loading keeps parsed-but-invalid values editable without weakening the
 //! strict `Config::load` the engine uses. Saving edits the TOML document in
 //! place with `toml_edit`, so comments, ordering and keys the window does not
-//! show survive, and replaces the file atomically. Nothing here touches a
-//! toolkit; both platform windows share it.
+//! show survive, and replaces the file atomically. Every save writes cleanup in
+//! its current shape (`mode` and the per-mode tables) and removes the legacy
+//! flat keys, after checking that the file still reads back as intended.
+//! Nothing here touches a toolkit; both platform windows, the macOS menu and
+//! `cantrip mode` share it.
 
 use anyhow::{Context, Result};
-use cantrip_engine::config::{Config, VocabularyEntry};
+use cantrip_engine::config::{Config, Mode, ModeModelConfig, PostprocConfig, VocabularyEntry};
 use cantrip_engine::delivery::InjectionMode;
 use cantrip_engine::paths;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
+
+/// `[postproc]` names from before explicit modes. The engine still reads them;
+/// a save writes what they meant in the current shape and removes them.
+const LEGACY_POSTPROC: &[&str] = &["enabled", "model", "reasoning_effort"];
 
 pub(crate) enum EditableConfigLoad {
     Ready {
@@ -80,13 +88,7 @@ pub(crate) fn save_config_preserving(
     config: &Config,
     expected: &str,
 ) -> Result<String> {
-    let existing = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", path.display()));
-        }
-    };
+    let existing = read_config(path)?;
     anyhow::ensure!(
         existing == expected,
         "Config changed on disk since opened — click Reload from disk first"
@@ -147,31 +149,6 @@ pub(crate) fn save_config_preserving(
     set_or_remove(stt, "api_key_id", config.stt.api_key_id.as_deref());
 
     let postproc = ensure_table(root, "postproc")?;
-    set_preserving_decor(
-        postproc,
-        "enabled",
-        toml_edit::value(config.postproc.enabled),
-    );
-    set_preserving_decor(
-        postproc,
-        "endpoint",
-        toml_edit::value(config.postproc.endpoint.clone()),
-    );
-    set_preserving_decor(
-        postproc,
-        "model",
-        toml_edit::value(config.postproc.model.clone()),
-    );
-    set_or_remove(
-        postproc,
-        "api_key_id",
-        config.postproc.api_key_id.as_deref(),
-    );
-    set_or_remove(
-        postproc,
-        "reasoning_effort",
-        config.postproc.reasoning_effort.as_deref(),
-    );
     // Timeout is a small positive integer (ms); far below i64::MAX in practice.
     set_preserving_decor(
         postproc,
@@ -193,10 +170,125 @@ pub(crate) fn save_config_preserving(
         "instructions",
         toml_edit::value(config.postproc.instructions.clone()),
     );
+    write_modes(&mut doc, &config.postproc)?;
 
     let text = doc.to_string();
+    anyhow::ensure!(
+        read_back(&text)? == config.postproc,
+        "Not saved: the file would not read back with these cleanup settings"
+    );
     write_config_atomically(path, &text)?;
     Ok(text)
+}
+
+/// Make `mode` the default for new takes in the file at `path`, keeping its
+/// comments and every other setting; the caller asks a running Cantrip to
+/// reload. A file that does not parse or validate is refused unchanged.
+pub fn save_default_mode(path: &Path, mode: Mode) -> Result<()> {
+    update_default_mode(path, |_| mode).map(drop)
+}
+
+/// Save the mode after the current default, in `Mode::ALL` order and wrapping
+/// from the last to the first, as [`save_default_mode`] does; returns it.
+pub fn cycle_default_mode(path: &Path) -> Result<Mode> {
+    update_default_mode(path, |current| {
+        let index = Mode::ALL.iter().position(|mode| *mode == current).unwrap_or(0);
+        Mode::ALL[(index + 1) % Mode::ALL.len()]
+    })
+}
+
+/// Read the saved default, choose the next one, and write it back. Nothing is
+/// written unless the result reads back as the original with only the mode
+/// changed, so completing the legacy cutover never alters another setting.
+fn update_default_mode(path: &Path, choose: impl FnOnce(Mode) -> Mode) -> Result<Mode> {
+    let existing = read_config(path)?;
+    let mut expected: Config = toml::from_str(&existing)
+        .with_context(|| format!("Mode not saved: {} does not parse", path.display()))?;
+    expected
+        .validate()
+        .with_context(|| format!("Mode not saved: {} needs repair", path.display()))?;
+    expected.postproc.mode = choose(expected.postproc.mode);
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    write_modes(&mut doc, &expected.postproc)?;
+    let text = doc.to_string();
+    anyhow::ensure!(
+        toml::from_str::<Config>(&text).ok().as_ref() == Some(&expected),
+        "Mode not saved: rewriting {} would change another setting",
+        path.display()
+    );
+    if text != existing {
+        write_config_atomically(path, &text)?;
+    }
+    Ok(expected.postproc.mode)
+}
+
+/// Make `[postproc]` read back as `wanted`: write `mode`, remove the legacy
+/// names, then write each shared or per-mode value that would otherwise read
+/// back differently. Keys left alone keep their comments, and a mode's model
+/// table the operator never set keeps following the defaults.
+fn write_modes(doc: &mut toml_edit::DocumentMut, wanted: &PostprocConfig) -> Result<()> {
+    let postproc = ensure_table(doc.as_table_mut(), "postproc")?;
+    set_preserving_decor(postproc, "mode", toml_edit::value(wanted.mode.as_str()));
+    for name in LEGACY_POSTPROC {
+        postproc.remove(name);
+    }
+    if read_back(&doc.to_string())?.endpoint != wanted.endpoint {
+        let postproc = ensure_table(doc.as_table_mut(), "postproc")?;
+        set_preserving_decor(postproc, "endpoint", toml_edit::value(wanted.endpoint.as_str()));
+    }
+    // An absent credential id's default follows the endpoint; compare it afterwards.
+    let current = read_back(&doc.to_string())?;
+    let postproc = ensure_table(doc.as_table_mut(), "postproc")?;
+    if current.api_key_id != wanted.api_key_id {
+        // An empty id is how the file says "no credential".
+        let id = wanted.api_key_id.as_deref().unwrap_or_default();
+        set_preserving_decor(postproc, "api_key_id", toml_edit::value(id));
+    }
+    for (name, saved, wanted) in [
+        ("clean", &current.clean, &wanted.clean),
+        ("elevate", &current.elevate, &wanted.elevate),
+    ] {
+        if saved != wanted {
+            write_mode_model(postproc, name, wanted)?;
+        }
+    }
+    Ok(())
+}
+
+/// One mode's `[postproc.<name>]` model and reasoning effort; an omitted
+/// effort is written empty, because an absent one means the default effort.
+fn write_mode_model(
+    postproc: &mut toml_edit::Table,
+    name: &str,
+    wanted: &ModeModelConfig,
+) -> Result<()> {
+    let table = postproc
+        .entry(name)
+        .or_insert(toml_edit::table())
+        .as_table_like_mut()
+        .with_context(|| format!("config key 'postproc.{name}' is not a TOML table"))?;
+    set_preserving_decor(table, "model", toml_edit::value(wanted.model.as_str()));
+    let effort = wanted.reasoning_effort.as_deref().unwrap_or_default();
+    set_preserving_decor(table, "reasoning_effort", toml_edit::value(effort));
+    Ok(())
+}
+
+/// The cleanup settings the engine would load from `text`.
+fn read_back(text: &str) -> Result<PostprocConfig> {
+    let config: Config =
+        toml::from_str(text).context("the edited configuration does not parse")?;
+    Ok(config.postproc)
+}
+
+/// The file's text, or none when it does not exist yet.
+fn read_config(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// Replace a file that could not be parsed with the operator's repaired text,
@@ -275,17 +367,25 @@ static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 
 /// Assign `item` to `key`, carrying over any decor (inline comment) the key
 /// already has, so edited values keep their trailing annotations and column
-/// alignment instead of being flattened.
-fn set_preserving_decor(table: &mut toml_edit::Table, key: &str, item: toml_edit::Item) {
-    let decor = table
-        .get(key)
-        .and_then(|old| old.as_value())
-        .map(|value| value.decor().clone());
+/// alignment instead of being flattened. The key itself, with the comments
+/// above it, stays in place. Works on standard and inline tables alike.
+fn set_preserving_decor<T: toml_edit::TableLike + ?Sized>(
+    table: &mut T,
+    key: &str,
+    item: toml_edit::Item,
+) {
     let mut item = item;
-    if let (Some(decor), Some(value)) = (decor, item.as_value_mut()) {
-        *value.decor_mut() = decor;
+    match table.get_mut(key) {
+        Some(slot) => {
+            if let (Some(old), Some(value)) = (slot.as_value(), item.as_value_mut()) {
+                *value.decor_mut() = old.decor().clone();
+            }
+            *slot = item;
+        }
+        None => {
+            table.insert(key, item);
+        }
     }
-    table[key] = item;
 }
 
 /// Set `key` to `value`, or remove it entirely when the optional is absent.
@@ -308,7 +408,7 @@ fn ensure_table<'a>(root: &'a mut toml_edit::Table, key: &str) -> Result<&'a mut
 mod tests {
     use super::*;
     use crate::settings::fixture::{sample_config, ConfigFixture};
-    use cantrip_engine::config::{PostprocConfig, SttConfig};
+    use cantrip_engine::config::SttConfig;
 
     #[test]
     fn save_preserves_comments_and_applies_edits() {
@@ -320,15 +420,7 @@ mod tests {
         )
         .expect("write fixture");
 
-        let config = Config {
-            postproc: PostprocConfig {
-                enabled: true,
-                endpoint: "http://localhost:11434/v1".to_owned(),
-                model: "qwen3:8b".to_owned(),
-                ..sample_config().postproc
-            },
-            ..sample_config()
-        };
+        let config = sample_config();
         let original = fs::read_to_string(&path).expect("original config");
         save_config_preserving(&path, &config, &original).expect("save");
         let text = fs::read_to_string(&path).expect("read back");
@@ -345,20 +437,19 @@ mod tests {
             text.contains("# trailing"),
             "inline comment on an edited key must survive: {text}"
         );
-        assert!(
-            text.contains("enabled = true"),
-            "postproc enabled edited: {text}"
-        );
-        assert!(
-            text.contains("model = \"qwen3:8b\""),
-            "postproc model edited: {text}"
-        );
 
-        // Round-trip: the saved file must parse back to the same config.
+        // Round-trip: the saved file reads back as the edited cleanup, written
+        // only in its current shape.
         let parsed: Config = toml::from_str(&text).expect("re-parse");
-        assert!(parsed.postproc.enabled);
-        assert_eq!(parsed.postproc.model, "qwen3:8b");
+        assert_eq!(parsed.postproc, config.postproc, "{text}");
         assert_eq!(parsed.injection, InjectionMode::Type);
+        let document: toml::Value = toml::from_str(&text).expect("document");
+        for key in LEGACY_POSTPROC {
+            assert!(
+                document["postproc"].get(*key).is_none(),
+                "{key} removed: {text}"
+            );
+        }
 
         fs::remove_file(&path).ok();
     }
@@ -394,6 +485,69 @@ mod tests {
         );
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn choosing_a_mode_migrates_legacy_cleanup_without_changing_its_meaning() {
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
+        let legacy = "# mine\n[postproc]\nenabled = true\nmodel = \"qwen3:8b\"  # local\nreasoning_effort = \"high\"\npersonal = 1\n";
+        fs::write(&path, legacy).expect("legacy fixture");
+        let mut expected: Config = toml::from_str(legacy).expect("legacy parses");
+
+        save_default_mode(&path, Mode::Elevate).expect("mode saved");
+
+        let text = fs::read_to_string(&path).expect("saved");
+        expected.postproc.mode = Mode::Elevate;
+        let saved: Config = toml::from_str(&text).expect("saved parses");
+        assert_eq!(saved, expected, "{text}");
+        let document: toml::Value = toml::from_str(&text).expect("document");
+        let postproc = &document["postproc"];
+        for key in LEGACY_POSTPROC {
+            assert!(postproc.get(*key).is_none(), "{key} removed: {text}");
+        }
+        assert_eq!(postproc["clean"]["model"].as_str(), Some("qwen3:8b"));
+        assert_eq!(postproc["personal"].as_integer(), Some(1));
+        assert!(
+            postproc.get("elevate").is_none(),
+            "an untouched Elevate keeps following its defaults: {text}"
+        );
+        assert!(text.contains("# mine"));
+    }
+
+    #[test]
+    fn choosing_a_mode_changes_only_the_mode_and_cycles_in_order() {
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
+        // From no file (the shipped Raw default), each mode in order, wrapping.
+        for expected in [Mode::Clean, Mode::Elevate, Mode::Raw, Mode::Clean] {
+            assert_eq!(cycle_default_mode(&path).expect("cycled"), expected);
+            let saved: Config =
+                toml::from_str(&fs::read_to_string(&path).expect("saved")).expect("parses");
+            assert_eq!(saved.postproc.mode, expected);
+        }
+        let current = "[postproc]\nmode = \"clean\"  # mine\nendpoint = \"http://localhost:11434/v1\"\n\n[postproc.clean]\nmodel = \"qwen3:8b\"\nreasoning_effort = \"\"\n";
+        fs::write(&path, current).expect("current fixture");
+        save_default_mode(&path, Mode::Elevate).expect("mode saved");
+        assert_eq!(
+            fs::read_to_string(&path).expect("saved"),
+            current.replace("\"clean\"  # mine", "\"elevate\"  # mine")
+        );
+    }
+
+    #[test]
+    fn choosing_a_mode_refuses_a_file_it_cannot_read_safely() {
+        let fixture = ConfigFixture::new();
+        let path = fixture.path();
+        for text in [
+            "[postproc\nmode = \"raw\"\n",
+            "[stt]\nmodel = \"retired-model\"\n",
+        ] {
+            fs::write(&path, text).expect("fixture");
+            assert!(save_default_mode(&path, Mode::Elevate).is_err(), "{text}");
+            assert!(cycle_default_mode(&path).is_err(), "{text}");
+            assert_eq!(fs::read_to_string(&path).expect("unchanged"), text);
+        }
     }
 
     #[test]

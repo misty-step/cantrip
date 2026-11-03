@@ -2,7 +2,7 @@
 //! [`TranscriptHistory`] in standard AppKit controls, inside the menu-bar app.
 //!
 //! A preference-style toolbar switches between Transcripts, General,
-//! Transcription, Cleanup and HUD. Configuration edits stay in the window until
+//! Transcription, Modes and HUD. Configuration edits stay in the window until
 //! Save & Apply validates them, writes the file with its comments preserved
 //! and asks the running Cantrip to apply it, exactly as on Linux. Live state
 //! and microphone access come from the app's status reader, which is the
@@ -17,7 +17,7 @@ use crate::settings::model::{
     INJECTION_CHOICES, MOTION_CHOICES,
 };
 use anyhow::{Context, Result};
-use cantrip_engine::{ipc, paths};
+use cantrip_engine::{config::Mode, ipc, paths};
 use clap::ValueEnum;
 use objc2::{
     define_class, msg_send,
@@ -47,6 +47,12 @@ const INSET: f64 = 24.0;
 const BODY: f64 = WIDTH - 2.0 * INSET;
 const CONTROL: f64 = 340.0;
 const NUMBER: f64 = 90.0;
+/// A mode's reasoning effort, beside its model.
+const EFFORT: f64 = 110.0;
+/// A mode's model, sharing the control column with its effort.
+const MODEL: f64 = CONTROL - EFFORT - 8.0;
+/// From a radio button's edge to its title.
+const RADIO_TITLE: f64 = 20.0;
 const ROW_HEIGHT: f64 = 44.0;
 /// Complete transcript rows visible at the window's size.
 const VISIBLE_ROWS: f64 = 5.0;
@@ -58,7 +64,7 @@ pub enum Pane {
     Transcripts,
     General,
     Transcription,
-    Cleanup,
+    Modes,
     Hud,
 }
 
@@ -67,7 +73,7 @@ impl Pane {
         Self::Transcripts,
         Self::General,
         Self::Transcription,
-        Self::Cleanup,
+        Self::Modes,
         Self::Hud,
     ];
 
@@ -76,7 +82,7 @@ impl Pane {
             Self::Transcripts => "Transcripts",
             Self::General => "General",
             Self::Transcription => "Transcription",
-            Self::Cleanup => "Cleanup",
+            Self::Modes => "Modes",
             Self::Hud => "HUD",
         }
     }
@@ -86,7 +92,7 @@ impl Pane {
             Self::Transcripts => "clock.arrow.circlepath",
             Self::General => "gearshape",
             Self::Transcription => "waveform",
-            Self::Cleanup => "wand.and.stars",
+            Self::Modes => "wand.and.stars",
             Self::Hud => "rectangle.bottomhalf.inset.filled",
         }
     }
@@ -96,7 +102,7 @@ impl Pane {
             Self::Transcripts => "transcripts",
             Self::General => "general",
             Self::Transcription => "transcription",
-            Self::Cleanup => "cleanup",
+            Self::Modes => "modes",
             Self::Hud => "hud",
         }
     }
@@ -166,11 +172,16 @@ struct Views {
     stt_model: Retained<NSTextField>,
     stt_endpoint: Retained<NSTextField>,
     stt_key: Retained<NSTextField>,
-    // Cleanup
-    cleanup: Retained<NSButton>,
-    cleanup_note: Message,
+    // Modes
+    /// One radio button per mode, in `Mode::ALL` order.
+    modes: Vec<Retained<NSButton>>,
+    /// The selected mode's pipeline, in order.
+    pipeline: Retained<NSTextField>,
+    clean_model: Retained<NSTextField>,
+    clean_effort: Retained<NSTextField>,
+    elevate_model: Retained<NSTextField>,
+    elevate_effort: Retained<NSTextField>,
     pp_endpoint: Retained<NSTextField>,
-    pp_model: Retained<NSTextField>,
     pp_key: Retained<NSTextField>,
     pp_timeout: Retained<NSTextField>,
     pp_passes: Retained<NSTextField>,
@@ -381,6 +392,19 @@ define_class!(
             self.show_general();
             self.show_form_state();
         }
+
+        #[unsafe(method(selectMode:))]
+        fn select_mode(&self, sender: &NSButton) {
+            let chosen = usize::try_from(sender.tag())
+                .ok()
+                .and_then(|index| Mode::ALL.get(index).copied());
+            if let Some(mode) = chosen {
+                let _ = self.collect();
+                self.state_mut().form.edit.mode = mode;
+            }
+            self.show_modes();
+            self.show_form_state();
+        }
     }
 );
 
@@ -485,8 +509,15 @@ impl SettingsWindow {
         }
         // SAFETY: clearing a delegate or data source has no preconditions.
         unsafe {
-            views.shortcut.setDelegate(None);
-            views.pp_model.setDelegate(None);
+            for field in [
+                &views.shortcut,
+                &views.stt_model,
+                &views.stt_endpoint,
+                &views.clean_model,
+                &views.elevate_model,
+            ] {
+                field.setDelegate(None);
+            }
             views.table.setDataSource(None);
             views.table.setDelegate(None);
         }
@@ -697,9 +728,11 @@ impl SettingsWindow {
             ui::set_text(&views.stt_model, &edit.stt_model);
             ui::set_text(&views.stt_endpoint, &edit.stt_endpoint);
             ui::set_text(&views.stt_key, &edit.stt_key);
-            ui::set_checked(&views.cleanup, edit.pp_enabled);
+            ui::set_text(&views.clean_model, &edit.clean_model);
+            ui::set_text(&views.clean_effort, &edit.clean_effort);
+            ui::set_text(&views.elevate_model, &edit.elevate_model);
+            ui::set_text(&views.elevate_effort, &edit.elevate_effort);
             ui::set_text(&views.pp_endpoint, &edit.pp_endpoint);
-            ui::set_text(&views.pp_model, &edit.pp_model);
             ui::set_text(&views.pp_key, &edit.pp_key);
             ui::set_text(&views.pp_timeout, &edit.pp_timeout.to_string());
             ui::set_text(&views.pp_passes, &edit.pp_passes.to_string());
@@ -718,6 +751,7 @@ impl SettingsWindow {
                 .collect();
             ui::fill_popup(&views.motion, &motions, motion);
         }
+        self.show_modes();
         self.show_general();
         self.show_form_state();
     }
@@ -731,7 +765,7 @@ impl SettingsWindow {
         let mode = ui::selected(&views.delivery);
         let motion = ui::selected(&views.motion);
         let timeout = whole(&views.pp_timeout, "Timeout");
-        let passes = whole(&views.pp_passes, "Cleanup passes");
+        let passes = whole(&views.pp_passes, "Clean passes");
         let min_chars = whole(&views.pp_min_chars, "Minimum length");
         let hotkey = ui::text_of(&views.shortcut);
         let vocabulary = ui::text_of(&views.vocabulary);
@@ -739,9 +773,11 @@ impl SettingsWindow {
         let stt_model = ui::text_of(&views.stt_model);
         let stt_endpoint = ui::text_of(&views.stt_endpoint);
         let stt_key = ui::text_of(&views.stt_key);
-        let pp_enabled = ui::checked(&views.cleanup);
+        let clean_model = ui::text_of(&views.clean_model);
+        let clean_effort = ui::text_of(&views.clean_effort);
+        let elevate_model = ui::text_of(&views.elevate_model);
+        let elevate_effort = ui::text_of(&views.elevate_effort);
         let pp_endpoint = ui::text_of(&views.pp_endpoint);
-        let pp_model = ui::text_of(&views.pp_model);
         let pp_key = ui::text_of(&views.pp_key);
         let instructions = views.pp_instructions.string().to_string();
         let labels = ui::checked(&views.labels);
@@ -761,9 +797,11 @@ impl SettingsWindow {
         edit.stt_model = stt_model;
         edit.stt_endpoint = stt_endpoint;
         edit.stt_key = stt_key;
-        edit.pp_enabled = pp_enabled;
+        edit.clean_model = clean_model;
+        edit.clean_effort = clean_effort;
+        edit.elevate_model = elevate_model;
+        edit.elevate_effort = elevate_effort;
         edit.pp_endpoint = pp_endpoint;
-        edit.pp_model = pp_model;
         edit.pp_key = pp_key;
         edit.pp_instructions = instructions;
         edit.hud.labels = labels;
@@ -814,7 +852,7 @@ impl SettingsWindow {
             Pane::Transcripts => Some(&views.table),
             Pane::General => Some(&views.microphone),
             Pane::Transcription => Some(&views.stt_model),
-            Pane::Cleanup => Some(&views.cleanup),
+            Pane::Modes => Some(&views.modes[0]),
             Pane::Hud => Some(&views.labels),
         };
         views.window.makeFirstResponder(first.map(|view| &**view));
@@ -859,6 +897,15 @@ impl SettingsWindow {
         }
     }
 
+    /// The default mode's radio button; the window keeps the group exclusive.
+    fn show_modes(&self) {
+        let views = self.views();
+        let mode = self.state().form.edit.mode;
+        for (radio, choice) in views.modes.iter().zip(Mode::ALL) {
+            ui::set_checked(radio, choice == mode);
+        }
+    }
+
     fn show_access(&self) {
         let views = self.views();
         let state = self.state();
@@ -885,7 +932,7 @@ impl SettingsWindow {
         let views = self.views();
         let state = self.state();
         let form = &state.form;
-        views.cleanup_note.show(form.edit.cleanup_note(), false);
+        ui::set_text(&views.pipeline, &form.edit.pipeline());
         views.notice.show(
             form.notice.as_ref().map(|notice| notice.text.as_str()),
             form.notice.as_ref().is_some_and(|notice| !notice.ok),
@@ -1092,6 +1139,12 @@ impl SettingsWindow {
         // Transcription
         let stt_model = ui::field(mtm, "", CONTROL);
         let stt_endpoint = ui::field(mtm, "https://api.openai.com/v1", CONTROL);
+        // The Modes pane names the recognizer, so it follows these as they are typed.
+        // SAFETY: teardown clears these delegates before the views are released.
+        unsafe {
+            stt_model.setDelegate(Some(ProtocolObject::from_ref(self)));
+            stt_endpoint.setDelegate(Some(ProtocolObject::from_ref(self)));
+        }
         let endpoint_note = ui::note(
             mtm,
             "Leave empty to transcribe on this Mac with the local model.",
@@ -1115,21 +1168,68 @@ impl SettingsWindow {
         );
         let transcription = pane(mtm, &[&transcription_form]);
 
-        // Cleanup
-        let cleanup = ui::checkbox(mtm, "Clean up transcripts", target, changed);
-        let cleanup_note = Message::new(mtm, CONTROL);
+        // Modes
+        let modes: Vec<Retained<NSButton>> = Mode::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, mode)| ui::radio(mtm, mode.label(), index, target, sel!(selectMode:)))
+            .collect();
+        // Each description sits under its radio button's title.
+        let descriptions: Vec<Retained<NSStackView>> = Mode::ALL
+            .iter()
+            .map(|mode| {
+                let note = ui::note(mtm, mode.description(), CONTROL - RADIO_TITLE);
+                let line = ui::column(mtm, &[&note], 0.0);
+                line.setEdgeInsets(NSEdgeInsets {
+                    top: 0.0,
+                    left: RADIO_TITLE,
+                    bottom: 0.0,
+                    right: 0.0,
+                });
+                line
+            })
+            .collect();
+        let pipeline = NSTextField::wrappingLabelWithString(&NSString::new(), mtm);
+        pipeline.setPreferredMaxLayoutWidth(CONTROL);
+        let columns = ui::row(
+            mtm,
+            &[
+                &ui::note(mtm, "Model", MODEL),
+                &ui::note(mtm, "Reasoning effort", EFFORT),
+            ],
+            8.0,
+        );
+        let model_field = |placeholder: &str, width: f64, name: &str| {
+            let field = ui::field(mtm, placeholder, width);
+            field.setAccessibilityLabel(Some(&ui::ns(name)));
+            field
+        };
+        let clean_model = model_field("none — aliases only", MODEL, "Clean model");
+        let clean_effort = model_field("not sent", EFFORT, "Clean reasoning effort");
+        let elevate_model = model_field("none — aliases only", MODEL, "Elevate model");
+        let elevate_effort = model_field("not sent", EFFORT, "Elevate reasoning effort");
+        // The pipeline names the selected mode's model as it is typed.
+        // SAFETY: teardown clears these delegates before the views are released.
+        unsafe {
+            clean_model.setDelegate(Some(ProtocolObject::from_ref(self)));
+            elevate_model.setDelegate(Some(ProtocolObject::from_ref(self)));
+        }
+        let clean_row = ui::row(mtm, &[&clean_model, &clean_effort], 8.0);
+        let elevate_row = ui::row(mtm, &[&elevate_model, &elevate_effort], 8.0);
         let pp_endpoint = ui::field(mtm, "", CONTROL);
-        let pp_model = ui::field(mtm, "", CONTROL);
-        // SAFETY: teardown clears this delegate before the view is released.
-        unsafe { pp_model.setDelegate(Some(ProtocolObject::from_ref(self))) };
-        let pp_key = ui::field(mtm, "openrouter", CONTROL);
+        let pp_key = ui::field(mtm, "none", CONTROL);
+        let provider_note = ui::note(
+            mtm,
+            "Clean and Elevate share this endpoint and key. The key ID names a key saved in your keychain, not the key itself.",
+            CONTROL,
+        );
         let pp_timeout = ui::field(mtm, "", NUMBER);
         let milliseconds = ui::label(mtm, "ms");
         let timeout_row = ui::row(mtm, &[&pp_timeout, &milliseconds], 6.0);
         let pp_passes = ui::field(mtm, "", NUMBER);
         let passes_note = ui::note(
             mtm,
-            "1 is one cleanup round; 2 adds a proofread pass.",
+            "2 adds a proofread pass. Elevate always makes one pass.",
             CONTROL,
         );
         let pp_min_chars = ui::field(mtm, "", NUMBER);
@@ -1137,27 +1237,35 @@ impl SettingsWindow {
         let min_chars_row = ui::row(mtm, &[&pp_min_chars, &characters], 6.0);
         let min_chars_note = ui::note(
             mtm,
-            "Shorter transcripts skip cleanup; 0 never skips.",
+            "Shorter transcripts skip Clean's model; 0 never skips.",
             CONTROL,
         );
         let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 88.0, false);
-        let cleanup_form = ui::form(
+        let modes_form = ui::form(
             mtm,
             &[
-                (None, &cleanup),
-                (None, &cleanup_note.view),
+                (Some("Mode:"), &modes[0]),
+                (None, &descriptions[0]),
+                (None, &modes[1]),
+                (None, &descriptions[1]),
+                (None, &modes[2]),
+                (None, &descriptions[2]),
+                (Some("Pipeline:"), &pipeline),
+                (None, &columns),
+                (Some("Clean:"), &clean_row),
+                (Some("Elevate:"), &elevate_row),
                 (Some("Endpoint:"), &pp_endpoint),
-                (Some("Model:"), &pp_model),
                 (Some("API key ID:"), &pp_key),
+                (None, &provider_note),
                 (Some("Timeout:"), &timeout_row),
-                (Some("Cleanup passes:"), &pp_passes),
+                (Some("Clean passes:"), &pp_passes),
                 (None, &passes_note),
                 (Some("Minimum length:"), &min_chars_row),
                 (None, &min_chars_note),
-                (Some("Instructions:"), &instructions_scroll),
+                (Some("Clean instructions:"), &instructions_scroll),
             ],
         );
-        let cleanup_pane = pane(mtm, &[&cleanup_form]);
+        let modes_pane = pane(mtm, &[&modes_form]);
 
         // HUD
         let labels = ui::checkbox(mtm, "Always show state labels", target, changed);
@@ -1294,7 +1402,7 @@ impl SettingsWindow {
                 Retained::into_super(transcripts),
                 Retained::into_super(general),
                 Retained::into_super(transcription),
-                Retained::into_super(cleanup_pane),
+                Retained::into_super(modes_pane),
                 Retained::into_super(hud),
             ],
             separator: Retained::into_super(separator),
@@ -1316,10 +1424,13 @@ impl SettingsWindow {
             stt_model,
             stt_endpoint,
             stt_key,
-            cleanup,
-            cleanup_note,
+            modes,
+            pipeline,
+            clean_model,
+            clean_effort,
+            elevate_model,
+            elevate_effort,
             pp_endpoint,
-            pp_model,
             pp_key,
             pp_timeout,
             pp_passes,

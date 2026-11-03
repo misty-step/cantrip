@@ -213,7 +213,7 @@ def verify(args):
         if not args.skip_hud:
             for state in (
                 "recording", "transcribing", "deferred", "delivery-uncertain", "setup-missing",
-                "requesting-microphone", "requesting-microphone-launcher",
+                "requesting-microphone", "requesting-microphone-launcher", "cloud-partial",
             ):
                 image = staged_output / f"hud-{state}.png"
                 run([executable, "hud", "--screenshot", image, "--state", state], env=environment, cwd=root, timeout=120)
@@ -222,7 +222,7 @@ def verify(args):
                 screenshots.append({"name": image.name, "sha256": sha256(image), "state": state})
             hud = {"status": "passed", "surface": "native-view-offscreen-pixels", "screenshots": screenshots}
             panes = []
-            for pane in ("transcripts", "general", "transcription", "cleanup", "hud"):
+            for pane in ("transcripts", "general", "transcription", "modes", "hud"):
                 image = staged_output / f"settings-{pane}.png"
                 run([executable, "settings", "--screenshot", image, "--pane", pane], env=environment, cwd=root, timeout=120)
                 data = image.read_bytes()

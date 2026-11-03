@@ -359,6 +359,18 @@ fn dictation(origin: Instant, reduced_motion: bool, raw: bool) -> Timeline {
             .cleanup = cantrip_engine::ipc::Cleanup::Applied;
     }
     let end = builder.outcome(result_at, sent, "Success");
+    if raw {
+        // A Raw take names the pipeline it ran; the shared fixtures run Elevate.
+        let pipeline = super::preview_pipeline(cantrip_engine::config::Mode::Raw, None);
+        for snapshot in builder
+            .events
+            .iter_mut()
+            .filter_map(|event| event.input.as_mut())
+            .filter(|snapshot| snapshot.state != StateKind::Idle)
+        {
+            snapshot.pipeline = Some(pipeline.clone());
+        }
+    }
     builder.finish(
         end + milliseconds(960),
         milliseconds(if raw { 3360 } else { 4960 }),

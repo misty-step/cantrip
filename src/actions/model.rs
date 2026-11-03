@@ -815,6 +815,7 @@ mod tests {
             },
             hud: HudConfig::default(),
             handoff: None,
+            pipeline: None,
             microphone: None,
         }
     }
