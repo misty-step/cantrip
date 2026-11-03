@@ -380,8 +380,8 @@ mod tests {
     }
 
     #[test]
-    fn qa255_clippy_warning_probe() {
-        let values: Vec<u32> = "1,2".split(',').map(|v| v.parse().unwrap()).collect();
-        assert!(values.len() != 0, "QA255 clippy-only probe");
+    fn qa255_rustfmt_probe() {
+        let   spaced :u32= "1".parse().unwrap();
+        assert_eq!(spaced, 1, "QA255 rustfmt-only probe");
     }
 }
