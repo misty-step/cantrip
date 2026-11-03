@@ -57,6 +57,17 @@ Model selection remains explicit and is evaluated separately from this text
 contract. The [evaluation guide](../EVALUATION.md) owns measurement and disclosure
 requirements.
 
+### Spoken numbers (2026-11-03)
+
+The operator chose digits for spoken numbers, dates, times, and quantities. A
+one-rule prompt candidate was trialed against the merged prompt and **not
+adopted**: it regressed fidelity on one private take (an omitted distinct claim)
+and converted a number inside an idiom in one synthetic repeat. Strict exact
+counts on non-number cases did not drop. Clean therefore keeps the current
+written-form rule until a candidate passes with repeated private takes and
+idiom protection. The [receipt](../../eval/baselines/2026-11-03-clean-digits/run.json)
+owns the counts, prompt hashes, and spend.
+
 
 ## Consequences
 
