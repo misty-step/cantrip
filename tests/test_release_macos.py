@@ -43,12 +43,22 @@ class MacSigningPrerequisiteContracts(unittest.TestCase):
 
     def test_development_signing_cannot_be_misrepresented_as_production(self):
         with tempfile.TemporaryDirectory(prefix="cantrip-signing-contract-") as directory:
-            for option, value in (
-                ("--sign-identity", "Developer ID Application: Fixture (ABCDEFGHIJ)"),
-                ("--team-id", "ABCDEFGHIJ"), ("--notary-profile", "fixture"),
-            ):
-                with self.subTest(option=option):
-                    self.assertIn("cannot be combined", self.invoke(directory, "--ad-hoc", option, value))
+            for development in (("--ad-hoc",), ("--dev-sign-identity", "A" * 40)):
+                for option, value in (
+                    ("--sign-identity", "Developer ID Application: Fixture (ABCDEFGHIJ)"),
+                    ("--team-id", "ABCDEFGHIJ"), ("--notary-profile", "fixture"),
+                ):
+                    with self.subTest(development=development, option=option):
+                        self.assertIn("cannot be combined", self.invoke(directory, *development, option, value))
+
+    def test_local_identity_inputs_fail_closed_before_building(self):
+        with tempfile.TemporaryDirectory(prefix="cantrip-signing-contract-") as directory:
+            self.assertIn("cannot be combined", self.invoke(directory, "--ad-hoc", "--dev-sign-identity", "A" * 40))
+            self.assertIn("requires --dev-sign-identity", self.invoke(directory, "--keychain", "fixture.keychain-db"))
+            self.assertIn("requires --dev-sign-identity", self.invoke(directory, "--ad-hoc", "--keychain", "fixture.keychain-db"))
+            for invalid in ("-", "Cantrip Development", "A" * 39, "G" * 40):
+                with self.subTest(identity=invalid):
+                    self.assertIn("full forty-character SHA-1", self.invoke(directory, "--dev-sign-identity", invalid))
 
 
 @unittest.skipUnless(
@@ -108,7 +118,7 @@ class NativeMacBundleContracts(unittest.TestCase):
         self.assertEqual(entitlements, {"com.apple.security.device.audio-input": True})
         entitlement_file = self.root / "entitlements.plist"
         entitlement_file.write_bytes(plistlib.dumps(entitlements))
-        PACKAGE["sign_bundle"](self.app, libraries, entitlement_file, "-", None, ad_hoc=True)
+        PACKAGE["sign_bundle"](self.app, libraries, entitlement_file, "-", None, development=True)
         shutil.rmtree(self.original)
         environment = {
             key: value for key, value in os.environ.items()

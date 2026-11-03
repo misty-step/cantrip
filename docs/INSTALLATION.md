@@ -341,12 +341,52 @@ verifies the signature and bundled executable version. System Apple libraries
 remain OS dependencies. The stable app identifier is `com.misty-step.cantrip`;
 the bundle contains the microphone purpose string and audio-input entitlement.
 
-**Ad-hoc means DEVELOPMENT ONLY: not hardened, not Developer ID signed, and not
-notarized.** Without a Team ID, hardened library validation would reject the
-contained third-party dylibs, so the development mode deliberately does not
-claim hardened runtime. It is not a production distribution or a guarantee of
-Gatekeeper acceptance. Do not disable Gatekeeper or fabricate signing metadata
-to turn it into one.
+**Development signing is not hardened, Developer ID signed, or notarized.**
+Without a Developer ID team, hardened library validation would reject the
+contained third-party dylibs. Neither development mode is a production
+distribution or a guarantee of Gatekeeper acceptance. Do not disable Gatekeeper
+or fabricate signing metadata to turn it into one.
+
+Ad-hoc signing binds macOS microphone access to that exact code. Replacing it
+with a different build can return access to `not-determined`, requiring Allow
+again. CI deliberately stays on `--ad-hoc`. For development updates on your own
+Mac, create a stable local code-signing identity once and reuse it:
+
+1. Open Keychain Access with `open -a "Keychain Access"`. Optionally create a
+   separate keychain through File › New Keychain and keep its password private.
+2. Select Keychain Access › Certificate Assistant › Create a Certificate. Give
+   it your own development name, select **Self Signed Root** for Identity Type
+   and **Code Signing** for Certificate Type, and save it in your chosen
+   keychain. Retain both the certificate and its private key across updates.
+3. Find its full certificate SHA-1. A self-signed identity may be listed as
+   untrusted; that does not prevent local signing. Do not use `-v`, which hides
+   identities that are not trusted:
+
+   ```sh
+   keychain="$HOME/Library/Keychains/YOUR_DEVELOPMENT.keychain-db"
+   security find-identity -p codesigning "$keychain"
+   ```
+
+4. Unlock that keychain yourself, then build to a new output directory:
+
+   ```sh
+   security unlock-keychain "$keychain" # prompts for the password
+   python3 scripts/package-macos --target "$target" \
+     --dev-sign-identity YOUR_CERTIFICATES_FORTY_CHARACTER_SHA1 \
+     --keychain "$keychain" --output dist/mac-local-development
+   ```
+
+`--keychain` is optional when the identity is already on the normal keychain
+search list. The script never reads or stores a keychain password. The local
+mode signs without hardened runtime or notarization, verifies a non-ad-hoc
+signature whose designated requirement pins the selected certificate, and
+records `local-identity-development` plus the public certificate SHA-1 in
+`build.json` and `manifest.json`. Reuse the same identity and bundle identifier
+to preserve the microphone grant when replacing a development app. Creating a
+new identity is a new permission identity, even if its display name is the same.
+
+The development signing modes are mutually exclusive. Neither accepts
+production `--sign-identity`, `--team-id`, or `--notary-profile` inputs.
 
 The generated app is real and self-contained: build tools and the source
 checkout are not runtime requirements. Open `Cantrip.app` deliberately in
@@ -372,7 +412,8 @@ silently downgraded.
 
 ### Production prerequisites and fail-closed packaging
 
-Production mode is the default when `--ad-hoc` is absent. It requires all of:
+Production mode is the default when neither development signing mode is selected.
+It requires all of:
 
 - A clean committed source checkout; the packaged version/toolchain/metadata
   come from that revision, and the checkout is rechecked before output.
