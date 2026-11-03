@@ -126,9 +126,9 @@ data. Cloudflare credentials belong in the operator environment or CI secrets,
 never this tree. The website deployment workflow and Wrangler configuration own
 the deployment policy and custom domain.
 
-`.github/workflows/site.yml` checks pull requests and deploys after successful
-`master` CI (including release publication), or on a deliberate manual dispatch.
-It refreshes signed release inputs before checking and building. Configure the
+Workflow entry, qualification and deployment policy are owned by
+[Decision 0035](../docs/decisions/0035-bounded-ci-feedback.md).
+The workflow refreshes signed release inputs before checking and building. Configure the
 repository secret `CLOUDFLARE_API_TOKEN` with Workers Scripts Edit for the Misty
 Step account and Workers Routes Edit plus Zone Read for `mistystep.io`. Store it
 with `gh secret set CLOUDFLARE_API_TOKEN --repo misty-step/cantrip`; do not commit

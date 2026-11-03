@@ -20,9 +20,10 @@ same published Markdown and verified identity. Normal navigation reaches
 `/changelog`; `/releases` and per-version downloads remain usable. Unpublished
 Cargo versions and macOS development apps are never advertised as stable assets.
 
-The generated release PR contains only versions and notes. Native CI runs on its
-exact head; missing, foreign, or moved runs are refused rather than replaced by
-dispatch checks. Failed or skipped verification cannot publish. Repeating
+The generated release PR contains only versions and notes. Before publication,
+one exact source candidate passes portable and both native architectures'
+qualification; the published archive is the same artifact exercised by runtime
+verification. Failed or skipped qualification cannot publish. Repeating
 preparation for an unchanged source reuses the PR, a no-release decision creates
 no new release, and an older source cannot replace a newer website/release.
 A verified descendant of the shipped source can promote after master advances;
