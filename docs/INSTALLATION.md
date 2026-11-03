@@ -528,3 +528,5 @@ the [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial
 shortcut/menu, login, and general-clipboard/manual-paste behavior. Intel runtime
 execution and production signing/notarization each require their own proof,
 not inference from an arm64 development app.
+
+QA255 throwaway docs-only probe; never merge.
