@@ -220,9 +220,13 @@ fn broker_accounting(endpoint: &str) -> Result<Value> {
 
 fn literal_present(text: &str, literal: &str) -> bool {
     text.match_indices(literal).any(|(start, matched)| {
-        let word = |c: char| c.is_alphanumeric() || c == '_' || c == '/';
-        !text[..start].chars().next_back().is_some_and(word)
-            && !text[start + matched.len()..].chars().next().is_some_and(word)
+        let word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '/' | '-');
+        let before = text[..start].chars().next_back();
+        let mut after = text[start + matched.len()..].chars();
+        let next = after.next();
+        !before.is_some_and(|c| word(c) || c == '.')
+            && !next.is_some_and(word)
+            && !(next == Some('.') && after.next().is_some_and(word))
     })
 }
 
@@ -432,6 +436,9 @@ mod tests {
     fn protected_literals_do_not_match_substrings_of_other_identifiers_or_numbers() {
         assert!(!literal_present("13", "3"));
         assert!(!literal_present("other_retry_take", "retry_take"));
+        assert!(!literal_present("version 0.1.12", "12"));
+        assert!(!literal_present("3.7 workers", "3"));
+        assert!(!literal_present("/var/lib/cantrip/takes.json.bak", "/var/lib/cantrip/takes.json"));
         assert!(literal_present("Keep /var/lib/cantrip/takes.json.", "/var/lib/cantrip/takes.json"));
     }
 }
