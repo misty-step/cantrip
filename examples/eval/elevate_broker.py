@@ -11,6 +11,10 @@ private scratch outside the repo. Only accounting.json is publishable; raw-*.jso
 contain model outputs and must remain private. No headers, keys or transcript
 text are printed. A refused request, unknown cost, interrupted request or missing
 post-call counter halts the broker; a new invocation is not a paid retry permit.
+--resume accepts only fully charged, nonempty, stop-completed checkpoints. Their
+byte-identical production request hashes replay retained responses locally; they
+are never submitted upstream again. Backwards counter reads retain the observed
+high-water mark and all known charges rather than manufacturing refunded room.
 """
 
 import argparse
@@ -21,6 +25,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -41,6 +46,7 @@ def main():
     parser.add_argument("--port", type=int, default=4949)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--inspect", action="store_true")
+    parser.add_argument("--resume", type=Path)
     args = parser.parse_args()
     key = os.environ.pop("OPENROUTER_API_KEY", "").removesuffix("\n")
     if not key or not key.isascii() or not all(33 <= ord(c) <= 126 for c in key):
@@ -98,12 +104,63 @@ def main():
                             "max_price": {"prompt": float(prompt_price * 1_000_000),
                                           "completion": float(completion_price * 1_000_000),
                                           "request": float(request_price)}},
-        "counter_policy": "Read before and after every serial call; reserve byte-bounded input plus 256 framing tokens and 1024 completion tokens at capped prices, with a 10% margin. Unknown liability halts; no paid retries.",
+        "counter_policy": "Read before and after every serial call; budget against max(counter high-water, initial usage plus all known provider charges). Reserve byte-bounded input plus 256 framing tokens and 1024 completion tokens at capped prices with a 10% margin. A backwards read never refunds room. Unknown liability halts; no paid retries.",
         "credential_placement": "Native pass-env process only; reverse-forwarded loopback HTTP carries no authorization header from the worker.",
         "calls": [],
         "halted": start >= CEILING,
     }
     reported_total = Decimal(0)
+    high_water = start
+    replays = []
+    replay_index = 0
+    if args.resume is not None:
+        previous = json.loads((args.resume / "accounting.json").read_bytes())
+        if (previous["model"] != MODEL or previous["reasoning_effort"] != "low"
+                or previous["provider_guards"] != accounting["provider_guards"]
+                or previous["test_only_max_completion_tokens"] != COMPLETION_CAP):
+            raise RuntimeError("checkpoint_protocol_mismatch")
+        fresh_counter = start
+        start = Decimal(str(previous["key_usage_start_usd"]))
+        for record in previous["calls"]:
+            raw = (args.resume / f"raw-{record['sequence']:03d}.json").read_bytes()
+            response = json.loads(raw)
+            charge = Decimal(str(response["usage"]["cost"]))
+            if (not charge.is_finite() or charge < 0
+                    or charge != Decimal(str(record["reported_cost_usd"]))
+                    or charge > Decimal(str(record["reserved_usd"]))
+                    or response["choices"][0].get("finish_reason") != "stop"
+                    or not response["choices"][0]["message"].get("content")
+                    or record["status"] not in ("ok", "counter_or_completion_guard_failed", "reconciled_complete")):
+                raise RuntimeError("checkpoint_has_unknown_or_incomplete_liability")
+            reported_total += charge
+            high_water = max(high_water, Decimal(str(record["key_usage_before_usd"])),
+                             Decimal(str(record["key_usage_after_usd"])))
+            replays.append((record["production_request_sha256"], response))
+            shutil.copyfile(args.resume / f"raw-{record['sequence']:03d}.json",
+                            args.out / f"raw-{record['sequence']:03d}.json")
+        if fresh_counter < start + reported_total:
+            raise RuntimeError("checkpoint_counter_not_reconciled")
+        policy = accounting["counter_policy"]
+        accounting = previous
+        accounting.update({
+            "counter_policy": policy,
+            "interrupted_attempt": {
+                "halt_reason": previous.get("halt_reason"),
+                "cloud_submissions": len(replays),
+                "reconciled_key_usage_usd": float(fresh_counter),
+                "reported_cost_usd": float(reported_total),
+                "recovery": "Byte-identical production request hashes replay retained completed responses locally; no duplicate upstream submission.",
+            },
+            "halted": False,
+            "reported_cost_usd": float(reported_total),
+            "local_replays": 0,
+        })
+        accounting.pop("halt_reason", None)
+        for record in accounting["calls"]:
+            if record["status"] != "ok":
+                record["prior_status"] = record["status"]
+                record["status"] = "reconciled_complete"
+    accounting["key_usage_high_water_usd"] = float(high_water)
 
     def persist():
         with (args.out / "accounting.json").open("w") as file:
@@ -140,7 +197,7 @@ def main():
             self.reply(200, accounting)
 
         def do_POST(self):
-            nonlocal reported_total
+            nonlocal reported_total, high_water, replay_index
             if self.path != "/api/v1/chat/completions" or accounting["halted"]:
                 self.reply(403, {"error": "broker_halted_or_route_not_allowed"})
                 return
@@ -160,17 +217,30 @@ def main():
                         or any(set(message) != {"role", "content"} or not isinstance(message["content"], str)
                                for message in body["messages"])):
                     raise RuntimeError("production_request_shape_invalid")
+                request_hash = digest(original)
+                if replay_index < len(replays):
+                    expected_hash, retained = replays[replay_index]
+                    if request_hash != expected_hash:
+                        raise RuntimeError("checkpoint_production_request_hash_mismatch")
+                    replay_index += 1
+                    accounting["local_replays"] = replay_index
+                    persist()
+                    self.reply(200, retained)
+                    return
+                if any(prior["production_request_sha256"] == request_hash for prior in accounting["calls"]):
+                    raise RuntimeError("duplicate_upstream_submission_refused")
                 before = usage()
                 # UTF-8 bytes upper-bound text tokens; extra framing/JSON bytes are conservative.
                 reserve = ((Decimal(size + 256) * prompt_price
                             + Decimal(COMPLETION_CAP) * completion_price + request_price)
                            * Decimal("1.10"))
-                conservative_usage = max(before, start + reported_total)
+                high_water = max(high_water, before)
+                conservative_usage = max(high_water, start + reported_total)
                 if conservative_usage + reserve > CEILING:
                     raise RuntimeError("absolute_key_ceiling_reservation_refused")
                 record = {
                     "sequence": len(accounting["calls"]) + 1,
-                    "production_request_sha256": digest(original),
+                    "production_request_sha256": request_hash,
                     "system_prompt_sha256": digest(body["messages"][0]["content"].encode()),
                     "user_prompt_sha256": digest(body["messages"][1]["content"].encode()),
                     "key_usage_before_usd": float(before),
@@ -195,6 +265,7 @@ def main():
                     raise RuntimeError("upstream_cost_missing_or_exceeds_reservation")
                 after = usage()
                 reported_total += charge
+                high_water = max(high_water, after)
                 upstream_id = response.get("id", "")
                 record.update({
                     "status": "ok",
@@ -203,14 +274,16 @@ def main():
                     "input_tokens": response["usage"].get("prompt_tokens"),
                     "output_tokens": response["usage"].get("completion_tokens"),
                     "key_usage_after_usd": float(after),
+                    "counter_read_regressed": after < before,
                     "finish_reason": response["choices"][0].get("finish_reason"),
                 })
-                if (after < before or after > CEILING
+                if (max(high_water, start + reported_total) > CEILING
                         or response["choices"][0].get("finish_reason") != "stop"
                         or not response["choices"][0]["message"].get("content")):
                     raise RuntimeError("counter_or_completion_guard_failed")
                 accounting.update({"key_usage_end_usd": float(after),
                                    "key_usage_delta_usd": float(after - start),
+                                   "key_usage_high_water_usd": float(high_water),
                                    "reported_cost_usd": float(reported_total),
                                    "halted": False})
                 persist()
