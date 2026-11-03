@@ -873,7 +873,7 @@ impl SettingsWindow {
         views.window.makeFirstResponder(first.map(|view| &**view));
     }
 
-    /// Size the window to the pane, keeping its top edge where it is.
+    /// Size the pane, preserving its top edge unless that would hide the footer.
     fn fit(&self, animate: bool) {
         let views = self.views();
         views.root.layoutSubtreeIfNeeded();
@@ -885,7 +885,17 @@ impl SettingsWindow {
             NSPoint::new(current.origin.x, top - size.height),
             NSSize::new(WIDTH, size.height),
         );
-        window.setFrame_display_animate(window.frameRectForContentRect(content), true, animate);
+        let mut frame = window.frameRectForContentRect(content);
+        if let Some(screen) = window.screen() {
+            // AppKit constrains the title bar, not the footer above the Dock.
+            let visible = screen.visibleFrame();
+            frame.origin.y = frame
+                .origin
+                .y
+                .max(visible.origin.y)
+                .min(visible.origin.y + visible.size.height - frame.size.height);
+        }
+        window.setFrame_display_animate(frame, true, animate);
     }
 
     /// Microphone, access, shortcut and delivery feedback from the form.
