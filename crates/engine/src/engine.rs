@@ -6,9 +6,9 @@ use crate::delivery::{
     ClipboardFallback, InjectionFailure, InjectionFailureKind, InjectionMode, InjectionOutcome,
 };
 use crate::ipc::{
-    self, Artifacts, AudioSignal, Capabilities, Cleanup, Command, CommandReply, Completeness,
-    Delivery, InteractionNotice, MicrophoneAccess, MicrophoneAuthorization, OperationKind, Request,
-    StateKind, StatusSnapshot, TerminalOutcome,
+    self, Artifacts, AudioSignal, Capabilities, CaptureGuidance, CaptureIssue, Cleanup, Command,
+    CommandReply, Completeness, Delivery, InteractionNotice, MicrophoneAccess,
+    MicrophoneAuthorization, OperationKind, Request, StateKind, StatusSnapshot, TerminalOutcome,
 };
 use crate::models;
 use crate::paths;
@@ -211,6 +211,7 @@ enum Work {
         recorder: Box<dyn Recorder>,
         wav: PathBuf,
         duration_ms: u64,
+        input_name: String,
     },
     Recover,
     Text,
@@ -255,6 +256,9 @@ struct Daemon {
     /// re-read on a cadence and after an explicit request, and who macOS grants
     /// is fixed at start. Status clients share this cache.
     microphone: Option<MicrophoneAccess>,
+    /// Local display metadata from this press; never logged or persisted.
+    capture_source: Option<String>,
+    capture_device_name: String,
     worker_available: bool,
     retainer: Option<JoinHandle<WorkerResult>>,
 }
@@ -289,6 +293,8 @@ impl Daemon {
             recordings,
             local_model,
             microphone,
+            capture_source: None,
+            capture_device_name: "microphone".to_owned(),
             worker_available: true,
             retainer: None,
         }
@@ -467,7 +473,30 @@ impl Daemon {
                 .operation()
                 .and_then(|operation| operation.handoff.clone()),
             microphone: self.microphone.clone(),
+            capture_guidance: self.capture_guidance(),
         }
+    }
+
+    fn capture_guidance(&self) -> Option<CaptureGuidance> {
+        let kind = match &self.state {
+            State::Recording {
+                signal, started, ..
+            } => capture_issue(signal.as_ref().as_ref(), started.elapsed()),
+            State::Idle => {
+                let outcome = self.outcome.as_ref().filter(|outcome| !outcome.dismissed)?;
+                match outcome.error.as_deref() {
+                    Some("capture-source-missing") => Some(CaptureIssue::MissingMicrophone),
+                    Some("no-audio") => Some(CaptureIssue::NoAudio),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }?;
+        Some(CaptureGuidance {
+            kind,
+            source: self.capture_source.clone(),
+            device_name: self.capture_device_name.clone(),
+        })
     }
 }
 
@@ -1218,6 +1247,17 @@ fn begin_capture(
 ) -> CommandReply {
     let take_id = &operation.identity.take_id;
     let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
+    daemon.capture_source = config.audio_source.clone();
+    daemon.capture_device_name = daemon
+        .platform
+        .input_device_name(config.audio_source.as_deref())
+        .unwrap_or_else(|| {
+            if config.audio_source.is_some() {
+                "Configured microphone".to_owned()
+            } else {
+                "microphone".to_owned()
+            }
+        });
     match daemon
         .platform
         .start_recording(&wav, config.audio_source.as_deref())
@@ -1238,9 +1278,18 @@ fn begin_capture(
             daemon.reply(true, "recording", None)
         }
         Err(error) => {
-            let (message, class) = match error.downcast_ref::<crate::ports::MissingMicrophone>() {
-                Some(missing) => (missing.to_string(), "capture-source-missing"),
-                None => ("Starting recording failed".to_owned(), "capture-failed"),
+            let (message, class) = if error.is::<crate::ports::MissingMicrophone>() {
+                let guidance = CaptureGuidance {
+                    kind: CaptureIssue::MissingMicrophone,
+                    source: config.audio_source.clone(),
+                    device_name: daemon.capture_device_name.clone(),
+                };
+                (
+                    format!("{}. Open Settings to select an input.", guidance.message()),
+                    "capture-source-missing",
+                )
+            } else {
+                ("Starting recording failed".to_owned(), "capture-failed")
             };
             tracing::warn!("[Capture] starting recording failed class={class}");
             let mut outcome = setup_failure(&message, class);
@@ -1343,6 +1392,7 @@ fn stop_recording(daemon: &mut Daemon, job_tx: &Sender<Job>, reason: StopReason)
             recorder,
             wav,
             duration_ms,
+            input_name: daemon.capture_device_name.clone(),
         },
     };
     let stage = if cancel {
@@ -1664,6 +1714,20 @@ fn setup_failure(message: &str, error: &str) -> TerminalOutcome {
     }
 }
 
+/// Measured silence is a notice, not a stop/cancel or speech detector. A header
+/// with no PCM frames stays distinct from a live stream of digital silence.
+fn capture_issue(signal: Option<&InputSignal>, elapsed: Duration) -> Option<CaptureIssue> {
+    if elapsed < audio::NO_SIGNAL_GRACE {
+        return None;
+    }
+    match signal {
+        Some(signal) if signal.silent && !signal.observed_signal => Some(CaptureIssue::SilentInput),
+        Some(_) => None,
+        None if elapsed >= audio::NO_SIGNAL_GRACE => Some(CaptureIssue::NoAudio),
+        None => None,
+    }
+}
+
 fn refresh_recording_signal(state: &mut State) {
     let State::Recording {
         recorder,
@@ -1678,7 +1742,9 @@ fn refresh_recording_signal(state: &mut State) {
     if now < *next_signal_sample {
         return;
     }
-    **signal = recorder.input_signal();
+    if let Some(sample) = recorder.input_signal() {
+        **signal = Some(sample);
+    }
     *next_signal_sample = now + SIGNAL_SAMPLE_INTERVAL;
 }
 
@@ -1842,6 +1908,7 @@ fn retain_rejected_capture(job: Job) -> TerminalOutcome {
         recorder,
         wav,
         duration_ms,
+        ..
     } = job.work
     {
         let wav = recorder.stop().unwrap_or(wav);
@@ -1971,6 +2038,7 @@ fn run_job(
             recorder,
             wav,
             duration_ms,
+            input_name,
         } => match recorder.stop() {
             Ok(wav) => process_audio(
                 &context,
@@ -1982,7 +2050,9 @@ fn run_job(
             Err(error) => {
                 // Empty finalized takes are retained too, but cancellation is
                 // not a capture failure merely because no frames arrived.
-                let empty = error.is::<audio::EmptyRecording>();
+                let empty = error.is::<audio::EmptyRecording>()
+                    || audio::verify_wav(&wav)
+                        .is_err_and(|error| error.is::<audio::EmptyRecording>());
                 let saved =
                     persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
                 let mut outcome = if empty && context.cancelled() {
@@ -1990,12 +2060,17 @@ fn run_job(
                 } else {
                     let mut outcome = context.outcome(Completeness::Failed, Delivery::None);
                     outcome.message = if empty {
-                        "The microphone supplied no audio."
+                        let guidance = CaptureGuidance {
+                            kind: CaptureIssue::NoAudio,
+                            source: context.config.audio_source.clone(),
+                            device_name: input_name,
+                        };
+                        format!("{}. Open Settings to select an input.", guidance.message())
                     } else {
-                        "Recording did not finish normally."
-                    }
-                    .to_owned();
-                    outcome.error = Some("capture-failed".to_owned());
+                        "Recording did not finish normally.".to_owned()
+                    };
+                    outcome.error =
+                        Some(if empty { "no-audio" } else { "capture-failed" }.to_owned());
                     outcome
                 };
                 outcome.artifacts = saved.artifacts;
@@ -3086,6 +3161,67 @@ mod tests {
             daemon.snapshot().operation_kind,
             Some(OperationKind::Dictation)
         );
+    }
+
+    #[test]
+    fn capture_guidance_distinguishes_no_frames_silence_and_restored_signal() {
+        let signal = |silent| InputSignal {
+            level: if silent { 0 } else { 30 },
+            waveform: [[0, 0]; audio::AUDIO_WAVEFORM_BINS],
+            silent,
+            observed_signal: !silent,
+        };
+        assert_eq!(capture_issue(None, Duration::from_millis(2_999)), None);
+        assert_eq!(
+            capture_issue(Some(&signal(true)), Duration::from_millis(2_999)),
+            None
+        );
+        assert_eq!(
+            capture_issue(None, Duration::from_secs(3)),
+            Some(CaptureIssue::NoAudio)
+        );
+        assert_eq!(
+            capture_issue(Some(&signal(true)), Duration::from_secs(3)),
+            Some(CaptureIssue::SilentInput)
+        );
+        assert_eq!(
+            capture_issue(Some(&signal(false)), Duration::from_secs(4)),
+            None
+        );
+        let thinking_pause = InputSignal {
+            observed_signal: true,
+            ..signal(true)
+        };
+        assert_eq!(
+            capture_issue(Some(&thinking_pause), Duration::from_secs(10)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_live_notice_preserves_recording_and_its_selected_source() {
+        let mut daemon = idle_daemon();
+        daemon.capture_source = Some("chosen-input".to_owned());
+        daemon.capture_device_name = "Fixture input".to_owned();
+        let operation = daemon.operation("new".to_owned(), Some(OperationKind::Dictation), None);
+        daemon.state = State::Recording {
+            operation,
+            recorder: Box::new(FakeRecorder::default()),
+            wav: PathBuf::from("/tmp/unused.wav"),
+            config: Box::new(Config::default()),
+            started: Instant::now() - Duration::from_secs(3),
+            signal: Box::new(None),
+            next_signal_sample: Instant::now(),
+        };
+        let status = daemon.snapshot();
+        assert_eq!(status.state, StateKind::Recording);
+        assert!(status.capabilities.stop && status.capabilities.cancel);
+        let guidance = status.capture_guidance.unwrap();
+        assert_eq!(guidance.source.as_deref(), Some("chosen-input"));
+        assert_eq!(guidance.device_name, "Fixture input");
+        assert_eq!(guidance.kind, CaptureIssue::NoAudio);
+        assert!(status.outcome.is_none());
+        assert_eq!(daemon.capture_source.as_deref(), Some("chosen-input"));
     }
 
     #[test]

@@ -816,6 +816,7 @@ mod tests {
             hud: HudConfig::default(),
             handoff: None,
             microphone: None,
+            capture_guidance: None,
         }
     }
 

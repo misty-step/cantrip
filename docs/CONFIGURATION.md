@@ -90,11 +90,29 @@ On Mac, `audio_source` stores the stable **CoreAudio input UID**, not its
 display name or a transient numeric device index. Settings lists microphones
 and preserves an unavailable selection visibly. Omission chooses System default;
 an explicitly selected UID that disappears or changes refuses capture rather
-than falling back to another microphone. Microphone permission is requested only
-by a deliberate Allow action, always in the running Cantrip that records. Capture
-and `doctor` do not prompt or broaden permissions. Follow the
+than falling back to another microphone. The HUD reports `capture-source-missing`
+and points to the Cantrip menu for **Open Settings** or
+**Use <default input name> instead**. Only clicking Use changes `audio_source`;
+it saves the displayed device's concrete UID. A stale action is refused rather
+than overwriting a newer selection or silently choosing a different default.
+No disconnected device name is inferred from its UID.
+
+Microphone access is requested by a deliberate Allow action or an admitted
+first dictation press, in the running Cantrip that records. An undetermined
+first press waits for your decision and continues into capture after Allow;
+Stop/Cancel consumes that pending press. `doctor`, status and opening Settings
+never prompt. Follow the
 [Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
 after selecting a device or granting access.
+
+The existing signal monitor warns when a take begins with about three seconds
+at or below its approximately −60 dBFS floor, with
+**No sound from <device> — check the input**. The non-blocking HUD notice points
+to Settings; capture continues and measured signal clears it. Later thinking
+pauses do not warn. No frames remains distinct from silent PCM, and a stopped,
+finalized zero-frame take reports `no-audio`. No microphone switch, silence
+threshold setting, speech detector or automatic deletion is added. See
+[setup recovery](USAGE.md#fix-microphone-setup).
 
 `keep_warm` controls local-model preload when the daemon starts. Changing it
 requires a restart through the [existing startup owner](DESKTOP.md#keep-one-startup-owner),

@@ -460,6 +460,12 @@ impl SettingsWindow {
         ui::present(&self.views().window);
     }
 
+    /// Turn the window to `pane`, as an action that names it asks, such as
+    /// Open Settings beside capture guidance turning to the microphone.
+    pub(crate) fn open_pane(&self, pane: Pane) {
+        self.show_pane(pane, true);
+    }
+
     /// The window was closed; the app drops it at its next tick.
     pub(crate) fn closed(&self) -> bool {
         self.ivars().closed.get()

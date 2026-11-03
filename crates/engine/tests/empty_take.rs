@@ -50,6 +50,10 @@ impl Platform for EmptyCapture {
         Ok(Box::new(EmptyRecorder(path.to_owned())))
     }
 
+    fn input_device_name(&self, _: Option<&str>) -> Option<String> {
+        Some("Fixture microphone".to_owned())
+    }
+
     fn prepare_delivery(&self) {}
 
     fn delivery_permit(&self) -> Arc<dyn DeliveryPermit> {
@@ -199,6 +203,23 @@ fn exercise_capture(cancel: bool) {
         .unwrap()
         .ok
     );
+    if !cancel {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let waiting = loop {
+            let waiting = ipc::status().unwrap();
+            if waiting.capture_guidance.is_some() || Instant::now() >= deadline {
+                break waiting;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(waiting.state, ipc::StateKind::Recording);
+        assert!(waiting.signal.is_none());
+        assert_eq!(
+            waiting.capture_guidance.unwrap().kind,
+            ipc::CaptureIssue::NoAudio
+        );
+        assert!(waiting.capabilities.stop && waiting.capabilities.cancel);
+    }
     assert!(
         ipc::command(if cancel {
             Command::Cancel
@@ -238,10 +259,17 @@ fn exercise_capture(cancel: bool) {
     );
     assert_eq!(
         outcome.error.as_deref(),
-        if cancel { None } else { Some("capture-failed") }
+        if cancel { None } else { Some("no-audio") }
     );
     if !cancel {
-        assert!(outcome.message.contains("microphone") && outcome.message.contains("no audio"));
+        assert!(outcome.message.contains("No sound from Fixture microphone"));
+        assert!(outcome.message.contains("Settings"));
+        assert_eq!(
+            snapshot.capture_guidance.unwrap().kind,
+            ipc::CaptureIssue::NoAudio
+        );
+    } else {
+        assert!(snapshot.capture_guidance.is_none());
     }
     assert!(!outcome.artifacts.audio && !outcome.artifacts.text);
     let id = outcome.artifacts.take_id.unwrap();

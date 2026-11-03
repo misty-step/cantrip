@@ -69,6 +69,11 @@ pub trait Platform: Send + Sync {
     /// returning; the engine durably retains remaining audio. Remove only
     /// conclusively empty, unaccepted startup artifacts.
     fn start_recording(&self, wav: &Path, source: Option<&str>) -> Result<Box<dyn Recorder>>;
+    /// A display name only, resolved once at the press. This must not select,
+    /// start or change a microphone; None keeps generic setup guidance.
+    fn input_device_name(&self, _source: Option<&str>) -> Option<String> {
+        None
+    }
     fn prepare_delivery(&self);
     fn delivery_permit(&self) -> Arc<dyn DeliveryPermit>;
     fn handoff_color(&self, slot: usize) -> [u8; 3];

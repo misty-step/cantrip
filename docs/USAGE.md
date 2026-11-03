@@ -301,6 +301,85 @@ uses the explicit shared `postproc.timeout_ms`, with no hidden five-second clamp
 See [waiting and recovery configuration](CONFIGURATION.md#stt--transcription)
 and [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
 
+## Fix microphone setup
+
+A saved microphone that is no longer available fails the press with
+`capture-source-missing`. Cantrip does not record a different microphone.
+On Mac the HUD points to the **Cantrip menu**, whose first section offers:
+
+- **Open Settings** to choose the input on the General pane.
+- **Use <default input name> instead** to deliberately save that named input.
+  Only clicking this item changes `audio_source`; it saves that device's UID,
+  not a rule to follow future system-default changes. If the selection or device
+  changes while the menu is open, reopen it and choose again.
+
+Reconnect the original microphone or make that explicit choice, then press
+again. A disconnected UID cannot reliably supply a display name, so the notice
+may say “Configured microphone isn’t connected” instead of guessing its name.
+
+If a take starts with about three seconds of digital or near-digital silence,
+the HUD shows **No sound from <device> — check the input** and points to Settings.
+The notice is non-blocking: Stop and Cancel still work, and recording continues.
+Signal above the existing approximately −60 dBFS floor clears the notice;
+later thinking pauses do not warn. This is input health, not speech detection.
+If no frames arrive, the same guidance
+appears while waiting; stopping a finalized zero-frame take ends with `no-audio`.
+Neither case switches microphones or deletes retained audio.
+
+The Mac panel stays passive and click-through so it cannot take your editor's
+focus. Open the menu deliberately for its actions. On Linux the shared HUD
+shows the same guidance; use `cantrip settings` to select the input.
+
+### Disposable VM proof (no physical headset)
+
+Use the candidate CI-built app in a fresh `macvm` guest, not the operator's Mac.
+Install BlackHole 2ch and `switchaudio-osx` in that guest. Explicitly select the
+same BlackHole device as the guest's system input and output. The driver refuses
+non-`VirtualMac` machines and creates its own private configuration/history.
+It changes no system audio routing and uses only `samples/jfk.wav`.
+
+Inside the guest, from this checkout (Python 3.11+):
+
+```sh
+APP=/Applications/Cantrip.app
+RUN="$HOME/.cache/tmp/cg-proof"
+PROOF=/absolute/path/to/cantrip/scripts/verify-capture-setup-macos
+python3 "$PROOF" --app "$APP" --run "$RUN" --pull-model prepare
+```
+
+`--pull-model` explicitly downloads the public local model into the isolated
+data directory. Do not start a second Cantrip app in the same proof session.
+
+1. Focus a guest scratch editor. Press **Control+Option+Space**; answer Allow
+   if asked. Inspect the HUD without changing editor focus. Open the Cantrip
+   menu and inspect **Open Settings** and **Use BlackHole 2ch instead**.
+   Run the driver's `missing` phase to check the failure class, guidance and
+   unchanged config.
+2. Click **Open Settings** and inspect the General/input pane. Close Settings.
+   Reopen the Cantrip menu and click **Use BlackHole 2ch instead**. Run `default`:
+   only that explicit action may save the UID, and it must not start capture.
+3. Focus the editor and press again. Wait at least three seconds without
+   playback; inspect the named no-sound HUD/menu guidance. Run `silence`;
+   the take must still be recording with Stop/Cancel available.
+4. Run `play` to send the public fixture to BlackHole. While playback is active,
+   run `signal` in a second guest command to check measured signal and cleared
+   guidance. Inspect the HUD and unchanged editor focus.
+5. Press the shortcut to stop after playback. Run `complete` and paste into the
+   guest editor. Inspect the public sentence; publish no transcript or audio.
+   Repeat the failure and silence inspections in light and dark appearances.
+
+Each phase uses the same arguments, for example:
+
+```sh
+python3 "$PROOF" --app "$APP" --run "$RUN" missing
+python3 "$PROOF" --app "$APP" --run "$RUN" cleanup
+```
+
+Collect only `proof-*.json` and reviewed VM screenshots, not the private run's
+history, WAVs or logs. `cleanup` stops only the app PID/start identity this
+driver launched. Remove the private run directory and delete the disposable VM
+when done. This is an attended proof recipe, not a claim that it has been run.
+
 ## Understand the outcome
 
 `status` prints the last outcome's completeness, delivery, cleanup, event id,
@@ -317,6 +396,8 @@ operation finished.
 | `delivery: uncertain` | The clipboard or some keys may already have changed. Inspect the destination before retrying to avoid duplicates; Cantrip does not automatically retry an uncertain handoff. |
 | `completeness: partial` | Available text is incomplete. Keep the audio and recover the whole recording; a partial transcript is not a successful retry. |
 | `completeness: empty`, `failed`, or `cancelled` | No complete dictation was delivered. Read the notice and use the matching recording's available artifacts. |
+| `capture-source-missing` | Reconnect the selected microphone, or use the explicit Settings/default-input actions in the Cantrip menu. |
+| `no-audio` or a No sound notice | Check the selected device, its mute/input level and routing in Settings. No microphone was substituted. |
 | `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [Clean fallback contract](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02). Repair cleanup configuration or leave the LLM unconfigured. |
 | Storage warning | Delivery and durable retention are separate. Inspect storage before relying on recovery or recording more. |
 | Disconnected/unknown HUD or failed `ping` | Use desktop diagnostics; do not infer Ready or start a competing owner. |

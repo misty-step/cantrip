@@ -6,8 +6,9 @@ where the destination cannot be verified (US-003, US-004, US-005).
 
 ## Sub-features
 
-- `fail-silence` a silent take settles `empty` with its WAV retained, not invented text.
-- `fail-absent-mic` an `audio_source` that does not exist is refused, never substituted; `doctor` identifies the missing source.
+- `fail-silence` initial near-digital silence shows non-blocking Settings guidance after about three seconds; a silent take settles `empty` with its WAV retained, not invented text.
+- `fail-no-frames` a finalized stopped zero-frame take settles `no-audio`, not a generic capture/storage failure; cancellation keeps its separate outcome.
+- `fail-absent-mic` an `audio_source` that does not exist is refused as `capture-source-missing`, never substituted; `doctor` identifies the missing source. On Mac the menu offers explicit Settings/default-input actions.
 - `fail-second-daemon` a second `daemon` on the same runtime exits non-zero; the first keeps answering.
 - `fail-no-model` `transcribe --local` without a model exits non-zero and downloads nothing.
 - `fail-unverified-desktop` `injection = "auto"` outside verified Hyprland/logind copies or defers, never pastes or types; the clipboard agrees with the reported delivery.
@@ -32,6 +33,10 @@ Preconditions:
 - **By hand (absent mic).** Edit `audio_source` in the session config
   (`$V cantrip --run "$RUN" -- config path`), `reload`, then `doctor` and `start`. Expect `capture: blocked` and a refused
   start naming the missing microphone. Restore and `reload`.
+- **macOS.** Use the candidate native app in a disposable `macvm` guest with
+  BlackHole and `scripts/verify-capture-setup-macos`; follow the
+  [attended VM recipe](../../../../docs/USAGE.md#disposable-vm-proof-no-physical-headset).
+  Inspect the actual HUD/menu/focus states as well as the driver's metadata checks.
 
 ## Gotchas
 
