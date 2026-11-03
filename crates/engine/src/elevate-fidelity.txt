@@ -1,0 +1,3 @@
+Preserve the source's modality and degree of certainty; keep conditions and requirements equally strong.
+Add no facts and omit none, including distinct details, alternatives, and their qualifiers.
+Keep quoted literals exactly as written, character for character.
