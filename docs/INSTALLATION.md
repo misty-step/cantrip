@@ -305,6 +305,15 @@ avoiding `ort-sys`' incomplete decomposed dependency list. Source revision and
 every archive are checked before cache reuse; no system ORT install or downgrade
 is needed. `--source-runtime` selects the same source build on arm64.
 
+Native macOS CI persists that Intel runtime tree with an exact-key
+`actions/cache` entry. The key includes the runtime version/revision, target,
+minimum macOS, runner image, Xcode/SDK/compiler and CMake identities, and the
+preparation script hash. Preparation still runs after restoration and rejects
+an identity mismatch, modified source, or changed archive; there is no partial-key
+fallback. Both architectures retain formatting, Clippy for every workspace target,
+workspace tests, the eval example, Python release tests, and relocated-app proof.
+Clippy also compiles the targets previously compiled by a separate `cargo check`.
+
 Cache schema 2 rejects older/incomplete caches. For standalone preparation,
 choose a fresh `--output`; packaging uses the same default cache, so
 remove only your own obsolete cache deliberately before rebuilding there.
