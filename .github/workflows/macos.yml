@@ -109,7 +109,7 @@ jobs:
             ${{ steps.runtime-cache.outputs.path }}/source
             ${{ steps.runtime-cache.outputs.path }}/build/**/*.a
           key: ${{ steps.runtime-cache.outputs.key }}
-      # A cache hit still goes through the script's fail-closed integrity checks.
+      # A warm PR run must still pass the script's fail-closed integrity checks.
       - name: Prepare the pinned CPU runtime omitted by upstream Intel prebuilts
         if: matrix.architecture == 'x86_64'
         env:
