@@ -1011,10 +1011,14 @@ impl Host {
 
     /// Make `mode` the default for new takes, then ask a running Cantrip to
     /// apply it; its answer arrives as the feedback line. Takes already
-    /// recording or processing keep the mode they started with.
+    /// recording or processing keep the mode they started with, and an open
+    /// Settings window shows the new default without losing unsaved edits.
     fn choose_mode(&self, mode: Mode) -> Result<()> {
         let path = paths::config_file().context("locating the configuration file")?;
         crate::settings::save_default_mode(&path, mode)?;
+        if let Some(window) = self.settings.as_ref().filter(|window| !window.closed()) {
+            window.follow_saved_mode();
+        }
         if self.hud.status().is_some() {
             self.send(Command::Reload)?;
         }

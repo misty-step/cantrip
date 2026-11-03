@@ -340,6 +340,7 @@ impl SettingsForm {
             ));
             return None;
         }
+        self.follow_saved_mode();
         let config = self.edit.to_config();
         if let Err(problem) = check(&config) {
             self.notice = Some(Notice::attention(format!("Not saved — {problem}")));
@@ -353,6 +354,37 @@ impl SettingsForm {
             }
         }
         Some(self.apply())
+    }
+
+    /// Adopt a default mode saved elsewhere since this form loaded, by the macOS
+    /// menu or `cantrip mode`, when that is the file's only change. Unsaved edits
+    /// stay, and the saved mode replaces the form's unless the form chose its own.
+    /// Any other change still makes Save refuse until the file is reloaded.
+    pub(crate) fn follow_saved_mode(&mut self) {
+        if !self.loaded_ok || self.applying {
+            return;
+        }
+        let Ok(text) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        if text == self.loaded_text {
+            return;
+        }
+        let (Ok(mut loaded), Ok(saved)) = (
+            toml::from_str::<Config>(&self.loaded_text),
+            toml::from_str::<Config>(&text),
+        ) else {
+            return;
+        };
+        let chosen_here = self.edit.mode != loaded.postproc.mode;
+        loaded.postproc.mode = saved.postproc.mode;
+        if loaded != saved {
+            return;
+        }
+        if !chosen_here {
+            self.edit.mode = saved.postproc.mode;
+        }
+        self.loaded_text = text;
     }
 
     /// Refuse to save because the window could not read a value it shows,
@@ -1019,6 +1051,40 @@ mod tests {
             (config.postproc.clean, config.postproc.elevate),
             (qwen, llama)
         );
+    }
+
+    #[test]
+    fn a_mode_saved_elsewhere_is_followed_without_losing_unsaved_edits() {
+        let fixture = ConfigFixture::new();
+        fs::write(fixture.path(), "# mine\n[postproc]\nenabled = true\n").expect("fixture");
+        let mut form = SettingsForm::load(fixture.path());
+        form.edit.pp_timeout = 20_000;
+        // The menu or `cantrip mode` saves a new default while the form is open.
+        store::save_default_mode(fixture.path().as_path(), Mode::Elevate).expect("mode saved");
+        assert!(form.save().is_some(), "{:?}", form.notice);
+        let saved: Config =
+            toml::from_str(&fs::read_to_string(fixture.path()).expect("saved")).expect("parses");
+        assert_eq!(saved.postproc.mode, Mode::Elevate);
+        assert_eq!(saved.postproc.timeout_ms, 20_000);
+
+        // A mode chosen in the form wins over one saved elsewhere meanwhile.
+        let mut form = SettingsForm::load(fixture.path());
+        form.edit.mode = Mode::Clean;
+        store::save_default_mode(fixture.path().as_path(), Mode::Raw).expect("mode saved");
+        assert!(form.save().is_some(), "{:?}", form.notice);
+        let saved: Config =
+            toml::from_str(&fs::read_to_string(fixture.path()).expect("saved")).expect("parses");
+        assert_eq!(saved.postproc.mode, Mode::Clean);
+
+        // Any other change still waits for Reload from Disk.
+        let mut form = SettingsForm::load(fixture.path());
+        let saved = fs::read_to_string(fixture.path()).expect("saved");
+        assert!(saved.contains("keep_warm = true"), "{saved}");
+        let external = saved.replace("keep_warm = true", "keep_warm = false");
+        fs::write(fixture.path(), &external).expect("external edit");
+        store::save_default_mode(fixture.path().as_path(), Mode::Elevate).expect("mode saved");
+        assert!(form.save().is_none());
+        assert_eq!(form.edit.mode, Mode::Clean, "an unrelated change adopts nothing");
     }
 
     #[test]

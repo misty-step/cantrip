@@ -523,6 +523,13 @@ impl SettingsWindow {
         }
     }
 
+    /// Show a default mode the menu just saved, keeping unsaved edits.
+    pub(crate) fn follow_saved_mode(&self) {
+        self.state_mut().form.follow_saved_mode();
+        self.show_modes();
+        self.show_form_state();
+    }
+
     /// Fold in live status and any finished background work.
     pub(crate) fn tick(&self, live: &Live) {
         let mut access = false;
