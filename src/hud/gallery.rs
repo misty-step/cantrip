@@ -531,6 +531,12 @@ fn catalog_timeline(state: ScreenshotState, origin: Instant, reduced_motion: boo
         builder.status(milliseconds(4960), target, "Dismiss outcome; idle");
         return builder.finish(milliseconds(5920), milliseconds(5280));
     }
+    if state == ScreenshotState::MissingMicrophone {
+        // The press is refused before capture: no recording or work precedes it.
+        let refused_at = milliseconds(320);
+        let end = builder.outcome(refused_at, target, "Press refused: microphone missing");
+        return builder.finish(end + milliseconds(960), refused_at + milliseconds(480));
+    }
     if target.state == StateKind::Recording {
         let long_startup = matches!(
             state,
@@ -544,13 +550,19 @@ fn catalog_timeline(state: ScreenshotState, origin: Instant, reduced_motion: boo
         if long_startup {
             let mut initial = target.clone();
             initial.elapsed = 0;
+            // The owner names a silent input only after its three-second window.
+            let guidance = initial.capture_guidance.take();
             builder.status(milliseconds(320), initial.clone(), "Recording begins");
             for elapsed in 1..=target.elapsed {
                 initial.elapsed = elapsed;
+                initial.capture_guidance = guidance.clone().filter(|_| elapsed >= 3);
                 builder.events.push(Event {
                     at: milliseconds(320 + elapsed * 1000),
                     input: Some(initial.clone()),
                 });
+            }
+            if guidance.is_some() {
+                builder.mark(milliseconds(3320), "Owner names the silent input");
             }
             builder.mark(target_at, "Named recording fixture");
         } else {
@@ -1298,6 +1310,7 @@ mod tests {
                 ScreenshotState::Failed,
                 ScreenshotState::DeliveryUncertain,
                 ScreenshotState::Deferred,
+                ScreenshotState::MissingMicrophone,
             ] {
                 let mut replay =
                     Replay::new(origin, catalog_timeline(state, origin, reduced_motion));

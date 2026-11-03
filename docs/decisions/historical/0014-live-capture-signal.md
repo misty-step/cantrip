@@ -5,6 +5,9 @@ Date: 2026-08-14. Status: accepted.
 The measurement window, waveform representation and rendering described here are
 superseded by [ADR 0021](0021-signed-pixel-waveform.md). The shared capture stream,
 cached observations and signal-health contract remain.
+The setup guidance and zero-frame failure amendment is maintained in
+[Decision 0031](../0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03);
+its named-device Settings guidance replaces the old “No mic signal” wording.
 
 ## Problem
 

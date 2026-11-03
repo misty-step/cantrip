@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use cantrip_engine::{
     config::{Mode, PipelineDisplay},
     ipc::{
-        self, AudioSignal, AudioWaveform, Cleanup, Completeness, Delivery, StateKind,
-        StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
+        self, AudioSignal, AudioWaveform, CaptureGuidance, CaptureIssue, Cleanup, Completeness,
+        Delivery, StateKind, StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
     },
     pipeline::Stage,
 };
@@ -65,11 +65,30 @@ const RECORDINGS_ACTION: &str = "Cantrip menu → Recordings and recovery";
 #[cfg(not(target_os = "macos"))]
 const RECORDINGS_ACTION: &str = "Cantrip → Recordings and recovery";
 
+/// Capture guidance routes to Settings: the macOS menu's Open Settings item
+/// beside the guidance, or the Linux actions window's Settings.
+#[cfg(target_os = "macos")]
+const SETTINGS_ACTION: &str = deliberately!("Open Settings");
+#[cfg(not(target_os = "macos"))]
+const SETTINGS_ACTION: &str = deliberately!("Settings");
+/// Where a missing microphone is fixed: the macOS menu's Use item names the
+/// default input the owner found at the press, beside Open Settings. Without
+/// that name Settings is the only route, as it always is on Linux.
+#[cfg(target_os = "macos")]
+fn missing_microphone_action(default_input: Option<&str>) -> String {
+    match default_input {
+        Some(name) => format!("Cantrip menu → Use {name} instead, or Open Settings"),
+        None => SETTINGS_ACTION.to_owned(),
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn missing_microphone_action(_default_input: Option<&str>) -> String {
+    SETTINGS_ACTION.to_owned()
+}
+
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const PREFERENCE_INTERVAL: Duration = Duration::from_secs(2);
-const SIGNAL_GRACE: Duration = Duration::from_secs(8);
-const SIGNAL_RETURN: Duration = Duration::from_millis(300);
 const MONITOR_DELAY: Duration = Duration::from_secs(5);
 const DISCONNECT_DELAY: Duration = Duration::from_millis(450);
 const STATUS_STALE_AFTER: Duration = Duration::from_secs(2);
@@ -278,42 +297,23 @@ impl Header {
     }
 }
 
-/// Signal absence at the beginning is actionable; silence after real input is
-/// usually thinking. An amplitude meter cannot diagnose mute/device failure.
+/// What one take's input showed: whether the owner ever measured it, and the
+/// owner's silence guidance while it lasts, kept for that take's outcome. The
+/// owner alone decides when measured input counts as silent.
 #[derive(Default)]
 struct SignalHistory {
     monitored: bool,
-    heard_input: bool,
-    warning: bool,
-    returning_since: Option<Instant>,
+    silence: Option<CaptureGuidance>,
 }
 
 impl SignalHistory {
-    fn update(&mut self, signal: Option<AudioSignal>, age: Duration, now: Instant) {
-        match signal {
-            Some(signal) => {
-                self.monitored = true;
-                if signal.level > 0 {
-                    if self.warning {
-                        let since = self.returning_since.get_or_insert(now);
-                        if now.duration_since(*since) >= SIGNAL_RETURN {
-                            self.warning = false;
-                            self.heard_input = true;
-                        }
-                    } else {
-                        self.heard_input = true;
-                    }
-                } else {
-                    self.returning_since = None;
-                    if !self.heard_input && signal.silent && age >= SIGNAL_GRACE {
-                        self.warning = true;
-                    }
-                }
-            }
-            None => {
-                self.returning_since = None;
-            }
-        }
+    fn update(&mut self, status: &StatusSnapshot) {
+        self.monitored |= status.signal.is_some();
+        self.silence = status
+            .capture_guidance
+            .as_ref()
+            .filter(|guidance| guidance.kind != CaptureIssue::MissingMicrophone)
+            .cloned();
     }
 }
 
@@ -508,8 +508,7 @@ impl Model {
             self.result = None;
         }
         if matches!(status.state, StateKind::Recording) {
-            let age = Duration::from_secs(status.elapsed).max(now.duration_since(self.phase_since));
-            self.signal.update(status.signal, age, now);
+            self.signal.update(&status);
             if status.hud.labels && self.elapsed_value != Some(status.elapsed) {
                 self.elapsed_value = Some(status.elapsed);
                 self.elapsed_label = format!("Recording · {}", format_elapsed(status.elapsed));
@@ -536,16 +535,17 @@ impl Model {
                 let initial = first || epoch_changed;
                 if !active && !outcome.dismissed && (!initial || attention_outcome(outcome)) {
                     let mut result = present_outcome(outcome, &status, now, self.reduced_motion);
-                    if !initial
-                        && belongs
-                        && outcome.completeness == Completeness::Empty
-                        && self.signal.warning
-                    {
-                        result.caption.title = "No input signal detected".to_owned();
+                    // A silent take's empty result names the input it heard
+                    // nothing from. Idle owners report no guidance for it, so
+                    // the route is the general Settings action.
+                    if let Some(guidance) = self.signal.silence.as_ref().filter(|_| {
+                        !initial && belongs && outcome.completeness == Completeness::Empty
+                    }) {
+                        result.caption.title = guidance.message();
                         result.caption.detail = if outcome.artifacts.audio {
-                            "Audio saved. Check the microphone input."
+                            "Audio saved."
                         } else {
-                            "Check the microphone input."
+                            ""
                         }
                         .to_owned();
                         if result.caption.action.is_empty() {
@@ -777,7 +777,11 @@ impl Model {
             .max(Duration::from_secs(status.elapsed));
         match &status.state {
             StateKind::Recording => {
-                let (kind, caption) = if status.signal.is_none() {
+                // The owner's silence guidance names the input and the route to
+                // Settings without stopping capture; Stop and Cancel stay as they are.
+                let (kind, caption) = if let Some(guidance) = &self.signal.silence {
+                    (Kind::Attention, guidance_caption(guidance))
+                } else if status.signal.is_none() {
                     let unavailable = self.signal.monitored || phase_age >= MONITOR_DELAY;
                     (
                         if unavailable {
@@ -795,15 +799,6 @@ impl Model {
                             Caption::title("Starting microphone…")
                         } else {
                             Caption::default()
-                        },
-                    )
-                } else if self.signal.warning {
-                    (
-                        Kind::Attention,
-                        Caption {
-                            title: "No input signal".to_owned(),
-                            detail: "Check the microphone input.".to_owned(),
-                            action: String::new(),
                         },
                     )
                 } else {
@@ -1185,6 +1180,22 @@ fn attention_outcome(outcome: &TerminalOutcome) -> bool {
     ))
 }
 
+/// The owner's capture guidance in HUD words: its sentence naming the input,
+/// and where the operator deliberately fixes it. The panel takes no clicks, so
+/// the route names the menu or window that carries the action.
+fn guidance_caption(guidance: &CaptureGuidance) -> Caption {
+    Caption {
+        title: guidance.message(),
+        detail: String::new(),
+        action: match guidance.kind {
+            CaptureIssue::MissingMicrophone => {
+                missing_microphone_action(guidance.default_input_name.as_deref())
+            }
+            CaptureIssue::SilentInput | CaptureIssue::NoAudio => SETTINGS_ACTION.to_owned(),
+        },
+    }
+}
+
 fn present_outcome(
     outcome: &TerminalOutcome,
     status: &StatusSnapshot,
@@ -1366,6 +1377,13 @@ fn present_outcome(
             caption.action.push('\n');
             caption.action.push_str(cause.advice());
         }
+    }
+    // Idle guidance describes this outcome: a refused press or a take without
+    // audio needs a deliberate input choice, not a recovered recording.
+    if let Some(guidance) = &status.capture_guidance {
+        let guided = guidance_caption(guidance);
+        caption.title = guided.title;
+        caption.action = guided.action;
     }
     if attention && status.capabilities.dismiss {
         if !caption.action.is_empty() {
@@ -2409,6 +2427,7 @@ pub enum ScreenshotState {
     Starting,
     MonitoringUnavailable,
     NoSignal,
+    MissingMicrophone,
     Working,
     RequestingMicrophone,
     RequestingMicrophoneLauncher,
@@ -2454,7 +2473,10 @@ pub enum ScreenshotState {
     Dismissed,
 }
 
-fn preview_snapshot(state: StateKind) -> StatusSnapshot {
+/// The input that screenshot guidance names.
+const PREVIEW_INPUT: &str = "USB Microphone";
+
+pub(crate) fn preview_snapshot(state: StateKind) -> StatusSnapshot {
     let mode = if state == StateKind::Idle {
         Mode::Raw
     } else {
@@ -2494,10 +2516,11 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
         // An idle engine reports its configured default; a take, what it started with.
         pipeline: Some(preview_pipeline(mode, None)),
         microphone: None,
+        capture_guidance: None,
     }
 }
 
-fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
+pub(crate) fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
     TerminalOutcome {
         event_id: 1,
         operation_id: Some("preview-take".to_owned()),
@@ -2552,6 +2575,33 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
     if state == ScreenshotState::Idle {
         return model;
     }
+    if state == ScreenshotState::MissingMicrophone {
+        // The press is refused before capture starts: an idle failure that
+        // carries the owner's guidance, with no recording before it.
+        let mut refused = preview_snapshot(StateKind::Idle);
+        let mut outcome = preview_outcome(Completeness::Failed, Delivery::None);
+        outcome.message =
+            "Configured microphone isn’t connected. Open Settings in the Cantrip menu.".to_owned();
+        outcome.error = Some("capture-source-missing".to_owned());
+        refused.outcome = Some(outcome);
+        refused.attention = true;
+        refused.capture_guidance = Some(CaptureGuidance {
+            kind: CaptureIssue::MissingMicrophone,
+            source: Some("preview-headset".to_owned()),
+            device_name: "Configured microphone".to_owned(),
+            default_input_name: Some(PREVIEW_INPUT.to_owned()),
+        });
+        let refused_at = now - (SETTLE + Duration::from_millis(200));
+        model.apply(refused, refused_at);
+        let mut at = refused_at;
+        while at < now {
+            model.refresh(at);
+            model.track.presented = model.frame(at);
+            at += FRAME_INTERVAL;
+        }
+        model.refresh(now);
+        return model;
+    }
     let mut recording = preview_snapshot(StateKind::Recording);
     recording.elapsed = 9;
     recording.signal = Some(AudioSignal {
@@ -2575,6 +2625,12 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
                 level: 0,
                 silent: true,
                 waveform: [[0; 2]; AUDIO_WAVEFORM_BINS],
+            });
+            recording.capture_guidance = Some(CaptureGuidance {
+                kind: CaptureIssue::SilentInput,
+                source: None,
+                device_name: PREVIEW_INPUT.to_owned(),
+                default_input_name: None,
             });
         }
         _ => {}
@@ -2860,6 +2916,15 @@ mod tests {
             } else {
                 [[0; 2]; AUDIO_WAVEFORM_BINS]
             },
+        }
+    }
+
+    fn guidance(kind: CaptureIssue) -> CaptureGuidance {
+        CaptureGuidance {
+            kind,
+            source: Some("usb".to_owned()),
+            device_name: PREVIEW_INPUT.to_owned(),
+            default_input_name: None,
         }
     }
 
@@ -3460,44 +3525,104 @@ mod tests {
     }
 
     #[test]
-    fn no_input_warning_is_initial_only_and_clears_with_hysteresis() {
+    fn owner_silence_guidance_names_the_input_and_clears_with_signal() {
         let now = Instant::now();
         let mut model = Model::new(now);
         model.apply(recording(0, Some(signal(false))), now);
-        model.apply(
-            recording(4, Some(signal(false))),
-            now + Duration::from_secs(4),
-        );
-        assert_eq!(model.kind, Some(Kind::Recording));
+        // Silent PCM alone is the owner's to judge: the HUD adds no warning.
         model.apply(
             recording(9, Some(signal(false))),
             now + Duration::from_secs(9),
         );
+        assert_eq!(model.kind, Some(Kind::Recording));
+        let silent = guidance(CaptureIssue::SilentInput);
+        let mut status = recording(9, Some(signal(false)));
+        status.capture_guidance = Some(silent.clone());
+        model.apply(status, now + Duration::from_millis(9100));
         assert_eq!(model.kind, Some(Kind::Attention));
-        model.apply(
-            recording(9, Some(signal(true))),
-            now + Duration::from_millis(9100),
-        );
+        assert_eq!(model.caption.title, silent.message());
+        assert_eq!(model.caption.action, SETTINGS_ACTION);
+        assert!(model.active(), "the notice never ends the take");
+        // The monitor fails after measuring: the owner withdraws its sample and
+        // its guidance, so the input is unconfirmed rather than silent.
+        model.apply(recording(9, None), now + Duration::from_millis(9500));
         assert_eq!(model.kind, Some(Kind::Attention));
+        assert!(model.caption.title.contains("unavailable"));
+        assert_ne!(model.caption.title, silent.message());
+        assert!(model.active(), "an unknown input never ends the take");
+        // A fresh measured sample clears both notices.
         model.apply(
-            recording(9, Some(signal(true))),
-            now + Duration::from_millis(9500),
+            recording(10, Some(signal(true))),
+            now + Duration::from_secs(10),
         );
         assert_eq!(model.kind, Some(Kind::Recording));
         assert_eq!(
             model.caption,
             Caption::default(),
-            "a cleared warning must not latch words"
+            "a cleared notice must not latch words"
         );
-        model.apply(
-            recording(40, Some(signal(false))),
-            now + Duration::from_secs(40),
-        );
-        assert_eq!(
-            model.kind,
-            Some(Kind::Recording),
-            "thinking after real input must not warn"
-        );
+    }
+
+    #[test]
+    fn idle_guidance_routes_its_failure_to_a_deliberate_input_choice() {
+        let now = Instant::now();
+        let default_input = "MacBook Pro Microphone";
+        for (issue, named) in [
+            (CaptureIssue::MissingMicrophone, Some(default_input)),
+            (CaptureIssue::MissingMicrophone, None),
+            (CaptureIssue::NoAudio, Some(default_input)),
+        ] {
+            let mut status = preview_snapshot(StateKind::Idle);
+            let mut outcome = preview_outcome(Completeness::Failed, Delivery::None);
+            if issue == CaptureIssue::NoAudio {
+                // A finalized zero-frame take may keep its file; recovering it
+                // cannot produce speech.
+                outcome.artifacts = ipc::Artifacts {
+                    take_id: Some("preview-take".to_owned()),
+                    audio: true,
+                    text: false,
+                };
+            }
+            status.outcome = Some(outcome.clone());
+            let mut guided = guidance(issue);
+            guided.default_input_name = named.map(str::to_owned);
+            status.capture_guidance = Some(guided.clone());
+            let view = present_outcome(&outcome, &status, now, false);
+            assert_eq!(view.kind, Kind::Attention);
+            assert_eq!(view.caption.title, guided.message());
+            let route = view.caption.action.lines().next().unwrap_or_default();
+            // Only the macOS menu offers Use, for a missing microphone whose
+            // default replacement the owner named; silence never swaps inputs.
+            let offers_use = cfg!(target_os = "macos")
+                && issue == CaptureIssue::MissingMicrophone
+                && named.is_some();
+            let use_named = format!("Use {default_input} instead");
+            assert_eq!(route.contains(&use_named), offers_use, "{route}");
+            assert!(route.contains("Settings"), "{route}");
+            assert!(!view.caption.action.contains("Recover"), "{issue:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_silent_take_names_the_input_it_heard_nothing_from() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(preview_snapshot(StateKind::Idle), now);
+        let silent = guidance(CaptureIssue::SilentInput);
+        let mut status = recording(4, Some(signal(false)));
+        status.capture_guidance = Some(silent.clone());
+        model.apply(status, now + Duration::from_secs(4));
+        let mut idle = preview_snapshot(StateKind::Idle);
+        let mut outcome = preview_outcome(Completeness::Empty, Delivery::None);
+        outcome.artifacts = ipc::Artifacts {
+            take_id: Some("preview-take".to_owned()),
+            audio: true,
+            text: false,
+        };
+        idle.outcome = Some(outcome);
+        model.apply(idle, now + Duration::from_secs(5));
+        assert_eq!(model.kind, Some(Kind::Neutral));
+        assert_eq!(model.caption.title, silent.message());
     }
 
     #[test]

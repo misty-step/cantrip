@@ -73,6 +73,7 @@ fn status_recommends_recovery_only_for_confirmed_undelivered_or_incomplete_takes
             handoff: None,
             microphone: None,
             pipeline: None,
+            capture_guidance: None,
         };
         let listener = UnixListener::bind(&socket).unwrap();
         listener.set_nonblocking(true).unwrap();

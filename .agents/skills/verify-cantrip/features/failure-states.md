@@ -6,8 +6,9 @@ where the destination cannot be verified (US-003, US-004, US-005).
 
 ## Sub-features
 
-- `fail-silence` a silent take settles `empty` with its WAV retained, not invented text.
-- `fail-absent-mic` an `audio_source` that does not exist is refused, never substituted; `doctor` identifies the missing source.
+- `fail-silence`, `fail-no-frames`, and `fail-absent-mic` exercise the distinct
+  cases in the [capture setup contract](../../../../docs/decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03).
+  The fixture checks the outcome, guidance and retained artifacts independently.
 - `fail-second-daemon` a second `daemon` on the same runtime exits non-zero; the first keeps answering.
 - `fail-no-model` `transcribe --local` without a model exits non-zero and downloads nothing.
 - `fail-unverified-desktop` `injection = "auto"` outside verified Hyprland/logind copies or defers, never pastes or types; the clipboard agrees with the reported delivery.
@@ -32,6 +33,10 @@ Preconditions:
 - **By hand (absent mic).** Edit `audio_source` in the session config
   (`$V cantrip --run "$RUN" -- config path`), `reload`, then `doctor` and `start`. Expect `capture: blocked` and a refused
   start naming the missing microphone. Restore and `reload`.
+- **macOS.** Use the candidate native app in a disposable `macvm` guest with
+  BlackHole and `scripts/verify-capture-setup-macos`; follow the
+  [attended VM recipe](../../../../docs/INSTALLATION.md#disposable-vm-proof-no-physical-headset).
+  Inspect the actual HUD/menu/focus states as well as the driver's metadata checks.
 
 ## Gotchas
 

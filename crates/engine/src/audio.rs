@@ -9,7 +9,7 @@ use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const NO_SIGNAL_GRACE: Duration = Duration::from_secs(3);
+pub(crate) const NO_SIGNAL_GRACE: Duration = Duration::from_secs(3);
 /// `20 * log10(32 / i16::MAX)` is approximately -60 dBFS.
 const SIGNAL_FLOOR: u16 = 32;
 const WAV_HEADER_SCAN_LIMIT: usize = 4_096;
@@ -30,6 +30,9 @@ pub struct InputSignal {
     /// True after PCM has remained at or below approximately -60 dBFS for
     /// `NO_SIGNAL_GRACE`.
     pub silent: bool,
+    /// Latched once PCM exceeds the floor. Initial-input guidance must not
+    /// interrupt a later thinking pause after real signal has been observed.
+    pub observed_signal: bool,
 }
 
 pub struct SignalMonitor {
@@ -38,6 +41,7 @@ pub struct SignalMonitor {
     cursor: u64,
     trailing_byte: Option<u8>,
     last_signal_at: Instant,
+    observed_signal: bool,
 }
 
 impl SignalMonitor {
@@ -48,6 +52,7 @@ impl SignalMonitor {
             cursor: 0,
             trailing_byte: None,
             last_signal_at: started_at,
+            observed_signal: false,
         }
     }
 
@@ -87,6 +92,11 @@ impl SignalMonitor {
             .context("checking live WAV sample length")?
             .len();
         let pcm_bytes = file_len.saturating_sub(data_offset);
+        // A ready header is not evidence of any audio frames. Keep the starting
+        // state distinct from measured (possibly silent) PCM.
+        if pcm_bytes < std::mem::size_of::<i16>() as u64 {
+            return Ok(None);
+        }
         let complete_pcm_end = data_offset + pcm_bytes - pcm_bytes % 2;
         let window_start = complete_pcm_end
             .saturating_sub(SIGNAL_WINDOW_BYTES)
@@ -147,6 +157,7 @@ impl SignalMonitor {
 
         if peak > SIGNAL_FLOOR {
             self.last_signal_at = now;
+            self.observed_signal = true;
         }
         let level = if sample_index > 0 {
             peak_level(peak)
@@ -163,6 +174,7 @@ impl SignalMonitor {
             level,
             waveform,
             silent: now.duration_since(self.last_signal_at) >= NO_SIGNAL_GRACE,
+            observed_signal: self.observed_signal,
         }))
     }
 }
@@ -667,6 +679,37 @@ mod tests {
         super::verify_wav(&path).unwrap();
         fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn a_live_header_is_not_audio_and_near_silence_warns_after_three_seconds() {
+        let path = wav_path("empty-then-quiet");
+        fs::write(&path, wav(&[])).unwrap();
+        let started = Instant::now();
+        let mut monitor = SignalMonitor::new(started);
+        assert!(monitor
+            .sample(&path, started + Duration::from_secs(3))
+            .unwrap()
+            .is_none());
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&32_i16.to_le_bytes()).unwrap();
+        let quiet = monitor
+            .sample(&path, started + Duration::from_secs(3))
+            .unwrap()
+            .unwrap();
+        assert!(quiet.silent);
+        assert_eq!(quiet.level, 0);
+        assert!(!quiet.observed_signal);
+        file.write_all(&33_i16.to_le_bytes()).unwrap();
+        let restored = monitor
+            .sample(&path, started + Duration::from_secs(4))
+            .unwrap()
+            .unwrap();
+        assert!(!restored.silent);
+        assert!(restored.level > 0);
+        assert!(restored.observed_signal);
+        drop(file);
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn live_signal_tracks_peak_and_sustained_digital_silence() {
         let path = wav_path("silence");

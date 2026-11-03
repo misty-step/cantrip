@@ -640,6 +640,10 @@ fn print_status(json: bool) -> Result<()> {
         println!("audio-level: {}%", signal.level);
         println!("audio-silent: {}", signal.silent);
     }
+    if let Some(guidance) = &status.capture_guidance {
+        println!("capture: {}", guidance.message());
+        println!("hint: cantrip settings   # check the selected input");
+    }
     if let Some(notice) = &status.notice {
         println!("notice: {} (event {})", notice.message, notice.event_id);
     }

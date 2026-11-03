@@ -305,6 +305,21 @@ avoiding `ort-sys`' incomplete decomposed dependency list. Source revision and
 every archive are checked before cache reuse; no system ORT install or downgrade
 is needed. `--source-runtime` selects the same source build on arm64.
 
+Native macOS CI persists the Intel runtime marker, static archives, and source
+tree with an exact-key `actions/cache` entry. Source (including `.git` and headers)
+is retained for the revision/clean-source checks; build objects, dependency source,
+and CMake intermediates are not cached. The key includes the runtime version/revision, target,
+minimum macOS, runner image, Xcode/SDK/compiler and CMake identities, and the
+preparation script hash. Preparation still runs after restoration and rejects
+an identity mismatch, modified source, or changed archive; there is no partial-key
+fallback. The validated runtime is saved immediately, so a later app-verification
+failure does not discard a successful source build. Both architectures retain
+formatting, Clippy for every workspace target, workspace tests, the eval example,
+Python release tests, and relocated-app proof.
+Clippy also compiles the targets previously compiled by a separate `cargo check`.
+Smoke-command failures report the command, exit status, and at most the last
+4096 bytes of stderr, never transcript-bearing stdout.
+
 Cache schema 2 rejects older/incomplete caches. For standalone preparation,
 choose a fresh `--output`; packaging uses the same default cache, so
 remove only your own obsolete cache deliberately before rebuilding there.
@@ -509,6 +524,56 @@ the [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial
 shortcut/menu, login, and general-clipboard/manual-paste behavior. Intel runtime
 execution and production signing/notarization each require their own proof,
 not inference from an arm64 development app.
+
+#### Disposable VM proof (no physical headset)
+
+Use the candidate CI-built app in a fresh `macvm` guest, not the operator's Mac.
+Install BlackHole 2ch and `switchaudio-osx` in that guest. Explicitly select the
+same BlackHole device as the guest's system input and output. The driver refuses
+non-`VirtualMac` machines and creates its own private configuration/history.
+It changes no system audio routing and uses only `samples/jfk.wav`.
+
+Inside the guest, from this checkout (Python 3.11+):
+
+```sh
+APP=/Applications/Cantrip.app
+RUN="$HOME/.cache/tmp/cg-proof"
+PROOF=/absolute/path/to/cantrip/scripts/verify-capture-setup-macos
+python3 "$PROOF" --app "$APP" --run "$RUN" --pull-model prepare
+```
+
+`--pull-model` explicitly downloads the public local model into the isolated
+data directory. Do not start a second Cantrip app in the same proof session.
+
+1. Focus a guest scratch editor. Press **Control+Option+Space**; answer Allow
+   if asked. Inspect the HUD without changing editor focus. Open the Cantrip
+   menu and inspect **Open Settings** and **Use BlackHole 2ch instead**.
+   Run the driver's `missing` phase to check the failure class, guidance and
+   unchanged config.
+2. Click **Open Settings** and inspect the General/input pane. Close Settings.
+   Reopen the Cantrip menu and click **Use BlackHole 2ch instead**. Run `default`:
+   only that explicit action may save the UID, and it must not start capture.
+3. Focus the editor and press again. Wait at least three seconds without
+   playback; inspect the named no-sound HUD/menu guidance. Run `silence`;
+   the take must still be recording with Stop/Cancel available.
+4. Run `play` to send the public fixture to BlackHole. While playback is active,
+   run `signal` in a second guest command to check measured signal and cleared
+   guidance. Inspect the HUD and unchanged editor focus.
+5. Press the shortcut to stop after playback. Run `complete` and paste into the
+   guest editor. Inspect the public sentence; publish no transcript or audio.
+   Repeat the failure and silence inspections in light and dark appearances.
+
+Each phase uses the same arguments, for example:
+
+```sh
+python3 "$PROOF" --app "$APP" --run "$RUN" missing
+python3 "$PROOF" --app "$APP" --run "$RUN" cleanup
+```
+
+Collect only `proof-*.json` and reviewed VM screenshots, not the private run's
+history, WAVs or logs. `cleanup` stops only the app PID/start identity this
+driver launched. Remove the private run directory and delete the disposable VM
+when done. This is an attended proof recipe, not a claim that it has been run.
 
 ### Mode picker and live HUD proof in a disposable Mac VM
 

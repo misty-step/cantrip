@@ -13,7 +13,7 @@ use cantrip_engine::audio::{
     verify_wav, InputSignal, Pcm16Converter, Pcm16WavWriter, PcmEncoding, PcmFormat, SignalMonitor,
 };
 use cantrip_engine::ipc::{MicrophoneAuthorization, MicrophoneGrantee};
-use cantrip_engine::ports::MicrophoneAccessUnsupported;
+use cantrip_engine::ports::{MicrophoneAccessUnsupported, MissingMicrophone};
 use crossbeam_queue::ArrayQueue;
 use objc2::rc::autoreleasepool;
 use objc2::runtime::Bool;
@@ -452,16 +452,21 @@ fn native_devices() -> Result<Vec<NativeDevice>> {
 }
 
 fn select_device(source: Option<&str>) -> Result<NativeDevice> {
-    native_devices()?
+    select_from(native_devices()?, source)
+}
+
+fn select_from(devices: Vec<NativeDevice>, source: Option<&str>) -> Result<NativeDevice> {
+    devices
         .into_iter()
         .find(|device| match source {
             Some(uid) => device.public.uid == uid,
             None => device.public.is_default,
         })
-        .context(if source.is_some() {
-            "configured microphone UID is unavailable; select an input device in Settings"
-        } else {
-            "no default microphone is available; select an input device in Settings"
+        .ok_or_else(|| match source {
+            Some(uid) => MissingMicrophone(uid.to_owned()).into(),
+            None => {
+                anyhow!("no default microphone is available; select an input device in Settings")
+            }
         })
 }
 
@@ -1490,9 +1495,11 @@ impl Recorder {
                 tracing::info!("[Capture] microphone recording started");
                 Ok(recorder)
             }
-            Ok(Err(error)) => {
-                let _ = recorder.finish_stop();
-                Err(anyhow!(error))
+            Ok(Err(_)) => {
+                // Join the owner to preserve its typed MissingMicrophone error;
+                // the readiness channel carries only a display string.
+                recorder.finish_stop()?;
+                bail!("microphone worker refused startup")
             }
             Err(_) => {
                 recorder.finish_stop()?;
@@ -1501,19 +1508,13 @@ impl Recorder {
         }
     }
 
-    pub fn input_signal(&mut self) -> Option<InputSignal> {
-        match self.signal_monitor.sample(&self.wav_path, Instant::now()) {
-            Ok(signal) => signal,
-            Err(_) => {
-                if !self.signal_monitor_warned {
-                    tracing::warn!(
-                        "[Capture] input signal monitor unavailable class=storage-failed"
-                    );
-                    self.signal_monitor_warned = true;
-                }
-                None
-            }
+    pub fn input_signal(&mut self) -> Result<Option<InputSignal>> {
+        let signal = self.signal_monitor.sample(&self.wav_path, Instant::now());
+        if signal.is_err() && !self.signal_monitor_warned {
+            tracing::warn!("[Capture] input signal monitor unavailable class=storage-failed");
+            self.signal_monitor_warned = true;
         }
+        signal
     }
 
     /// Nonblocking/idempotent stop request; the owned writer finalizes in order.
@@ -1544,7 +1545,7 @@ impl Recorder {
 }
 
 impl cantrip_engine::ports::Recorder for Recorder {
-    fn input_signal(&mut self) -> Option<InputSignal> {
+    fn input_signal(&mut self) -> Result<Option<InputSignal>> {
         Recorder::input_signal(self)
     }
 
@@ -1608,6 +1609,30 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn missing_configured_uid_never_selects_the_available_default() {
+        let devices = || {
+            vec![NativeDevice {
+                id: 42,
+                public: InputDevice {
+                    uid: "built-in".to_owned(),
+                    name: "MacBook Microphone".to_owned(),
+                    is_default: true,
+                },
+            }]
+        };
+        let missing = select_from(devices(), Some("disconnected-headset"))
+            .err()
+            .unwrap();
+        assert_eq!(
+            missing.downcast_ref::<MissingMicrophone>().unwrap().0,
+            "disconnected-headset"
+        );
+        assert_eq!(select_from(devices(), Some("built-in")).unwrap().id, 42);
+        assert_eq!(select_from(devices(), None).unwrap().id, 42);
+        assert!(select_from(Vec::new(), None).is_err());
     }
 
     #[test]

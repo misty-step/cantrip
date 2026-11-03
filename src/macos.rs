@@ -20,6 +20,7 @@ pub(crate) mod shortcut;
 pub(crate) mod ui;
 
 use crate::hud::macos::{runtime_dir, LiveHud};
+use crate::settings::model::{GuidanceOffer, Microphones, Replacement, SettingsForm};
 use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{
     config::{Config, Mode, PipelineDisplay},
@@ -138,6 +139,8 @@ fn app_bundle() -> Option<Retained<NSURL>> {
 /// How Cantrip answered one command.
 enum Reply {
     Accepted,
+    /// Cantrip applied a change the menu saved, said back to the operator.
+    Done(String),
     RequestingMicrophone(String),
     /// The engine's own sentence; a reply's `error` is a log class, not words.
     Refused(String),
@@ -161,9 +164,28 @@ impl Reply {
         }
     }
 
+    /// Cantrip's answer to applying a change already saved to its configuration
+    /// file. The file keeps the change whatever the answer.
+    fn applied(reply: Result<ipc::CommandReply>, done: String) -> Self {
+        match reply {
+            Ok(reply) if reply.ok => Self::Done(done),
+            Ok(reply) => Self::Refused(format!(
+                "Saved. {}",
+                reply
+                    .message
+                    .unwrap_or_else(|| "Cantrip did not apply it.".to_owned())
+            )),
+            Err(_) => Self::Refused(
+                "Saved. Cantrip did not answer; it applies the change when it next starts."
+                    .to_owned(),
+            ),
+        }
+    }
+
     fn message(&self, microphone_pending: bool) -> Option<&str> {
         match self {
             Self::Accepted => None,
+            Self::Done(message) => Some(message),
             Self::RequestingMicrophone(message) if microphone_pending => Some(message),
             Self::RequestingMicrophone(_) => None,
             Self::Refused(message) => Some(message),
@@ -172,17 +194,28 @@ impl Reply {
     }
 }
 
+/// What the command worker does, in order.
+enum Job {
+    Send(Command),
+    /// Ask Cantrip to apply a change the menu saved to the configuration file,
+    /// saying this once it has.
+    Apply(String),
+}
+
 /// One worker submits commands in order, so the AppKit thread never waits on IPC.
-fn spawn_commands() -> Result<(mpsc::Sender<Command>, mpsc::Receiver<Reply>)> {
-    let (commands, incoming) = mpsc::channel::<Command>();
+fn spawn_commands() -> Result<(mpsc::Sender<Job>, mpsc::Receiver<Reply>)> {
+    let (jobs, incoming) = mpsc::channel::<Job>();
     let (replies, results) = mpsc::channel();
     thread::Builder::new()
         .name("cantrip-commands".to_owned())
         .spawn(move || {
-            for command in incoming {
-                let reply = match ipc::command(command) {
-                    Ok(reply) => Reply::from_command(reply),
-                    Err(_) => Reply::Unreachable,
+            for job in incoming {
+                let reply = match job {
+                    Job::Send(command) => match ipc::command(command) {
+                        Ok(reply) => Reply::from_command(reply),
+                        Err(_) => Reply::Unreachable,
+                    },
+                    Job::Apply(done) => Reply::applied(ipc::command(Command::Reload), done),
                 };
                 if replies.send(reply).is_err() {
                     break;
@@ -190,7 +223,7 @@ fn spawn_commands() -> Result<(mpsc::Sender<Command>, mpsc::Receiver<Reply>)> {
             }
         })
         .context("starting the command worker")?;
-    Ok((commands, results))
+    Ok((jobs, results))
 }
 
 enum EngineExit {
@@ -223,6 +256,10 @@ enum Choice {
     /// Recordings and Recovery on its setup pane, where installing starts.
     InstallModel,
     MicrophoneSettings,
+    /// Settings on its General pane, where the microphone is chosen.
+    InputSettings,
+    /// Record from this input instead of the missing one, while still current.
+    UseInput(Replacement),
     StartEngine,
     Login,
     Quit,
@@ -268,19 +305,31 @@ impl Items<'_> {
         self.add(title, Some(Choice::Send(command)));
     }
 
+    /// An item titled `text`, shortened to the menu's width with the full text
+    /// in its tooltip.
+    fn fitted(&mut self, text: &str, choice: Option<Choice>) -> Retained<NSMenuItem> {
+        if text.chars().count() <= LINE_LIMIT {
+            return self.add(text, choice);
+        }
+        let short: String = text.chars().take(LINE_LIMIT - 1).chain(['…']).collect();
+        let item = self.add(&short, choice);
+        item.setToolTip(Some(&NSString::from_str(text)));
+        item
+    }
+
     /// An informational line: absent when empty, shortened to the menu's width
     /// with the full text in its tooltip.
     fn line(&mut self, text: Option<&str>) {
-        let Some(text) = text.filter(|text| !text.is_empty()) else {
-            return;
-        };
-        if text.chars().count() <= LINE_LIMIT {
-            self.add(text, None);
-        } else {
-            let short: String = text.chars().take(LINE_LIMIT - 1).chain(['…']).collect();
-            self.add(&short, None)
-                .setToolTip(Some(&NSString::from_str(text)));
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            self.fitted(text, None);
         }
+    }
+
+    /// A line the operator needs to act on, marked with the warning symbol so
+    /// color never carries its meaning alone.
+    fn attention(&mut self, text: &str) {
+        let symbol = ui::symbol("exclamationmark.triangle.fill", "Needs attention");
+        self.fitted(text, None).setImage(symbol.as_deref());
     }
 
     fn separator(&self) {
@@ -422,6 +471,34 @@ fn microphone_item(
     Some((title, choice, access.grantee.disclosure()))
 }
 
+/// The menu's actions for capture guidance, bound as it opens: Use names the
+/// input shown then, never a default chosen later, and Open Settings opens on
+/// the pane where the microphone is chosen.
+fn guidance_items(offer: &GuidanceOffer) -> Vec<(String, Choice)> {
+    let mut items = Vec::with_capacity(2);
+    if let Some(replacement) = &offer.replacement {
+        let title = format!("Use {} instead", replacement.name);
+        items.push((title, Choice::UseInput(replacement.clone())));
+    }
+    items.push(("Open Settings…".to_owned(), Choice::InputSettings));
+    items
+}
+
+/// The latest outcome's line beneath the state line. While idle, an offered
+/// guidance block replaces the outcome it came with, so its sentence is not
+/// said twice; a stale offer shows no block, and the outcome keeps its line.
+fn outcome_line(status: &ipc::StatusSnapshot, offer: Option<&GuidanceOffer>) -> Option<String> {
+    let outcome = status.outcome.as_ref()?;
+    let replaced = status.state == StateKind::Idle && offer.is_some();
+    if outcome.dismissed || replaced {
+        return None;
+    }
+    Some(match &outcome.handoff {
+        Some(handoff) => format!("{} · to {}", outcome.message, handoff.label),
+        None => outcome.message.clone(),
+    })
+}
+
 /// Every piece of app state the AppKit thread owns, created at launch.
 struct Host {
     hud: LiveHud,
@@ -435,7 +512,7 @@ struct Host {
     tone: Option<Tone>,
     tooltip: String,
     shortcut: Registration,
-    commands: mpsc::Sender<Command>,
+    commands: mpsc::Sender<Job>,
     replies: mpsc::Receiver<Reply>,
     /// The latest action reply; permission disclosures are shown while pending.
     feedback: Option<Reply>,
@@ -492,10 +569,10 @@ impl Host {
             tone: None,
             tooltip: String::new(),
             shortcut: Registration::new(move || {
-                let _ = toggles.send(Command::Toggle {
+                let _ = toggles.send(Job::Send(Command::Toggle {
                     postproc: None,
                     handoff: None,
-                });
+                }));
             }),
             commands,
             replies,
@@ -571,8 +648,18 @@ impl Host {
     }
 
     fn send(&self, command: Command) -> Result<()> {
+        self.submit(Job::Send(command))
+    }
+
+    /// Ask Cantrip to apply a change already saved to its configuration file,
+    /// after every command sent before it; `done` reports it once applied.
+    fn apply_saved(&self, done: String) -> Result<()> {
+        self.submit(Job::Apply(done))
+    }
+
+    fn submit(&self, job: Job) -> Result<()> {
         self.commands
-            .send(command)
+            .send(job)
             .map_err(|_| anyhow!("The command worker stopped; quit and reopen Cantrip."))
     }
 
@@ -618,7 +705,7 @@ impl Host {
                 Err(anyhow!("Cantrip is quitting."))
             } else {
                 match show {
-                    Show::Settings => self.show_settings(),
+                    Show::Settings => self.show_settings(None),
                     Show::Recordings => self.show_recordings(Open::Recordings),
                     Show::CheckSetup => self.show_recordings(Open::CheckSetup),
                 }
@@ -627,16 +714,23 @@ impl Host {
         }
     }
 
-    /// Bring the Settings window forward, or open a new one on past transcripts.
-    fn show_settings(&mut self) -> Result<()> {
+    /// Bring the Settings window forward, or open a new one on past
+    /// transcripts; an action that names a pane brings the window to it.
+    fn show_settings(&mut self, pane: Option<Pane>) -> Result<()> {
         // A window closed since the last tick is released, never shown again.
         if self.settings.as_ref().is_some_and(|window| window.closed()) {
             self.close_windows();
         }
-        if self.settings.is_none() {
-            // Each new window opens on past transcripts, as the story asks.
-            let window = SettingsWindow::new(self.button.mtm(), Pane::Transcripts)
-                .context("Opening Settings")?;
+        if let Some(window) = &self.settings {
+            if let Some(pane) = pane {
+                window.open_pane(pane);
+            }
+        } else {
+            // Each new window opens on past transcripts, as the story asks,
+            // unless an action names its pane.
+            let pane = pane.unwrap_or(Pane::Transcripts);
+            let window =
+                SettingsWindow::new(self.button.mtm(), pane).context("Opening Settings")?;
             self.settings = Some(window);
             self.tick_settings(Instant::now());
         }
@@ -711,7 +805,7 @@ impl Host {
         for request in requests {
             match request {
                 AppRequest::OpenSettings => {
-                    if let Err(error) = self.show_settings() {
+                    if let Err(error) = self.show_settings(None) {
                         if let Some(window) = &self.recordings {
                             window.show_problem(format!("{error:#}"));
                         }
@@ -837,6 +931,18 @@ impl Host {
         let notice = status
             .and_then(|status| status.notice.as_ref())
             .map(|notice| notice.message.as_str());
+        // The owner's capture guidance and its deliberate fixes come first. Only
+        // a missing microphone reads the saved file and the inputs, to name the
+        // input that could replace it.
+        let offer = status
+            .and_then(|status| status.capture_guidance.as_ref())
+            .and_then(|guidance| {
+                GuidanceOffer::new(
+                    guidance,
+                    || paths::config_file().ok().map(SettingsForm::load),
+                    Microphones::list,
+                )
+            });
         menu.removeAllItems();
         let mut items = Items {
             menu,
@@ -846,11 +952,8 @@ impl Host {
         items.line(Some(&state));
         items.line(detail);
         items.line(
-            outcome
-                .map(|outcome| match &outcome.handoff {
-                    Some(handoff) => format!("{} · to {}", outcome.message, handoff.label),
-                    None => outcome.message.clone(),
-                })
+            status
+                .and_then(|status| outcome_line(status, offer.as_ref()))
                 .as_deref(),
         );
         let microphone_pending = status.is_some_and(|status| {
@@ -862,6 +965,12 @@ impl Host {
                 .and_then(|reply| reply.message(microphone_pending))
                 .or(notice),
         );
+        if let Some(offer) = &offer {
+            items.attention(&offer.message);
+            for (title, choice) in guidance_items(offer) {
+                items.fitted(&title, Some(choice));
+            }
+        }
         items.separator();
         if idle {
             let start = Command::Start {
@@ -991,11 +1100,13 @@ impl Host {
         let done = match choice {
             Choice::Send(command) => self.send(command),
             Choice::Mode(mode) => self.choose_mode(mode),
-            Choice::Settings => self.show_settings(),
+            Choice::Settings => self.show_settings(None),
             Choice::Recordings => self.show_recordings(Open::Recordings),
             Choice::CheckSetup => self.show_recordings(Open::CheckSetup),
             Choice::InstallModel => self.show_recordings(Open::Setup),
             Choice::MicrophoneSettings => open_microphone_settings(),
+            Choice::InputSettings => self.show_settings(Some(Pane::General)),
+            Choice::UseInput(replacement) => self.use_input(&replacement),
             Choice::StartEngine => {
                 self.start_engine();
                 Ok(())
@@ -1023,6 +1134,17 @@ impl Host {
             self.send(Command::Reload)?;
         }
         Ok(())
+    }
+
+    /// Save the input the menu named as the microphone, then ask Cantrip to
+    /// apply it. A choice the saved file or the inputs have since overtaken
+    /// writes nothing, and no take starts either way.
+    fn use_input(&self, replacement: &Replacement) -> Result<()> {
+        let path = paths::config_file().context("locating the configuration file")?;
+        let _apply = SettingsForm::load(path)
+            .replace_microphone(replacement, &Microphones::list())
+            .map_err(anyhow::Error::msg)?;
+        self.apply_saved(format!("Microphone set to {}.", replacement.name))
     }
 }
 
@@ -1207,5 +1329,56 @@ mod tests {
                 assert_eq!(shown.contains("Terminal"), launched, "{shown}");
             }
         }
+    }
+
+    fn reload(ok: bool) -> Result<ipc::CommandReply> {
+        Ok(ipc::CommandReply {
+            ok,
+            state: StateKind::Idle,
+            message: (!ok).then(|| "Not reloaded.".to_owned()),
+            stage: None,
+            outcome: None,
+            error: (!ok).then(|| "reload-failed".to_owned()),
+        })
+    }
+
+    #[test]
+    fn a_saved_change_says_whether_cantrip_applied_it() {
+        let done = "Microphone set to MacBook Microphone.";
+        let applied = Reply::applied(reload(true), done.to_owned());
+        assert_eq!(applied.message(false), Some(done));
+        for reply in [reload(false), Err(anyhow!("unreachable"))] {
+            let refused = Reply::applied(reply, done.to_owned());
+            let shown = refused.message(false).expect("reported");
+            assert!(shown.starts_with("Saved."), "the file keeps it: {shown}");
+            assert!(!shown.contains("reload-failed"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn the_outcome_line_yields_only_to_an_offered_guidance_block() {
+        let message = "Configured microphone isn’t connected.";
+        let mut status = crate::hud::preview_snapshot(StateKind::Idle);
+        let mut outcome = crate::hud::preview_outcome(Completeness::Failed, ipc::Delivery::None);
+        outcome.message = message.to_owned();
+        status.outcome = Some(outcome);
+        status.capture_guidance = Some(ipc::CaptureGuidance {
+            kind: ipc::CaptureIssue::MissingMicrophone,
+            source: Some("zone".to_owned()),
+            device_name: "Configured microphone".to_owned(),
+            default_input_name: None,
+        });
+        let offer = GuidanceOffer {
+            message: "Configured microphone isn’t connected".to_owned(),
+            replacement: None,
+        };
+        // The offered block says it, with its fixes: no second line.
+        assert_eq!(outcome_line(&status, Some(&offer)), None);
+        // A stale offer shows no block, so the outcome keeps its own words.
+        assert_eq!(outcome_line(&status, None).as_deref(), Some(message));
+        // While a take records, the earlier take's outcome keeps its line.
+        status.state = StateKind::Recording;
+        let recording = outcome_line(&status, Some(&offer));
+        assert_eq!(recording.as_deref(), Some(message));
     }
 }

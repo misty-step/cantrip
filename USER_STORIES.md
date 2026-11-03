@@ -33,6 +33,7 @@ Criteria:
 5. WHILE recording, THE SYSTEM SHALL keep capturing through silence and at any take length until a toggle, stop, cancel, or daemon shutdown ends the take.
 6. WHEN a take stops recording, THE SYSTEM SHALL log which of those ended it, as a reason class without transcript text.
 7. WHEN an outcome needs attention, THE SYSTEM SHALL show bounded HUD feedback according to [HUD timing](docs/CONFIGURATION.md#hud--passive-status), then hide it without dismissing the outcome, clearing menu/status-bar attention, or removing recordings.
+8. THE SYSTEM SHALL follow the [capture setup and signal-health contract](docs/decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03) for input failures and their explicit repair actions.
 
 No-gos: no interactive notification popups or chatty notification daemon alerts.
 

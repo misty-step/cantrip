@@ -64,11 +64,38 @@ class MacSigningPrerequisiteContracts(unittest.TestCase):
                     self.assertIn("full forty-character SHA-1", self.invoke(directory, "--dev-sign-identity", invalid))
 
 
+class MacSmokeDiagnosticsContracts(unittest.TestCase):
+    def test_failure_names_command_and_bounds_stderr_without_disclosing_transcript_stdout(self):
+        with tempfile.TemporaryDirectory(prefix="cantrip-smoke-error-") as directory:
+            root = Path(directory)
+            command = root / "failed-command.py"
+            command.write_text(
+                'import sys\n'
+                'print("TRANSCRIPT_MUST_NOT_BE_LOGGED")\n'
+                'sys.stderr.write("OMITTED_PREFIX" + "x" * 5000 + "\\\\nDIAGNOSTIC_TAIL\\\\n")\n'
+                'sys.exit(17)\n'
+            )
+            with self.assertRaises(RuntimeError) as raised:
+                VERIFY["run"]([sys.executable, command, "models", "pull"], env=os.environ, cwd=root)
+            diagnostic = str(raised.exception)
+            self.assertIn("failed-command.py models pull", diagnostic)
+            self.assertIn("failed (17)", diagnostic)
+            self.assertIn("DIAGNOSTIC_TAIL", diagnostic)
+            self.assertNotIn("OMITTED_PREFIX", diagnostic)
+            self.assertNotIn("TRANSCRIPT_MUST_NOT_BE_LOGGED", diagnostic)
+            self.assertLessEqual(len(diagnostic.split("stderr tail:\n", 1)[1]), 4096)
+
+            # Expected refusal paths still receive their result rather than raising.
+            result = VERIFY["run"]([sys.executable, command], env=os.environ, cwd=root, check=False)
+            self.assertEqual(result.returncode, 17)
+            self.assertIn(b"TRANSCRIPT_MUST_NOT_BE_LOGGED", result.stdout)
+
+
 class MacCaptureRefusalContracts(unittest.TestCase):
     def test_permission_smoke_never_starts_an_undetermined_owner(self):
         for authorization, expected_error in (
             ("not-determined", None),
-            ("authorized", "capture-failed"),
+            ("authorized", "capture-source-missing"),
             ("denied", "microphone-denied"),
             ("restricted", "microphone-restricted"),
         ):

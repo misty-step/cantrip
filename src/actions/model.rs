@@ -817,6 +817,7 @@ mod tests {
             handoff: None,
             pipeline: None,
             microphone: None,
+            capture_guidance: None,
         }
     }
 

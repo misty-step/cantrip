@@ -27,6 +27,7 @@ pub struct Recorder {
     started_at: Instant,
     signal_monitor: SignalMonitor,
     signal_monitor_warned: bool,
+    input_name: Option<String>,
     disarmed: bool,
     stop_requested: Option<Instant>,
 }
@@ -34,9 +35,10 @@ pub struct Recorder {
 impl Recorder {
     /// Start a 16 kHz, mono, signed 16-bit WAV recording.
     pub fn start(wav_path: &Path, source: Option<&str>) -> Result<Self> {
-        let source = source.map(check_source).transpose()?;
+        let selected = source.map(query_source).transpose()?;
+        let source = selected.as_ref().map(|input| input.serial.as_str());
         let mut command = Command::new("pw-record");
-        if let Some(source) = &source {
+        if let Some(source) = source {
             // libpipewire applies PIPEWIRE_PROPS after CLI properties. Let
             // pw-record parse the inherited SPA syntax first, then enforce our
             // routing safeguards, so unrelated properties survive unchanged.
@@ -52,7 +54,7 @@ impl Recorder {
                 .env("PIPEWIRE_NODE", source);
         }
         let child = command
-            .args(pw_record_args(wav_path, source.as_deref()))
+            .args(pw_record_args(wav_path, source))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -67,6 +69,7 @@ impl Recorder {
             started_at,
             signal_monitor: SignalMonitor::new(started_at),
             signal_monitor_warned: false,
+            input_name: selected.and_then(|input| input.name),
             disarmed: false,
             stop_requested: None,
         })
@@ -75,17 +78,13 @@ impl Recorder {
     ///
     /// Monitoring is deliberately best-effort: a missing or unfamiliar WAV
     /// header removes the visual meter but never interrupts capture.
-    pub fn input_signal(&mut self) -> Option<InputSignal> {
-        match self.signal_monitor.sample(&self.wav_path, Instant::now()) {
-            Ok(signal) => signal,
-            Err(error) => {
-                if !self.signal_monitor_warned {
-                    tracing::warn!("[Capture] input signal monitor unavailable: {error:#}");
-                    self.signal_monitor_warned = true;
-                }
-                None
-            }
+    pub fn input_signal(&mut self) -> Result<Option<InputSignal>> {
+        let signal = self.signal_monitor.sample(&self.wav_path, Instant::now());
+        if signal.is_err() && !self.signal_monitor_warned {
+            tracing::warn!("[Capture] input signal monitor unavailable class=storage-failed");
+            self.signal_monitor_warned = true;
         }
+        signal
     }
 
     /// Request capture termination immediately; the worker still owns reaping
@@ -154,6 +153,16 @@ impl Recorder {
 /// Resolve the same node name/object serial accepted by pw-record. The serial
 /// pins this take to this device instance even if a node name is later reused.
 pub fn check_source(source: &str) -> Result<String> {
+    Ok(query_source(source)?.serial)
+}
+
+#[derive(Debug)]
+struct SelectedSource {
+    serial: String,
+    name: Option<String>,
+}
+
+fn query_source(source: &str) -> Result<SelectedSource> {
     let mut child = Command::new("pw-dump")
         .arg("--no-colors")
         .stdin(Stdio::null())
@@ -187,13 +196,13 @@ pub fn check_source(source: &str) -> Result<String> {
     if !status?.success() {
         bail!("cannot inspect PipeWire microphones; check the PipeWire session");
     }
-    source_serial(
+    selected_source(
         source,
         &serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)?,
     )
 }
 
-fn source_serial(source: &str, nodes: &[serde_json::Value]) -> Result<String> {
+fn selected_source(source: &str, nodes: &[serde_json::Value]) -> Result<SelectedSource> {
     for node in nodes {
         if node["type"] != "PipeWire:Interface:Node" {
             continue;
@@ -208,7 +217,13 @@ fn source_serial(source: &str, nodes: &[serde_json::Value]) -> Result<String> {
         if let Some(serial) = props["object.serial"].as_u64() {
             let serial = serial.to_string();
             if props["node.name"].as_str() == Some(source) || serial == source {
-                return Ok(serial);
+                return Ok(SelectedSource {
+                    serial,
+                    name: props["node.description"]
+                        .as_str()
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned),
+                });
             }
         }
     }
@@ -228,8 +243,12 @@ impl Drop for Recorder {
 }
 
 impl cantrip_engine::ports::Recorder for Recorder {
-    fn input_signal(&mut self) -> Option<InputSignal> {
+    fn input_signal(&mut self) -> Result<Option<InputSignal>> {
         Recorder::input_signal(self)
+    }
+
+    fn take_input_name(&mut self) -> Option<String> {
+        self.input_name.take()
     }
 
     fn request_stop(&mut self) -> Result<()> {
@@ -505,17 +524,20 @@ signal.pause()
     fn selected_microphone_matches_name_or_serial_but_not_reusable_node_id() {
         let nodes = serde_json::json!([
             {"id": 11, "type": "PipeWire:Interface:Node", "info": {"props": {
-                "media.class": "Audio/Source/Virtual", "node.name": "private_mic", "object.serial": 90
+                "media.class": "Audio/Source/Virtual", "node.name": "private_mic", "object.serial": 90,
+                "node.description": "USB Microphone"
             }}},
             {"id": 12, "type": "PipeWire:Interface:Node", "info": {"props": {
                 "media.class": "Audio/Sink", "node.name": "speaker", "object.serial": 91
             }}}
         ]);
         let nodes = nodes.as_array().unwrap();
-        assert_eq!(super::source_serial("private_mic", nodes).unwrap(), "90");
-        assert_eq!(super::source_serial("90", nodes).unwrap(), "90");
+        let input = super::selected_source("private_mic", nodes).unwrap();
+        assert_eq!(input.serial, "90");
+        assert_eq!(input.name.as_deref(), Some("USB Microphone"));
+        assert_eq!(super::selected_source("90", nodes).unwrap().serial, "90");
         for missing in ["11", "speaker", "91", "unplugged"] {
-            let error = super::source_serial(missing, nodes).unwrap_err();
+            let error = super::selected_source(missing, nodes).unwrap_err();
             assert_eq!(
                 error
                     .downcast_ref::<cantrip_engine::ports::MissingMicrophone>()
@@ -563,6 +585,7 @@ signal.pause()
             started_at: started,
             signal_monitor: SignalMonitor::new(started),
             signal_monitor_warned: false,
+            input_name: None,
             disarmed: false,
             stop_requested: None,
         }
@@ -618,6 +641,7 @@ signal.pause()
             started_at,
             signal_monitor: SignalMonitor::new(started_at),
             signal_monitor_warned: false,
+            input_name: None,
             disarmed: false,
             stop_requested: None,
         };
@@ -682,6 +706,7 @@ signal.pause()
             started_at,
             signal_monitor: SignalMonitor::new(started_at),
             signal_monitor_warned: false,
+            input_name: None,
             disarmed: false,
             stop_requested: None,
         };

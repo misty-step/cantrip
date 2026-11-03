@@ -329,6 +329,13 @@ uses the explicit shared `postproc.timeout_ms`, with no hidden five-second clamp
 See [waiting and recovery configuration](CONFIGURATION.md#stt--transcription)
 and [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
 
+## Fix microphone setup
+
+For a missing input or an input-health notice, follow the
+[capture setup guidance](decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03).
+That contract owns the failure messages, menu actions and signal-health rules.
+Microphone selection is configured with [`audio_source`](CONFIGURATION.md#capture-and-model-preload).
+
 ## Understand the outcome
 
 `status` prints the last outcome's completeness, delivery, cleanup, event id,
@@ -345,6 +352,7 @@ operation finished.
 | `delivery: uncertain` | The clipboard or some keys may already have changed. Inspect the destination before retrying to avoid duplicates; Cantrip does not automatically retry an uncertain handoff. |
 | `completeness: partial` | Available text is incomplete. Keep the audio and recover the whole recording; a partial transcript is not a successful retry. |
 | `completeness: empty`, `failed`, or `cancelled` | No complete dictation was delivered. Read the notice and use the matching recording's available artifacts. |
+| `capture-source-missing`, `no-audio` or an input-health notice | Follow the [capture setup guidance](decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03). |
 | `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [mode fallback contract](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03). Repair provider configuration or deliberately leave that mode's model empty for aliases only. |
 | Storage warning | Delivery and durable retention are separate. Inspect storage before relying on recovery or recording more. |
 | Disconnected/unknown HUD or failed `ping` | Use desktop diagnostics; do not infer Ready or start a competing owner. |

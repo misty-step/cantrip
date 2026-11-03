@@ -15,6 +15,7 @@ import plistlib
 import re
 import runpy
 import shutil
+import shlex
 import signal
 import subprocess
 import tempfile
@@ -40,14 +41,17 @@ def sha256(path):
 def run(command, *, env, cwd, timeout=60, check=True):
     result = subprocess.run(list(map(str, command)), env=env, cwd=cwd, capture_output=True, timeout=timeout)
     if check and result.returncode:
-        raise RuntimeError(f"{Path(command[0]).name} smoke command failed ({result.returncode})")
+        # Transcription is stdout-only; never include it in failure diagnostics.
+        stderr_tail = result.stderr[-4096:].decode(errors="replace")
+        invocation = shlex.join([Path(command[0]).name, *map(str, command[1:])])
+        raise RuntimeError(f"{invocation} smoke command failed ({result.returncode}); stderr tail:\n{stderr_tail}")
     return result
 
 
 def capture_refusal(executable, root, env, before):
     authorization = (before.get("microphone") or {}).get("authorization")
     expected_errors = {
-        "authorized": "capture-failed",
+        "authorized": "capture-source-missing",
         "denied": "microphone-denied",
         "restricted": "microphone-restricted",
     }
