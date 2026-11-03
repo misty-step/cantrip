@@ -378,4 +378,10 @@ mod tests {
             "http://custom:8080"
         );
     }
+
+    #[test]
+    fn qa255_deliberately_failing_probe() {
+        let observed: u32 = "2".parse().unwrap();
+        assert_eq!(observed, 3, "QA255 deliberate unit-test failure");
+    }
 }
