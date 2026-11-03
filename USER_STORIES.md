@@ -134,11 +134,11 @@ Evidence: `crates/engine/src/recovery.rs`, `crates/engine/src/archive.rs`, `src/
 
 ## US-007 Refine transcript text with opt-in cleanup
 
-Statement: When I dictate spontaneous speech, I want an optional language model cleanup pass to strip filler words and punctuate sentences, so I get clean prose without losing my exact phrasing.
+Statement: When I dictate spontaneous speech, I want optional cleanup to tighten and restructure my words into concise prose, so I can use the result without editing away repetition or losing meaning.
 
 Criteria:
 1. WHERE postproc is enabled in configuration, THE SYSTEM SHALL refine raw transcripts through the configured OpenAI-compatible endpoint.
-2. THE SYSTEM SHALL instruct the cleanup model to preserve speaker meaning, questions, and commands without answering them.
+2. THE SYSTEM SHALL apply the [Clean refinement contract](docs/decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02), preserving the speaker's speech acts and factual content while refining wording and structure.
 3. IF cleanup fails or returns an empty response, THEN THE SYSTEM SHALL fall back to delivering the raw speech-to-text transcript.
 4. WHERE cleanup runs, THE SYSTEM SHALL share explicit `postproc.timeout_ms` across native credential waits, DNS, triage, generative passes, and watchdog without a hidden five-second cleanup inference clamp. Native credential waits SHALL also respect their independent five-second maximum and honor cancellation promptly without accumulating outstanding native lookups across takes.
 5. IF the generative chain cannot finish, THEN THE SYSTEM SHALL preserve raw text; IF only the optional watchdog becomes unavailable after completed passes, THEN THE SYSTEM SHALL preserve the completed candidate.

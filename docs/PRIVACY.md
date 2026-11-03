@@ -25,6 +25,7 @@ not enable telemetry in the desktop app.
 | Cloud transcription | Setting `[stt].endpoint` sends the selected recording's audio, model selection, and configured vocabulary to that endpoint. |
 | Local cleanup | An explicitly configured local endpoint receives transcript text, cleanup instructions, and vocabulary. Its own logging and networking policies are separate from Cantrip's. |
 | Cloud cleanup | Enabling a remote `[postproc].endpoint` sends transcript text, instructions, and vocabulary to that provider, even when speech recognition was local. |
+| Optional decision model | Setting `[postproc].decision_model` sends source transcript text, vocabulary, model selection, and decision criteria to the decision endpoint for triage, even when generative cleanup is bypassed. The watchdog also sends the candidate cleanup text. This includes **TypeSafe-native decision models**, not only OpenRouter models. These decision calls send no audio. |
 | Opt-in telemetry | Enabling `[telemetry]` sends operational metadata to the configured Langfuse endpoint, never audio or transcript text. |
 
 Cloud providers have their own retention and account policies. Cantrip does not

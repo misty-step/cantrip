@@ -9,7 +9,7 @@ agent will otherwise re-propose. Do not write one per PR. Start from
 
 - [0004](0004-postprocessing.md): one cleanup wire protocol, no provider SDKs.
 - [0008](0008-daemon-owned-hud.md): the Linux daemon owns HUD lifecycle.
-- [0012](0012-eval-driven-postprocessing.md): evaluate cleanup fidelity instead of production text heuristics.
+- [0012](0012-eval-driven-postprocessing.md): Hone-style Clean and its vocabulary boundaries; evaluate fidelity instead of production text heuristics.
 - [0019](0019-per-take-recovery-and-verified-delivery.md): one per-take archive and verified delivery, no uncertain retries.
 - [0020](0020-local-completion-and-explicit-audio-deletion.md): retain every stopped take; only confirmed Forget deletes audio.
 - [0022](0022-verified-linux-release.md): one verified CPU-only Linux release, no second release service.

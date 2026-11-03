@@ -42,7 +42,7 @@ existing file wholesale with the example. Enable cleanup only after the
 injection = "auto"        # auto | paste | type | clipboard — how finished text is delivered
 keep_warm = true          # preload the local STT model at startup; restart to apply
 # audio_source = "…"      # optional PipeWire node; omit for the default input
-vocabulary = ["PipeWire", "Parakeet"]   # exact-spelling terms fed to postproc + cloud STT
+vocabulary = ["PipeWire", "Parakeet"]   # canonical-name hints for cleanup + cloud STT
 
 [stt]
 model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
@@ -257,12 +257,14 @@ table or replace unrelated settings. A `--postproc clean` capture also needs
 this usable endpoint/model, even when the saved default is disabled. The
 [per-take controls](USAGE.md#everyday-controls) explain clean/raw shortcuts.
 
-The built-in prompt defines conservative transcript cleanup. Use
-`instructions` only for extra style guidance. It is appended to the fixed
-contract, so keep it short and avoid redefining the task.
+Clean uses the [Hone-style refinement contract](decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02):
+it actively tightens and restructures speech, rather than preserving its wording.
+Raw skips that transformation. `instructions` appends optional extra style
+guidance to the fixed contract; keep it short and do not redefine the task.
 
-- **Disfluency removal.** The built-in prompt removes filler sounds, false
-  starts, and repeated words.
+- **Vocabulary.** Add intended canonical names to the top-level `vocabulary`;
+  the [Clean contract](decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02)
+  owns its correction and literal-span boundaries.
 - **`passes`.** The cleanup runs `passes` rounds in a chain (default 1). Each
   later round is a focused proofread for residual speech-recognition errors,
   such as a truncated acronym. One pass avoids compounded drift and latency.
@@ -278,8 +280,9 @@ contract, so keep it short and avoid redefining the task.
   expiry, and a cancelled result is never delivered. This cleanup budget is
   separate from cloud STT's waiting policy.
 - **`min_chars`.** Skip cleanup when the raw transcript has fewer than this
-  many characters (default 40). Short commands skip the cloud round-trip.
-  Set `0` to always run cleanup when enabled.
+  many characters (default 40). Short takes skip both refinement and vocabulary
+  correction. Lower thresholds also admit short noise annotations and filler;
+  choose one using the [evaluation evidence](EVALUATION.md#2026-11-02-operator-refinement-study).
 - **Local.** The default endpoint address is Ollama at `localhost:11434`, but
   its presence in the file does not mean a service is installed or running.
   `qwen3:8b` is a local option; use a model your endpoint actually serves.
@@ -297,9 +300,9 @@ contract, so keep it short and avoid redefining the task.
   bypass generative cleanup to reduce latency and token spend; post-cleanup
   watchdog verification rejects "answer-to-question" hallucinations and falls
   back to the raw transcript ([ADR 0026](decisions/0026-typesafe-system-one-decisions.md)).
-  Enabling a decision model sends transcript text to the decision endpoint even
-  when generative cleanup is bypassed; review the
-  [network/content boundary](PRIVACY.md#what-leaves-the-machine) before opting in.
+  Review the [decision-endpoint content boundary](PRIVACY.md#what-leaves-the-machine)
+  before opting in. The triage/watchdog models have not been evaluated against
+  the Hone-style contract; a decision model is **not recommended with Clean yet**.
 - **`decision_endpoint`.** Optional URL override for the decision model.
   Defaults to OpenRouter's decisions endpoint (`https://openrouter.ai/api/alpha/decisions`)
   for `typesafe/*` models, or TypeSafe native (`https://api.typesafe.ai/v1/systemone`)

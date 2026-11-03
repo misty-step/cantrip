@@ -244,3 +244,34 @@ Primary API references:
 - [OpenRouter speech-to-text guide](https://openrouter.ai/docs/guides/overview/multimodal/stt)
 - [Create transcription API](https://openrouter.ai/docs/api/api-reference/stt/create-transcription)
 - [Current transcription model catalog](https://openrouter.ai/api/v1/models?output_modalities=transcription)
+
+## Operator commissions
+
+The operator approved the 2026-11-02 STT and Clean comparison: up to **$6
+combined spend**, selected retained takes disclosed to cloud models, and no
+paid judges. It does not reopen or widen the earlier $4.50 cloud-STT commission
+above. Private audio, text, vocabulary, and per-take outputs are not published.
+
+| Commission | Cap | OpenRouter eval-key spend | Direct OpenAI spend | Total measured spend | Receipt |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 2026-11-02 Hone-style Clean | $6.00 | $2.213922222 | $0.00 | $2.213922222 | [Aggregate receipt](baselines/2026-11-02-hone-clean/run.json) |
+
+[MEASURED] The row includes all eval-key usage since the commission's starting
+counter, including usage outside the builder's per-call journal. The
+[receipt's accounting](baselines/2026-11-02-hone-clean/run.json) owns the dated
+counter read, phase breakdown, submission counts, and attribution evidence.
+[INFERRED] Both out-of-journal intervals are likely QA243's probes on the same
+key. They count against this commission regardless of attribution uncertainty.
+
+[MEASURED] Spend is the eval key's authoritative usage-counter delta, not the
+sum of estimated reservations or provider-reported call costs. The conductor
+approved append-only aggregate reconciliation against that counter. All **31
+individual unknown-cost flags** remain in the private journal; no failed paid
+call was retried and no ledger was reset. The direct OpenAI metadata preflight
+returned 401, so no audio or paid inference was sent through that key.
+
+For the remaining calls, each one-call batch required the absolute eval-key
+usage plus its full worst-case reservation to remain at or below **$4.50**. The
+key's existing $5 limit was not changed. Local inference was withdrawn when the
+operator stopped it for memory pressure; the incomplete local cleanup control
+is not a promoted or completed comparison.

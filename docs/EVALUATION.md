@@ -113,6 +113,37 @@ separate operator approval. A single `--allow-paid` run does not authorize a
 schedule. Keep the durable commission journal across invocations; never reset
 it to restart spending after a failure or a budget stop.
 
+### 2026-11-02 operator refinement study
+
+The operator approved a private-take comparison with cloud models and a bounded
+spend cap. The [commission ledger](../eval/cloud-stt-contracts.md#operator-commissions)
+owns that authorization, the conductor's accounting decisions and spending
+guards, and links to each immutable aggregate receipt. Do not infer renewed
+spending authority from an older evaluation run.
+
+Private audio, original take IDs, silver references, vocabulary candidates,
+model outputs, and the operator adjudication sheet stay in the owner-only
+`~/.cache/tmp/cantrip-eval-private/` directory, never in Git, telemetry, or worker
+uploads. The public receipt contains aggregates and reproducibility hashes only.
+Before/after **agent silver adjudication** must be distinguished from pending
+operator adjudication; neither silver phase is a human-reviewed reference.
+
+The one-off private orchestration reuses the unchanged Rust WER/CER scorer and
+the isolated native local-transcription path. Request-to-final cleanup latency
+is not live release-to-delivery proof; disclose routing and cold-local timing
+differences from the application.
+
+The original literal-empty-source controls are API-only probes, not production
+cleanup passes. Empty/null replies cannot prove the production protocol. The
+original builder graded its own outputs; those semantic grades cannot override
+the hard exact-accepted oracle or replace operator review. The focused review
+rerun uses three repetitions and publishes every remaining synthetic miss for
+operator adjudication. The frozen v4/v5 review round, its private fidelity
+selection, strict exact counts, and recommended `min_chars` live in the
+[receipt's `review_round`](../eval/baselines/2026-11-02-hone-clean/run.json).
+Earlier private quality numbers do not evaluate a second pass or decision model.
+
+
 ### Local weekly schedule
 
 The user timer keeps original dictation audio, reviewed references, installed
@@ -372,15 +403,12 @@ It is not a statement about the operator's current configuration or runtime.
 
 ## Corpus design: `cantrip-evals`
 
-The current manifests now carry non-semantic identity metadata:
+The current manifests own corpus identities, versions, splits, and case counts:
 
-* `samples/eval/manifest.json:2-5` identifies
-  `cantrip.eval.audio.v1`, dataset `cantrip-evals`, corpus version
-  `2026-08-13`, and the current default `regression` split. Each current clip
-  is explicitly tagged at `samples/eval/manifest.json:8-41`.
-* `samples/eval/postproc-behavior.json:2-10` identifies
-  `cantrip.eval.behavior.v1`, dataset `cantrip-evals`, corpus version
-  `2026-08-13`, and the deterministic/model-judge grader names.
+* [Audio manifest](../samples/eval/manifest.json): audio schema, dataset,
+  version, default split, and licensed clip inventory.
+* [Behavior manifest](../samples/eval/postproc-behavior.json): behavior schema,
+  dataset, version, grader names, and the current regression-case inventory.
 
 The current historical baseline predates those metadata fields; its recorded
 SHA-256 values remain valid for the exact files used on 2026-08-13. Any new
@@ -411,8 +439,11 @@ an anonymized, consented fixture and its provenance.
 
 ### Behavior set
 
-Retain the 24 reviewed public `regression` cases. The proposed expansion targets
-at least 16 decision cases and 16 held-out cases, covering:
+Retain every public `regression` case in the
+[behavior manifest](../samples/eval/postproc-behavior.json), including the
+statement-not-command negative case. The manifest owns the current version and
+case count. The proposed expansion targets at least 16 decision cases and 16
+held-out cases, covering:
 
 * speech acts: questions, commands, requests, refusals, and quoted
   instructions that must remain transcript text;
