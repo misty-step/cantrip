@@ -1,20 +1,15 @@
-name: CI
+name: Release qualification
 
 on:
-  push:
-    branches: [master]
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
-  schedule:
-    - cron: '17 5,17 * * *'
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: cantrip-ci-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: cantrip-qualification-${{ github.run_id }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev libssl-dev pkg-config
@@ -53,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -62,7 +57,7 @@ jobs:
         run: ./scripts/check contracts
 
   check:
-    # Preserve the required-check name and fail closed on failed/skipped shards.
+    # Qualification policy: docs/decisions/0035-bounded-ci-feedback.md
     needs: [rust, contracts]
     if: always()
     runs-on: ubuntu-24.04
@@ -95,26 +90,18 @@ jobs:
       - name: TruffleHog — working-tree scan (fails on any finding)
         run: /tmp/th/trufflehog filesystem . --exclude-paths .trufflehog-exclude --fail
 
-  website:
-    needs: [check, secret-scan]
-    if: github.ref == 'refs/heads/master' && contains(fromJSON('["push","workflow_dispatch"]'), github.event_name)
-    uses: ./.github/workflows/site.yml
-    secrets:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-  nightly-native:
-    if: github.event_name == 'schedule'
+  native:
     uses: ./.github/workflows/macos.yml
 
-  release:
-    needs: [check, secret-scan]
-    if: github.ref == 'refs/heads/master' && contains(fromJSON('["push","workflow_dispatch"]'), github.event_name)
-    permissions:
-      contents: write
-      pull-requests: write
-      actions: write
-      id-token: write
-      attestations: write
-    uses: ./.github/workflows/release.yml
-    secrets:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+  release-gate:
+    needs: [check, secret-scan, native]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require portable and both native qualifications
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+          SCAN_RESULT: ${{ needs.secret-scan.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: test "$CHECK_RESULT" = success && test "$SCAN_RESULT" = success && test "$NATIVE_RESULT" = success

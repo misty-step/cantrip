@@ -21,7 +21,7 @@ agent will otherwise re-propose. Do not write one per PR. Start from
 - [0032](0032-cloud-stt-without-inference-deadlines.md): wait for cloud STT without inference deadlines; cleanup honors its explicit timeout.
 - [0033](0033-capture-owner-microphone-authorization.md): microphone authorization is read and requested only through the capture owner.
 - [0034](0034-native-macos-presentation.md): native AppKit windows on macOS; the live HUD keeps Cantrip's Omarchy look on both platforms; Linux keeps egui and Omarchy.
-- [0035](0035-bounded-ci-feedback.md): bounded CI feedback and publication.
+- [0035](0035-bounded-ci-feedback.md): release-only qualification and bounded feedback.
 
 ## Historical
 

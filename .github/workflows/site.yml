@@ -1,13 +1,6 @@
 name: Website
 
 on:
-  pull_request:
-    paths:
-      - 'site/**'
-      - 'docs/**'
-      - 'README.md'
-      - 'scripts/check-site'
-      - '.github/workflows/site.yml'
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -22,22 +15,19 @@ permissions:
   contents: read
 
 concurrency:
-  group: cantrip-website-${{ github.event.pull_request.number || 'production' }}
+  group: cantrip-website-production
   cancel-in-progress: false
   queue: max
 
 jobs:
   site:
-    if: >-
-      github.event_name == 'pull_request' ||
-      (github.ref == 'refs/heads/master' &&
-       contains(fromJSON('["push","workflow_dispatch"]'), github.event_name))
+    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Select the already-qualified website source for release-data refresh
         if: inputs.refresh-release-data
@@ -57,14 +47,13 @@ jobs:
           cache: npm
           cache-dependency-path: site/package-lock.json
       - name: Refresh published release inputs
-        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: npm --prefix site run sync:releases
       - name: Check and build the same static site used locally
         run: python3 scripts/check-site
       - name: Deploy the verified static build
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
         working-directory: site
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,7 +64,7 @@ jobs:
           python3 ../scripts/release check-site-promotion
           npm run deploy -- --message "git:$(git rev-parse HEAD) run:$GITHUB_RUN_ID"
       - name: Verify public routes
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
         run: |
           for path in / /health.json /docs/install /docs/use /docs/configuration /docs/desktop /docs/privacy /changelog /releases /evals /evals/latest.json; do
             curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 3 "https://cantrip.mistystep.io$path" --output /dev/null

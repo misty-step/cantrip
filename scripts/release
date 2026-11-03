@@ -11,7 +11,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import time
 import tomllib
 import urllib.parse
 import urllib.request
@@ -31,22 +30,17 @@ SIGNER = f"{REPOSITORY}/.github/workflows/release.yml"
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 REVISION = re.compile(r"[0-9a-f]{40}")
 OWNED_PACKAGES = {"cantrip", "cantrip-engine"}
-RELEASE_CHECK_WAIT_SECONDS = 120
-RELEASE_CHECK_POLL_SECONDS = 2
 
 
 class ReleaseError(Exception):
     pass
 
 
-def run(*args, check=True, input=None, timeout=None):
-    try:
-        result = subprocess.run(
-            args, cwd=ROOT, input=input, text=True, capture_output=True, timeout=timeout,
-            env={**os.environ, "LC_ALL": "C.UTF-8", "GIT_NO_REPLACE_OBJECTS": "1"},
-        )
-    except subprocess.TimeoutExpired:
-        raise ReleaseError(f"{args[0]} timed out") from None
+def run(*args, check=True, input=None):
+    result = subprocess.run(
+        args, cwd=ROOT, input=input, text=True, capture_output=True,
+        env={**os.environ, "LC_ALL": "C.UTF-8", "GIT_NO_REPLACE_OBJECTS": "1"},
+    )
     if check and result.returncode:
         raise ReleaseError(f"{args[0]} failed ({result.returncode}): {result.stderr.strip()}")
     return result
@@ -56,8 +50,8 @@ def git(*args, **kwargs):
     return run("git", *args, **kwargs)
 
 
-def github(path, *, missing=False, timeout=None):
-    result = run("gh", "api", f"repos/{REPOSITORY}/{path}", check=False, timeout=timeout)
+def github(path, *, missing=False):
+    result = run("gh", "api", f"repos/{REPOSITORY}/{path}", check=False)
     if result.returncode:
         if missing and "HTTP 404" in result.stderr:
             return None
@@ -328,7 +322,7 @@ def emit(**values):
                 destination.write(f"{key}={value}\n")
 
 
-def ensure_release_pr(version, revision):
+def ensure_release_pr(version):
     prs = json.loads(run("gh", "pr", "list", "--repo", REPOSITORY, "--head", BRANCH, "--base", "master", "--state", "open", "--json", "number,url").stdout)
     if len(prs) > 1:
         raise ReleaseError("multiple release PRs need operator reconciliation")
@@ -342,61 +336,12 @@ def ensure_release_pr(version, revision):
             "Reading order: `.landmark/release-plan.json`, the public notes in "
             "`docs/releases/`, the separate technical changelog, then Cargo metadata. "
             "Public Markdown is reviewable/editable; published formats are rendered from the approved Markdown.\n\n"
-            "Merge only after CI passes and the version/notes are approved. Merging starts the baseline build, "
-            "clean-runtime verification, signed provenance, and guarded publication. No release is public yet.\n"
+            "After the author's real-path proof, merge the generated version/notes without PR CI. "
+            "Then dispatch `release.yml` on master for the candidate's qualification, baseline build, "
+            "clean-runtime verification, signed provenance and guarded publication. No release is public yet.\n"
         )
         url = run("gh", "pr", "create", "--repo", REPOSITORY, "--base", "master", "--head", BRANCH, "--title", f"chore(release): prepare {version}", "--body", body).stdout.strip()
-    approve_release_checks(int(url.rstrip("/").split("/")[-1]), revision)
     print(f"Release PR: {url}")
-
-
-def approve_release_checks(number, revision):
-    """Wait for native bot-PR checks, then approve only this exact PR head."""
-    deadline = time.monotonic() + RELEASE_CHECK_WAIT_SECONDS
-    pending = ["ci.yml", "macos.yml", "site.yml", "pr-title.yml"]
-
-    def remaining():
-        seconds = deadline - time.monotonic()
-        if seconds <= 0:
-            raise ReleaseError(f"timed out waiting for native release PR checks: {', '.join(pending)}")
-        return seconds
-
-    def require_pr():
-        pr = github(f"pulls/{number}", timeout=remaining())
-        if (
-            pr["state"] != "open" or pr["user"]["login"] != "github-actions[bot]"
-            or pr["base"]["ref"] != "master" or pr["head"]["ref"] != BRANCH
-            or pr["head"]["repo"]["full_name"] != REPOSITORY
-            or pr["head"]["sha"] != revision
-        ):
-            raise ReleaseError("release PR identity moved or is not the same-repository generator PR")
-
-    while pending:
-        require_pr()
-        for workflow in pending[:]:
-            runs = github(
-                f"actions/workflows/{workflow}/runs?event=pull_request&head_sha={revision}&per_page=100",
-                timeout=remaining(),
-            )["workflow_runs"]
-            if not runs:
-                continue
-            for check in runs:
-                if (
-                    check["event"] != "pull_request" or check["head_sha"] != revision
-                    or check["head_repository"]["full_name"] != REPOSITORY
-                    or not any(item["number"] == number for item in check["pull_requests"])
-                ):
-                    raise ReleaseError("native release check does not belong to the exact generator PR head")
-                if check["status"] == "completed" and check["conclusion"] == "action_required":
-                    require_pr()
-                    run("gh", "api", "--method", "POST",
-                        f"repos/{REPOSITORY}/actions/runs/{check['id']}/approve",
-                        timeout=remaining())
-            pending.remove(workflow)
-        if pending:
-            # GitHub creates native PR runs asynchronously after the branch push.
-            time.sleep(min(RELEASE_CHECK_POLL_SECONDS, remaining()))
-    require_pr()
 
 
 def release_branch_merged(revision, source):
@@ -436,7 +381,7 @@ def prepare(binary, evidence):
             old_plan = json.loads(git("show", f"{old_revision}:{PLAN}").stdout)
             validate_plan(old_plan, old_revision)
             if old_plan["base_revision"] == source and old_plan["version"] == version:
-                ensure_release_pr(version, old_revision)
+                ensure_release_pr(version)
                 emit(mode="prepared", version=version)
                 return
             if (remote.get("author") or {}).get("login") != "github-actions[bot]":
@@ -481,7 +426,7 @@ def prepare(binary, evidence):
     revision = head()
     validate_plan(plan, revision)
     git("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "push", f"--force-with-lease=refs/heads/{BRANCH}:{old_revision}", "origin", f"HEAD:refs/heads/{BRANCH}")
-    ensure_release_pr(version, revision)
+    ensure_release_pr(version)
     emit(mode="prepared", version=version)
 
 

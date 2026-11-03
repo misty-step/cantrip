@@ -1,5 +1,6 @@
-"""Exercise the canonical check command's independent CI tiers and failure gate."""
+"""Exercise the canonical check tiers and release-only workflow boundary."""
 
+import itertools
 import os
 from pathlib import Path
 import re
@@ -116,35 +117,43 @@ class WorkflowDispatch(unittest.TestCase):
             raise AssertionError(f"{workflow} has no {name} job")
         return match.group(1)
 
-    def test_pushes_and_schedules_cannot_replace_a_pending_release_run(self):
+    def test_no_workflow_runs_ci_on_a_pr_or_push(self):
+        expected = {
+            "ci.yml": {"workflow_dispatch", "workflow_call"},
+            "macos.yml": {"workflow_dispatch", "workflow_call", "schedule"},
+            "release.yml": {"workflow_dispatch"},
+            "site.yml": {"workflow_dispatch", "workflow_call"},
+        }
+        for path in (ROOT / ".github/workflows").glob("*.y*ml"):
+            with self.subTest(workflow=path.name):
+                events = path.read_text().split("\non:\n", 1)[1].split("\n\n", 1)[0]
+                triggers = set(re.findall(r"(?m)^  (\w+):", events))
+                self.assertNotIn("push", triggers)
+                self.assertNotIn("pull_request", triggers)
+                self.assertNotIn("pull_request_target", triggers)
+                if path.name in expected:
+                    self.assertEqual(triggers, expected[path.name])
+        self.assertFalse((ROOT / ".github/workflows/pr-title.yml").exists())
+
+    def test_dispatches_and_warmups_cannot_replace_a_pending_release(self):
         for workflow in ("ci.yml", "macos.yml"):
             with self.subTest(workflow=workflow):
                 policy = self.concurrency(workflow)
-                # Bind the grouping expression for A, release R, a later push
-                # and a schedule. The old github.ref grouping collides here.
                 groups = {
-                    policy["group"].replace(
-                        "${{ github.event.pull_request.number || github.run_id }}", str(run)
-                    )
+                    policy["group"].replace("${{ github.run_id }}", str(run))
                     for run in (101, 102, 103, 104)
                 }
                 self.assertEqual(len(groups), 4)
-                self.assertEqual(
-                    policy["cancel-in-progress"],
-                    "${{ github.event_name == 'pull_request' }}",
-                )
-
+                self.assertEqual(policy["cancel-in-progress"], "false")
         writer = self.concurrency("release.yml")
         self.assertEqual(writer["group"], "cantrip-release")
         self.assertEqual(writer["cancel-in-progress"], "false")
         self.assertEqual(writer["queue"], "max")
 
-        # GitHub's documented single-pending policy loses R when C arrives.
-        # Exercise the same bounded trace using the workflow's actual policy.
-        def pending_after_later_pushes(queue):
-            pending = ["merged-release"]
-            for event in ("later-push", "schedule", "another-push"):
-                if event == "schedule":
+        def pending_after_later_dispatches(queue):
+            pending = ["release-candidate"]
+            for event in ("later-release", "warmup", "another-release"):
+                if event == "warmup":
                     continue
                 if queue == "single":
                     pending[:] = [event]
@@ -152,45 +161,80 @@ class WorkflowDispatch(unittest.TestCase):
                     pending.append(event)
             return pending
 
-        self.assertIn("merged-release", pending_after_later_pushes(writer["queue"]))
-        self.assertNotIn("merged-release", pending_after_later_pushes("single"))
+        self.assertIn("release-candidate", pending_after_later_dispatches(writer["queue"]))
+        self.assertNotIn("release-candidate", pending_after_later_dispatches("single"))
 
-    def test_website_uses_fast_gates_and_refreshes_after_publication(self):
-        website = self.job("ci.yml", "website")
-        self.assertIn("needs: [check, secret-scan]", website)
-        self.assertIn("uses: ./.github/workflows/site.yml", website)
+    def test_release_gate_rejects_every_incomplete_qualification(self):
+        gate = self.job("ci.yml", "release-gate")
+        self.assertIn("needs: [check, secret-scan, native]", gate)
+        self.assertIn("if: always()", gate)
+        command = next(
+            line.strip().removeprefix("run: ") for line in gate.splitlines()
+            if 'run: test "$CHECK_RESULT"' in line
+        )
+        for results in itertools.product(("success", "failure", "cancelled", "skipped"), repeat=3):
+            with self.subTest(results=results):
+                result = subprocess.run(
+                    ["bash", "-c", command], capture_output=True,
+                    env={**os.environ, **dict(zip(
+                        ("CHECK_RESULT", "SCAN_RESULT", "NATIVE_RESULT"), results,
+                    ))},
+                )
+                self.assertEqual(result.returncode == 0, all(item == "success" for item in results))
+
+    def test_publication_qualifies_one_candidate_and_reuses_its_artifact(self):
+        qualification = self.job("release.yml", "qualification")
+        self.assertIn("needs: plan", qualification)
+        self.assertIn("if: needs.plan.outputs.mode == 'publish'", qualification)
+        self.assertIn("uses: ./.github/workflows/ci.yml", qualification)
+        self.assertIn("uses: ./.github/workflows/macos.yml", self.job("ci.yml", "native"))
+        publish = self.job("release.yml", "publish")
+        self.assertIn("needs: [build, verify, qualification]", publish)
+        for consumer in ("verify", "publish"):
+            self.assertIn(
+                "artifact-ids: ${{ needs.build.outputs.artifact_id }}",
+                self.job("release.yml", consumer),
+            )
+        self.assertIn("artifact-ids: ${{ needs.verify.outputs.proof_id }}", publish)
+        self.assertNotIn("cargo build", publish)
+
+    def test_schedule_only_prewarms_intel_and_never_qualifies_a_candidate(self):
+        native = self.job("macos.yml", "native")
+        self.assertIn(
+            """fromJSON(github.event_name == 'schedule' && '["macos-15-intel"]' || '["macos-15","macos-15-intel"]')""",
+            native,
+        )
+        steps = re.split(r"(?m)^      - ", native.split("    steps:\n", 1)[1])
+        for step in steps:
+            if any(command in step for command in (
+                "rust-cache@", "cargo fmt", "scripts/package-macos",
+                "scripts/verify-macos", "upload-artifact@",
+            )):
+                self.assertIn("if: github.event_name != 'schedule'", step)
+        self.assertIn("scripts/prepare-macos-runtime", native)
+        self.assertIn("uses: actions/cache/save@", native)
+        self.assertNotIn("schedule", self.workflow("ci.yml"))
+        self.assertNotIn("schedule", self.workflow("release.yml"))
+
+    def test_only_the_named_existing_secret_reaches_master_website_calls(self):
+        guard = "github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'"
         refresh = self.job("release.yml", "website")
         self.assertIn("needs: publish", refresh)
+        self.assertIn(f"if: {guard}", refresh)
         self.assertIn("uses: ./.github/workflows/site.yml", refresh)
         self.assertIn("refresh-release-data: true", refresh)
+        field, value = refresh.split("\n    secrets:\n", 1)[1].strip().split(": ", 1)
+        self.assertEqual(field, "CLOUDFLARE_API_TOKEN")
+        self.assertEqual(value, "${{ secrets." + "CLOUDFLARE_API_TOKEN }}")
+        self.assertNotIn("CLOUDFLARE_API_TOKEN", self.workflow("ci.yml"))
+        self.assertNotIn("actions: write", self.workflow("release.yml"))
+        for workflow in ("ci.yml", "release.yml", "site.yml"):
+            self.assertNotIn("secrets: inherit", self.workflow(workflow))
         site = self.workflow("site.yml")
         self.assertIn("run: python3 scripts/release site-refresh-source", site)
         self.assertIn("ref: ${{ steps.website-source.outputs.source_revision }}", site)
-        self.assertNotIn("\n  workflow_run:", self.workflow("site.yml"))
-
-    def test_only_the_named_existing_secret_reaches_master_website_calls(self):
-        guard = (
-            "github.ref == 'refs/heads/master' && "
-            "contains(fromJSON('[\"push\",\"workflow_dispatch\"]'), github.event_name)"
-        )
-        for workflow, job in (
-            ("ci.yml", "website"), ("ci.yml", "release"), ("release.yml", "website"),
-        ):
-            with self.subTest(workflow=workflow, job=job):
-                body = self.job(workflow, job)
-                self.assertIn(f"if: {guard}", body)
-                field, value = body.split("\n    secrets:\n", 1)[1].strip().split(": ", 1)
-                self.assertEqual(field, "CLOUDFLARE_API_TOKEN")
-                self.assertEqual(value, "${{ secrets." + "CLOUDFLARE_API_TOKEN }}")
-        for workflow in ("ci.yml", "release.yml", "site.yml"):
-            self.assertNotIn("secrets: inherit", self.workflow(workflow))
-        deploy = self.workflow("site.yml").split(
-            "- name: Deploy the verified static build\n", 1
-        )[1]
-        self.assertIn(
-            "if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'",
-            deploy,
-        )
+        deploy = site.split("- name: Deploy the verified static build\n", 1)[1]
+        self.assertIn(f"if: {guard}", deploy)
 
     def test_website_watchdog_exceeds_all_edge_wait_budgets(self):
         verify = runpy.run_path(str(ROOT / "scripts/verify-site"))

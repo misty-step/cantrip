@@ -25,14 +25,15 @@ engine inherit one Cargo version; the static site is a separate deployment,
 not another version generator. Keep Landmark's existing pre-stable policy
 (minor signals become patch releases before 1.0); never reset the immutable
 `v0.1.3` baseline at `895b000d0b04de306b8005bb7fc2d5e676d6c318`.
-Future squash commits use the reviewed Conventional Commit PR title only.
+Future squash commits use Conventional Commit PR titles.
 
 `docs/releases/vVERSION.md` is the canonical public notes source. The release
 adapter adds the verified build identity and Landmark renders its other formats;
 GitHub and the build-time `/changelog` use those same signed Markdown bytes.
 The technical changelog is generator evidence, not a second public notes author.
-Approve the bot's native exact-head PR workflows, never dispatch substitute
-checks. A mismatched artifact source or failed/skipped runtime proof cannot publish.
+Release-gate entry and bot-PR handling are owned by
+[Decision 0035](0035-bounded-ci-feedback.md). A mismatched artifact source or
+failed/skipped runtime proof cannot publish.
 
 Port [Overmind PR105](https://github.com/misty-step/overmind/pull/105)'s monotonic
 promotion rule: shipped-source <= tested-source <= current-master by ancestry,
@@ -58,8 +59,9 @@ remain unpublished and are never promoted as production releases.
 
 ## Consequences
 
-A reviewable Landmark release PR starts publication only after merge and clean
-baseline runtime proof. Assets and notes name the source revision; interrupted
+A Landmark release PR supplies the generated version and notes; publication
+entry follows [Decision 0035](0035-bounded-ci-feedback.md). Assets and notes
+name the source revision; interrupted
 draft uploads resume only for identical bytes. The binary-only installer changes
 only PREFIX/bin/cantrip and publishes a private update backup, preserving user
 state. Release assets supply website version data. Automated public-fixture proof

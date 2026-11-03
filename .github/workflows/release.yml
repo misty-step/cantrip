@@ -1,10 +1,7 @@
 name: Verified Linux release
 
 on:
-  workflow_call:
-    secrets:
-      CLOUDFLARE_API_TOKEN:
-        required: true
+  workflow_dispatch:
 
 # Writer/qualification policy: docs/decisions/0035-bounded-ci-feedback.md
 concurrency:
@@ -19,17 +16,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  native:
-    # Publication policy: docs/decisions/0035-bounded-ci-feedback.md
-    uses: ./.github/workflows/macos.yml
+  qualification:
+    needs: plan
+    if: needs.plan.outputs.mode == 'publish'
+    uses: ./.github/workflows/ci.yml
 
   plan:
+    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
       pull-requests: write
-      actions: write
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       version: ${{ steps.plan.outputs.version }}
@@ -156,7 +154,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [build, verify, native]
+    needs: [build, verify, qualification]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -200,7 +198,7 @@ jobs:
 
   website:
     needs: publish
-    if: github.ref == 'refs/heads/master' && contains(fromJSON('["push","workflow_dispatch"]'), github.event_name)
+    if: github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/site.yml
     with:
       refresh-release-data: true

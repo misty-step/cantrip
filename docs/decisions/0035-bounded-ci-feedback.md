@@ -1,4 +1,4 @@
-# 0035: Bounded PR feedback, full qualification before release
+# 0035: Release-only CI, full qualification before publication
 
 - **Status:** accepted
 - **Date:** 2026-11-03
@@ -7,9 +7,12 @@
 
 ## Context and measurements
 
-The operator's target is less than five minutes from push to required checks
-being green, with ten minutes the acceptance ceiling. Queue time and cache
-transfer count; timing only `cargo test` does not measure that contract.
+The owner's 2026-11-03 delivery correction places CI and one critical-correctness/
+security assessment only at the pre-deploy release gate. Authors prove the
+running product, then merge without PR CI or a review gate. No PR or push event
+starts a workflow. This supersedes the initial push-to-green merge-gate design;
+the latency work remains useful at the release gate, not as a reason to retain
+per-change CI.
 
 Measured on 2026-11-03, before this decision:
 
@@ -31,8 +34,9 @@ took 9m41s on Intel (42s restore, 10s validation), and 4m01s on arm64. Runtime
 cache loss or a compiler/image change can still require a cold build; a warm
 cache is an optimization, never a prerequisite for correctness.
 
-The implementation PR's Evidence section owns the after measurements, with the
-source SHA and at least two `pull_request` runs. Do not copy a changing run ledger here.
+The implementation PR's Evidence section owns historical PR measurements and
+the new release-qualification dispatch measurement, with exact source SHAs and
+cold/warm cache conditions. Do not copy a changing run ledger here.
 
 ## Decision
 
@@ -43,59 +47,70 @@ is authorized. None of the current portable jobs requires private networking
 or a persistent host, so none needs the single Hetzner runner. This change does
 not decommission that machine or its other workloads.
 
-| Tier and trigger | What it proves | Gate |
+| Entry and tier | What it proves | Publication barrier |
 | --- | --- | --- |
-| Every PR: `scripts/check rust` | formatting, locked all-target clippy, every workspace test, offline evaluation example | required `check` |
-| Every PR, in parallel: `scripts/check contracts` | Omarchy, source/binary installers, release identity/promotion, website smoke contracts | required `check` |
-| Every PR, in parallel: full-history gitleaks and working-tree TruffleHog; literal Conventional Commit title | unchanged secret and squash-title contracts | required `secret-scan`, `pr-title` |
-| Every PR, in parallel: native arm64 | locked workspace, development app packaging, relocated public-file STT, capture refusal, HUD/windows | native PR check |
-| Master after Linux gates, and twice daily: both native architectures | Intel ABI/runtime/native artifact qualification; refresh default-branch caches | successful native and Linux jobs precede publication |
-| Release candidate: existing build → downloaded artifact verification → attestation/publication | CPU-only Ubuntu baseline, checksums/source identity, offline public-file STT, install/update/rollback/uninstall and retained-state preservation on the exact published bytes | publication requires successful qualification and runtime proof |
-| Master after Linux gates: website build, promotion and public-route proof | the current source with the latest already-published release assets | independent of native qualification |
-| After release publication: repeat website synchronization and proof | newly published version/notes appear without waiting for another push | successful publication |
+| Author before merge | changed real-product success, rejection and recovery | author-owned proof, no GitHub required check |
+| `release.yml` dispatch on master: prepare | Landmark's pinned version/notes generation and release-plan identity | metadata-only PR, no compilation or bot-workflow approval |
+| Dispatch after the generated plan is merged: `ci.yml` | formatting, locked all-target Clippy, every workspace test, offline evaluation, Omarchy/install/release/site contracts and both secret scanners | successful `qualification` |
+| The same qualification, in parallel: both native architectures | Intel ABI/runtime and arm64 behavior, native workspace, development packaging, relocated public-file STT, capture refusal and HUD/windows | successful `qualification` |
+| The same candidate: build → downloaded artifact verification → attestation/publication | CPU-only Ubuntu baseline, checksums/source identity, public-file STT, install/update/rollback/uninstall and retained-state preservation on the exact published bytes | successful `build`, `verify` and `qualification` |
+| Website dispatch on master, or after app publication | build/check, current published assets, monotonic promotion and public-route proof | static build succeeds before deployment; post-publication refresh preserves trusted live website source |
+| Twice-daily `macos.yml` schedule | only restore/validate/prepare/save the pinned Intel runtime cache | no qualification claim, artifact publication or website deployment |
 
-`check` remains the required context, not the name of a chosen shard. It runs
-with `always()` and accepts only successful Rust **and** contract results;
-failure, cancellation or skipping cannot turn an incomplete gate green.
-There are no path filters that silently omit a required check.
-Title validation has its own checkout-free `pr-title.yml` workflow. Editing a
-PR title or evidence body reruns metadata validation, not compilation/scanning;
-the code workflows run only on opening, reopening or a new head.
+`ci.yml` has only `workflow_call` and `workflow_dispatch` entry points. Its
+Rust, Python contracts, secret scan and native matrix start independently.
+Linux `check` accepts only successful Rust and contract shards; `release-gate`
+accepts only successful `check`, `secret-scan` and the complete native matrix.
+Both aggregate jobs use `always()` and reject failed, cancelled or skipped
+dependencies. No scanner, Linux test, native packaging or public-fixture
+proof is deleted. Native qualification always includes arm64 and Intel;
+the schedule is deliberately only cache maintenance.
 
-Intel qualification moves from each PR to master and the twice-daily full
-battery. Release planning and native qualification run independently; the
-metadata-only release PR need not wait for a compiler. Artifact build/runtime
-proof also overlap native qualification. Publication explicitly depends on
-successful native, build and runtime jobs for the same master SHA, so a failed
-or skipped native job cannot publish. Scheduled runs qualify but do not publish
-releases or deploy the website. Downloaded Linux release proof remains intact.
-No Linux test, scanner, native packaging or public-fixture proof is deleted.
-An Intel regression can still reach master before it is found; the release
-barrier is deliberate, not a claim that arm64 proves Intel behavior.
+`release.yml` is dispatched explicitly on master. If the source needs a plan,
+it prepares the Landmark PR and stops without qualification. The author merges
+the generated metadata without CI. The conductor performs the single
+critical-correctness/security release assessment on that candidate, then
+dispatches `release.yml` again. Its valid plan selects publishing mode, running
+qualification alongside the one Linux release build and downloaded-artifact
+verification. `publish` depends on all three, so failed/skipped native or
+portable qualification cannot publish. The attested/published archive is the
+artifact already built and exercised, never a rebuild in the publish job.
+
+```sh
+gh workflow run release.yml --repo misty-step/cantrip --ref master
+# After author proof, generated-plan merge and the release assessment:
+gh workflow run release.yml --repo misty-step/cantrip --ref master
+# Qualification-only measurement/diagnosis on an exact candidate branch:
+gh workflow run ci.yml --repo misty-step/cantrip --ref <candidate-branch>
+```
+
+There are **no required GitHub checks for merging**, including the Landmark
+release PR. Remove the former `check`, `secret-scan` and `pr-title` branch
+requirements; do not replace them with `release-gate`. The checkout-free PR
+metadata workflow is removed with the other PR triggers. Conventional Commit
+titles remain the source convention, not another merge-time workflow.
 
 ## Concurrency and website
 
-PR CI/native groups use the PR number and cancel superseded work. Non-PR
-CI/native groups instead use the unique `github.run_id`; a push, dispatch or
-schedule cannot replace another run waiting behind the same branch reference.
-This also prevents a scheduled native run from cancelling an active release's
-native qualification.
+Qualification/native concurrency groups use the unique `github.run_id` and
+never cancel earlier work. A later dispatch or cache warm-up cannot replace
+another candidate waiting behind the same branch reference.
 
 The release workflow alone retains the shared `cantrip-release` writer group,
 with `cancel-in-progress: false` and `queue: max`. [GitHub documents](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency)
 that `max` preserves up to 100 waiting runs; a later arrival never replaces
 one already queued. At capacity GitHub rejects additional arrivals rather than
-evicting pending release heads. Only publishing-capable master runs enter this
-queue; a schedule cannot take their place. The default single-pending policy is
+evicting pending release heads. Only explicit master release dispatches enter
+this queue; a cache warm-up cannot take their place. The default single-pending policy is
 not safe for this writer. Existing source/ancestry guards still reject stale
 promotion, since queue order is based on time entering the queue, not dispatch.
 
-The website is a reusable workflow, called after Linux `check` and
-`secret-scan` succeed, with no dependency on Mac qualification or the complete
-CI workflow result. Release publication calls it again to refresh version data
-from the newly published assets; ordinary website changes therefore need not
-wait for native builds, while release notes do not remain stale after publishing.
-One non-cancelling, `queue: max` website group serializes both kinds of promotion.
+The website is a reusable workflow with an explicit master dispatch entry.
+It is independent of native qualification for website-only releases, and
+performs its own focused static-build pre-deploy gate. App publication calls
+it to refresh published-asset data, so release notes do not wait for a later
+push. One non-cancelling, `queue: max` website group serializes both forms of
+promotion.
 For post-publication refresh, the existing Cloudflare deployment annotation
 selects the already-qualified live website source while that writer lock is
 held. If a newer master website has already deployed, refresh keeps its code
@@ -103,11 +118,12 @@ instead of rebuilding the older release checkout or an unqualified branch tip.
 The same source/ancestry parser owns selection and the final promotion check;
 unknown, split, mismatched or foreign source identity still fails closed.
 
-Only the existing `CLOUDFLARE_API_TOKEN` is forwarded, explicitly by name:
-`CI → site.yml` for master deployment and `CI → release.yml → site.yml` for
-post-publication refresh. No `secrets: inherit`, new credential or API scope is
-used. These calls require master push/dispatch; PRs receive only the existing
-build/check path, never the deployment step or forwarded secret.
+Only the existing `CLOUDFLARE_API_TOKEN` is forwarded, explicitly by name,
+through `release.yml → site.yml` for post-publication refresh. Direct website
+dispatch uses that same repository secret. No `secrets: inherit`, new credential
+or API scope is used. Both entries require master `workflow_dispatch`; PRs and
+pushes start no website workflow and never reach deployment. Qualification-only
+dispatch has no Cloudflare secret.
 
 The website job has a 30-minute watchdog. Its four sequential `verify-site`
 commands may each spend 180 seconds waiting for edge convergence plus the
@@ -131,15 +147,19 @@ compiler and CMake identity remain part of its key. Never replace its integrity
 checks with a cache-hit assertion. Upstream arm64 CPU prebuilts remain the fast
 native runtime; do not introduce an unverified Intel download mirror.
 
-Initial rollout: #250's PR-scoped Intel cache is not readable from master. If
-no matching default-branch cache has been saved yet, the first post-merge
-master qualification is an expected one-time cold build: measured 68m39s,
-including 58m56s of runtime preparation. It runs outside PR feedback and must
-complete before publication. The eager save preserves the validated runtime
-before later app checks; subsequent qualification reads can reuse it. Twice-daily
-qualification refreshes the default-branch cache, but image/key changes or
-eviction can require another cold build. Never copy a PR-scoped cache into the
-trusted master scope or replace qualification with a warm-up success claim.
+The twice-daily schedule exists only to pre-warm the default-branch Intel
+runtime cache before a release gate. It selects Intel alone and skips Rust
+toolchain/cache work, workspace checks, app packaging, native runtime proof
+and artifact upload. It cannot satisfy release qualification.
+
+A PR-scoped cache is not readable from master or an unrelated candidate branch.
+If no matching default-branch entry exists, pre-warming or the first release
+qualification still builds the pinned runtime: measured 68m39s total with
+58m56s preparation in the prior cold qualification. The eager save retains
+validated archives before later app work. Image/key changes and eviction can
+require another cold build; observe the matching master key rather than assume
+warmth. Never copy a PR-scoped cache into trusted master scope or replace
+qualification with warm-up success.
 
 
 Do not stack sccache on top of these target caches without evidence. Its
@@ -170,21 +190,26 @@ for the fixture wait: measured on Darwin, `poll` reports FIFO data but misses
 EOF, while `select` reports both. Do not extend production timeouts or rerun
 failed tests to hide a race.
 
-[#227](https://github.com/misty-step/cantrip/issues/227): GitHub creates native
-release-PR runs asynchronously. The release adapter waits at most 120 seconds
-in total for exact-head `pull_request` runs, discovering missing workflows at
-two-second intervals. Every API operation shares the remaining monotonic
-budget. It rechecks the bot PR's repository/head identity before approvals,
-approves each discovered blocked run once, and fails closed on API errors,
-head movement or timeout. This is discovery synchronization, not failed-CI
-retry, approval bypass, or substitute `workflow_dispatch` proof.
+[#227](https://github.com/misty-step/cantrip/issues/227): release preparation
+must not wait for bot-created PR workflows or their approval. There are no
+PR-triggered workflows under this method. Remove the obsolete asynchronous
+approval discovery/poller and its `actions: write` permission instead of
+waiting for runs that will never be created. New and existing Landmark PR
+preparation tests exercise the GitHub CLI boundary and reject any approval or
+workflow-dispatch side effect. The actual post-merge release dispatch runs the
+exact candidate's qualification directly, not substitute proof for an automatic
+PR check.
 
 ## Reconsideration
 
-Measure push-to-green at the actual required-check completion timestamps,
-including setup, queueing, cache post-steps and the aggregate gate. Compare at
-least two PR runs and state cold/warm cache conditions. If the warm fast tier
-exceeds five minutes or any required tier exceeds ten, identify its measured
-critical path before adding runners, sharding or a cache. Paid capacity remains
-an explicit operator decision. Changing repository visibility also requires
-revisiting the free-hosted-runner assumption.
+Measure dispatch-to-`release-gate` wall time, including queueing, setup, cache
+transfer and aggregate completion; measure app publication separately when a
+real release is authorized. Inferred from measured phases: portable feedback
+should remain under five minutes and a warm complete qualification should be
+about ten minutes, dominated by the prior 9m41s Intel job. Build/runtime proof
+overlap that qualification rather than adding to its critical path. A cold
+runtime is an explicit rollout/cache-loss exception, not an acceptable steady
+state. Fix the measured critical path before adding runners, finer sharding
+or another cache. Paid capacity and changed repository visibility remain
+operator decisions. No PR/push CI or branch-protection wait is reintroduced
+to improve a release metric.
