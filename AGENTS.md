@@ -1,5 +1,7 @@
 # Cantrip
 
+Shared standard: [Constitution](https://foundations.mistystep.io/) and [Way of working](https://foundations.mistystep.io/way-of-working).
+
 Cantrip is a local-first Linux/macOS dictation app: the `cantrip` native host
 and `cantrip-engine` shared workflow crate in one Rust workspace, with
 `workspace.package.version` as the version authority. Start with
@@ -34,9 +36,4 @@ are defined in `.github/workflows/macos.yml` and documented in
 `docs/INSTALLATION.md`; offscreen NSView pixels are not live panel/focus proof.
 Choose a smaller command only for a named, changed surface.
 
-## Work tracking and secrets
 
-Work from the operator's current request. Check current code and overlapping
-work before starting. Link the result and sanitized verification evidence from
-the existing work record when available and from the PR/session.
-Historical issues are context, not an intake queue. Never commit secrets.
