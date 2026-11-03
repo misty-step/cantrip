@@ -4,8 +4,8 @@
 No model requests or credentials are handled here. postproc::refine and the native
 broker own inference. Keep every intermediate under private scratch outside the
 repo. Give the independent grader only blind/items.json, never native-plan.json
-or the decode file. aggregate emits text-free comparison.json only after all
-hash-bound blind judgments are present; it does not alter the historical study.
+or the decode file. After fixed hash-bound grades, aggregate emits a compact
+comparison.json and a private numeric per-call receipt; history stays unchanged.
 """
 
 import argparse
@@ -225,9 +225,15 @@ def aggregate(args):
     end = Decimal(str(final["key_usage_start_usd"]))
     if end - start != total or end > Decimal("4.50"):
         raise ValueError("final_key_counter_not_reconciled")
+    generation_ids = {call["provider_generation_id"] for call in public_calls}
+    if None in generation_ids or len(generation_ids) != 246:
+        raise ValueError("every_scheduled_draw_requires_a_unique_provider_generation")
+    save(args.out / "private-calls.json", public_calls)
     comparison = {
         "schema": "cantrip.eval.elevate-comparison.v1", "run_id": "2026-11-03-elevate-ab",
+        "claim_type": "Measured execution/accounting; quality counts are independent blinded reviewer judgments, not builder labels.",
         "source_revision": run["source_revision"], "precommit": plan["precommit"],
+        "aggregation_script_sha256": digest(Path(__file__).read_bytes()),
         "ordering": plan["ordering"], "seed": plan["seed"],
         "corpus_sha256": plan["manifest_sha256"], "inherited_corpus_sha256": plan["inherited_manifest_sha256"],
         "operator_sha256": plan["operator_sha256"], "addendum_sha256": plan["addendum_sha256"],
@@ -238,13 +244,24 @@ def aggregate(args):
         "arms": arms, "selected_arm": selected,
         "accounting": {"unique_scheduled_upstream_submissions":246, "historical_outputs_reused":0,
                        "paid_retries":0, "reported_cost_usd":float(total),
+                       "canonical_model":broker["canonical_model"],
                        "key_usage_start_usd":float(start), "key_usage_end_usd":float(end),
                        "absolute_key_ceiling_usd":4.5, "test_only_max_completion_tokens":1024,
                        "provider_guards":broker["provider_guards"], "counter_policy":broker["counter_policy"],
                        "local_completed_response_replays":broker.get("local_replays",0),
                        "interruption":broker.get("interrupted_attempt")},
-        "calls": public_calls,
+        "failures": [{key:call[key] for key in ("case", "repeat", "arm", "blind_item_id", "output_sha256", "fidelity_failures")}
+                     for call in public_calls if call["fidelity_failed"]],
+        "sampling_provenance": {
+            "unique_provider_generations":len(generation_ids),
+            "unique_original_production_bodies":len({call["production_request_sha256"] for call in public_calls}),
+            "unique_effective_bodies":len({call["evaluated_request_sha256"] for call in public_calls}),
+            "private_numeric_calls_sha256":digest((args.out / "private-calls.json").read_bytes()),
+            "private_production_receipt_sha256":digest((args.run / "receipt.json").read_bytes()),
+            "private_provider_receipt_sha256":digest((args.broker / "accounting.json").read_bytes()),
+        },
         "limitations": ["One precommitted 41-case x3-repeat x2-arm synthetic trial; no private dictation, native UI or reliability claim.",
+                        "The same decision corpus informed the initial study and is not a held-out or independent dictation corpus.",
                         "Identical source/output pairs were deduplicated for blind judgment and then weighted back to every scheduled output.",
                         "Primary fidelity and lexical scores are the independent blind reviewer's judgments, not Clean wording or builder exact-number diagnostics.",
                         "The candidate system insertion and identical generation/price caps were broker-only transport changes; production postproc::refine generated every original request."]
