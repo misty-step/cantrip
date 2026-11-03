@@ -3786,8 +3786,9 @@ mod tests {
 
     #[test]
     fn only_a_local_only_target_is_told_its_take_stayed_local() {
-        let (root, target) =
-            handoff_fixture("printf '%s' \"${CANTRIP_LOCAL_ONLY-unset}\" > \"$1\"");
+        let (root, target) = handoff_fixture(
+            "cat > /dev/null\nprintf '%s' \"${CANTRIP_LOCAL_ONLY-unset}\" > \"$1\"",
+        );
         let seen = root.join("seen");
         for (local_only, expected) in [(true, "1"), (false, "unset")] {
             let target = crate::config::HandoffTarget {
