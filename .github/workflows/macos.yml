@@ -93,7 +93,7 @@ jobs:
           # Match packaging's default path so it validates and reuses this same tree.
           path = Path(os.environ["RUNNER_TEMP"]) / "native-runtime" / identity["target"] / runtime["ORT_VERSION"]
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"key=macos-runtime-{identity['target']}-{runtime['ORT_VERSION']}-{digest}\n")
+              output.write(f"key=macos-runtime-archives-{identity['target']}-{runtime['ORT_VERSION']}-{digest}\n")
               output.write(f"path={path}\n")
           print(json.dumps(identity, indent=2, sort_keys=True))
           PY
@@ -102,7 +102,12 @@ jobs:
         id: runtime-cache-restore
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ${{ steps.runtime-cache.outputs.path }}
+          # Source and .git are required by the revision/clean-source checks.
+          # Cache all verified archives, but no objects or CMake intermediates.
+          path: |
+            ${{ steps.runtime-cache.outputs.path }}/runtime.json
+            ${{ steps.runtime-cache.outputs.path }}/source
+            ${{ steps.runtime-cache.outputs.path }}/build/**/*.a
           key: ${{ steps.runtime-cache.outputs.key }}
       # A cache hit still goes through the script's fail-closed integrity checks.
       - name: Prepare the pinned CPU runtime omitted by upstream Intel prebuilts
@@ -118,7 +123,10 @@ jobs:
         if: matrix.architecture == 'x86_64' && steps.runtime-cache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: ${{ steps.runtime-cache.outputs.path }}
+          path: |
+            ${{ steps.runtime-cache.outputs.path }}/runtime.json
+            ${{ steps.runtime-cache.outputs.path }}/source
+            ${{ steps.runtime-cache.outputs.path }}/build/**/*.a
           key: ${{ steps.runtime-cache.outputs.key }}
       - name: Check every crate and native target against the lockfile
         run: |
