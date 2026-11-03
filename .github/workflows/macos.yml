@@ -19,7 +19,7 @@ env:
 
 jobs:
   native:
-    name: macOS ${{ matrix.runner }} workspace and native app
+    name: macOS ${{ matrix.runner == 'macos-15' && 'arm64' || 'x86_64' }} workspace and native app
     # GitHub documents macos-15 as Apple Silicon and macos-15-intel as Intel:
     # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
     # Runner images remain mutable patched labels; actions are SHA-pinned.
