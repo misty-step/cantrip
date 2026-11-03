@@ -1,4 +1,4 @@
-"""Release gate regressions; real files/git/shell, GitHub transport only mocked."""
+"""Release gate regressions; real files/git/shell, fake GitHub transport and clock."""
 
 import copy
 import hashlib
@@ -15,6 +15,164 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = runpy.run_path(str(ROOT / "scripts/release"))
+
+
+class NativeReleaseChecks(unittest.TestCase):
+    def setUp(self):
+        self.approve = RELEASE["approve_release_checks"]
+        self.revision = "a" * 40
+        self.pr = {
+            "state": "open", "user": {"login": "github-actions[bot]"},
+            "base": {"ref": "master"},
+            "head": {"ref": "landmark/release", "sha": self.revision,
+                     "repo": {"full_name": "misty-step/cantrip"}},
+        }
+        self.checks = {
+            workflow: {
+                "id": identifier, "event": "pull_request", "head_sha": self.revision,
+                "head_repository": {"full_name": "misty-step/cantrip"},
+                "pull_requests": [{"number": 133}],
+                "status": "completed", "conclusion": "action_required",
+            }
+            for identifier, workflow in enumerate(("ci.yml", "macos.yml", "site.yml"), 100)
+        }
+        self.responses = {workflow: [[check]] for workflow, check in self.checks.items()}
+        self.reads = []
+        self.seconds = 0
+        self.clock = mock.Mock()
+        self.clock.monotonic.side_effect = lambda: self.seconds
+        self.clock.sleep.side_effect = self.advance
+        self.transport = mock.Mock()
+        patch = mock.patch.dict(self.approve.__globals__, github=self.github,
+                                run=self.transport, time=self.clock,
+                                RELEASE_CHECK_WAIT_SECONDS=5)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def advance(self, seconds):
+        self.seconds += seconds
+
+    def query(self, workflow):
+        return f"actions/workflows/{workflow}/runs?event=pull_request&head_sha={self.revision}&per_page=100"
+
+    def github(self, path, *, timeout):
+        self.assertGreater(timeout, 0)
+        self.assertLessEqual(timeout, 5)
+        self.reads.append(path)
+        if path == "pulls/133":
+            return self.pr
+        for workflow, responses in self.responses.items():
+            if path == self.query(workflow):
+                response = responses.pop(0) if len(responses) > 1 else responses[0]
+                if isinstance(response, Exception):
+                    raise response
+                return {"workflow_runs": response}
+        self.fail(f"unexpected GitHub lookup: {path}")
+
+    def test_waits_for_all_native_runs_and_approves_each_once(self):
+        extra = {**self.checks["ci.yml"], "id": 103}
+        self.responses["ci.yml"] = [[], [self.checks["ci.yml"], extra]]
+        self.responses["site.yml"] = [[], [], [self.checks["site.yml"]]]
+        self.approve(133, self.revision)
+        self.assertEqual(self.clock.sleep.call_args_list, [mock.call(2), mock.call(2)])
+        self.assertEqual(
+            [call.args for call in self.transport.call_args_list],
+            [("gh", "api", "--method", "POST",
+              f"repos/misty-step/cantrip/actions/runs/{identifier}/approve")
+             for identifier in (101, 100, 103, 102)],
+        )
+        self.assertEqual([call.kwargs["timeout"] for call in self.transport.call_args_list],
+                         [5, 3, 3, 1])
+        self.assertEqual(self.reads.count(self.query("ci.yml")), 2)
+        self.assertEqual(self.reads.count(self.query("macos.yml")), 1)
+        self.assertEqual(self.reads.count(self.query("site.yml")), 3)
+
+    def test_times_out_without_reapproving_discovered_runs(self):
+        self.responses["site.yml"] = [[]]
+        with self.assertRaisesRegex(RELEASE["ReleaseError"], "timed out.*site.yml"):
+            self.approve(133, self.revision)
+        self.assertEqual(self.seconds, 5)
+        self.assertEqual(self.clock.sleep.call_args_list,
+                         [mock.call(2), mock.call(2), mock.call(1)])
+        self.assertEqual(self.transport.call_count, 2)
+        self.assertEqual(self.reads.count(self.query("site.yml")), 3)
+
+    def test_existing_approvals_and_failed_runs_are_not_retried(self):
+        for status, conclusion in (
+            ("completed", "success"), ("completed", "failure"),
+            ("completed", "skipped"), ("completed", "cancelled"),
+            ("completed", "timed_out"), ("in_progress", None), ("queued", None),
+        ):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.responses = {
+                    workflow: [[{**check, "status": status, "conclusion": conclusion}]]
+                    for workflow, check in self.checks.items()
+                }
+                self.approve(133, self.revision)
+                self.transport.assert_not_called()
+                self.clock.sleep.assert_not_called()
+
+    def test_rejects_checks_outside_the_exact_native_pr_head(self):
+        for changes in (
+            {"head_sha": "b" * 40}, {"event": "workflow_dispatch"},
+            {"head_repository": {"full_name": "other/cantrip"}},
+            {"pull_requests": []}, {"pull_requests": [{"number": 134}]},
+        ):
+            with self.subTest(changes=changes):
+                self.responses["ci.yml"] = [[{**self.checks["ci.yml"], **changes}]]
+                with self.assertRaisesRegex(RELEASE["ReleaseError"], "exact generator PR head"):
+                    self.approve(133, self.revision)
+                self.transport.assert_not_called()
+                self.clock.sleep.assert_not_called()
+
+    def test_rejects_foreign_generator_pr(self):
+        self.pr["head"]["repo"]["full_name"] = "other/cantrip"
+        with self.assertRaisesRegex(RELEASE["ReleaseError"], "same-repository generator PR"):
+            self.approve(133, self.revision)
+        self.transport.assert_not_called()
+        self.clock.sleep.assert_not_called()
+
+    def test_rechecks_pr_identity_while_waiting(self):
+        self.responses = {workflow: [[]] for workflow in self.checks}
+
+        def move_head(seconds):
+            self.advance(seconds)
+            self.pr["head"]["sha"] = "b" * 40
+
+        self.clock.sleep.side_effect = move_head
+        with self.assertRaisesRegex(RELEASE["ReleaseError"], "PR identity moved"):
+            self.approve(133, self.revision)
+        self.transport.assert_not_called()
+        self.assertEqual(self.clock.sleep.call_count, 1)
+
+    def test_rechecks_pr_identity_before_approval(self):
+        moved = copy.deepcopy(self.pr)
+        moved["head"]["sha"] = "b" * 40
+        lookup = mock.Mock(side_effect=[
+            self.pr, {"workflow_runs": [self.checks["ci.yml"]]}, moved,
+        ])
+        with mock.patch.dict(self.approve.__globals__, github=lookup):
+            with self.assertRaisesRegex(RELEASE["ReleaseError"], "PR identity moved"):
+                self.approve(133, self.revision)
+        self.transport.assert_not_called()
+        self.clock.sleep.assert_not_called()
+
+    def test_discovery_api_error_stops_waiting_without_retry(self):
+        self.responses["ci.yml"] = [[], RELEASE["ReleaseError"]("GitHub lookup refused")]
+        for workflow in ("macos.yml", "site.yml"):
+            self.responses[workflow] = [[{**self.checks[workflow], "conclusion": "success"}]]
+        with self.assertRaisesRegex(RELEASE["ReleaseError"], "GitHub lookup refused"):
+            self.approve(133, self.revision)
+        self.transport.assert_not_called()
+        self.assertEqual(self.clock.sleep.call_count, 1)
+        self.assertEqual(self.reads.count(self.query("ci.yml")), 2)
+
+    def test_approval_api_error_is_not_retried(self):
+        self.transport.side_effect = RELEASE["ReleaseError"]("GitHub approval refused")
+        with self.assertRaisesRegex(RELEASE["ReleaseError"], "GitHub approval refused"):
+            self.approve(133, self.revision)
+        self.assertEqual(self.transport.call_count, 1)
+        self.clock.sleep.assert_not_called()
 
 
 class ReleaseGates(unittest.TestCase):
@@ -34,52 +192,13 @@ class ReleaseGates(unittest.TestCase):
                 result = subprocess.run(shlex.split(command), env={**os.environ, "PR_TITLE": title}, capture_output=True)
                 self.assertEqual(result.returncode, expected)
 
-    def test_native_approval_is_exact_scoped_and_idempotent(self):
-        approve = RELEASE["approve_release_checks"]
-        revision = "a" * 40
-        pr = {
-            "state": "open", "user": {"login": "github-actions[bot]"},
-            "base": {"ref": "master"},
-            "head": {"ref": "landmark/release", "sha": revision, "repo": {"full_name": "misty-step/cantrip"}},
-        }
-        check = {
-            "id": 123, "event": "pull_request", "head_sha": revision,
-            "head_repository": {"full_name": "misty-step/cantrip"},
-            "pull_requests": [{"number": 133}],
-            "status": "completed", "conclusion": "action_required",
-        }
-
-        def exercise(candidate_pr, runs, moved=False):
-            reads = 0
-
-            def github(path):
-                nonlocal reads
-                if path == "pulls/133":
-                    reads += 1
-                    return {**candidate_pr, "head": {**candidate_pr["head"], "sha": "b" * 40}} if moved and reads > 1 else candidate_pr
-                return {"workflow_runs": runs}
-
-            transport = mock.Mock()
-            with mock.patch.dict(approve.__globals__, github=github, run=transport):
-                approve(133, revision)
-            return transport
-
-        self.assertEqual(exercise(pr, [check]).call_count, 3)
-        for conclusion in ("success", "failure", "skipped", "cancelled"):
-            self.assertEqual(exercise(pr, [{**check, "conclusion": conclusion}]).call_count, 0)
-        self.assertEqual(exercise(pr, [{**check, "status": "in_progress", "conclusion": None}]).call_count, 0)
-        bad_pr = copy.deepcopy(pr)
-        bad_pr["head"]["repo"]["full_name"] = "other/cantrip"
-        cases = [(bad_pr, [check], False), (pr, [], False), (pr, [check], True)]
-        for changes in (
-            {"head_sha": "b" * 40}, {"event": "workflow_dispatch"},
-            {"head_repository": {"full_name": "other/cantrip"}}, {"pull_requests": []},
-        ):
-            cases.append((pr, [{**check, **changes}], False))
-        for candidate_pr, runs, moved in cases:
-            with self.subTest(candidate_pr=candidate_pr, runs=runs, moved=moved):
-                with self.assertRaises(RELEASE["ReleaseError"]):
-                    exercise(candidate_pr, runs, moved)
+    def test_github_transport_timeout_fails_without_command_output(self):
+        with mock.patch.object(subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("gh", 1, output="private")) as transport:
+            with self.assertRaisesRegex(RELEASE["ReleaseError"], "^gh timed out$"):
+                RELEASE["github"]("pulls/133", timeout=1)
+        self.assertEqual(transport.call_count, 1)
+        self.assertEqual(transport.call_args.kwargs["timeout"], 1)
 
     def test_failed_skipped_or_foreign_runtime_proof_cannot_finalize(self):
         finalize = RELEASE["finalize"]
