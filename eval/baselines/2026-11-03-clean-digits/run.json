@@ -1,0 +1,188 @@
+{
+  "schema": "cantrip.operator-refinement-study.v1",
+  "run_id": "operator-2026-11-03-clean-digits",
+  "date": "2026-11-03",
+  "claim_type": "measured_unless_explicitly_inferred_or_unverified",
+  "base_revision": "0f5bfca0d366b135614c4b0d143d402b81c8cedc",
+  "decision": "drop",
+  "decision_text": "Prompt v5 stays unchanged. The v6 digits candidate regressed fidelity on one private take and over-converted an idiom in one synthetic repeat.",
+  "request": "Operator chose digits for spoken numbers; conductor asked for one added rule, kept only if no fidelity case regressed and non-number strict count did not drop.",
+  "protocol": {
+    "model": "openai/gpt-6.1-sol",
+    "reasoning_effort": "low",
+    "passes": 1,
+    "decision_model": null,
+    "provider_guards": "Fallbacks disabled and provider.max_price enforced; the application sends neither.",
+    "rule": "- Write spoken numbers, dates, times, and quantities as digits: `three hundred and twenty five servers, March fourth` becomes `325 servers, March 4`. Keep numbers that are part of a name, idiom, or quotation as spoken.",
+    "prompts": {
+      "v5_base_sha256": "bdcc34d888a270ff9d45989b05a8e4a53b23501a6a432accd5fd4326b1dfb95d",
+      "v5_system_with_evaluated_vocabulary_sha256": "536d79ca8c6afd7d878964e7ae871caee6c4d2a6c861b80329249deb5c926c7c",
+      "v6_base_sha256": "1077273c50a6ed971127caef6fb2f8851dc00721af86c8ff0448c371fc44b784",
+      "v6_system_with_evaluated_vocabulary_sha256": "40dcdda29c3db32318990d17d6e808a30e1d46c1fe1091f593e136a213597013"
+    },
+    "v6_edits": "Added the digits rule and removed \"and their written form\" from the numbers-preservation sentence.",
+    "corpus": {
+      "candidate_manifest_sha256": "38a049fbd5be8c313ca6282ba16663ffad44803de005137aad5b0f2974b8b097",
+      "candidate_cases": 37,
+      "non_number_cases": 25,
+      "number_cases": [
+        "digits-quantity-date",
+        "email-request",
+        "embedded-instruction",
+        "idiom-number-kept",
+        "long-detail-preservation",
+        "long-question",
+        "minimum-and-option",
+        "negated-quantity-digits",
+        "numbered-sequence",
+        "quantities",
+        "summary-request",
+        "version-string-digits"
+      ],
+      "repeats": 3,
+      "precommit": "Digit-form accepted strings and four new public cases were written before any v6 call. Ordinal, one-paragraph and list-count cases accepted both forms; the first/second-sentence case stayed non-number and unchanged."
+    },
+    "private_comparison": "16 fresh v6 outputs against the retained frozen v5 outputs, graded by the builder with spoken-number conversions visible. This is not a fully blind comparison.",
+    "calls": {
+      "v6_public": 111,
+      "v5_same_session_control": 75,
+      "v6_private": 16,
+      "total": 202,
+      "normal_stop": 202
+    },
+    "keep_rule": {
+      "fidelity": "No v6 private or synthetic output may have a hard fidelity failure that v5 did not have on the same case; number over-conversion in a name, idiom or quotation and wrong numeric value are hard failures.",
+      "strict": "v6 strict exact-accepted count on non-number cases must be >= the same-session v5 control count; also report against the earlier frozen v5 run.",
+      "number_cases": "Digit compliance on the number cases is reported separately and cannot rescue a fidelity regression.",
+      "otherwise": "Ship v5 unchanged and record the failure on the decision record."
+    },
+    "independence": "The public core cases were reused from earlier tuning; one builder agent graded. One draw per private take, so sampling noise and rule effect are not separated."
+  },
+  "new_public_cases": [
+    {
+      "id": "digits-quantity-date",
+      "category": "preservation",
+      "input": "we need three hundred and twenty five servers by march fourth",
+      "accepted": [
+        "We need 325 servers by March 4."
+      ]
+    },
+    {
+      "id": "idiom-number-kept",
+      "category": "preservation",
+      "input": "she has a sixth sense and takes it one day at a time",
+      "accepted": [
+        "She has a sixth sense and takes it one day at a time."
+      ]
+    },
+    {
+      "id": "version-string-digits",
+      "category": "preservation",
+      "input": "pin serde to version one point two point three",
+      "accepted": [
+        "Pin serde to version 1.2.3."
+      ]
+    },
+    {
+      "id": "negated-quantity-digits",
+      "category": "preservation",
+      "input": "we do not need three hundred servers we need at most forty two not forty three",
+      "accepted": [
+        "We do not need 300 servers. We need at most 42, not 43.",
+        "We do not need 300 servers; we need at most 42, not 43.",
+        "We do not need 300 servers, we need at most 42, not 43."
+      ]
+    }
+  ],
+  "results": {
+    "strict_non_number": {
+      "cases": 25,
+      "v6": "64/75",
+      "v5_same_session_control": "63/75",
+      "v5_earlier_frozen_run": "64/75",
+      "v6_by_repeat": {
+        "1": 21,
+        "2": 21,
+        "3": 22
+      },
+      "v5_control_by_repeat": {
+        "1": 22,
+        "2": 21,
+        "3": 20
+      },
+      "passes_strict_rule": true
+    },
+    "number_cases_v6_strict": {
+      "digits-quantity-date": "3/3",
+      "email-request": "3/3",
+      "embedded-instruction": "3/3",
+      "idiom-number-kept": "2/3",
+      "long-detail-preservation": "3/3",
+      "long-question": "3/3",
+      "minimum-and-option": "1/3",
+      "negated-quantity-digits": "3/3",
+      "numbered-sequence": "3/3",
+      "quantities": "3/3",
+      "summary-request": "2/3",
+      "version-string-digits": "3/3"
+    },
+    "number_cases_v5_earlier_rescored": {
+      "email-request": "0/3",
+      "embedded-instruction": "0/3",
+      "long-detail-preservation": "0/3",
+      "long-question": "0/3",
+      "minimum-and-option": "0/3",
+      "numbered-sequence": "3/3",
+      "quantities": "0/3",
+      "summary-request": "3/3"
+    },
+    "public_fidelity": {
+      "v6_hard_failures": 1,
+      "class": "number_in_idiom_converted",
+      "affected": "idiom-number-kept repeat 1 (public synthetic)",
+      "non_hard_digit_misses": "minimum-and-option wrote the ordinal as 4th in two repeats; accepted strings required \"a fourth\"."
+    },
+    "private_fidelity": {
+      "v6_hard_failures": 1,
+      "v5_hard_failures": 0,
+      "class": "distinct_claim_omitted",
+      "note": "One v6 output had class distinct_claim_omitted. One other v6 output had class minor_attribution_shift, which the builder did not count as a hard failure. No private spoken number was converted to a wrong value; clear cardinal quantities became digits.",
+      "latency": {
+        "v6_private": {
+          "n": 16,
+          "p50_ms": 2430.923603998963,
+          "p95_ms": 9573.066749959253,
+          "max_ms": 9573.066749959253
+        },
+        "v6_public": {
+          "n": 111,
+          "p50_ms": 1562.4042080016807,
+          "p95_ms": 2061.6855421103537,
+          "max_ms": 2318.172874976881
+        }
+      },
+      "limits": "The same class of failure appeared once in the earlier v4 prompt, so [INFERRED] it may be sampling noise rather than a digit-rule effect. This trial cannot establish that."
+    },
+    "rule_effect": "[MEASURED] Clear cardinal quantities, dates and version strings became digits in every v6 repeat except one idiom repeat and the ordinal case; [INFERRED] the rule is promising but needs idiom protection and repeated private takes before adoption."
+  },
+  "accounting": {
+    "key_usage_before_usd": 2.367916619,
+    "key_usage_after_usd": 2.784823119,
+    "trial_delta_usd": 0.4169065,
+    "trial_reported_cost_usd": 0.4169065,
+    "unknown_cost_calls": 0,
+    "cumulative_commission_spend_usd": 2.630828722,
+    "commission_cap_usd": 6.0,
+    "absolute_key_ceiling_usd": 4.5,
+    "paid_retries": 0,
+    "inference_submissions": 202,
+    "journal_submissions_total": 1052,
+    "observed_utc": "2026-11-03T02:40:02.432048+00:00",
+    "attribution": "The trial delta equals the reported cost of its calls; earlier shared-key QA usage remains in the cumulative total."
+  },
+  "limitations": [
+    "[MEASURED] One operator, one grader, three public repeats, one private draw per take.",
+    "[UNVERIFIED] No live app, delivery, build or local test path was exercised.",
+    "[MEASURED] Public and aggregate evidence only: no private text, take identifier or vocabulary list is in this receipt."
+  ]
+}

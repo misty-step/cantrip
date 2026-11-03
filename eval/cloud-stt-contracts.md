@@ -254,12 +254,14 @@ above. Private audio, text, vocabulary, and per-take outputs are not published.
 
 | Commission | Cap | OpenRouter eval-key spend | Direct OpenAI spend | Total measured spend | Receipt |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 2026-11-02 Hone-style Clean | $6.00 | $2.213922222 | $0.00 | $2.213922222 | [Aggregate receipt](baselines/2026-11-02-hone-clean/run.json) |
+| 2026-11-02 Hone-style Clean | $6.00 | $2.630828722 | $0.00 | $2.630828722 | [Study receipt](baselines/2026-11-02-hone-clean/run.json); [digits follow-up](baselines/2026-11-03-clean-digits/run.json) |
 
 [MEASURED] The row includes all eval-key usage since the commission's starting
 counter, including usage outside the builder's per-call journal. The
-[receipt's accounting](baselines/2026-11-02-hone-clean/run.json) owns the dated
-counter read, phase breakdown, submission counts, and attribution evidence.
+[study receipt](baselines/2026-11-02-hone-clean/run.json) owns the study's
+phase breakdown, submission counts, and attribution evidence; the
+[digits receipt](baselines/2026-11-03-clean-digits/run.json) owns the latest
+dated counter read and its trial spend.
 [INFERRED] Both out-of-journal intervals are likely QA243's probes on the same
 key. They count against this commission regardless of attribution uncertainty.
 
