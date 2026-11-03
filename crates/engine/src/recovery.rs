@@ -1,7 +1,8 @@
 //! Per-take recovery artifacts live in the existing private transcript history.
 //! Availability is measured from trusted files, never from a persisted promise.
 
-use crate::archive::{self, Store};
+use crate::archive::{self, ModeSelection, Store};
+use crate::config::PostprocConfig;
 use crate::{paths, stt};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,19 @@ pub fn read_text(id: &str) -> Result<String> {
     read_text_in(&Store::open(&paths::transcript_history_dir()?)?, id)
 }
 
+pub(crate) fn selection(id: &str) -> Result<ModeSelection> {
+    let store = Store::open(&paths::transcript_history_dir()?)?;
+    // Audio remains recoverable when its old JSON is missing or corrupt.
+    get_in(&store, id)?;
+    Ok(store
+        .read_record(id)
+        .ok()
+        .flatten()
+        .as_ref()
+        .map(ModeSelection::from_record)
+        .unwrap_or_else(|| ModeSelection::from_record(&Value::Null)))
+}
+
 pub fn audio_path(id: &str) -> Result<PathBuf> {
     archive::validate_id(id)?;
     let directory = paths::transcript_history_dir()?;
@@ -107,6 +121,29 @@ pub fn persist(
         wav,
         partial,
         unresolved,
+    )
+}
+
+/// Retain a capture's start-time mode/model in the same atomic history record
+/// as its audio metadata, before recognition or cancellation can settle it.
+pub(crate) fn persist_with_config(
+    id: &str,
+    duration_ms: u64,
+    text: Option<&str>,
+    wav: Option<&Path>,
+    partial: bool,
+    unresolved: bool,
+    postproc: &PostprocConfig,
+) -> Result<Take> {
+    persist_selected_in(
+        &Store::open(&paths::transcript_history_dir()?)?,
+        id,
+        duration_ms,
+        text,
+        wav,
+        partial,
+        unresolved,
+        Some(postproc),
     )
 }
 
@@ -288,6 +325,20 @@ fn persist_in(
     partial: bool,
     unresolved: bool,
 ) -> Result<Take> {
+    persist_selected_in(store, id, duration_ms, text, wav, partial, unresolved, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_selected_in(
+    store: &Store,
+    id: &str,
+    duration_ms: u64,
+    text: Option<&str>,
+    wav: Option<&Path>,
+    partial: bool,
+    unresolved: bool,
+    postproc: Option<&PostprocConfig>,
+) -> Result<Take> {
     archive::validate_id(id)?;
     let audio_name = format!("{id}.wav");
     // Publish the sidecar first. Even a later JSON/fsync failure leaves an
@@ -316,7 +367,18 @@ fn persist_in(
     let complete =
         supplied.is_some() && !partial && audio_result.as_ref().is_none_or(|result| result.is_ok());
     let record_result = (|| -> Result<()> {
-        let mut record = store.record_for_update(id, complete)?.unwrap_or_else(|| {
+        // A start-time mode snapshot can repair unreadable metadata before STT;
+        // record_for_update preserves the original corrupt bytes privately.
+        let existing = store.record_for_update(id, complete || postproc.is_some())?;
+        let selection = existing
+            .as_ref()
+            .map(ModeSelection::from_record)
+            .unwrap_or_else(|| {
+                postproc
+                    .map(ModeSelection::capture)
+                    .unwrap_or_else(|| ModeSelection::from_record(&Value::Null))
+            });
+        let mut record = existing.unwrap_or_else(|| {
             json!({
                 "schema_version": archive::SCHEMA_VERSION,
                 "session_id": id,
@@ -384,6 +446,7 @@ fn persist_in(
         }
         record["audio"]["duration_ms"] = json!(duration);
         record["schema_version"] = json!(archive::SCHEMA_VERSION);
+        selection.write_to(&mut record);
         store.write_record(id, &record)
     })();
     match (audio_result.transpose(), record_result) {
@@ -577,6 +640,21 @@ fn import_runtime_in(runtime: &Path, history: &Path) -> Result<()> {
             // resolved take whose runtime unlink failed. Confirm it without
             // changing completion state or associating it with another ID.
             confirm_audio_in(&store, id, &source)?;
+            // An interrupted audio publication may have no readable JSON.
+            // Publish an explicitly inferred selection before consuming its
+            // runtime original; never borrow today's configured default.
+            let mut record = store.record_for_update(id, true)?.unwrap_or_else(|| {
+                json!({
+                    "schema_version": archive::SCHEMA_VERSION,
+                    "session_id": id,
+                    "source": "recovery",
+                    "recovery": { "created_at_unix_ms": archive::now_ms(), "unresolved": true },
+                })
+            });
+            let selection = ModeSelection::from_record(&record);
+            selection.write_to(&mut record);
+            record["schema_version"] = json!(archive::SCHEMA_VERSION);
+            store.write_record(id, &record)?;
             let current = originals
                 .open_file(&name)?
                 .context("runtime recording disappeared")?;
@@ -760,6 +838,107 @@ mod tests {
             assert!(get_in(&store, invalid).is_err());
         }
         assert!(list_in(&store).unwrap().is_empty());
+    }
+
+    #[test]
+    fn recorded_mode_and_model_survive_failed_cancelled_and_complete_recovery() {
+        use crate::config::{Mode, ModeModelConfig};
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        for mode in Mode::ALL {
+            let id = new_id();
+            let original = PostprocConfig {
+                mode,
+                clean: ModeModelConfig {
+                    model: "original-clean".into(),
+                    reasoning_effort: None,
+                },
+                elevate: ModeModelConfig {
+                    model: "original-elevate".into(),
+                    reasoning_effort: Some("high".into()),
+                },
+                ..Default::default()
+            };
+            // Audio-only persistence happens before STT can fail or be cancelled.
+            persist_selected_in(
+                &store,
+                &id,
+                10,
+                None,
+                Some(&fixture.wav),
+                false,
+                true,
+                Some(&original),
+            )
+            .unwrap();
+            let before = ModeSelection::from_record(&store.read_record(&id).unwrap().unwrap());
+            assert_eq!(before, ModeSelection::capture(&original));
+            assert!(!before.inferred);
+            let mut live = PostprocConfig {
+                mode: Mode::Elevate,
+                ..Default::default()
+            };
+            live.clean.model = "changed-clean".into();
+            live.elevate.model = "changed-elevate".into();
+            before.apply_to(&mut live);
+            assert_eq!(live.mode, mode);
+            if mode != Mode::Raw {
+                assert_eq!(live.model_config(), original.model_config());
+            }
+            for (text, partial) in [
+                (None, false),
+                (Some("cancelled partial"), true),
+                (Some("completed recovery"), false),
+            ] {
+                persist_selected_in(&store, &id, 10, text, None, partial, true, Some(&live))
+                    .unwrap();
+                let after = ModeSelection::from_record(&store.read_record(&id).unwrap().unwrap());
+                assert_eq!(after, before);
+            }
+            assert_eq!(read_text_in(&store, &id).unwrap(), "completed recovery");
+        }
+    }
+
+    #[test]
+    fn legacy_mode_inference_never_borrows_the_current_default_model() {
+        use crate::config::Mode;
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        for (evidence, expected) in [
+            (json!({"postproc": {"status": "off"}}), Mode::Raw),
+            (
+                json!({"postproc": {"status": "failed", "model": "old-model"}}),
+                Mode::Clean,
+            ),
+            (
+                json!({"postproc": {"status": "skipped_short"}}),
+                Mode::Clean,
+            ),
+            (json!({"alias_substitutions": 1}), Mode::Clean),
+            (json!({}), Mode::Raw),
+        ] {
+            let id = new_id();
+            let mut old = evidence;
+            old["session_id"] = json!(id);
+            old["raw_transcript"] = json!("old words");
+            store.write_record(&id, &old).unwrap();
+            let live = PostprocConfig {
+                mode: Mode::Elevate,
+                ..Default::default()
+            };
+            persist_selected_in(&store, &id, 10, None, None, false, true, Some(&live)).unwrap();
+            let record = store.read_record(&id).unwrap().unwrap();
+            let selection = ModeSelection::from_record(&record);
+            assert_eq!(selection.mode, expected);
+            assert!(selection.inferred);
+            assert_eq!(record["mode_inferred"], true);
+            let mut retry = live;
+            selection.apply_to(&mut retry);
+            assert_eq!(retry.mode, expected);
+            if expected == Mode::Clean {
+                assert!(retry.model_config().model.is_empty());
+            }
+        }
     }
 
     #[test]
@@ -1249,7 +1428,21 @@ mod tests {
         fs::set_permissions(&old_runtime, fs::Permissions::from_mode(0o644)).unwrap();
         {
             let store = fixture.store();
-            persist_in(&store, &queued_id, 10, None, None, false, true).unwrap();
+            let selected = PostprocConfig {
+                mode: crate::config::Mode::Elevate,
+                ..Default::default()
+            };
+            persist_selected_in(
+                &store,
+                &queued_id,
+                10,
+                None,
+                None,
+                false,
+                true,
+                Some(&selected),
+            )
+            .unwrap();
             persist_in(
                 &store,
                 &unrelated_id,
@@ -1271,6 +1464,20 @@ mod tests {
                 let take = get_in(&store, id).unwrap();
                 assert!(take.audio_available && take.unresolved);
                 assert!(!take.text_available);
+                let record = store.read_record(id).unwrap().unwrap();
+                let selection = ModeSelection::from_record(&record);
+                if id == &queued_id {
+                    assert_eq!(selection.mode, crate::config::Mode::Elevate);
+                    assert!(!selection.inferred);
+                    assert_eq!(
+                        selection.model,
+                        Some(crate::config::ModeModelConfig::default())
+                    );
+                } else {
+                    assert_eq!(selection.mode, crate::config::Mode::Raw);
+                    assert!(selection.inferred);
+                    assert_eq!(record["mode_inferred"], true);
+                }
                 assert_eq!(
                     fs::read(fixture.history.join(format!("{id}.wav"))).unwrap(),
                     fs::read(&fixture.wav).unwrap()

@@ -14,6 +14,26 @@
     "action": "cantrip toggle --postproc clean",
     "description": "Same action as Super+Shift+R; applies vocabulary aliases, then any configured LLM cleanup"
   },
+  "cantrip.elevate": {
+    "label": "Toggle elevate dictation",
+    "action": "cantrip toggle --postproc elevate",
+    "description": "Applies vocabulary aliases, then the Elevate model's clearer, more articulate version"
+  },
+  "cantrip.default-raw": {
+    "label": "Default mode: Raw",
+    "action": "cantrip mode raw",
+    "description": "Takes started without a per-take mode use it; a running take keeps its own"
+  },
+  "cantrip.default-clean": {
+    "label": "Default mode: Clean",
+    "action": "cantrip mode clean",
+    "description": "Takes started without a per-take mode use it; a running take keeps its own"
+  },
+  "cantrip.default-elevate": {
+    "label": "Default mode: Elevate",
+    "action": "cantrip mode elevate",
+    "description": "Takes started without a per-take mode use it; a running take keeps its own"
+  },
   "cantrip.stop": {
     "label": "Stop recording",
     "action": "cantrip stop",
@@ -39,7 +59,7 @@
   "cantrip.settings": {
     "label": "Settings",
     "action": "cantrip settings",
-    "description": "Input, models, provider configuration, state labels, and reduced motion"
+    "description": "Input, modes and their models, provider configuration, state labels, and reduced motion"
   },
   "cantrip.check": {
     "label": "Check setup",

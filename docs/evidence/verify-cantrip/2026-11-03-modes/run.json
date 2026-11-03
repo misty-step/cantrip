@@ -1,0 +1,563 @@
+{
+  "schema": 1,
+  "claim_type": "measured",
+  "date": "2026-11-03",
+  "result": "passed",
+  "scope": "Author-run native app, real capture/IPC/retention/clipboard, synthetic loopback STT and LLM providers; not recognition or cloud-model quality.",
+  "app": {
+    "source_revision": "a3ac648f56fee3bfc60b510239c5cf76d15519ca",
+    "source_tree_dirty": false,
+    "integrated_master": "8c55f7f",
+    "capture_guidance_pr": 256,
+    "target": "aarch64-apple-darwin",
+    "version": "0.1.12",
+    "signing": "ad-hoc-development",
+    "production_signed": false,
+    "notarized": false,
+    "installed_binary_sha256": "353fb4878a17b3a0e3389d6cad1e46e2746b97eb41dd07676b1449fa7c33eb2e",
+    "archive_sha256": "c55b47769bd225bc685697988e35a2b627bb79f20e258e3799608581245db1c5"
+  },
+  "method": {
+    "launch": "open -a /Applications/Cantrip.app",
+    "input": "macvm hardware mouse clicks and keys; native microphone consent and guest System Settings appearance controls",
+    "app_or_hud_mocked": false,
+    "app_screenshot_command_used": false,
+    "capture_input": "BlackHole 2ch; concrete UID BlackHole2ch_UID",
+    "capture_signal_observed": true,
+    "audio_fixture": "samples/jfk.wav",
+    "audio_fixture_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+    "stt_provider": "synthetic HTTP fixture at 127.0.0.1:9900/v1",
+    "llm_provider": "synthetic HTTP fixture at the same endpoint",
+    "provider_delay_seconds": 7,
+    "paid_requests": 0,
+    "credentials_in_guest": false,
+    "delivery": "real guest clipboard; exact private comparison without printing text",
+    "appearance": [
+      "light",
+      "dark"
+    ],
+    "display_pixels": [
+      1440,
+      900
+    ],
+    "dock_visible": true
+  },
+  "checks": {
+    "menu_default_persisted": [
+      "raw",
+      "clean",
+      "elevate"
+    ],
+    "settings_default_saved": [
+      "clean",
+      "elevate"
+    ],
+    "settings_radio_selection_exclusive": true,
+    "mode_descriptions_and_stage_models_visible": true,
+    "legacy_enabled_removed": true,
+    "unrelated_config_comment_preserved": true,
+    "hud_recording_and_stt_modes": [
+      "raw",
+      "clean",
+      "elevate"
+    ],
+    "hud_llm_modes": [
+      "clean",
+      "elevate"
+    ],
+    "elevate_capture_kept_mode_after_default_changed_to_raw": true,
+    "elevate_system_prefix_operator_and_addendum_verbatim": true,
+    "elevate_effective_system_matches_selected_cloud_trial_sha256": "01637ab0f1d996936893659b4eda602399f1f2ebe7ac8e7baa38f55a342066b3",
+    "raw_override_under_elevate_default": true,
+    "merged_no_sound_guidance_kept_mode_header": true,
+    "public_signal_cleared_guidance": true,
+    "same_cancelled_take_recovered": true,
+    "recovery_kept_recorded_raw_under_elevate_default": true,
+    "recovery_cli_exit": 0,
+    "save_controls_reachable_with_dock_visible_after_saved_notice": true
+  },
+  "observed_processing_status": [
+    {
+      "mode": "raw",
+      "stage": "transcribing",
+      "configured_default": "raw"
+    },
+    {
+      "mode": "clean",
+      "stage": "transcribing",
+      "configured_default": "clean"
+    },
+    {
+      "mode": "clean",
+      "stage": "cleaning-up",
+      "configured_default": "clean"
+    },
+    {
+      "mode": "elevate",
+      "stage": "transcribing",
+      "configured_default": "raw"
+    },
+    {
+      "mode": "elevate",
+      "stage": "cleaning-up",
+      "configured_default": "raw"
+    }
+  ],
+  "takes": [
+    {
+      "label": "raw",
+      "mode": "raw",
+      "configured_default": "raw",
+      "completeness": "complete",
+      "delivery": "copied",
+      "audio_retained": true,
+      "alias_substitutions": 0,
+      "postproc_status": "off",
+      "requests": [
+        {
+          "stage": "stt",
+          "model": "proof-stt",
+          "request_bytes": 672572
+        }
+      ],
+      "result": "passed",
+      "private_content_exported": false
+    },
+    {
+      "label": "clean",
+      "mode": "clean",
+      "configured_default": "clean",
+      "completeness": "complete",
+      "delivery": "copied",
+      "audio_retained": true,
+      "alias_substitutions": 1,
+      "postproc_status": "applied",
+      "requests": [
+        {
+          "stage": "stt",
+          "model": "proof-stt",
+          "request_bytes": 1093764
+        },
+        {
+          "stage": "llm",
+          "model": "proof-clean",
+          "system_sha256": "b8fd60d57772047dcd9057e71240c6ecbbec99c799ac989929705e1c00911aed",
+          "request_bytes": 3683
+        }
+      ],
+      "result": "passed",
+      "private_content_exported": false
+    },
+    {
+      "label": "elevate",
+      "mode": "elevate",
+      "configured_default": "raw",
+      "completeness": "complete",
+      "delivery": "copied",
+      "audio_retained": true,
+      "alias_substitutions": 1,
+      "postproc_status": "applied",
+      "requests": [
+        {
+          "stage": "stt",
+          "model": "proof-stt",
+          "request_bytes": 7641584
+        },
+        {
+          "stage": "llm",
+          "model": "proof-elevate",
+          "system_sha256": "01637ab0f1d996936893659b4eda602399f1f2ebe7ac8e7baa38f55a342066b3",
+          "request_bytes": 3348
+        }
+      ],
+      "result": "passed",
+      "private_content_exported": false
+    },
+    {
+      "label": "cancelled-raw",
+      "mode": "raw",
+      "configured_default": "elevate",
+      "completeness": "cancelled",
+      "delivery": "cancelled",
+      "audio_retained": true,
+      "alias_substitutions": 0,
+      "postproc_status": null,
+      "requests": [],
+      "result": "passed",
+      "private_content_exported": false
+    },
+    {
+      "label": "recovered-raw",
+      "mode": "raw",
+      "configured_default": "elevate",
+      "completeness": "complete",
+      "delivery": "copied",
+      "audio_retained": true,
+      "alias_substitutions": 0,
+      "postproc_status": "off",
+      "requests": [
+        {
+          "stage": "stt",
+          "model": "proof-stt",
+          "request_bytes": 1774724
+        }
+      ],
+      "result": "passed",
+      "private_content_exported": false
+    }
+  ],
+  "runtime_defect_found_and_fixed": {
+    "initial_source": "27a4639c039a31fdd05c17e7e9617feaed9db77a",
+    "observation": "Changing from Transcripts to Modes preserved the short pane top edge and put Save & Apply behind the Dock at 1440x900.",
+    "fix_commit": "a3ac648f56fee3bfc60b510239c5cf76d15519ca",
+    "fix": "Constrain the resized Settings frame vertically to the screen visible frame while preserving the top edge where possible.",
+    "repeated_on_fixed_binary": "Full menu, Settings, Raw/Clean/Elevate capture and processing, override, guidance coexistence, and recovery path."
+  },
+  "resources": {
+    "maximum_concurrent_vms": 1,
+    "cargo_build_jobs": 4,
+    "each_package_finished_before_vm_boot": true,
+    "initial_vm": "macvm-modes258",
+    "initial_vm_deleted_before_rebuild": true,
+    "passing_proof_vm": "macvm-modes258-final",
+    "passing_proof_vm_deleted": true,
+    "final_macvm_ls": "empty",
+    "owned_fixture_stopped": true,
+    "host_desktop_input_audio_clipboard_used": false
+  },
+  "privacy": {
+    "transcript_text_exported": false,
+    "clipboard_text_exported": false,
+    "audio_exported": false,
+    "guest_history_or_logs_exported": false,
+    "take_ids_exported": false,
+    "screenshots": "Reviewed crops of actual VM frames, excluding transcript views; originals remain private.",
+    "crop_metadata_below": true
+  },
+  "cloud_quality_receipt": "../../../../eval/baselines/2026-11-03-elevate/run.json",
+  "screenshots": [
+    {
+      "file": "menu-raw-light.png",
+      "sha256": "d969b6c9e218d07880dc4398031f6b8f21f60459feaa99e6358614fd544f8ad1",
+      "source_frame_sha256": "394bf2d24efedcb8badea788815dfb3b09a425e1acdf09eff1818878df3f49ef",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        1074,
+        30,
+        361,
+        455
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Persisted Raw default, descriptions and recognizer-only pipeline"
+    },
+    {
+      "file": "menu-clean-light.png",
+      "sha256": "ac36966100714827e4bb9a1227e398c98796f7fa6017a543110dc3ad1efffec9",
+      "source_frame_sha256": "b8b824ff8c6a0238f8e946071ae5f2c20328a1fd8b39ac47e190fd9eb9972878",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        1018,
+        30,
+        417,
+        455
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Clean default saved in Settings is checked in the menu"
+    },
+    {
+      "file": "menu-elevate-dark.png",
+      "sha256": "b2811ca93d3815894769af286139873e937cafb2e90b4beba71acf2e86b65d2f",
+      "source_frame_sha256": "e06086ff3d3b8b820e8367d5636baf8808e16f9d400bab1987e41a4e3ee98fed",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        997,
+        30,
+        438,
+        479
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Persisted Elevate default and ordered stage/model label"
+    },
+    {
+      "file": "settings-raw-light.png",
+      "sha256": "3bd12e2533a055be3de746ad0382558403fee9703bd793e6a74056a6ddbf805c",
+      "source_frame_sha256": "7441a8810bced96416c2341c2fb18bec93bc5b3ef055faae717f0f98273cea9e",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        414,
+        24,
+        612,
+        876
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Transcripts-to-Modes resize keeps controls reachable with Dock visible"
+    },
+    {
+      "file": "settings-clean-light.png",
+      "sha256": "b2938951d9f1e004c12bd95e1632e73975fc3609c10b027efdcc04f60361cd9d",
+      "source_frame_sha256": "452d851a3772e5f91113f5c6ca5ac6e7bc4de5f36afce05ada44c70153d8157b",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        414,
+        24,
+        612,
+        876
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Exclusive Clean selection, model fields, shared transport and Saved feedback"
+    },
+    {
+      "file": "settings-elevate-dark.png",
+      "sha256": "7f7c8157596748bbb8c1f423da08f52cc46bbf18af8ebf66fb4bc20cc9283cda",
+      "source_frame_sha256": "fe9bb03b9a67dcdafa965308b276eb600aeff1c06b1f2c57edfb42ec026eb3ed",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        414,
+        24,
+        612,
+        876
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Elevate selection, wrapped pipeline and Saved feedback with Dock visible"
+    },
+    {
+      "file": "hud-raw-recording-light.png",
+      "sha256": "69c4f7415d8d0188c00d439a80f5309f8c8f7e02c91a1062c27b366bbf3b34ca",
+      "source_frame_sha256": "b2dcdcf2f36666f12b2c427b6caf70edcbabba71ccc2e09cbc47b6c43e8bdd34",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        720,
+        336,
+        60
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Raw recognizer-only recording HUD with actual input signal"
+    },
+    {
+      "file": "hud-raw-stt-light.png",
+      "sha256": "15088dcb052b6a45f0e968ea214b32ce3163bc1b56347c8e99f7389a8760624d",
+      "source_frame_sha256": "2c67f21d059cba58f5be2838afd57d4f56169263625a8790304f6f026f9afeea",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        720,
+        336,
+        60
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Raw HUD while status reports transcribing"
+    },
+    {
+      "file": "hud-clean-recording-light.png",
+      "sha256": "1a6d8c1e8f76b22f2f250a3db5853c0ec222e3ca15f6ffd01e40e0ab28931971",
+      "source_frame_sha256": "0be5ce1ff0f1dcab304ee9739c278334a87f4630afe5daccbc21e2fc0a0558fc",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        720,
+        336,
+        60
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Clean recording HUD names STT, aliases and Clean model"
+    },
+    {
+      "file": "hud-clean-stt-light.png",
+      "sha256": "cd52699755068ce62b8d6c9af9010140ed443c1c1beef2db1d3b1eea7f08f9ea",
+      "source_frame_sha256": "f0e3e793e61ffaf27f6cdc5471e64caf1fe5ed9f0b641bbbd1e4d8ffaabc49b6",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        720,
+        336,
+        60
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Clean HUD while status reports transcribing"
+    },
+    {
+      "file": "hud-clean-llm-light.png",
+      "sha256": "8e4aeaaa00fb3646e0e795fb2fbbe641fbcdd046b5f7b804b26a6e635b3db088",
+      "source_frame_sha256": "24b76f0fdc815383dbc7911801efafe402f9c6d21858bca50981cf14478d458e",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        720,
+        336,
+        60
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Clean HUD while status reports cleaning-up"
+    },
+    {
+      "file": "hud-elevate-recording-light.png",
+      "sha256": "069f704b73d20893861883e83f007c17ca2589c17d94811b71e26e8fbbdb1268",
+      "source_frame_sha256": "ca58ba091530342f00b74cd4d42a31e4ca73b05749e7ebe383abb6b4d6c138f4",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        704,
+        336,
+        76
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Elevate recording HUD wraps its complete pipeline"
+    },
+    {
+      "file": "hud-elevate-stt-light.png",
+      "sha256": "a00905efd089947521e5161423bfd77518b79f839957e3d0d89726f467d9b2cf",
+      "source_frame_sha256": "63306f4a11f08842e6412b06be9c394c8e0eccaecf81898c66d70618b69d7d90",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        704,
+        336,
+        76
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Elevate HUD while transcribing after default changed to Raw"
+    },
+    {
+      "file": "hud-elevate-llm-light.png",
+      "sha256": "df30802d44020884965e4d901e05095695519dff4025fe9e428d3699df81aa16",
+      "source_frame_sha256": "e5fa3f5916cb3e530ed2a40c1389a638fffa224473d90a4a415e3b1bdd640946",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        704,
+        336,
+        76
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Elevate HUD during its LLM stage after default changed to Raw"
+    },
+    {
+      "file": "snapshot-default-raw-menu-light.png",
+      "sha256": "f71a24ae4a886221f78f145a11f14ea3f837a6b807922629df88de88dbbe11ec",
+      "source_frame_sha256": "4c0689a085de2ae1d2fec7d4dab6631720bac1b4a60e22d296056ae75864160b",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        1074,
+        30,
+        361,
+        455
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Next-take default is Raw while the ongoing take remains Elevate"
+    },
+    {
+      "file": "snapshot-active-elevate-hud-light.png",
+      "sha256": "d1ddb782db45c2309f0c71b61b02e6c96dd0d035d2eea5a1d3f4943013173803",
+      "source_frame_sha256": "4c0689a085de2ae1d2fec7d4dab6631720bac1b4a60e22d296056ae75864160b",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        704,
+        336,
+        76
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Same original frame as default-Raw menu; active capture remains Elevate"
+    },
+    {
+      "file": "hud-raw-override-guidance-dark.png",
+      "sha256": "4c56292da28cb37ec2bc3b561e060ec9461cd7485b78bbb5eb3ecb917d06545d",
+      "source_frame_sha256": "7b08e15233b13e7429b1b6457537a9275346cc63b4964114437aab5eaca1b8a8",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        668,
+        336,
+        112
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Raw per-take override under Elevate default coexists with merged no-sound guidance"
+    },
+    {
+      "file": "hud-raw-override-signal-dark.png",
+      "sha256": "437fccfc6eac7c39928d832c99daa47984dddeea828800bc6a4eb08ae3d1610f",
+      "source_frame_sha256": "995c2bea64b15aa4fa7664acd83ebcbad943e3088c57df31ab8a495094ad89f1",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        720,
+        336,
+        60
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Public audio clears guidance without changing the Raw override"
+    },
+    {
+      "file": "hud-recovered-raw-dark.png",
+      "sha256": "77c478bd58f767003ab064e99df37fd7b2e8553934d611c0b7eee9da9ba8f81b",
+      "source_frame_sha256": "95084e861da6aafd26f0035d03eb2cf7870ff80f807e80312256d972b0a66a0f",
+      "source_dimensions": [
+        1440,
+        900
+      ],
+      "crop_xywh": [
+        552,
+        691,
+        336,
+        89
+      ],
+      "transformation": "crop only; no scaling, compositing or text overlays",
+      "observation": "Recovered Raw take reports copied while configured default remains Elevate"
+    }
+  ]
+}

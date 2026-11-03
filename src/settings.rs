@@ -16,6 +16,9 @@
 //! access and sets the global dictation shortcut; there `cantrip settings`
 //! asks the running app to show its window.
 //!
+//! [`save_default_mode`] and [`cycle_default_mode`] persist only the default
+//! mode, with the same in-place editing, for the macOS menu and `cantrip mode`.
+//!
 //! `cantrip settings --screenshot <path>` renders the window to a PNG and
 //! exits, for visual testing without a screenshot utility.
 
@@ -23,6 +26,8 @@
 mod linux;
 pub(crate) mod model;
 pub(crate) mod store;
+
+pub use store::{cycle_default_mode, save_default_mode};
 
 use crate::theme;
 use anyhow::Result;
@@ -98,7 +103,9 @@ pub(crate) fn apply_theme(ctx: &egui::Context, palette: theme::Palette) {
 
 #[cfg(test)]
 pub(crate) mod fixture {
-    use cantrip_engine::config::{Config, HudConfig, PostprocConfig, SttConfig, TelemetryConfig};
+    use cantrip_engine::config::{
+        Config, HudConfig, Mode, ModeModelConfig, PostprocConfig, SttConfig, TelemetryConfig,
+    };
     use cantrip_engine::delivery::InjectionMode;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -145,11 +152,18 @@ pub(crate) mod fixture {
                 api_key_id: None,
             },
             postproc: PostprocConfig {
-                enabled: true,
+                mode: Mode::Clean,
+                clean: ModeModelConfig {
+                    model: "qwen3:8b".to_owned(),
+                    reasoning_effort: Some("low".to_owned()),
+                },
+                // A local provider without OpenRouter's reasoning extension.
+                elevate: ModeModelConfig {
+                    model: "llama3.3:70b".to_owned(),
+                    reasoning_effort: None,
+                },
                 endpoint: "http://localhost:11434/v1".to_owned(),
-                model: "qwen3:8b".to_owned(),
                 api_key_id: None,
-                reasoning_effort: Some("low".to_owned()),
                 timeout_ms: 30_000,
                 passes: 1,
                 min_chars: 40,

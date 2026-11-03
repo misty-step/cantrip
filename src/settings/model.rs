@@ -10,7 +10,8 @@ use crate::actions;
 use crate::inject::{self, DeliveryGuard};
 use anyhow::{anyhow, Result};
 use cantrip_engine::config::{
-    Config, HandoffTarget, HudConfig, PostprocConfig, SttConfig, TelemetryConfig, VocabularyEntry,
+    Config, HandoffTarget, HudConfig, Mode, ModeModelConfig, PostprocConfig, SttConfig,
+    TelemetryConfig, VocabularyEntry,
 };
 use cantrip_engine::delivery::{InjectionFailureKind, InjectionMode};
 use cantrip_engine::{ipc, recovery};
@@ -50,13 +51,17 @@ pub(crate) struct Editable {
     pub(crate) stt_model: String,
     pub(crate) stt_endpoint: String,
     pub(crate) stt_key: String,
-    pub(crate) pp_enabled: bool,
+    /// The default mode for new takes; a per-take override never changes it.
+    pub(crate) mode: Mode,
+    /// Each mode's own model and reasoning effort. An empty model applies
+    /// vocabulary aliases only; an empty effort is not sent.
+    pub(crate) clean_model: String,
+    pub(crate) clean_effort: String,
+    pub(crate) elevate_model: String,
+    pub(crate) elevate_effort: String,
+    /// Shared by Clean and Elevate.
     pub(crate) pp_endpoint: String,
-    pub(crate) pp_model: String,
     pub(crate) pp_key: String,
-    /// Not editable in the window; carried through saves so a
-    /// config-file reasoning effort survives a settings write.
-    pp_effort: Option<String>,
     pub(crate) pp_timeout: u64,
     pub(crate) pp_passes: u8,
     pub(crate) pp_min_chars: usize,
@@ -92,11 +97,23 @@ impl Editable {
             stt_model: cfg.stt.model.clone(),
             stt_endpoint: cfg.stt.endpoint.clone().unwrap_or_default(),
             stt_key: cfg.stt.api_key_id.clone().unwrap_or_default(),
-            pp_enabled: cfg.postproc.enabled,
+            mode: cfg.postproc.mode,
+            clean_model: cfg.postproc.clean.model.clone(),
+            clean_effort: cfg
+                .postproc
+                .clean
+                .reasoning_effort
+                .clone()
+                .unwrap_or_default(),
+            elevate_model: cfg.postproc.elevate.model.clone(),
+            elevate_effort: cfg
+                .postproc
+                .elevate
+                .reasoning_effort
+                .clone()
+                .unwrap_or_default(),
             pp_endpoint: cfg.postproc.endpoint.clone(),
-            pp_model: cfg.postproc.model.clone(),
             pp_key: cfg.postproc.api_key_id.clone().unwrap_or_default(),
-            pp_effort: cfg.postproc.reasoning_effort.clone(),
             pp_timeout: cfg.postproc.timeout_ms,
             pp_passes: cfg.postproc.passes,
             pp_min_chars: cfg.postproc.min_chars,
@@ -131,25 +148,8 @@ impl Editable {
             audio_source: non_empty(self.audio_source.trim()),
             hotkey: non_empty(self.hotkey.trim()),
             vocabulary,
-            stt: SttConfig {
-                model: self.stt_model.trim().to_owned(),
-                endpoint: non_empty(self.stt_endpoint.trim()),
-                api_key_id: non_empty(self.stt_key.trim()),
-            },
-            postproc: PostprocConfig {
-                enabled: self.pp_enabled,
-                endpoint: self.pp_endpoint.trim().to_owned(),
-                model: self.pp_model.trim().to_owned(),
-                api_key_id: non_empty(self.pp_key.trim()),
-                reasoning_effort: self.pp_effort.clone(),
-                timeout_ms: self.pp_timeout,
-                passes: self.pp_passes,
-                min_chars: self.pp_min_chars,
-                instructions: self.pp_instructions.clone(),
-                decision_model: self.pp_decision_model.clone(),
-                decision_endpoint: self.pp_decision_endpoint.clone(),
-                decision_api_key_id: self.pp_decision_key.clone(),
-            },
+            stt: self.stt(),
+            postproc: self.postproc(),
             telemetry: self.telemetry.clone(),
             hud: self.hud,
             handoff: self.handoff.clone(),
@@ -157,9 +157,45 @@ impl Editable {
         }
     }
 
-    pub(crate) fn cleanup_note(&self) -> Option<&'static str> {
-        (self.pp_enabled && self.pp_model.trim().is_empty())
-            .then_some("Clean applies vocabulary aliases only (no cleanup model).")
+    /// What new takes run with the values in the form, in the engine's words:
+    /// recognizer and where it runs, then aliases and the selected mode's model.
+    pub(crate) fn pipeline(&self) -> String {
+        Config {
+            stt: self.stt(),
+            postproc: self.postproc(),
+            ..Config::default()
+        }
+        .pipeline_display()
+        .label()
+    }
+
+    fn stt(&self) -> SttConfig {
+        SttConfig {
+            model: self.stt_model.trim().to_owned(),
+            endpoint: non_empty(self.stt_endpoint.trim()),
+            api_key_id: non_empty(self.stt_key.trim()),
+        }
+    }
+
+    fn postproc(&self) -> PostprocConfig {
+        let mode_model = |model: &str, effort: &str| ModeModelConfig {
+            model: model.trim().to_owned(),
+            reasoning_effort: non_empty(effort.trim()),
+        };
+        PostprocConfig {
+            mode: self.mode,
+            clean: mode_model(&self.clean_model, &self.clean_effort),
+            elevate: mode_model(&self.elevate_model, &self.elevate_effort),
+            endpoint: self.pp_endpoint.trim().to_owned(),
+            api_key_id: non_empty(self.pp_key.trim()),
+            timeout_ms: self.pp_timeout,
+            passes: self.pp_passes,
+            min_chars: self.pp_min_chars,
+            instructions: self.pp_instructions.clone(),
+            decision_model: self.pp_decision_model.clone(),
+            decision_endpoint: self.pp_decision_endpoint.clone(),
+            decision_api_key_id: self.pp_decision_key.clone(),
+        }
     }
 }
 
@@ -304,6 +340,7 @@ impl SettingsForm {
             ));
             return None;
         }
+        self.follow_saved_mode();
         let config = self.edit.to_config();
         if let Err(problem) = check(&config) {
             self.notice = Some(Notice::attention(format!("Not saved — {problem}")));
@@ -317,6 +354,37 @@ impl SettingsForm {
             }
         }
         Some(self.apply())
+    }
+
+    /// Adopt a default mode saved elsewhere since this form loaded, by the macOS
+    /// menu or `cantrip mode`, when that is the file's only change. Unsaved edits
+    /// stay, and the saved mode replaces the form's unless the form chose its own.
+    /// Any other change still makes Save refuse until the file is reloaded.
+    pub(crate) fn follow_saved_mode(&mut self) {
+        if !self.loaded_ok || self.applying {
+            return;
+        }
+        let Ok(text) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        if text == self.loaded_text {
+            return;
+        }
+        let (Ok(mut loaded), Ok(saved)) = (
+            toml::from_str::<Config>(&self.loaded_text),
+            toml::from_str::<Config>(&text),
+        ) else {
+            return;
+        };
+        let chosen_here = self.edit.mode != loaded.postproc.mode;
+        loaded.postproc.mode = saved.postproc.mode;
+        if loaded != saved {
+            return;
+        }
+        if !chosen_here {
+            self.edit.mode = saved.postproc.mode;
+        }
+        self.loaded_text = text;
     }
 
     /// Refuse to save because the window could not read a value it shows,
@@ -1035,13 +1103,112 @@ mod tests {
     }
 
     #[test]
-    fn aliases_only_note_follows_the_enabled_mode_and_model_field() {
+    fn the_pipeline_follows_the_chosen_mode_and_that_modes_own_model() {
+        use cantrip_engine::config::PipelineDisplay;
+        let shown = |mode, llm_model: Option<&str>| {
+            PipelineDisplay {
+                mode,
+                stt_model: sample_config().stt.model,
+                stt_local: true,
+                llm_model: llm_model.map(str::to_owned),
+            }
+            .label()
+        };
         let mut edit = Editable::from_config(&sample_config());
-        assert!(edit.cleanup_note().is_none());
-        edit.pp_model = "  ".into();
-        assert!(edit.cleanup_note().is_some());
-        edit.pp_enabled = false;
-        assert!(edit.cleanup_note().is_none());
+        edit.clean_model = " clean-model ".into();
+        edit.elevate_model = "vendor/elevate-model".into();
+        edit.mode = Mode::Clean;
+        assert_eq!(edit.pipeline(), shown(Mode::Clean, Some("clean-model")));
+        edit.mode = Mode::Elevate;
+        assert_eq!(
+            edit.pipeline(),
+            shown(Mode::Elevate, Some("vendor/elevate-model"))
+        );
+        // An empty model leaves only that mode without an LLM; Raw never has one.
+        edit.elevate_model = "  ".into();
+        assert_eq!(edit.pipeline(), shown(Mode::Elevate, None));
+        edit.mode = Mode::Raw;
+        assert_eq!(edit.pipeline(), shown(Mode::Raw, None));
+    }
+
+    #[test]
+    fn saving_keeps_each_modes_model_an_omitted_effort_and_no_credential() {
+        let fixture = ConfigFixture::new();
+        let local = "[postproc]\nmode = \"clean\"\nendpoint = \"http://localhost:11434/v1\"\n\n[postproc.clean]\nmodel = \"qwen3:8b\"\nreasoning_effort = \"\"\n";
+        fs::write(fixture.path(), local).expect("fixture");
+        let mut form = SettingsForm::load(fixture.path());
+        assert_eq!(form.edit.mode, Mode::Clean);
+        assert!(form.edit.clean_effort.is_empty() && form.edit.pp_key.is_empty());
+        form.edit.mode = Mode::Elevate;
+        form.edit.pp_timeout = 20_000;
+        assert!(form.save().is_some());
+        let saved = fs::read_to_string(fixture.path()).expect("saved");
+        let config: Config = toml::from_str(&saved).expect("parses");
+        assert_eq!(config.postproc.mode, Mode::Elevate);
+        let qwen = ModeModelConfig {
+            model: "qwen3:8b".to_owned(),
+            reasoning_effort: None,
+        };
+        assert_eq!(config.postproc.clean, qwen);
+        assert_eq!(config.postproc.api_key_id, None);
+        // An untouched Elevate keeps following the defaults instead of pinning them.
+        assert_eq!(config.postproc.elevate, ModeModelConfig::default());
+        let document: toml::Value = toml::from_str(&saved).expect("document");
+        assert!(document["postproc"].get("elevate").is_none(), "{saved}");
+        assert!(document["postproc"].get("api_key_id").is_none(), "{saved}");
+
+        let mut form = SettingsForm::load(fixture.path());
+        form.edit.elevate_model = "llama3.3:70b".to_owned();
+        form.edit.elevate_effort.clear();
+        assert!(form.save().is_some());
+        let saved = fs::read_to_string(fixture.path()).expect("saved");
+        let config: Config = toml::from_str(&saved).expect("parses");
+        let llama = ModeModelConfig {
+            model: "llama3.3:70b".to_owned(),
+            reasoning_effort: None,
+        };
+        assert_eq!(
+            (config.postproc.clean, config.postproc.elevate),
+            (qwen, llama)
+        );
+    }
+
+    #[test]
+    fn a_mode_saved_elsewhere_is_followed_without_losing_unsaved_edits() {
+        let fixture = ConfigFixture::new();
+        fs::write(fixture.path(), "# mine\n[postproc]\nenabled = true\n").expect("fixture");
+        let mut form = SettingsForm::load(fixture.path());
+        form.edit.pp_timeout = 20_000;
+        // The menu or `cantrip mode` saves a new default while the form is open.
+        store::save_default_mode(fixture.path().as_path(), Mode::Elevate).expect("mode saved");
+        assert!(form.save().is_some(), "{:?}", form.notice);
+        let saved: Config =
+            toml::from_str(&fs::read_to_string(fixture.path()).expect("saved")).expect("parses");
+        assert_eq!(saved.postproc.mode, Mode::Elevate);
+        assert_eq!(saved.postproc.timeout_ms, 20_000);
+
+        // A mode chosen in the form wins over one saved elsewhere meanwhile.
+        let mut form = SettingsForm::load(fixture.path());
+        form.edit.mode = Mode::Clean;
+        store::save_default_mode(fixture.path().as_path(), Mode::Raw).expect("mode saved");
+        assert!(form.save().is_some(), "{:?}", form.notice);
+        let saved: Config =
+            toml::from_str(&fs::read_to_string(fixture.path()).expect("saved")).expect("parses");
+        assert_eq!(saved.postproc.mode, Mode::Clean);
+
+        // Any other change still waits for Reload from Disk.
+        let mut form = SettingsForm::load(fixture.path());
+        let saved = fs::read_to_string(fixture.path()).expect("saved");
+        assert!(saved.contains("keep_warm = true"), "{saved}");
+        let external = saved.replace("keep_warm = true", "keep_warm = false");
+        fs::write(fixture.path(), &external).expect("external edit");
+        store::save_default_mode(fixture.path().as_path(), Mode::Elevate).expect("mode saved");
+        assert!(form.save().is_none());
+        assert_eq!(
+            form.edit.mode,
+            Mode::Clean,
+            "an unrelated change adopts nothing"
+        );
     }
 
     #[test]

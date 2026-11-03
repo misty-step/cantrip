@@ -1,7 +1,7 @@
 //! Typed command acknowledgements and identity-aware daemon snapshots.
 
 pub use crate::audio::AUDIO_WAVEFORM_BINS;
-use crate::config::HudConfig;
+use crate::config::{HudConfig, Mode, PipelineDisplay};
 use crate::paths;
 use crate::pipeline::Stage;
 use crate::recovery::Take;
@@ -24,12 +24,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Command {
     Toggle {
-        postproc: Option<bool>,
+        postproc: Option<Mode>,
         #[serde(default)]
         handoff: Option<String>,
     },
     Start {
-        postproc: Option<bool>,
+        postproc: Option<Mode>,
         #[serde(default)]
         handoff: Option<String>,
     },
@@ -520,6 +520,9 @@ pub struct StatusSnapshot {
     /// (Linux) or the owner predates this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microphone: Option<MicrophoneAccess>,
+    /// Selected take pipeline while active; configured default while idle.
+    #[serde(default)]
+    pub pipeline: Option<PipelineDisplay>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_guidance: Option<CaptureGuidance>,
 }
@@ -1187,7 +1190,7 @@ mod tests {
     fn handoff_commands_roundtrip_and_old_clients_default_to_none() {
         for command in [
             Command::Toggle {
-                postproc: Some(true),
+                postproc: Some(Mode::Elevate),
                 handoff: Some("pepper".into()),
             },
             Command::Start {
@@ -1206,12 +1209,32 @@ mod tests {
             }
         );
         assert_eq!(
-            serde_json::from_str::<Command>(r#"{"command":"start","postproc":false}"#).unwrap(),
+            serde_json::from_str::<Command>(r#"{"command":"start","postproc":"raw"}"#).unwrap(),
             Command::Start {
-                postproc: Some(false),
+                postproc: Some(Mode::Raw),
                 handoff: None
             }
         );
+        for mode in Mode::ALL {
+            for command in [
+                Command::Toggle {
+                    postproc: Some(mode),
+                    handoff: None,
+                },
+                Command::Start {
+                    postproc: Some(mode),
+                    handoff: None,
+                },
+            ] {
+                let wire = serde_json::to_value(&command).unwrap();
+                assert_eq!(wire["postproc"], mode.as_str());
+                assert_eq!(serde_json::from_value::<Command>(wire).unwrap(), command);
+            }
+        }
+        assert!(
+            serde_json::from_str::<Command>(r#"{"command":"start","postproc":"unknown"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<Command>(r#"{"command":"start","postproc":true}"#).is_err());
         assert_eq!(
             serde_json::to_string(&Delivery::HandedOff).unwrap(),
             "\"handed-off\""

@@ -34,6 +34,7 @@ use transcribe_rs::onnx::moonshine::{MoonshineModel, MoonshineParams, MoonshineV
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
+mod elevate;
 mod judge;
 mod langfuse;
 mod schedule;
@@ -1500,6 +1501,9 @@ fn normalize_behavior_text(text: &str) -> String {
 }
 
 fn run_behavior(args: &[String]) -> Result<()> {
+    if parse_flag(args, "--mode").is_some_and(|values| values == ["elevate"]) {
+        return elevate::run(args);
+    }
     let started_at = std::time::SystemTime::now();
     let config = load_config(args)?;
     validate_config(&config)?;

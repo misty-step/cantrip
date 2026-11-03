@@ -1,0 +1,2270 @@
+{
+  "schema": "cantrip.eval.elevate-receipt.v1",
+  "claim_type": "Measured execution/accounting; semantic failures are explicit unblinded builder judgments, not an independent oracle.",
+  "source_revision": "a140b99dcd978ced2f26deb624967b6b9f0cbcf6",
+  "corpus_version": "2026-11-03-r1",
+  "corpus_sha256": "1317c0d6951b323a28c72a5cd670c993923a8122a5851f85886a4fba837a15db",
+  "inherited_corpus_sha256": "447c382098bdd4d0a20d34f909dcd57a81a1a6d6f80b70cc910e3d2d024f1885",
+  "inherited_cases": 33,
+  "added_cases": 8,
+  "model": "openai/gpt-6.1-sol",
+  "reasoning_effort": "low",
+  "production_path": "vocabulary::apply then postproc::refine (production prompt, request serialization, response normalization, usage and shared deadline)",
+  "system_prompt_sha256": "5ef810baaac6da2d2983ef674010d5ef2d797ead46ed46bc871b93aa5ff67e0f",
+  "operator_prompt_sha256": "0dadc03aaacd757190ce83f5ded06091d5bbb51c5912ecd123deec018a1d32c0",
+  "timeout_ms": 30000,
+  "calls": [
+    {
+      "case": "basic-punctuation",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 595,
+      "output_tokens": 16,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00135,
+      "alias_substitutions": 0,
+      "source_sha256": "d493d0238f17673f124f28885ee2fba00056de43b0b302b22ba697c54beb2108",
+      "output_sha256": "997bd4ef96cc7f25c5b16b21881359ec0e32d9fe220b0ca0449093404ebac00a",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 405,
+      "refine_elapsed_scope": "local_retained_response_normalization",
+      "upstream_latency_ms": 1505.345,
+      "provider_generation_id": "gen-1793734885-4x41eGv1A6jIagd1Z6ce",
+      "production_request_sha256": "6b1fa83dbd53f845a72349aa4c870636b3026f0a511237526793ebe5a4972b93",
+      "user_prompt_sha256": "ef8d39860614510cf1965200efdc230194bfef57d8ffd7b6aeb4a4341b3c3633",
+      "raw_response_sha256": "5f6ae18cfbdadc2f2d20a7b5f946b3e770268496d3cf417ab20cfee3a11f37e6",
+      "locally_replayed_completed_response": true,
+      "initial_attempt_elapsed_ms": 2167,
+      "initial_attempt_transport_accounting_failure": false,
+      "budget": {
+        "key_usage_before_usd": 2.784823119,
+        "key_usage_after_usd": 2.784823119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184976,
+        "conservative_key_liability_before_usd": 2.784823119
+      }
+    },
+    {
+      "case": "filler-removal",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 595,
+      "output_tokens": 11,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.0013,
+      "alias_substitutions": 0,
+      "source_sha256": "51d96f8267fd7de6f261aad3041c901b998fc095a2602d36588a8f1276df3e04",
+      "output_sha256": "a9ddfd684064f349d5483157f596a2e20f8d0d8a9b4a43d394a22747f57be00c",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 688,
+      "refine_elapsed_scope": "local_retained_response_normalization",
+      "upstream_latency_ms": 1793.859,
+      "provider_generation_id": "gen-1793734890-T5cet9N0Ri4SX2RcRpvu",
+      "production_request_sha256": "c34f09bbf64735986f8885cdb3dbc23a75aa186bad6215b63eb3f39c553fe675",
+      "user_prompt_sha256": "5ab155225916effd39baab3be222c8a966d688284a6e0609b785088149216fb3",
+      "raw_response_sha256": "4009572c796d7caa0abf9c58ec61c9d8d06f91883f148aec488f5431569cc73e",
+      "locally_replayed_completed_response": true,
+      "initial_attempt_elapsed_ms": 2394,
+      "initial_attempt_transport_accounting_failure": false,
+      "budget": {
+        "key_usage_before_usd": 2.784823119,
+        "key_usage_after_usd": 2.784823119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184734,
+        "conservative_key_liability_before_usd": 2.786173119
+      }
+    },
+    {
+      "case": "repeated-words",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 592,
+      "output_tokens": 10,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001284,
+      "alias_substitutions": 0,
+      "source_sha256": "2046e3189ec810346b88ece0c86ea93ea33a354e5ef71c62868eb4f93676b775",
+      "output_sha256": "28cef77bc4b8c291799b74f6f5fd4b3b4956ffbc6adf8be76bc1965b3a6136cd",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 381,
+      "refine_elapsed_scope": "local_retained_response_normalization",
+      "upstream_latency_ms": 1514.677,
+      "provider_generation_id": "gen-1793734892-irAPBHIlGBy1GMSvzRsu",
+      "production_request_sha256": "a852ebd81969e93d70d5a1b0f82e65b234a7211945f29d316f194fa5411b278a",
+      "user_prompt_sha256": "700dad3d6b83d23f2b365c5facab961fec6a905aeebddf46097541e505f7838d",
+      "raw_response_sha256": "9a6c42b8a1e7907dbe80bfbadbab70808f8184a4852bf1c34fc20ec57417daf3",
+      "locally_replayed_completed_response": true,
+      "initial_attempt_elapsed_ms": 2030,
+      "initial_attempt_transport_accounting_failure": false,
+      "budget": {
+        "key_usage_before_usd": 2.784823119,
+        "key_usage_after_usd": 2.784823119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184624,
+        "conservative_key_liability_before_usd": 2.787473119
+      }
+    },
+    {
+      "case": "false-start",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 593,
+      "output_tokens": 11,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001296,
+      "alias_substitutions": 0,
+      "source_sha256": "d38b5f3188354840c47735fb056e138bd0f8b69efd44ef829acf9a52050ec66e",
+      "output_sha256": "428c6f63735660aeb35b074c14002fef5954d118364bfd976723474b9e730b15",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 405,
+      "refine_elapsed_scope": "local_retained_response_normalization",
+      "upstream_latency_ms": 1636.518,
+      "provider_generation_id": "gen-1793734895-nc67co3MpGh70PyyK91T",
+      "production_request_sha256": "725543179b2158cef9c35c76c3b603c518672ae43a942f2b6003f1d84a0903ec",
+      "user_prompt_sha256": "3d67c60d800021eaf33641e2a381b61e5dc6ec33c0e88233c7e701cf00f9cd23",
+      "raw_response_sha256": "03db51d626935cd36da26c11aac7522f2bd7edb054da08cbf21def1a1dfba00f",
+      "locally_replayed_completed_response": true,
+      "initial_attempt_elapsed_ms": 2362,
+      "initial_attempt_transport_accounting_failure": false,
+      "budget": {
+        "key_usage_before_usd": 2.784823119,
+        "key_usage_after_usd": 2.784823119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184954,
+        "conservative_key_liability_before_usd": 2.788757119
+      }
+    },
+    {
+      "case": "truncated-acronym",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 594,
+      "output_tokens": 46,
+      "reasoning_tokens": 31,
+      "cost_usd": 0.001648,
+      "alias_substitutions": 0,
+      "source_sha256": "df54bb3bfc1cc695ce6a09b1576dffce66e912061aa7d3928dd99fdd5b06f0f9",
+      "output_sha256": "ceb887b3edbf73efa1523ae20926c508849a19995bf24bb4b12c55d4c970450c",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 392,
+      "refine_elapsed_scope": "local_retained_response_normalization",
+      "upstream_latency_ms": 3823.576,
+      "provider_generation_id": "gen-1793734897-Aunhdm000iYPmW1EcjrU",
+      "production_request_sha256": "1787ddca99242664ebac4b8bc2f976eb9f46f80b3e73e3bfd6b071b775422976",
+      "user_prompt_sha256": "ed0a73fc2ff50cf728526a2aaea469ff26c7dcac5917625e6ecaa59b13a850b6",
+      "raw_response_sha256": "2928e9843484057e757dea64edc3a272d745646391ba2c38dfdc0654658a45f6",
+      "locally_replayed_completed_response": true,
+      "initial_attempt_elapsed_ms": 4358,
+      "initial_attempt_transport_accounting_failure": false,
+      "budget": {
+        "key_usage_before_usd": 2.784823119,
+        "key_usage_after_usd": 2.784823119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184954,
+        "conservative_key_liability_before_usd": 2.790053119
+      }
+    },
+    {
+      "case": "technical-spelling",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 594,
+      "output_tokens": 14,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001328,
+      "alias_substitutions": 1,
+      "source_sha256": "8e67d1ee9433e9b0e0fa1341d964d8a32911e172253c5f35593875d1d903231e",
+      "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 397,
+      "refine_elapsed_scope": "local_retained_response_normalization",
+      "upstream_latency_ms": 1441.859,
+      "provider_generation_id": "gen-1793734902-S9MaoRVEYaP2TRfQuF9T",
+      "production_request_sha256": "e9f8cde24d18a1f4481ec3c8abe13db642f841ee2bec35ea9a7d9648796f408f",
+      "user_prompt_sha256": "d9c2c15b0405261a701decc6dd41965949544c2005efe079fee1bd1e9cb472c1",
+      "raw_response_sha256": "ab05809d5a860d71f10fa370a4ff72f72289c9d748106259250d5f2309ccb703",
+      "locally_replayed_completed_response": true,
+      "initial_attempt_elapsed_ms": 1964,
+      "initial_attempt_transport_accounting_failure": false,
+      "budget": {
+        "key_usage_before_usd": 2.784823119,
+        "key_usage_after_usd": 2.784823119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184778,
+        "conservative_key_liability_before_usd": 2.791701119
+      }
+    },
+    {
+      "case": "short-question",
+      "category": "role",
+      "iteration": 1,
+      "input_tokens": 594,
+      "output_tokens": 12,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001308,
+      "alias_substitutions": 0,
+      "source_sha256": "f8329600d4a707160a4c995d82470dc417af829a3662adf9254852d7f288410d",
+      "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+      "failures": [
+        "fact_omitted"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 402,
+      "refine_elapsed_scope": "local_retained_response_normalization",
+      "upstream_latency_ms": 1588.502,
+      "provider_generation_id": "gen-1793734904-yHM7TZXvLdpCmuWFCjZQ",
+      "production_request_sha256": "e6bdb3bc199288247c6cf6ea8a6b5ff871997d180f6d660a46ad625f66e2c579",
+      "user_prompt_sha256": "23a6f123cde447e9d7af3b547a6543a1f522cbcb8b824a4bbcced76e1d8d4c39",
+      "raw_response_sha256": "3b4dbb98c9c7f612ade75364df3ad5cc0bc961c40485733326d4c3f487e341a3",
+      "locally_replayed_completed_response": true,
+      "initial_attempt_elapsed_ms": 2134,
+      "initial_attempt_transport_accounting_failure": true,
+      "budget": {
+        "key_usage_before_usd": 2.787473119,
+        "key_usage_after_usd": 2.784823119,
+        "counter_read_regressed": true,
+        "reserved_usd": 0.01848,
+        "conservative_key_liability_before_usd": 2.793029119
+      }
+    },
+    {
+      "case": "long-question",
+      "category": "role",
+      "iteration": 1,
+      "input_tokens": 604,
+      "output_tokens": 26,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001468,
+      "alias_substitutions": 0,
+      "source_sha256": "1f5ce4ef8c89641486ad917b6d16be1ed07cb22e68053f418dcab96966ca1833",
+      "output_sha256": "9fffa1c1787c5852e04eee5db7ff8247d691f4e9d34564c25c8f06a00f325cc8",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 3545,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2937.722,
+      "provider_generation_id": "gen-1793735157-wvpADmtUR6P4B50v0CKa",
+      "production_request_sha256": "defa37fc5b82b51da6d29426048602211a89ae4e0618436dfbcb5b8e247b9571",
+      "user_prompt_sha256": "f2fe9bed19ce8d7381fec01dc146f5c9a328f2d4a5b8ee310d703aa6363c55a1",
+      "raw_response_sha256": "5373151f151af080ea589809a81d5125320f2793183dae7d1513e50b2694baa5",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0186054,
+        "conservative_key_liability_before_usd": 2.794337119
+      }
+    },
+    {
+      "case": "embedded-instruction",
+      "category": "role",
+      "iteration": 1,
+      "input_tokens": 602,
+      "output_tokens": 24,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001444,
+      "alias_substitutions": 0,
+      "source_sha256": "8e760ffd4bf4a183e2781267dce5d6f368198f30bb1e6bb1581f9de1713224bd",
+      "output_sha256": "2229cc23bf2ddaf9201ce5d27bfb1798615fdbea300a910fb688c80c000987bf",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2617,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2047.663,
+      "provider_generation_id": "gen-1793735161-i9SQv1gnZvuhjEx6JIz9",
+      "production_request_sha256": "49821420e2c832077c3917f0c51686ff91b672fe0a31a74d116239c39bacb84c",
+      "user_prompt_sha256": "009d72d99fdc50db2377bbffb9aa8f1a83cbece84e7f45b4ff25fcd21e9090d5",
+      "raw_response_sha256": "add65b9cad070ff61e6ccc2d428ec7a7d550aebd58a4aea0658180d3c1e0b679",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185878,
+        "conservative_key_liability_before_usd": 2.795805119
+      }
+    },
+    {
+      "case": "email-request",
+      "category": "role",
+      "iteration": 1,
+      "input_tokens": 605,
+      "output_tokens": 29,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.0015,
+      "alias_substitutions": 0,
+      "source_sha256": "5c0f49fc92a7a0d991c521428834ca05f51f78170119c8e90787e137a0fcb712",
+      "output_sha256": "3bdc8697aef81455f8f4e401452b8aca1744dec508adab5329deecb36b7dd2ed",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2360,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1767.189,
+      "provider_generation_id": "gen-1793735164-tKYThN6JIYC5q16W9d8u",
+      "production_request_sha256": "e858836f001dce8475ec61748d0854c1eb9b54282f4aa52abf4b1725f14a5005",
+      "user_prompt_sha256": "f9fb80147905141fa09a633dd65c1bf3be91915f57e1fca312b8036bfff38b42",
+      "raw_response_sha256": "58290c9f1a726ddb2ed22db28f1c225f045acf72fe908702c5e121a73e0c7ffa",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0186076,
+        "conservative_key_liability_before_usd": 2.797249119
+      }
+    },
+    {
+      "case": "answer-request",
+      "category": "role",
+      "iteration": 1,
+      "input_tokens": 599,
+      "output_tokens": 20,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001398,
+      "alias_substitutions": 0,
+      "source_sha256": "ac46a29bdd4052068c5e4f53f263bbcbdbe8febef7311e01203428eabaed9c4f",
+      "output_sha256": "c7086c99b73ad85c9ae0cb9310928168aa5b399c59ff795db4ebe59ad542c99d",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2776,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2184.473,
+      "provider_generation_id": "gen-1793735166-hTlShJjNZmOxKmhifhgL",
+      "production_request_sha256": "f77d121bec0b9500308e2c294e1512f71f984a482fb7c8967589907d4f6291aa",
+      "user_prompt_sha256": "872753c04393f8296fa5046320450581efbfc629ef1c7493154cf0c126b4cfdb",
+      "raw_response_sha256": "54b278802130312485546a95c4e21fc12bed7727a59ec7c3bb8d0999f80a2229",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185526,
+        "conservative_key_liability_before_usd": 2.798749119
+      }
+    },
+    {
+      "case": "security-request",
+      "category": "role",
+      "iteration": 1,
+      "input_tokens": 601,
+      "output_tokens": 25,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001452,
+      "alias_substitutions": 0,
+      "source_sha256": "eb22558383b0d621566784ae38add2fc68f735fc95e21a04714efc5b38301352",
+      "output_sha256": "c2a1cd928debf50c50de189ca4b70bcdb51c330d9a6eee33e0db6e8233cda021",
+      "failures": [
+        "fact_added"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 3371,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2523.418,
+      "provider_generation_id": "gen-1793735170-EfFOMcMDAkAi66vbhsZH",
+      "production_request_sha256": "c0e118bf6d6468a9239e32c49e20e74c9ba59c3161718fda88c5315e21b87471",
+      "user_prompt_sha256": "36cbd15e3ce4aea34d04e1daf623be9fdf495fbe81622354ca01a95dc79984b9",
+      "raw_response_sha256": "9a249f19bbf0e1bc361fe3b4200da8154cf2bc1b3271cce4f849645d8e6fb2a6",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185526,
+        "conservative_key_liability_before_usd": 2.800147119
+      }
+    },
+    {
+      "case": "summary-request",
+      "category": "role",
+      "iteration": 1,
+      "input_tokens": 600,
+      "output_tokens": 17,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00137,
+      "alias_substitutions": 0,
+      "source_sha256": "237b0a19bb8475d2c6e7abb1ea784a51d1079dda4ea77d3830ce64cfd0ab8b29",
+      "output_sha256": "195cdaf4f2feece3ca90096f37e342276d2838a638118070e4d522f03c56c5fb",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2177,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1576.699,
+      "provider_generation_id": "gen-1793735173-qtLRbEacbyJhjVljn2LB",
+      "production_request_sha256": "b2c2153477621d9c562bce3afc25f8272ed208e0f512c631a7f057170a437a58",
+      "user_prompt_sha256": "7d8ba0c82b3494ad8bded5b36fc63cfbd3fe4e3b4d56fb69b71b92c31b795e20",
+      "raw_response_sha256": "c59302b53c086fc17657ad1c405cb1cdd07c13be5ee2af4b69a91e5e3db4e6f9",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185548,
+        "conservative_key_liability_before_usd": 2.801599119
+      }
+    },
+    {
+      "case": "negation",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 596,
+      "output_tokens": 15,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001342,
+      "alias_substitutions": 0,
+      "source_sha256": "a5fa7eb76edcb136c2f3008d6c0638c09469cd1c2749117d4a74530087581780",
+      "output_sha256": "6ab1b1247d785acd6d3fc7cc6ec70fc04e70dbe8980223845501e743830023c8",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 1775,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1184.774,
+      "provider_generation_id": "gen-1793735176-eVysVlr37QwQFj5jGTjU",
+      "production_request_sha256": "2eefb39487801724df16a194c4fb85e07fbdaaf56ae1a044e8b9d5224764fce3",
+      "user_prompt_sha256": "708de28d5155a015126fc56e8637cbe49e6b0c7f998bccf17966aadec74e30b3",
+      "raw_response_sha256": "4b6b230f2aa50a9c75d0dce46101ac98e14e6e33ba9cbecf317113a69b82b001",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185196,
+        "conservative_key_liability_before_usd": 2.802969119
+      }
+    },
+    {
+      "case": "quantities",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 597,
+      "output_tokens": 19,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001384,
+      "alias_substitutions": 0,
+      "source_sha256": "28616572c2be432448efa9a707df1548a930cdc48f33ed614eed1fde2234a26b",
+      "output_sha256": "f64285c31c1cf30737e17758dda6973b879bc0c0f1a280779b235589f70f5e43",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2246,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1692.405,
+      "provider_generation_id": "gen-1793735178-ICXc7RYWqSCjWYJVPY9w",
+      "production_request_sha256": "298f0af62eb60c7d26af2d1aecde84c41ff5a459e1f3bf2ff2891e40990bc339",
+      "user_prompt_sha256": "9761baae8d6ce6dc28492ba93ce963760465a052496791412270abeb89fcc537",
+      "raw_response_sha256": "60117c18485889db221ceba7152eb453d51583cebadc8ef34685c9106ded109b",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185262,
+        "conservative_key_liability_before_usd": 2.804311119
+      }
+    },
+    {
+      "case": "names",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 595,
+      "output_tokens": 17,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00136,
+      "alias_substitutions": 0,
+      "source_sha256": "d5be0ca3ef6e6d8128db0bc58b6f19b83223e7c09e2c47275814ff1325a1c6e4",
+      "output_sha256": "939a35170522286dd77ab93687073be5986eac2e4da799a7c185d51d6ad1cfc3",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2278,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1777.576,
+      "provider_generation_id": "gen-1793735181-SEiLEmoui2c2Wn9BiDyI",
+      "production_request_sha256": "aa87d11aaa38cae66e05dcd85dea26c7ed9531f19263c93559f242fbff36b549",
+      "user_prompt_sha256": "ceeaf3f177a81042eac2dc82847fc670f30654d93d87c8c451bbcb2726efd4fe",
+      "raw_response_sha256": "e9e95d55fd72289f9841c850ceef0011c63ff69b3495daa9bab0c264d5eaf68d",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.018502,
+        "conservative_key_liability_before_usd": 2.805695119
+      }
+    },
+    {
+      "case": "technical-path",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 607,
+      "output_tokens": 25,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001464,
+      "alias_substitutions": 0,
+      "source_sha256": "daba71cb51f454b66972e506e8aa34ad656f6be11d5d569381eb9cce67070cdd",
+      "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2472,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1980.565,
+      "provider_generation_id": "gen-1793735183-QjZXjvFuFoSPWuJQJzYj",
+      "production_request_sha256": "4fce078457dc707aeda8771ab314a97b83e66e7fe6cf8d8a36b0206190a43b5a",
+      "user_prompt_sha256": "328d57103979f2939c28a8904ba6e908e86d5b9865dc5fc49cbee4ce9b0fa0d6",
+      "raw_response_sha256": "e319fc2308e5a5045f7e0c35f5e0b933e1ad89b5f5db1cdd88ea64be1c1f1e0b",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.018601,
+        "conservative_key_liability_before_usd": 2.807055119
+      }
+    },
+    {
+      "case": "quoted-command",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 596,
+      "output_tokens": 16,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001352,
+      "alias_substitutions": 0,
+      "source_sha256": "f31456f09c0fa0cdb27d1e3748ae93b045753eed19267474fbf459540bba1887",
+      "output_sha256": "a2b4616c1f076ea825fbd6b6e9aaefefc9189d989a1b82044cdb6290e2f75362",
+      "failures": [
+        "literal"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 2027,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1521.195,
+      "provider_generation_id": "gen-1793735186-FXX7lzASPnPdSkq7aBL1",
+      "production_request_sha256": "a28f0c8706ff536a615309715b410872a5606132dd5ea4dfd99abc1bdda751b7",
+      "user_prompt_sha256": "1900f066a469d276ab043b52033170f53f3168d9842a45dd9529d543c379fc32",
+      "raw_response_sha256": "506512c4bd0ded45b7eeb6715cd74e21a229ab4febfeee3fed16457fc1cab6e7",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185262,
+        "conservative_key_liability_before_usd": 2.808519119
+      }
+    },
+    {
+      "case": "point-of-view",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 596,
+      "output_tokens": 11,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001302,
+      "alias_substitutions": 0,
+      "source_sha256": "f10e0190bed74186b072c22f506f3e8815aefe06b2777b39b55bc1c97ed6843a",
+      "output_sha256": "524a86e526050ce62e586673230ee9771c983f4f142ebd028c878e428f648bcf",
+      "failures": [
+        "speech_act",
+        "modality"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 1800,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1297.336,
+      "provider_generation_id": "gen-1793735189-Gbf2ySUQNh0aZ6J4Au9O",
+      "production_request_sha256": "f42603adbab889414815b35a1de5f1e650c88744df36b327de2021f0685ba014",
+      "user_prompt_sha256": "836230e6838e7fa1cc0a34468749239c3bd337ab95e26d9ca2852aac813ca1c6",
+      "raw_response_sha256": "a61641843e5fa497435e29533075bf52172dde9b63689d5e81565e610c593e9b",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185042,
+        "conservative_key_liability_before_usd": 2.809871119
+      }
+    },
+    {
+      "case": "long-detail-preservation",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 615,
+      "output_tokens": 34,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00157,
+      "alias_substitutions": 0,
+      "source_sha256": "4e2d3fcd4ed5f733dab6c304f1c487e2d1d4d46a01484e82dc28c6f3a4bdbc4a",
+      "output_sha256": "02f223212f6ca4da43031c841550c22f391fa19ca4d28591cc4ce87f40199f01",
+      "failures": [
+        "speech_act"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 2265,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1789.762,
+      "provider_generation_id": "gen-1793735191-eSn6cWxkgKAH0arjyVkW",
+      "production_request_sha256": "100536d3b733d9315624db509116e76dcb516722cb0ecae4d37fcfa36ddb1608",
+      "user_prompt_sha256": "fd1275a9f0112f0c7e5ecb61d1892cee252a7315ae7bcb2c2d68fb2259b41171",
+      "raw_response_sha256": "f68d999ad8bfae39641b63780575fc730d0c9843291966e432467793bea0428e",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.800119119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": true,
+        "reserved_usd": 0.0187396,
+        "conservative_key_liability_before_usd": 2.811173119
+      }
+    },
+    {
+      "case": "numbered-sequence",
+      "category": "formatting",
+      "iteration": 1,
+      "input_tokens": 600,
+      "output_tokens": 21,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00141,
+      "alias_substitutions": 0,
+      "source_sha256": "a55e13ef455bbd6b175fa74d6fb9c3668919de679d41e74c74c67917ca71e1a5",
+      "output_sha256": "1085b702d8ed02e73170cf053d4c7b91cc40cbd7e5b39e8f8f0163beaa891f18",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 3220,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2662.76,
+      "provider_generation_id": "gen-1793735193-29Oue0RnQlsCmr275ecI",
+      "production_request_sha256": "32b91f9bb380df69acaf01039012e6fb27882616022c8af5ca78aad8e7e42401",
+      "user_prompt_sha256": "2124a4abd5bb559b1412801099cbe8ea4919d51a2038fa0feda2e7cc6e1cf935",
+      "raw_response_sha256": "1f57c5429fda09874865e9584f500103451f9be3c3e0d910573c3e808dfcb7dd",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185724,
+        "conservative_key_liability_before_usd": 2.812743119
+      }
+    },
+    {
+      "case": "explicit-paragraph",
+      "category": "formatting",
+      "iteration": 1,
+      "input_tokens": 599,
+      "output_tokens": 14,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001338,
+      "alias_substitutions": 0,
+      "source_sha256": "e47de21975e35d294954e0ceda2869e81c478ab4c381817ade76d3ddfc733640",
+      "output_sha256": "f9f7aacf338e099e721ee9cc9921a5a031c585b3a13fe7a9001024283a1ba74b",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 3858,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 3308.818,
+      "provider_generation_id": "gen-1793735197-vb0HNsvELV0EsIeMkR9y",
+      "production_request_sha256": "cbb0a205fcf53958a7d045e41438d24bf36c8a4953c4a897df8ba9a73aab9e60",
+      "user_prompt_sha256": "8bc2ecc5e42f3206e8e70d52fdb52783aeb7c68205535beaa793bf92f5cab246",
+      "raw_response_sha256": "ac6c7e8a26a998f122e29af50463d7fea2cf3d2f63dbce4ffed6bb4723787e43",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.800119119,
+        "key_usage_after_usd": 2.800119119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185614,
+        "conservative_key_liability_before_usd": 2.814153119
+      }
+    },
+    {
+      "case": "topic-paragraphs",
+      "category": "formatting",
+      "iteration": 1,
+      "input_tokens": 608,
+      "output_tokens": 28,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001496,
+      "alias_substitutions": 0,
+      "source_sha256": "279c4fb067fdde18df4b3027f39b89d2013378259a7e0bc34cdf698ed3a32749",
+      "output_sha256": "e20fd4ee9eee2d386830ab5de5d704ec771c62d9acdd65891b86401b72469c21",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 3544,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2458.878,
+      "provider_generation_id": "gen-1793735202-1TYAImb293uXfsN0HiSw",
+      "production_request_sha256": "eb26c276ead783cf56ea7590ebbb913617afb80494015a188239c96c012d0bc7",
+      "user_prompt_sha256": "e41ed438446491fede3bac13b7d64ef56caf67db26ee9c90389c6d5339983464",
+      "raw_response_sha256": "aaa86ce50c96cdc2bb9ad7996ad49c9f3da3ff4e0a3c4ada5a1577c7253ab319",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.800119119,
+        "key_usage_after_usd": 2.800119119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0186626,
+        "conservative_key_liability_before_usd": 2.815491119
+      }
+    },
+    {
+      "case": "simple-prose",
+      "category": "formatting",
+      "iteration": 1,
+      "input_tokens": 601,
+      "output_tokens": 24,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001442,
+      "alias_substitutions": 0,
+      "source_sha256": "86d63fd05c659be63562725e197664e4648d0884d7b8aac87e140e409a686c0c",
+      "output_sha256": "8437354c06e15df2f2a3eabc2d0fe63d60b992ea7542808b0cde05fa1c7ddc5f",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 3829,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 3269.984,
+      "provider_generation_id": "gen-1793735205-kgS84Wwj6a1owYhBgsvP",
+      "production_request_sha256": "07ed8741a4dbf55bba927a7eef821bd5024b31e45aeb8bdbc7729fcec40f9f23",
+      "user_prompt_sha256": "eec1c662ea72c294eb71bf9a9a5ab8183ea0ec6ee5b564ca94d5ad2d41b6c270",
+      "raw_response_sha256": "253e1b606ec456af6250ac3f09f3d202d07c970ceb9e509318c0f99fbe6a218d",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.794337119,
+        "key_usage_after_usd": 2.794337119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185592,
+        "conservative_key_liability_before_usd": 2.816987119
+      }
+    },
+    {
+      "case": "clean-compression",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 610,
+      "output_tokens": 17,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00139,
+      "alias_substitutions": 0,
+      "source_sha256": "ca81b9daeda0a57168560180558d8a0ba3f4ab241fc8efd472237d286a2b59a1",
+      "output_sha256": "6b6f640e0183381fff7513c156496ad683719a332e2a8fa22e9265d6a66ca163",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 3201,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2712.779,
+      "provider_generation_id": "gen-1793735209-3nThsAhMN46UsXXhKsN1",
+      "production_request_sha256": "b3ed831892e95b21ebbe94b0a8a95508678d1b4e47d20c89451c39ba0e8d599a",
+      "user_prompt_sha256": "6dc8c20a76f3123d5b1ae6fd56a4754a7c20def5a8ef2d1739b650a6ad0c4f41",
+      "raw_response_sha256": "c58269044b391efca7675bd7b93c2591909ab221f3666d38286d54d14ac62173",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0186406,
+        "conservative_key_liability_before_usd": 2.818429119
+      }
+    },
+    {
+      "case": "meaningful-uncertainty",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 598,
+      "output_tokens": 15,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001346,
+      "alias_substitutions": 0,
+      "source_sha256": "30e714282e282dde9390af2f3bdcb973792e2cdfb013d85a71492b5f4dd55e03",
+      "output_sha256": "fe6f64f3b8e201ebf10e93ca3264c575104018f16fc84ce8f2316e79a0edd830",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2514,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1989.929,
+      "provider_generation_id": "gen-1793735213-wShbDLr5XjeoCGPrSzeL",
+      "production_request_sha256": "148f50294ee28072e5a84c6cf6e1c039e771b81330b15dca98d506e5978210a4",
+      "user_prompt_sha256": "d06ddc65abe1ada69f20a51d656e6c5b141de0d5cfe1b41b2950d03e8800c3ae",
+      "raw_response_sha256": "029176953990aa13c18d3742caf63aad2121122a7f5b358f9f4f4f987c6cb4b6",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185152,
+        "conservative_key_liability_before_usd": 2.819819119
+      }
+    },
+    {
+      "case": "literal-identifiers-and-version",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 607,
+      "output_tokens": 32,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001534,
+      "alias_substitutions": 0,
+      "source_sha256": "c691daaa6b54a0d06da966bc775205db6e18a61db549cb43874cc1bf9bb8762b",
+      "output_sha256": "3193d7ea5761eff509c9558424c270af49e3ce3111fd0508a73c9aa6f0c3d8cd",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2546,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2031.704,
+      "provider_generation_id": "gen-1793735216-LXGNFpIMnXeSJdeCSVde",
+      "production_request_sha256": "f19cf24998c9c7c4b2a8fe83a66b213895503d7a809606eb2be137e6c9c45927",
+      "user_prompt_sha256": "4b71c7bc6e897301ca2f10a1c86d51f4a22c35741afb536534c35deeb0646611",
+      "raw_response_sha256": "be60adf788783039635dcda9326e276c0eacadd4d08c48fb512deea907295be7",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185108,
+        "conservative_key_liability_before_usd": 2.821165119
+      }
+    },
+    {
+      "case": "vocabulary-common-words",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 597,
+      "output_tokens": 17,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001364,
+      "alias_substitutions": 0,
+      "source_sha256": "9d412ad71817cd494043cad0c67cfac1c949f6f3300585a4b64120a07cdb96ba",
+      "output_sha256": "062fa15bf3ebebb9352cff0875ffe8c36a3bbfbe7993505de4223ec2236430fa",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2593,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2100.765,
+      "provider_generation_id": "gen-1793735219-wMPmdMKbGDMTuQsELmAr",
+      "production_request_sha256": "d64c7502cfa6fb7f688b0825e075b9cd6eae9bc5486d4234428f3edab380f2ef",
+      "user_prompt_sha256": "83c859ba8452fb0bd8a3a04cc1df2d0c624d81ab3f251c499d76bb6de129716f",
+      "raw_response_sha256": "ec5b030dce42b8a9f92b7e310c1674b0a140efae9e4f1f751e76451f5ac68c44",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.800119119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184954,
+        "conservative_key_liability_before_usd": 2.822699119
+      }
+    },
+    {
+      "case": "quoted-misspelling",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 603,
+      "output_tokens": 27,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001476,
+      "alias_substitutions": 0,
+      "source_sha256": "a9767c1794d0cd5d0c39c05f763515a1a37ea3549441062599ae8957c5041ba2",
+      "output_sha256": "337c8e7f22745f7d6da18bc117ce1ebcaa972a055143ae3c24264819430649bd",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2234,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1716.255,
+      "provider_generation_id": "gen-1793735222-5B4p7ApycDV1g883T8KD",
+      "production_request_sha256": "1df84f12238eb8265a28dc53783495cdf762bdc5df8dfc793c7a27f719806208",
+      "user_prompt_sha256": "6941aee8344a81bcee6251beb5f3ba809e84677b25348395c1eedec0f2fdcb24",
+      "raw_response_sha256": "fb126b35da86edb1fbe7e445d28c631aad82adad99d5c7761e38bdb0dcd16178",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185306,
+        "conservative_key_liability_before_usd": 2.824063119
+      }
+    },
+    {
+      "case": "canonical-product-name",
+      "category": "cleanup",
+      "iteration": 1,
+      "input_tokens": 593,
+      "output_tokens": 13,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001316,
+      "alias_substitutions": 0,
+      "source_sha256": "fa855af9bc43179f20e0f43d693932ce3a8838d89693bef9f5691e2c364c8d38",
+      "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2099,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1567.88,
+      "provider_generation_id": "gen-1793735225-3Loz9aqnkr3Iu8LNwfno",
+      "production_request_sha256": "5eea0621147050ef2732a86727533d6798b6f27e3869bc3040fc49421ade0ed9",
+      "user_prompt_sha256": "8dc6e82a8cfbe67adc959102c419dcd892c8adf2c639c9cd7db2072d72fbb02e",
+      "raw_response_sha256": "d349bd6de0a45601444f6671d5b4cde670e039cc023a490b2ba0645e51e05ce8",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0184712,
+        "conservative_key_liability_before_usd": 2.825539119
+      }
+    },
+    {
+      "case": "minimum-and-option",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 599,
+      "output_tokens": 16,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001358,
+      "alias_substitutions": 0,
+      "source_sha256": "46cf5911bf76cb36d9ce43ba65151ae36308d2ae5961ef4c4b4e55e1571b8608",
+      "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+      "failures": [
+        "modality"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 2279,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1751.136,
+      "provider_generation_id": "gen-1793735227-y2HwwXtxom5XMGixmRt4",
+      "production_request_sha256": "c5c56f344eede79a433224d9491ea491354a54820c0cb815672b1cfbeeca3588",
+      "user_prompt_sha256": "81a4a2a9be12ad3598681ff84bdb5c7f212fbb226ce2dd0d0d1ad6e8e22e009b",
+      "raw_response_sha256": "798813c3345145e5e397bc2b5d880c96621a4da099ad6ee77dc426d3786ec72b",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185174,
+        "conservative_key_liability_before_usd": 2.826855119
+      }
+    },
+    {
+      "case": "qualified-negation",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 596,
+      "output_tokens": 15,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001342,
+      "alias_substitutions": 0,
+      "source_sha256": "84ff0c9ea945a97f5e1dc7115996fc17d03d0c4bfd4711a697ba1e7dc8940026",
+      "output_sha256": "bc6ec46454ec35f1b2b5174526999664888d6646b085ca1448540b53424f89a8",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 1993,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1502.848,
+      "provider_generation_id": "gen-1793735230-TPe2ZOnHWQfYg2aWLHxg",
+      "production_request_sha256": "952415bf14760ed5045e6ec319d52d963351647a98cd4fb6890db491bed62154",
+      "user_prompt_sha256": "7524f8b225cf67958b675a0eef2f146246e650ce856f366a258bcd6a9ae43330",
+      "raw_response_sha256": "ad813d1aa50855ce0c16ffa6221d0286ed23749eb475c42224ff1a7185f8d403",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0185152,
+        "conservative_key_liability_before_usd": 2.828213119
+      }
+    },
+    {
+      "case": "statement-not-command",
+      "category": "preservation",
+      "iteration": 1,
+      "input_tokens": 591,
+      "output_tokens": 11,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001292,
+      "alias_substitutions": 0,
+      "source_sha256": "8a4c515705ce08410ab0c327c92e89633241a69909364f9445a3b7997b70a47d",
+      "output_sha256": "055f4aa12bf28b695811adfc0b8aab6f058ef508b2d4640b0e737d23b72057b0",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2987,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2490.568,
+      "provider_generation_id": "gen-1793735232-57jIFFQiNI9QSfwnHe2A",
+      "production_request_sha256": "38fa81bc990bf54b99890a9e5a9591768a366dfcc67e581ec8a7042fca40e825",
+      "user_prompt_sha256": "9338c9f13a37b59ff408c5dc87425f804ad501c20353c65c87d402d3f88fadde",
+      "raw_response_sha256": "eff7f4df4885c1fc9a0c4fd025d9fd2604edf830f0bdce4f8b28447f2c1d782a",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.018436,
+        "conservative_key_liability_before_usd": 2.829555119
+      }
+    },
+    {
+      "case": "elevate-leading-question",
+      "category": "speech-act",
+      "iteration": 1,
+      "input_tokens": 611,
+      "output_tokens": 23,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001452,
+      "alias_substitutions": 0,
+      "source_sha256": "69a90905254f19b3f6b72a87e71110ca6c2915de5179b7820dc5d13b76715f7e",
+      "output_sha256": "49e31eaf705125a188087fcb7c8ab0dd37f377063a84e4d58b71f0d3e4e763d5",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2289,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1775.884,
+      "provider_generation_id": "gen-1793735235-Il01OnFqD7soGtAY7OXo",
+      "production_request_sha256": "d2e3475191802fc745745ccae2d629f50adc0371cdb3f5e0e3f9453262b9119f",
+      "user_prompt_sha256": "09a697898acbbd18482e81fa52e9077f5ccbbc8339193f2e43d82705f3421d62",
+      "raw_response_sha256": "3ff8f7c050bcedeab4e3c39fb8a55b8c4e358949daf0e55af0f2d45121247a82",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0186648,
+        "conservative_key_liability_before_usd": 2.830847119
+      }
+    },
+    {
+      "case": "elevate-idempotent-directive",
+      "category": "speech-act",
+      "iteration": 1,
+      "input_tokens": 614,
+      "output_tokens": 32,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001548,
+      "alias_substitutions": 0,
+      "source_sha256": "a696e4bf22e957bf14b7f4e298eb17943732d3d8869acb858d6f46287ac37b7b",
+      "output_sha256": "c52ece36b640d9d61bd028fcd182bff156d0980daffee8c36c818dfe681c8119",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2141,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1655.59,
+      "provider_generation_id": "gen-1793735239-wcQ8JvXqN543Cdv3xRCL",
+      "production_request_sha256": "5395f02343e21536a3160173d53a1d753d88578ab069d5e635e8946bf3182469",
+      "user_prompt_sha256": "cc39a9509aa63b0fbf116741ce8db246c4d1159490c8a6811ee0dc34860c6d98",
+      "raw_response_sha256": "7dba0972d95cb30f5a1687f2349e4fce38236812e02a6a9181c6784416b7ef58",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.816933119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": true,
+        "reserved_usd": 0.018689,
+        "conservative_key_liability_before_usd": 2.832299119
+      }
+    },
+    {
+      "case": "elevate-regression-negation",
+      "category": "fact-fidelity",
+      "iteration": 1,
+      "input_tokens": 614,
+      "output_tokens": 31,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001538,
+      "alias_substitutions": 0,
+      "source_sha256": "3345e382d54d89e9f5488fef1ccbd97a9c3b918af8c42ab8b88ceeab107e280f",
+      "output_sha256": "1bf43a6fc49d0f44b8624245897049cd6450905b7eac28bd9279627b3bacb7cd",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 1941,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1461.176,
+      "provider_generation_id": "gen-1793735241-apHEm00rxGLjtNiq010k",
+      "production_request_sha256": "dc0e37614318d4e2ffc89f75ae366e2d27c6d52293414b4b62d709a84800313c",
+      "user_prompt_sha256": "a330d86a6d1df8433bfac2b7a77189cea1eaef21964851ecacda785a978752a1",
+      "raw_response_sha256": "7814327611a313cfe3a5ca292aee83c99bf0d4356c4705c5acb0f12c42f26486",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.816933119,
+        "key_usage_after_usd": 2.816933119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0186604,
+        "conservative_key_liability_before_usd": 2.833847119
+      }
+    },
+    {
+      "case": "elevate-backpressure-hypothesis",
+      "category": "fact-fidelity",
+      "iteration": 1,
+      "input_tokens": 616,
+      "output_tokens": 37,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001602,
+      "alias_substitutions": 0,
+      "source_sha256": "e503693bf43993eb8280b596d762f24019875a32af6d7abc773983d7c017ea65",
+      "output_sha256": "eb41724989aad3535a5cbf1e71edb9d521e3c91bf7106c48fd0d1df96926d73b",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2801,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2285.039,
+      "provider_generation_id": "gen-1793735243-idmAQuQL4L7f427hiv7W",
+      "production_request_sha256": "a3722e5dba05132aaa3966ea0222086ab2d7722604c41342006698123216acfa",
+      "user_prompt_sha256": "94c6218cbc6e2d6a9268340ca8278573d8115c4e1a7f9e8e9bf24dead3737021",
+      "raw_response_sha256": "9bf8ccc8de547d86e944bc5a05e145bae47349fac11a1bae3432c05bf61ef414",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.816933119,
+        "key_usage_after_usd": 2.816933119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0187572,
+        "conservative_key_liability_before_usd": 2.835385119
+      }
+    },
+    {
+      "case": "elevate-invariant-numbers",
+      "category": "fact-fidelity",
+      "iteration": 1,
+      "input_tokens": 624,
+      "output_tokens": 37,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001618,
+      "alias_substitutions": 0,
+      "source_sha256": "ebcf27a44d6aeb6bc4836103cbd0b5a5e77c678815560cd4604a0584bffbf47f",
+      "output_sha256": "3141fe1d48d075d736ead2051faa7d785e5f6c6edf57c3e0c741959f48b83d78",
+      "failures": [
+        "speech_act"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 2225,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1702.242,
+      "provider_generation_id": "gen-1793735247-akJcup0YZ34lXlVwnZlL",
+      "production_request_sha256": "0ebedde0c09b52499c037ddefd1ee2a7c3c20abe62871a9340210cecef8c62a8",
+      "user_prompt_sha256": "45ade4a1c0949a8bc8841859e53411d061b10b0cc851226555fad8e69654704a",
+      "raw_response_sha256": "92342282e54b2c86627675bbea90c1193a09bf9a7156ca153efc1c9c295becf1",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.816933119,
+        "key_usage_after_usd": 2.816933119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0187044,
+        "conservative_key_liability_before_usd": 2.836987119
+      }
+    },
+    {
+      "case": "elevate-instantiate-conditional",
+      "category": "lexical-upgrade",
+      "iteration": 1,
+      "input_tokens": 607,
+      "output_tokens": 27,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001484,
+      "alias_substitutions": 0,
+      "source_sha256": "46b491d84c1e98517f4f8c48d2477606943cd98d8cdb654fe282d1570ca01e0f",
+      "output_sha256": "0efb322f04950505a4f88e5b8dbe1072152b7cdb1581fd668a0050d724021047",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 1995,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 1486.704,
+      "provider_generation_id": "gen-1793735249-Sjb2n3ldkIKTN7shFJPP",
+      "production_request_sha256": "da06e4bb081c6b86043a595594caeca328ad6a07a66513de4c4ed4e2f99076d3",
+      "user_prompt_sha256": "22420bd12f8b4bdbe13625a2b46f0ece7472bcbe7b52a59aa76aca6c5095f3c0",
+      "raw_response_sha256": "39c8d14f6ace10766d763e9491fcd52249ee306482c652dafc6d2ca25cb0cc7a",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.811401119,
+        "key_usage_after_usd": 2.811401119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0186362,
+        "conservative_key_liability_before_usd": 2.838605119
+      }
+    },
+    {
+      "case": "elevate-atomicity-question",
+      "category": "speech-act",
+      "iteration": 1,
+      "input_tokens": 610,
+      "output_tokens": 24,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00146,
+      "alias_substitutions": 0,
+      "source_sha256": "a8ab7b42d92c8eb392de8a7c21d52e1cc2ca5e25f4d50551dd35cc9f021653d7",
+      "output_sha256": "bf45e89070f2a18ee2a84f2049e5e939e314ed1309c6549f712156c513f503c1",
+      "failures": [
+        "modality"
+      ],
+      "reviewed": true,
+      "refine_elapsed_ms": 2700,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2138.237,
+      "provider_generation_id": "gen-1793735252-dfgTsIgC0M2bBQon6CO6",
+      "production_request_sha256": "90516733525e3fdf87bb331ae84030a9544a7c585116479ecce085122fff6876",
+      "user_prompt_sha256": "bf505ae4fe6eb687041e03ac06b6bc86cc2ed027ab9964e17d4d443b1338520d",
+      "raw_response_sha256": "967137e3a5abf0d590dddbd043ed81778c347b067b34408c94dd06d24a04c84c",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.816933119,
+        "key_usage_after_usd": 2.816933119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.018722,
+        "conservative_key_liability_before_usd": 2.840089119
+      }
+    },
+    {
+      "case": "elevate-fricatives-evidence",
+      "category": "lexical-upgrade",
+      "iteration": 1,
+      "input_tokens": 622,
+      "output_tokens": 55,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001794,
+      "alias_substitutions": 0,
+      "source_sha256": "f04236aea7c5a1d3ef8df469c6fd4dd77b910512532d53556057baab89349938",
+      "output_sha256": "c79ea388a7414776163fe2e7b0312979f137a6683f9078587bbb3d4dff1477d9",
+      "failures": [],
+      "reviewed": true,
+      "refine_elapsed_ms": 2796,
+      "refine_elapsed_scope": "production_refine_including_broker_counter_reads",
+      "upstream_latency_ms": 2304.569,
+      "provider_generation_id": "gen-1793735255-VVcy1GYj4OpX3It6OpQY",
+      "production_request_sha256": "55366afbf17f5c10969e4f0b2fb55e0f5fc1003cbd756eb2b79177954fc76d76",
+      "user_prompt_sha256": "0e52458bd863d794cae6755e0483f13f971386a022b46755fa6e3fb2c68e05b2",
+      "raw_response_sha256": "834f39cc9da35816bdecd5ecf9f095e723f2783354b6f5a61399df282ca2d375",
+      "locally_replayed_completed_response": false,
+      "budget": {
+        "key_usage_before_usd": 2.816933119,
+        "key_usage_after_usd": 2.826849119,
+        "counter_read_regressed": false,
+        "reserved_usd": 0.0187836,
+        "conservative_key_liability_before_usd": 2.841549119
+      }
+    }
+  ],
+  "accounting": {
+    "schema": "cantrip.eval.native-broker.v1",
+    "model": "openai/gpt-6.1-sol",
+    "canonical_model": "openai/gpt-6.1-sol-20260929",
+    "reasoning_effort": "low",
+    "absolute_key_ceiling_usd": 4.5,
+    "key_usage_start_usd": 2.784823119,
+    "key_usage_end_usd": 2.843343119,
+    "key_usage_delta_usd": 0.05852,
+    "test_only_max_completion_tokens": 1024,
+    "prompt_usd_per_token": 2e-06,
+    "completion_usd_per_token": 1e-05,
+    "request_usd": 0.0,
+    "provider_guards": {
+      "allow_fallbacks": false,
+      "require_parameters": true,
+      "max_price": {
+        "prompt": 2.0,
+        "completion": 10.0,
+        "request": 0.0
+      }
+    },
+    "counter_policy": "Read before and after every serial call; budget against max(counter high-water, initial usage plus all known provider charges). Reserve byte-bounded input plus 256 framing tokens and 1024 completion tokens at capped prices with a 10% margin. A backwards read never refunds room. Unknown liability halts; no paid retries.",
+    "credential_placement": "Native pass-env process only; reverse-forwarded loopback HTTP carries no authorization header from the worker.",
+    "halted": false,
+    "reported_cost_usd": 0.05852,
+    "interrupted_attempt": {
+      "halt_reason": "counter_or_completion_guard_failed",
+      "cloud_submissions": 7,
+      "reconciled_key_usage_usd": 2.794337119,
+      "reported_cost_usd": 0.009514,
+      "recovery": "Byte-identical production request hashes replay retained completed responses locally; no duplicate upstream submission."
+    },
+    "local_replays": 7,
+    "key_usage_high_water_usd": 2.843343119,
+    "key_usage_end_after_last_call_usd": 2.826849119,
+    "final_counter_reconciles_all_reported_costs": true,
+    "max_reserved_key_liability_usd": 2.860332719,
+    "paid_retries": 0,
+    "all_sent_system_prompts_match_receipt_hash": true,
+    "stale_or_regressed_post_call_reads": 3
+  },
+  "summary": {
+    "failed": 8,
+    "failures": [
+      {
+        "case": "short-question",
+        "categories": [
+          "fact_omitted"
+        ],
+        "iteration": 1
+      },
+      {
+        "case": "security-request",
+        "categories": [
+          "fact_added"
+        ],
+        "iteration": 1
+      },
+      {
+        "case": "quoted-command",
+        "categories": [
+          "literal"
+        ],
+        "iteration": 1
+      },
+      {
+        "case": "point-of-view",
+        "categories": [
+          "speech_act",
+          "modality"
+        ],
+        "iteration": 1
+      },
+      {
+        "case": "long-detail-preservation",
+        "categories": [
+          "speech_act"
+        ],
+        "iteration": 1
+      },
+      {
+        "case": "minimum-and-option",
+        "categories": [
+          "modality"
+        ],
+        "iteration": 1
+      },
+      {
+        "case": "elevate-invariant-numbers",
+        "categories": [
+          "speech_act"
+        ],
+        "iteration": 1
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "categories": [
+          "modality"
+        ],
+        "iteration": 1
+      }
+    ],
+    "gate": "fail",
+    "input_tokens": 24690,
+    "output_tokens": 914,
+    "passed": 33,
+    "reported_cost_usd": 0.05852,
+    "reviewed": 41,
+    "scheduled": 41,
+    "submitted": 41,
+    "unknown_cost_calls": 0,
+    "production_refine_elapsed_ms_including_local_replays": {
+      "max": 3858,
+      "p50": 2278,
+      "p95": 3545
+    },
+    "upstream_latency_ms": {
+      "scope": "41 original unique cloud submissions; local replays excluded",
+      "n": 41,
+      "mean": 1998.9965365853661,
+      "p50": 1777.576,
+      "p95": 3269.984,
+      "min": 1184.774,
+      "max": 3823.576
+    },
+    "unique_cloud_submissions": 41,
+    "duplicate_upstream_submissions": 0,
+    "local_completed_response_replays": 7,
+    "failure_category_counts": {
+      "fact_added": 1,
+      "fact_omitted": 1,
+      "literal": 1,
+      "modality": 3,
+      "speech_act": 3
+    },
+    "inherited_passed": 27,
+    "added_passed": 6,
+    "added_lexical_upgrades_demonstrated": 8,
+    "question_answering_or_directive_execution_failures": 0,
+    "number_negation_identifier_path_version_failures": 0,
+    "reasoning_tokens": 31
+  },
+  "semantic_reviewer": "ElevateMode.ElevateEval (builder-agent, unblinded; semantic review of every synthetic source/output pair)",
+  "limitations": [
+    "One sequential sample per case; no paid retries or paid judge. This light gate is not a reliability estimate or native UI/dictation proof.",
+    "Semantic judgments are explicit builder-agent review, not an independent blinded judge. Clean accepted strings are never scored.",
+    "The native broker adds only disclosed test-only generation/price bounds; system/user/model/reasoning remain the production request.",
+    "A stale/backwards OpenRouter key counter caused a transport-accounting interruption after seven completed calls. After exact cost reconciliation, those seven byte-identical requests replayed retained responses locally, with no duplicate upstream submission. Original paid upstream latencies are reported separately from local normalization replay times.",
+    "One ambiguous added duration qualification and one incomplete canonical acronym are disclosed but not counted as hard failures. Independent semantic adjudication remains unverified.",
+    "This receipt fails its own full-contract gate despite demonstrating all eight requested lexical upgrades; no prompt change was made to hide failures."
+  ],
+  "run_id": "2026-11-03-elevate",
+  "date": "2026-11-03",
+  "decision": "fails_precommitted_light_gate",
+  "semantic_review": {
+    "claim_type": "builder_judgment",
+    "policy": "Elevate transformative contract, not Clean accepted-string matching. The runner does not deserialize accepted strings. The builder had inspected the inherited corpus during harness preparation; this explicit hash-bound review of all 41 source/output pairs was unblinded.",
+    "rationale_codes": {
+      "short-question": "affected_person_omitted",
+      "security-request": "authorization_assumed",
+      "quoted-command": "reported_error_literal_case_changed",
+      "point-of-view": "recommendation_changed_to_command",
+      "long-detail-preservation": "statement_of_need_changed_to_command",
+      "minimum-and-option": "optional_branch_made_required",
+      "elevate-invariant-numbers": "stated_constraint_changed_to_command",
+      "elevate-atomicity-question": "unverified_guarantee_changed_to_independence_requirement"
+    },
+    "non_gating_observations": [
+      {
+        "case": "truncated-acronym",
+        "category": "canonical_acronym_not_completed",
+        "disposition": "Not a hard fidelity failure; no Clean exact-string oracle."
+      },
+      {
+        "case": "elevate-backpressure-hypothesis",
+        "category": "possible_unsupported_duration_qualification",
+        "disposition": "Ambiguous exploratory reframing; not counted as a hard factual failure. Independent adjudication unverified."
+      }
+    ]
+  },
+  "execution": {
+    "placement": "Fresh Boat large Linux x86_64 worker; native credential broker only on macOS; no native compilation, model inference or VM on the operator host.",
+    "worker_id": "bx_3htkhh2p",
+    "worker_flags": [
+      "--no-env",
+      "--no-snapshots",
+      "--no-monitoring",
+      "--type large",
+      "--ttl 1800"
+    ],
+    "worker_ttl_extension_seconds": 1800,
+    "credential_env_absent_probe": true,
+    "reverse_tunnel_closed_during_compilation": true,
+    "build_command": "rustup run 1.98.1 cargo build --locked --example eval --jobs 4",
+    "build_exit_code": 0,
+    "build_initial_failure": {
+      "class": "rust_E0382",
+      "location": "src/hud.rs::preview_snapshot",
+      "repair_commit": "ff95a22",
+      "repaired_before_evaluation": true
+    },
+    "dry_run": {
+      "exit_code": 0,
+      "inherited_cases": 33,
+      "added_cases": 8,
+      "paid_calls": 0
+    },
+    "initial_paid_attempt": {
+      "exit_code": 0,
+      "cloud_submissions": 7,
+      "outputs_delivered_to_refine": 6,
+      "transport_accounting_failure_case": "short-question",
+      "guard_reason": "counter_or_completion_guard_failed",
+      "before_usd": 2.787473119,
+      "after_usd": 2.784823119,
+      "later_reconciled_usd": 2.794337119
+    },
+    "resumed_paid_attempt": {
+      "exit_code": 0,
+      "new_cloud_submissions": 34,
+      "hash_matched_local_replays": 7,
+      "completed_case_outputs": 41
+    },
+    "offline_review": {
+      "exit_code": 0,
+      "reviewed": 41,
+      "gate": "fail"
+    },
+    "credential_broker_revision": "382f068",
+    "native_broker_and_reverse_tunnel_stopped": true,
+    "worker_cleanup": {
+      "deletion_operation": "bdop_0dc4dff03e284c149caabdee1e0f6214",
+      "status": "completed",
+      "completed_at": "2026-11-03T19:51:26.637Z",
+      "absent_from_all_inventory": true,
+      "inventory_has_more": false
+    },
+    "general_checks_run_by_this_slice": false
+  },
+  "comparison": {
+    "schema": "cantrip.eval.elevate-comparison.v1",
+    "run_id": "2026-11-03-elevate-ab",
+    "claim_type": "Measured execution/accounting; quality counts are independent blinded reviewer judgments, not builder labels.",
+    "source_revision": "8031836697718ca6f4eebb560fcdb94edb826b3c",
+    "precommit": {
+      "candidate_revision": "61dfe40",
+      "comparison_rule_revision": "f53020d",
+      "planned_upstream_submissions": 246,
+      "cases": 41,
+      "repeats": 3,
+      "model": "openai/gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "absolute_key_ceiling_usd": 4.5,
+      "primary": "One binary fidelity-failed outcome per output if any blind semantic fidelity category fails. No Clean wording oracle; numeric values, meaningful modality/conditions and literal content are protected, not unquoted number spelling, quotation wrappers or verbal filler.",
+      "fidelity_categories": [
+        "fact_added",
+        "fact_omitted",
+        "literal",
+        "modality",
+        "negation",
+        "number",
+        "speech_act"
+      ],
+      "lexical_floor_per_arm": "21/24 across the eight added cases and three repeats",
+      "selection": "Among complete arms meeting the lexical floor, choose fewer fidelity-failed outputs. Ties choose operator. Protocol failures never become passes.",
+      "historical_outputs_reused": 0,
+      "paid_retries_authorized": false
+    },
+    "aggregation_script_sha256": "8067234bfecb6f6d63f4bb7c48099f2918453b1a1943ae702fd814eb12e895da",
+    "ordering": "Shuffle case/repeat pairs, then randomize the two arm positions within every pair.",
+    "seed": 2026110301,
+    "corpus_sha256": "1317c0d6951b323a28c72a5cd670c993923a8122a5851f85886a4fba837a15db",
+    "inherited_corpus_sha256": "447c382098bdd4d0a20d34f909dcd57a81a1a6d6f80b70cc910e3d2d024f1885",
+    "operator_sha256": "0dadc03aaacd757190ce83f5ded06091d5bbb51c5912ecd123deec018a1d32c0",
+    "addendum_sha256": "05f0cc50c043c09663246229879f2edacadf2ebf4dc0dfbc25a5deb6d233b742",
+    "system_prompt_sha256": {
+      "candidate": [
+        "01637ab0f1d996936893659b4eda602399f1f2ebe7ac8e7baa38f55a342066b3"
+      ],
+      "operator": [
+        "5ef810baaac6da2d2983ef674010d5ef2d797ead46ed46bc871b93aa5ff67e0f"
+      ]
+    },
+    "blind_review": {
+      "reviewer": "ElevateMode.BlindFidelity",
+      "artifact_sha256": "9bab70e31fce09dd84e106a3da270ec1bfa117a3f9c0f78732f8757e9dd70587",
+      "judgments_sha256": "7d6d09f40c4cb9873290cf24465dbd1dab038533aad76e8d25743528c64d94ab",
+      "unique_items": 115,
+      "weighted_outputs": 246,
+      "decode_revealed_only_after_fixed_grades": true
+    },
+    "arms": {
+      "candidate": {
+        "outputs": 123,
+        "protocol_failures": 0,
+        "fidelity_failed_outputs": 22,
+        "fidelity_passed_outputs": 101,
+        "failure_categories": {
+          "fact_added": 3,
+          "fact_omitted": 3,
+          "literal": 12,
+          "modality": 4
+        },
+        "lexical_successes": 24,
+        "lexical_possible": 24,
+        "lexical_by_repeat": {
+          "1": 8,
+          "2": 8,
+          "3": 8
+        },
+        "lexical_by_case": {
+          "elevate-atomicity-question": 3,
+          "elevate-backpressure-hypothesis": 3,
+          "elevate-fricatives-evidence": 3,
+          "elevate-idempotent-directive": 3,
+          "elevate-instantiate-conditional": 3,
+          "elevate-invariant-numbers": 3,
+          "elevate-leading-question": 3,
+          "elevate-regression-negation": 3
+        },
+        "lexical_distinct_case_coverage": 8,
+        "qualifies": true,
+        "upstream_latency_ms": {
+          "n": 123,
+          "mean": 1718.2295284552845,
+          "p50": 1650.301,
+          "p95": 2415.733,
+          "min": 1100.405,
+          "max": 3999.515
+        },
+        "reported_cost_usd": 0.186296,
+        "input_tokens": 79728,
+        "output_tokens": 2684
+      },
+      "operator": {
+        "outputs": 123,
+        "protocol_failures": 0,
+        "fidelity_failed_outputs": 33,
+        "fidelity_passed_outputs": 90,
+        "failure_categories": {
+          "fact_added": 8,
+          "fact_omitted": 3,
+          "literal": 14,
+          "modality": 8
+        },
+        "lexical_successes": 24,
+        "lexical_possible": 24,
+        "lexical_by_repeat": {
+          "1": 8,
+          "2": 8,
+          "3": 8
+        },
+        "lexical_by_case": {
+          "elevate-atomicity-question": 3,
+          "elevate-backpressure-hypothesis": 3,
+          "elevate-fricatives-evidence": 3,
+          "elevate-idempotent-directive": 3,
+          "elevate-instantiate-conditional": 3,
+          "elevate-invariant-numbers": 3,
+          "elevate-leading-question": 3,
+          "elevate-regression-negation": 3
+        },
+        "lexical_distinct_case_coverage": 8,
+        "qualifies": true,
+        "upstream_latency_ms": {
+          "n": 123,
+          "mean": 1690.744219512195,
+          "p50": 1570.108,
+          "p95": 2351.69,
+          "min": 1164.884,
+          "max": 3241.908
+        },
+        "reported_cost_usd": 0.17516,
+        "input_tokens": 74070,
+        "output_tokens": 2702
+      }
+    },
+    "selected_arm": "candidate",
+    "accounting": {
+      "unique_scheduled_upstream_submissions": 246,
+      "historical_outputs_reused": 0,
+      "paid_retries": 0,
+      "reported_cost_usd": 0.361456,
+      "canonical_model": "openai/gpt-6.1-sol-20260929",
+      "key_usage_start_usd": 2.843343119,
+      "key_usage_end_usd": 3.204799119,
+      "absolute_key_ceiling_usd": 4.5,
+      "test_only_max_completion_tokens": 1024,
+      "provider_guards": {
+        "allow_fallbacks": false,
+        "require_parameters": true,
+        "max_price": {
+          "prompt": 2.0,
+          "completion": 10.0,
+          "request": 0.0
+        }
+      },
+      "counter_policy": "Read before and after every serial call; budget against max(counter high-water, initial usage plus all known provider charges). Reserve byte-bounded input plus 256 framing tokens and 1024 completion tokens at capped prices with a 10% margin. A backwards read never refunds room. Unknown liability halts; no paid retries.",
+      "local_completed_response_replays": 0,
+      "interruption": null
+    },
+    "failures": [
+      {
+        "case": "elevate-backpressure-hypothesis",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "f9ad8e8fbf2c0815e9956ca46745177f",
+        "output_sha256": "93a125fd5a502778cba5858c8a0518ad639469ec103c6dd41b51321935ee8afd",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "quoted-misspelling",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "1ce18919bcdb4b535d2f90035a171244",
+        "output_sha256": "c6f9d40a21b12550f8f1d901e1701f5a144b32e50e8dcfa7d5c9fd4e209a0330",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "538d2b3ea20ae55392b093c1bd232427",
+        "output_sha256": "524a86e526050ce62e586673230ee9771c983f4f142ebd028c878e428f648bcf",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "538d2b3ea20ae55392b093c1bd232427",
+        "output_sha256": "524a86e526050ce62e586673230ee9771c983f4f142ebd028c878e428f648bcf",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "b47c534459b358b2d29a458b3ea89c3f",
+        "output_sha256": "2d102da8afdde687df8300bfcc09eb194d4ad1d0687797e8d861c1dd67648636",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "47bdd40f009b8c7c0fdc40e90ee76b18",
+        "output_sha256": "80377996debb2944feaca190988c6d2bd19b2f21a738e7343fa23172ae617718",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "negation",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "fb47586dc74595fa58cb957bec1577f2",
+        "output_sha256": "b380ac41a4837f38b65766107d426b0c472b62e63c3930b14bce35946bc799f2",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "e1a8f624c8ec6d43acc72d720cec970c",
+        "output_sha256": "27b2758fe6e0909d2698fbd5f6415065e34ef4b3a7bdf4ab882a1f0ea95e797b",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "688f6baa3e2e25f6ce56d2e965552761",
+        "output_sha256": "8f91f04fa185d1f3b60afe8ce3207d2304691ecdb4c5389fcde516fc03b56182",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "short-question",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "1b71cb227698ff8d200d745044c3561e",
+        "output_sha256": "9f2a80e1eae3a81945797e3b396fafc121d16ec49d8cbeab2a9b2a91480e3764",
+        "fidelity_failures": [
+          "fact_omitted"
+        ]
+      },
+      {
+        "case": "elevate-fricatives-evidence",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "0f2b264f416f3c7a5038b9d8b1623f4b",
+        "output_sha256": "5c79f9fa8706dc41ea2fcb4b52e179a04257e0027b3c381f12a121e17e59681f",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "0e7bc320ac59914e6c2dfa4ab8bf7d61",
+        "output_sha256": "edccd2fec2edc8ce3a766a74408b21488b34a7567a58fcfef08f2df440c98261",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "numbered-sequence",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "df09d85b5190a29012426e64e2069a61",
+        "output_sha256": "9ad111907d4e9c677be32fb7349b348975ceb8b924d0f5bd2c459844f53b83f7",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "elevate-fricatives-evidence",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "0f2b264f416f3c7a5038b9d8b1623f4b",
+        "output_sha256": "5c79f9fa8706dc41ea2fcb4b52e179a04257e0027b3c381f12a121e17e59681f",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-backpressure-hypothesis",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "41e4afc18000e1e5919603e8c7f45533",
+        "output_sha256": "7089df38da71984a639431817f7b46604e93afb19e296fea6ff4d23ebea26d74",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "minimum-and-option",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "d680c10e5124202d3f983fa1c8a814e6",
+        "output_sha256": "486e6f85f744f2b8315f83a6feaebf7ac939306d528ddc2d1d6606c787340fc7",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "quoted-misspelling",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "1ce18919bcdb4b535d2f90035a171244",
+        "output_sha256": "c6f9d40a21b12550f8f1d901e1701f5a144b32e50e8dcfa7d5c9fd4e209a0330",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-path",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "774ceb77a4dcbdba2b31877f0c0d23a2",
+        "output_sha256": "b88edc4bd25b26b2ab996c16961f73276ba05e766db8cb2bae8bf9a43edfe2cf",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "cab20c0c228ad13818aa47b32dbba495",
+        "output_sha256": "0b308f7707852682bf44938bade6b01cff781fa22f12c48611d0c294308d47ac",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "elevate-atomicity-question",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "8f68d8bc5694285cfbf1226c599d6044",
+        "output_sha256": "afef01a0d1d717e5557f7016de3976b976dd6fd1f7475455a3f2766e54dadbc6",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "b47c534459b358b2d29a458b3ea89c3f",
+        "output_sha256": "2d102da8afdde687df8300bfcc09eb194d4ad1d0687797e8d861c1dd67648636",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "point-of-view",
+        "repeat": 2,
+        "arm": "candidate",
+        "blind_item_id": "b47c534459b358b2d29a458b3ea89c3f",
+        "output_sha256": "2d102da8afdde687df8300bfcc09eb194d4ad1d0687797e8d861c1dd67648636",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "truncated-acronym",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "2569a2b768eeaebda89078ae7c037bd3",
+        "output_sha256": "1adac159f3c933e4e6cc757de6979c020c370b778280a63e88a3d8cca82dd0ea",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "c394697bd75b6ab8afb24cf15ba60eac",
+        "output_sha256": "0697e2959d5231e04f82659e0d1e82402362dca7d23f022bd4db559772eb25a2",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "technical-spelling",
+        "repeat": 3,
+        "arm": "candidate",
+        "blind_item_id": "cab20c0c228ad13818aa47b32dbba495",
+        "output_sha256": "0b308f7707852682bf44938bade6b01cff781fa22f12c48611d0c294308d47ac",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "elevate-backpressure-hypothesis",
+        "repeat": 2,
+        "arm": "operator",
+        "blind_item_id": "f6b0f565dd1ee07f7898cdfed7c9165b",
+        "output_sha256": "b023c70c6ef9fadf3726f009a8b873217f3d8c47bac6a724a80bcd9fd5527d9b",
+        "fidelity_failures": [
+          "fact_added"
+        ]
+      },
+      {
+        "case": "negation",
+        "repeat": 3,
+        "arm": "operator",
+        "blind_item_id": "fb47586dc74595fa58cb957bec1577f2",
+        "output_sha256": "b380ac41a4837f38b65766107d426b0c472b62e63c3930b14bce35946bc799f2",
+        "fidelity_failures": [
+          "modality"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 1,
+        "arm": "operator",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      },
+      {
+        "case": "canonical-product-name",
+        "repeat": 1,
+        "arm": "candidate",
+        "blind_item_id": "51ad80f5653c6c64b7f24aa31bdcc2b9",
+        "output_sha256": "f06575402d099cc4581a25b31137db0020f33515a76886fd1a4727757cc93b81",
+        "fidelity_failures": [
+          "literal"
+        ]
+      }
+    ],
+    "sampling_provenance": {
+      "unique_provider_generations": 246,
+      "unique_original_production_bodies": 41,
+      "unique_effective_bodies": 82,
+      "private_numeric_calls_sha256": "1004c064728223c8a014165f252bf256a9b8f72f9a5eb2c561a513a35d60b780",
+      "private_production_receipt_sha256": "f9ff13abab0810a6ea60b249bcb981598694125ef9e4dc1f76ffd91721381c30",
+      "private_provider_receipt_sha256": "46864ca159c19132c507046c027b69680af138e32d88743a84daef31aa34d09f"
+    },
+    "limitations": [
+      "One precommitted 41-case x3-repeat x2-arm synthetic trial; no private dictation, native UI or reliability claim.",
+      "The same decision corpus informed the initial study and is not a held-out or independent dictation corpus.",
+      "Identical source/output pairs were deduplicated for blind judgment and then weighted back to every scheduled output.",
+      "Primary fidelity and lexical scores are the independent blind reviewer's judgments, not Clean wording or builder exact-number diagnostics.",
+      "The candidate system insertion and identical generation/price caps were broker-only transport changes; production postproc::refine generated every original request.",
+      "[INFERENCE] The blind artifact excludes full canonical-vocabulary context; literal grades on name/acronym and spoken-path cases need that context for interpretation. All fixed judgments are retained, with no post-unblinding regrading."
+    ],
+    "execution": {
+      "placement": "Fresh Boat Linux x86_64 worker for the assigned build and production-path inference; native macOS pass-env broker only for credential-bearing HTTPS.",
+      "worker_id": "bx_9rwx6d29",
+      "worker_flags": [
+        "--no-env",
+        "--no-snapshots",
+        "--no-monitoring",
+        "--type large",
+        "--ttl 1800"
+      ],
+      "source_revision": "8031836697718ca6f4eebb560fcdb94edb826b3c",
+      "build_command": "env CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup TMPDIR=/home/user/.cache/tmp/cantrip-elevate-ab rustup run 1.98.1 cargo build --locked --example eval --jobs 4",
+      "build_exit_code": 0,
+      "dry_run": {
+        "exit_code": 0,
+        "inherited_cases": 33,
+        "added_cases": 8,
+        "scheduled_slots": 246,
+        "paid_calls": 0
+      },
+      "paid_run": {
+        "exit_code": 0,
+        "remote_timeout_seconds": 1200,
+        "scheduled_slots": 246,
+        "completed_outputs": 246,
+        "native_cli_wall_seconds": 688.99
+      },
+      "fresh_draw_identity": "Each precommitted slot has its own opaque loopback endpoint. The native journal binds slot, arm, repeat and the exact production body hash; identical repeated bodies do not share upstream generations.",
+      "credential_placement": "Dedicated SPEECH_EVAL key injected only into the native broker by pass-env; never copied to a worker environment, file or snapshot.",
+      "worker_credential_environment_absent_probe": true,
+      "reverse_tunnel_closed_during_compilation": true,
+      "native_broker_and_reverse_tunnel_stopped": true,
+      "blind_artifact": {
+        "unique_items": 115,
+        "weighted_outputs": 246,
+        "whitelisted_fields_only": true,
+        "all_output_hashes_verified": true,
+        "owner_only_file_and_directory": true,
+        "arm_model_timing_cost_metadata_fields": false
+      },
+      "independent_grader_agent": "ElevateMode.BlindFidelity",
+      "worker_cleanup": {
+        "operation": "bdop_4f86ae2030ea45d989a6c79ff386a877",
+        "status": "completed",
+        "completed_at": "2026-11-03T20:39:47.870Z",
+        "absent_from_complete_inventory": true,
+        "inventory_has_more": false
+      },
+      "general_checks_linters_or_formatters_run_by_this_slice": false,
+      "local_cargo_builds_models_or_vms_run": false,
+      "sampling_protocol_proof": {
+        "unique_scheduled_slot_ids": 246,
+        "unique_provider_generation_ids": 246,
+        "unique_original_production_bodies": 41,
+        "unique_effective_bodies": 82,
+        "all_provider_replies_stop_completed": true,
+        "final_counter_reconciles_all_provider_charges": true,
+        "maximum_reserved_key_liability_usd": 3.222526119
+      },
+      "independent_grades_fixed_before_decode": true
+    }
+  }
+}

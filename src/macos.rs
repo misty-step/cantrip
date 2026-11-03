@@ -23,7 +23,7 @@ use crate::hud::macos::{runtime_dir, LiveHud};
 use crate::settings::model::{GuidanceOffer, Microphones, Replacement, SettingsForm};
 use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{
-    config::Config,
+    config::{Config, Mode, PipelineDisplay},
     engine::{request_shutdown, shutdown_requested},
     ipc::{
         self, Command, Completeness, MicrophoneAccess, MicrophoneAuthorization, MicrophoneGrantee,
@@ -248,6 +248,8 @@ enum Engine {
 #[derive(Clone, Debug, PartialEq)]
 enum Choice {
     Send(Command),
+    /// Make this the default mode for new takes.
+    Mode(Mode),
     Settings,
     Recordings,
     CheckSetup,
@@ -401,6 +403,38 @@ fn sentence(text: &str) -> String {
     characters.next().map_or_else(String::new, |first| {
         first.to_uppercase().chain(characters).collect()
     })
+}
+
+/// The pipeline new takes run with the saved default mode, read from the file
+/// as the menu opens. None while the file cannot be read or parsed; Settings
+/// offers its repair.
+fn saved_pipeline() -> Option<PipelineDisplay> {
+    use crate::settings::store::{load_editable_config, EditableConfigLoad};
+    match load_editable_config(&paths::config_file().ok()?) {
+        EditableConfigLoad::Ready { config, .. } => Some(config.pipeline_display()),
+        EditableConfigLoad::Blocked { .. } => None,
+    }
+}
+
+/// The default mode for new takes, with what each does, then the pipeline the
+/// default runs, in order. A per-take override never moves the check mark.
+fn mode_items(items: &mut Items<'_>, saved: Option<&PipelineDisplay>) {
+    for mode in Mode::ALL {
+        let item = items.add(mode.label(), saved.is_some().then_some(Choice::Mode(mode)));
+        if saved.is_some_and(|pipeline| pipeline.mode == mode) {
+            item.setState(NSControlStateValueOn);
+        }
+        let description = NSString::from_str(mode.description());
+        item.setToolTip(Some(&description));
+        if objc2::available!(macos = 14.4) {
+            item.setSubtitle(Some(&description));
+        }
+    }
+    let pipeline = saved.map_or_else(
+        || "Modes unavailable until the configuration is repaired".to_owned(),
+        PipelineDisplay::label,
+    );
+    items.line(Some(&pipeline));
 }
 
 /// The menu's microphone item, from the access the capture owner reports:
@@ -967,6 +1001,8 @@ impl Host {
             .add(&title, repair.then_some(Choice::Settings))
             .setToolTip(shortcut_problem.map(NSString::from_str).as_deref());
         items.separator();
+        mode_items(&mut items, saved_pipeline().as_ref());
+        items.separator();
         if let Some(outcome) = outcome {
             // Deliberate actions for the outcome shown, bound to its own take.
             if let Some(id) = &outcome.artifacts.take_id {
@@ -1063,6 +1099,7 @@ impl Host {
         self.feedback = None;
         let done = match choice {
             Choice::Send(command) => self.send(command),
+            Choice::Mode(mode) => self.choose_mode(mode),
             Choice::Settings => self.show_settings(None),
             Choice::Recordings => self.show_recordings(Open::Recordings),
             Choice::CheckSetup => self.show_recordings(Open::CheckSetup),
@@ -1081,6 +1118,22 @@ impl Host {
             self.feedback = Some(Reply::Refused(format!("{error:#}")));
         }
         false
+    }
+
+    /// Make `mode` the default for new takes, then ask a running Cantrip to
+    /// apply it; its answer arrives as the feedback line. Takes already
+    /// recording or processing keep the mode they started with, and an open
+    /// Settings window shows the new default without losing unsaved edits.
+    fn choose_mode(&self, mode: Mode) -> Result<()> {
+        let path = paths::config_file().context("locating the configuration file")?;
+        crate::settings::save_default_mode(&path, mode)?;
+        if let Some(window) = self.settings.as_ref().filter(|window| !window.closed()) {
+            window.follow_saved_mode();
+        }
+        if self.hud.status().is_some() {
+            self.send(Command::Reload)?;
+        }
+        Ok(())
     }
 
     /// Save the input the menu named as the microphone, then ask Cantrip to

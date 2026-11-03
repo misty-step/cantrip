@@ -33,11 +33,11 @@ operations, not in-flight inference. `audio_source` applies to the next capture.
 `keep_warm` governs model preload at startup and needs a daemon restart.
 
 This Linux example keeps the local-first defaults: Parakeet is selected but its
-weights must be [downloaded deliberately](USAGE.md#2-download-the-local-model-deliberately);
-cleanup remains disabled with no cleanup model selected. Setting `enabled = true`
-without a model selects alias-only Clean. Do not replace an existing file wholesale
-with the example. Prepare the [endpoint, model, and any credential](#postproc--cleanup)
-before selecting a model for LLM cleanup.
+weights must be [downloaded deliberately](USAGE.md#2-download-the-local-model-deliberately).
+Raw is selected, so the configured post-processing provider is not contacted.
+Do not replace an existing file wholesale with the example. Prepare the
+[shared endpoint and credential](#postproc--cleanup) before selecting Clean or
+Elevate.
 
 ```toml
 injection = "auto"        # auto | paste | type | clipboard — how finished text is delivered
@@ -52,14 +52,21 @@ model = "parakeet-tdt-0.6b-v3-int8"   # local registry name (see below)
 # api_key_id = "openai"
 
 [postproc]
-enabled = false           # false = Raw; true = Clean (see Decision 0012)
-endpoint = "http://localhost:11434/v1"    # does not install or start an endpoint
-model = ""               # optional LLM model served by your endpoint
+mode = "raw"              # raw | clean | elevate; Raw makes no postproc requests
+endpoint = "https://openrouter.ai/api/v1"  # shared by Clean and Elevate
+api_key_id = "openrouter"  # OS keyring entry, never the key itself
 timeout_ms = 30000
-passes = 1                # cleanup rounds; 2 adds a proofread pass (slower)
-min_chars = 40            # skip LLM cleanup under this length; 0 = never skip
-# reasoning_effort = "low" # optional: low | medium | high | none (for providers supporting reasoning.effort)
-instructions = ""         # optional extra style guidance
+passes = 1                # Clean only; 2 adds a proofread pass
+min_chars = 40            # Clean only; Elevate processes short text too
+instructions = ""         # extra Clean guidance only
+
+[postproc.clean]
+model = "openai/gpt-6.1-sol"
+reasoning_effort = "low"
+
+[postproc.elevate]
+model = "openai/gpt-6.1-sol"
+reasoning_effort = "low"
 
 [hud]
 labels = false             # true = continuous accessibility stage labels
@@ -108,7 +115,7 @@ vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip"] }]
 
 Existing string-only lists need no migration. See
 [Decision 0012](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02)
-for Raw/Clean behavior, alias matching and validation rules, and the
+for the mode pipelines, alias matching and validation rules, and the
 deliberately-spoken-alias limitation.
 
 Settings on Linux and macOS edit plain-string terms. Entries with a `term`
@@ -243,88 +250,96 @@ For selected-recording retries and the per-operation `--local` override, see
 
 ## `[postproc]` — cleanup
 
-LLM cleanup is **off by default**. Configure it only after ordinary local
-dictation works:
+The default is `mode = "raw"`: neither aliases nor post-processing requests run.
+The [mode contracts](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03)
+own what each pipeline changes. Settings and the macOS menu choose the same
+persisted default; [per-take overrides](USAGE.md#everyday-controls) do not change it.
 
-With no cleanup model, `enabled = true` selects alias-only Clean and makes no
-LLM or decision requests. The steps below enable the optional LLM pass.
+### Mode and model configuration
 
-1. Choose a local or remote OpenAI-compatible chat endpoint and a model it
-   actually serves. Cantrip does not install or launch Ollama or download its
-   models. For local Ollama, start that service and deliberately install the
-   chosen model there before using Cantrip cleanup.
-2. Set `[postproc].endpoint` and `model` in the existing configuration. If the
-   provider requires a credential, store it with `key set ID` and set the
-   matching `api_key_id`; never paste the key into the file.
-3. Set `enabled = true`, save/reload, and make a harmless attended trial.
-   Read `cleanup` in the settled outcome. `doctor` describes configuration
-   and available prerequisites; it does not prove that the endpoint is running,
-   the credential works, or the selected model is usable.
+`[postproc].mode` is the single mode setting: `raw`, `clean`, or `elevate`.
+`[postproc.clean]` and `[postproc.elevate]` each own a `model` and optional
+`reasoning_effort`. Both default to `openai/gpt-6.1-sol` with `low` reasoning.
+They share one `[postproc].endpoint` and one `api_key_id`, defaulting to
+OpenRouter and the `openrouter` keyring entry. One key therefore works for both.
+Setting a model to an empty string deliberately leaves that mode alias-only;
+an empty endpoint with a selected model is a visible failure, not alias-only mode.
 
-For example, an explicitly prepared local Ollama service could use:
+1. Choose a local or remote OpenAI-compatible chat endpoint and models it serves.
+   Cantrip does not install or launch a model service.
+2. Set the shared endpoint in the existing `[postproc]` table. Store any
+   credential with `cantrip key set ID`, then set `api_key_id = "ID"`.
+   Never paste a key into the file.
+3. Set the per-mode model fields, choose the mode, and save/reload.
+   Make a harmless attended trial and inspect `cleanup` in the settled outcome.
+   `doctor` reports configuration and prerequisites, not provider availability
+   or credential validity.
+
+For an explicitly prepared local Ollama service:
 
 ```toml
 [postproc]
-enabled = true
+mode = "clean"
 endpoint = "http://localhost:11434/v1"
+# Remove api_key_id for an endpoint that needs no credential.
+
+[postproc.clean]
 model = "qwen3:8b"
+reasoning_effort = ""       # omit reasoning from requests to this provider
+
+[postproc.elevate]
+model = "qwen3:8b"
+reasoning_effort = ""
 ```
 
-Apply these fields to your existing `[postproc]` table; do not add a duplicate
-table or replace unrelated settings. See [Raw/Clean](decisions/0012-eval-driven-postprocessing.md#vocabulary-aliases-2026-11-02)
-for model/endpoint behavior and the [per-take controls](USAGE.md#everyday-controls)
-for shortcut syntax.
+Apply these fields to the existing tables; do not add duplicate tables or
+replace unrelated settings. Set `reasoning_effort = ""` for a provider that
+does not support OpenRouter's `reasoning.effort` extension. A remote endpoint receives
+transcript text even with local STT; review [privacy](PRIVACY.md#what-leaves-the-machine)
+before opting in.
 
-Clean uses the [Hone-style refinement contract](decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02):
-it actively tightens and restructures speech, rather than preserving its wording.
-Raw skips that transformation. `instructions` appends optional extra style
-guidance to the fixed contract; keep it short and do not redefine the task.
+### Migration
 
-- **Vocabulary.** Add intended canonical names to the top-level `vocabulary`;
-  the [Clean contract](decisions/0012-eval-driven-postprocessing.md#clean-refinement-contract-2026-11-02)
-  owns its correction and literal-span boundaries.
-- **`passes`.** The cleanup runs `passes` rounds in a chain (default 1). Each
-  later round is a focused proofread for residual speech-recognition errors,
-  such as a truncated acronym. One pass avoids compounded drift and latency.
-  Use 2 only after evaluating it on your own dictation corpus.
-- **`timeout_ms`.** Cleanup shares the explicit configured milliseconds across
-  native credential waits, triage, every generative pass, and the final
-  watchdog, including DNS, connections, and response bodies. There is no hidden
-  five-second cleanup inference clamp; individual native keyring reads still
-  have their independent five-second maximum and can use less when the shared
-  budget is nearly spent. See [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md)
-  for failure/cancellation behavior and the boundary with cloud STT waiting.
-- **`min_chars`.** Skip LLM cleanup when its input has fewer than this many
-  characters (default 40). Lower thresholds admit short noise annotations and
-  filler; choose one using the
-  [evaluation evidence](EVALUATION.md#2026-11-02-operator-refinement-study).
-- **Local.** The default endpoint address is Ollama at `localhost:11434`, but
-  its presence in the file does not mean a service is installed or running.
-  `qwen3:8b` is a local option; use a model your endpoint actually serves.
-- **Cloud.** Point the endpoint at an OpenAI-compatible chat provider and set
-  its `api_key_id`. This sends transcript text to that provider even if STT is
-  local. Choose deliberately using the provider's policies and your own
-  [evaluation](https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md).
-- **`reasoning_effort`.** Optional reasoning effort level (e.g. `low`, `medium`,
-  `high`, `none`) for OpenAI-compatible providers that support
-  `reasoning.effort` (such as OpenRouter). Omitted from the request when
-  unset; local endpoints ignore unknown fields.
-- **`decision_model`.** Optional TypeSafe System One decision model (e.g.
-  `typesafe/jev-1.13` or `jev-latest`) for pre-cleanup triage and post-cleanup
-  watchdog verification. Disabled when unset. When enabled, clean takes
-  bypass generative cleanup to reduce latency and token spend; post-cleanup
-  watchdog verification rejects "answer-to-question" hallucinations under
-  [ADR 0026](decisions/0026-typesafe-system-one-decisions.md).
-  Review the [decision-endpoint content boundary](PRIVACY.md#what-leaves-the-machine)
-  before opting in. The triage/watchdog models have not been evaluated against
-  the Hone-style contract; a decision model is **not recommended with Clean yet**.
-- **`decision_endpoint`.** Optional URL override for the decision model.
-  Defaults to OpenRouter's decisions endpoint (`https://openrouter.ai/api/alpha/decisions`)
-  for `typesafe/*` models, or TypeSafe native (`https://api.typesafe.ai/v1/systemone`)
-  otherwise.
-- **`decision_api_key_id`.** Keyring credential ID for decision calls. When unset,
-  defaults to `openrouter` in the OS keyring for OpenRouter models or `typesafe`
-  otherwise, falling back to the runtime cleanup credential.
+Old `[postproc].enabled = true` loads as Clean; `false` loads as Raw.
+An explicit `mode` takes precedence when both are present. Legacy `model` and
+`reasoning_effort` load into `postproc.clean`; an explicit `[postproc.clean]`
+takes precedence. Legacy configurations without an LLM model keep alias-only
+Clean, rather than silently acquiring a cloud model. A legacy model without an
+endpoint keeps the former `http://localhost:11434/v1` default.
+Saving through Settings, the mode controls, or effective configuration
+serialization writes only `mode` and the per-mode model tables, removing the
+legacy owners. No key moves out of the OS keyring.
+
+### Shared budget and Clean-only tuning
+
+- **Vocabulary.** Canonical names and explicit aliases remain in top-level
+  [`vocabulary`](#vocabulary--spellings-and-aliases). Each mode's
+  [contract](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03)
+  determines whether aliases run.
+- **`instructions`.** Appends extra style guidance to Clean's fixed prompt.
+  It does not modify the verbatim Elevate prompt.
+- **`passes`.** Clean chains this many rounds (default 1); later rounds only
+  proofread. Elevate always makes one transformation pass.
+- **`min_chars`.** Clean skips its LLM below this character count (default 40;
+  `0` never skips). Elevate does not skip short questions or directives.
+- **`timeout_ms`.** Both LLM modes share these explicit milliseconds across
+  native credentials, DNS, connections, response bodies, generative work, and
+  optional decisions. There is no hidden five-second inference clamp. Native
+  credential reads retain their independent five-second maximum and may use
+  less when the shared budget is nearly spent. See
+  [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
+- **`decision_model`.** Optional TypeSafe model, disabled when unset. Clean may
+  use pre-generation triage; Elevate never skips its transformation because a
+  source was already grammatically clean. Both may use the post-generation
+  speech-act/fact watchdog, judged against their own mode contract. These
+  decision models remain unevaluated for these prompts and are not recommended
+  until evaluated. See [ADR 0026](decisions/0026-typesafe-system-one-decisions.md)
+  and the [content boundary](PRIVACY.md#what-leaves-the-machine).
+- **`decision_endpoint`.** Optional override; otherwise OpenRouter's decisions
+  endpoint for `typesafe/*` models or the TypeSafe native endpoint.
+- **`decision_api_key_id`.** Optional decision credential. Otherwise use
+  `openrouter` for OpenRouter models or `typesafe` for native models, falling
+  back to the shared cleanup credential.
 
 ## `[handoff.NAME]` — named local commands (US-011)
 
@@ -356,7 +371,7 @@ one shortcut never stops another's take, so a desktop take is never handed
 off and a handoff take is never pasted. `cantrip stop` explicitly stops any
 take and delivers it where its start selected. Alternatively use
 `cantrip start --handoff pepper`; both start commands can also specify
-`--postproc clean` or `--postproc raw`. Changing config does not change the
+`--postproc raw`, `--postproc clean`, or `--postproc elevate`. Changing config does not change the
 destination of a take already recording. On failure or timeout Cantrip kills
 the command's whole process group, so a wrapper script's children cannot
 deliver after the failure is reported.

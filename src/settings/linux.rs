@@ -11,7 +11,7 @@ use super::store::injection_str;
 use super::{apply_theme, color};
 use crate::theme;
 use anyhow::{anyhow, Context, Result};
-use cantrip_engine::{ipc, paths};
+use cantrip_engine::{config::Mode, ipc, paths};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -227,10 +227,10 @@ impl SettingsApp {
         );
         Self::section(
             ui,
-            "Transcript cleanup",
-            "Post-processing behavior and model",
+            "Modes",
+            "What happens to the transcript after recognition",
             |ui| {
-                self.postproc_section(ui);
+                self.modes_section(ui);
             },
         );
 
@@ -462,31 +462,57 @@ impl SettingsApp {
             });
     }
 
-    fn postproc_section(&mut self, ui: &mut egui::Ui) {
+    /// The default mode, the pipeline it runs in order, each mode's own model,
+    /// and the provider and tuning they share.
+    fn modes_section(&mut self, ui: &mut egui::Ui) {
         let edit = &mut self.form.edit;
-        ui.checkbox(&mut edit.pp_enabled, "Clean up the transcript");
-        if let Some(note) = edit.cleanup_note() {
-            ui.label(egui::RichText::new(note).weak());
+        for mode in Mode::ALL {
+            ui.radio_value(&mut edit.mode, mode, mode.label());
+            ui.indent(mode.as_str(), |ui| {
+                ui.label(egui::RichText::new(mode.description()).weak().small());
+            });
         }
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("Pipeline").weak());
+            ui.label(egui::RichText::new(edit.pipeline()).strong());
+        });
         ui.add_space(4.0);
         egui::Grid::new("postproc")
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label(egui::RichText::new("Endpoint").weak());
+                for (label, model, effort) in [
+                    ("Clean", &mut edit.clean_model, &mut edit.clean_effort),
+                    ("Elevate", &mut edit.elevate_model, &mut edit.elevate_effort),
+                ] {
+                    ui.label(egui::RichText::new(format!("{label} model")).weak());
+                    ui.add(
+                        egui::TextEdit::singleline(model)
+                            .hint_text("none — aliases only")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new(format!("{label} reasoning effort")).weak());
+                    ui.add(
+                        egui::TextEdit::singleline(effort)
+                            .hint_text("not sent")
+                            .desired_width(120.0),
+                    );
+                    ui.end_row();
+                }
+
+                ui.label(egui::RichText::new("Endpoint (Clean and Elevate)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut edit.pp_endpoint).desired_width(f32::INFINITY),
                 );
                 ui.end_row();
 
-                ui.label(egui::RichText::new("Model").weak());
-                ui.add(egui::TextEdit::singleline(&mut edit.pp_model).desired_width(f32::INFINITY));
-                ui.end_row();
-
                 ui.label(egui::RichText::new("API key id (keyring)").weak());
                 ui.add(
                     egui::TextEdit::singleline(&mut edit.pp_key)
-                        .hint_text("openrouter")
+                        .hint_text("none")
                         .desired_width(f32::INFINITY),
                 );
                 ui.end_row();
@@ -500,7 +526,7 @@ impl SettingsApp {
                 );
                 ui.end_row();
 
-                ui.label(egui::RichText::new("Cleanup passes").weak());
+                ui.label(egui::RichText::new("Clean passes").weak());
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::DragValue::new(&mut edit.pp_passes)
@@ -509,14 +535,14 @@ impl SettingsApp {
                             .clamp_existing_to_range(false),
                     );
                     ui.label(
-                        egui::RichText::new("1 = one cleanup round; 2 adds a proofread pass")
+                        egui::RichText::new("2 adds a proofread pass; Elevate makes one")
                             .weak()
                             .small(),
                     );
                 });
                 ui.end_row();
 
-                ui.label(egui::RichText::new("Min chars").weak());
+                ui.label(egui::RichText::new("Clean min chars").weak());
                 ui.horizontal(|ui| {
                     ui.add(
                         egui::DragValue::new(&mut edit.pp_min_chars)
@@ -525,14 +551,14 @@ impl SettingsApp {
                             .clamp_existing_to_range(false),
                     );
                     ui.label(
-                        egui::RichText::new("skip cleanup under this length (0 = never skip)")
+                        egui::RichText::new("shorter text skips Clean's model (0 = never skip)")
                             .weak()
                             .small(),
                     );
                 });
                 ui.end_row();
             });
-        ui.label(egui::RichText::new("Instructions (the cleanup behavior)").weak());
+        ui.label(egui::RichText::new("Clean instructions (extra guidance)").weak());
         ui.add(
             egui::TextEdit::multiline(&mut edit.pp_instructions)
                 .desired_rows(4)

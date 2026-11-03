@@ -99,6 +99,22 @@ pub(crate) fn checkbox(
     }
 }
 
+/// One choice of a group the window keeps exclusive itself; `tag` names it.
+pub(crate) fn radio(
+    mtm: MainThreadMarker,
+    title: &str,
+    tag: usize,
+    target: &AnyObject,
+    action: Sel,
+) -> Retained<NSButton> {
+    // SAFETY: as for `button`.
+    let radio = unsafe {
+        NSButton::radioButtonWithTitle_target_action(&ns(title), Some(target), Some(action), mtm)
+    };
+    radio.setTag(tag as isize);
+    radio
+}
+
 /// A pop-up menu whose items this window enables itself.
 pub(crate) fn popup(
     mtm: MainThreadMarker,
