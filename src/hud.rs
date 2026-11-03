@@ -1197,9 +1197,9 @@ fn present_outcome(
     }
     if outcome.cleanup == Cleanup::Failed && (delivered || copied) {
         caption.title = if copied {
-            "Original text copied. Cleanup unavailable."
+            "Alias-corrected text copied. Cleanup unavailable."
         } else {
-            "Original text sent. Cleanup unavailable."
+            "Alias-corrected text sent. Cleanup unavailable."
         }
         .to_owned();
     }
@@ -3838,6 +3838,28 @@ mod tests {
             model.kind.is_none(),
             "repeated outcomes must neither rearm nor replay success"
         );
+    }
+
+    #[test]
+    fn cleanup_failure_caption_describes_the_delivered_alias_corrected_text() {
+        let now = Instant::now();
+        let status = preview_snapshot(StateKind::Idle);
+        for delivery in [
+            Delivery::Copied,
+            Delivery::Typed,
+            Delivery::Pasted,
+            Delivery::HandedOff,
+        ] {
+            let mut outcome = preview_outcome(Completeness::Complete, delivery);
+            outcome.cleanup = Cleanup::Failed;
+            let view = present_outcome(&outcome, &status, now, false);
+            let expected = if delivery == Delivery::Copied {
+                "Alias-corrected text copied. Cleanup unavailable."
+            } else {
+                "Alias-corrected text sent. Cleanup unavailable."
+            };
+            assert_eq!(view.caption.title, expected);
+        }
     }
 
     #[test]

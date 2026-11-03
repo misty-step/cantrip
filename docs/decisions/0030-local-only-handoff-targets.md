@@ -14,6 +14,9 @@ owns this rule.
 
 ## Decision
 
+**Amendment (2026-11-03):** accept explicit `--postproc clean` as alias-only Clean
+instead of refusing it; local-only policy restricts providers, not Raw/Clean selection.
+
 Snapshot `local_only` on the named target: use installed default local STT and
 prevent every LLM cleanup and decision call, with no cloud attempt or fallback.
 Preserve the take's Raw/Clean selection. Local, deterministic aliases still run

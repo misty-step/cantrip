@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 /// A canonical spelling, optionally owning exact recognition aliases.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum VocabularyEntry {
     Term(String),
     Aliased {
@@ -91,7 +91,11 @@ pub(crate) fn validate(entries: &[VocabularyEntry]) -> Result<()> {
             if folded.is_empty() {
                 bail!("vocabulary entry {} has an empty alias", index + 1);
             }
-            if canonical.contains(&folded) {
+            if canonical
+                .iter()
+                .enumerate()
+                .any(|(other, term)| other != index && term == &folded)
+            {
                 bail!(
                     "vocabulary entry {} has an alias equal to a canonical term",
                     index + 1
@@ -131,11 +135,13 @@ pub fn apply<'a>(text: &'a str, entries: &[VocabularyEntry]) -> (Cow<'a, str>, u
             for (start, character) in text.char_indices() {
                 if !character.is_whitespace() && !before.is_some_and(word_character) {
                     if let Some(end) = phrase_end(&text[start..], &folded) {
-                        matches.push(Match {
-                            start,
-                            end: start + end,
-                            term: entry.term(),
-                        });
+                        if &text[start..start + end] != entry.term() {
+                            matches.push(Match {
+                                start,
+                                end: start + end,
+                                term: entry.term(),
+                            });
+                        }
                     }
                 }
                 before = Some(character);
@@ -282,11 +288,23 @@ mod tests {
             assert!(validate(&canonical_conflict).is_err(), "{alias}");
             let duplicate = [entries[0].clone(), aliases("Other", &[equivalent])];
             assert!(validate(&duplicate).is_err(), "{alias}");
-            assert!(
-                validate(&[aliases(equivalent, &[alias])]).is_err(),
-                "{alias}"
-            );
+            validate(&[aliases(equivalent, &[alias])]).unwrap();
         }
         assert_eq!(apply("ß", &[aliases("Canonical", &["s"])]).1, 0);
+    }
+
+    #[test]
+    fn case_only_aliases_correct_spelling_without_counting_canonical_text() {
+        let entries = [aliases("Daybook", &["daybook"])];
+        validate(&entries).unwrap();
+        assert_eq!(
+            apply("daybook", &entries),
+            (Cow::Owned("Daybook".into()), 1)
+        );
+        assert_eq!(apply("Daybook", &entries), (Cow::Borrowed("Daybook"), 0));
+        assert_eq!(
+            apply("Daybook daybook DAYBOOK", &entries),
+            (Cow::Owned("Daybook Daybook Daybook".into()), 2)
+        );
     }
 }

@@ -34,9 +34,10 @@ operations, not in-flight inference. `audio_source` applies to the next capture.
 
 This Linux example keeps the local-first defaults: Parakeet is selected but its
 weights must be [downloaded deliberately](USAGE.md#2-download-the-local-model-deliberately);
-cleanup remains disabled with no cleanup model selected. Do not replace an
-existing file wholesale with the example. Enable cleanup only after the
-[endpoint, model, and any credential are ready](#postproc--cleanup).
+cleanup remains disabled with no cleanup model selected. Setting `enabled = true`
+without a model selects alias-only Clean. Do not replace an existing file wholesale
+with the example. Prepare the [endpoint, model, and any credential](#postproc--cleanup)
+before selecting a model for LLM cleanup.
 
 ```toml
 injection = "auto"        # auto | paste | type | clipboard — how finished text is delivered
@@ -249,6 +250,9 @@ For selected-recording retries and the per-operation `--local` override, see
 LLM cleanup is **off by default**. Configure it only after ordinary local
 dictation works:
 
+With no cleanup model, `enabled = true` selects alias-only Clean and makes no
+LLM or decision requests. The steps below enable the optional LLM pass.
+
 1. Choose a local or remote OpenAI-compatible chat endpoint and a model it
    actually serves. Cantrip does not install or launch Ollama or download its
    models. For local Ollama, start that service and deliberately install the
@@ -256,8 +260,8 @@ dictation works:
 2. Set `[postproc].endpoint` and `model` in the existing configuration. If the
    provider requires a credential, store it with `key set ID` and set the
    matching `api_key_id`; never paste the key into the file.
-3. Only then set `enabled = true`, save/reload, and make a harmless attended
-   trial. Read `cleanup` in the settled outcome. `doctor` describes configuration
+3. Set `enabled = true`, save/reload, and make a harmless attended trial.
+   Read `cleanup` in the settled outcome. `doctor` describes configuration
    and available prerequisites; it does not prove that the endpoint is running,
    the credential works, or the selected model is usable.
 

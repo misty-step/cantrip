@@ -354,6 +354,7 @@ mod tests {
         for text in [
             r#"vocabulary = ["PipeWire", "Cantrip"]"#,
             r#"vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip", "can trip"] }]"#,
+            r#"vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["cantrip"] }]"#,
         ] {
             let config: Config = toml::from_str(text).unwrap();
             config.validate().unwrap();
@@ -377,10 +378,6 @@ mod tests {
             (
                 r#"[{ term = "  ", aliases = ["Gantrip"] }]"#,
                 "empty canonical term",
-            ),
-            (
-                r#"[{ term = "PipeWire", aliases = [" pipewire "] }]"#,
-                "a canonical term",
             ),
             (
                 r#"["PipeWire", { term = "Cantrip", aliases = ["PIPEWIRE"] }]"#,
@@ -409,6 +406,10 @@ mod tests {
             (
                 r#"vocabulary = [{ term = 7, aliases = ["PRIVATE-ALIAS"] }]"#,
                 1,
+            ),
+            (
+                r#"vocabulary = ["PRIVATE-CANONICAL", { term = "PRIVATE-TERM", alias = ["PRIVATE-ALIAS"] }]"#,
+                2,
             ),
         ] {
             let error = toml::from_str::<Config>(text).unwrap_err();

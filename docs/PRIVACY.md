@@ -49,7 +49,7 @@ provider and keeps your configured cleanup policy.
 
 Named `local_only` targets and explicit `recover --local` / `transcribe --local`
 follow the [local-only content policy](decisions/0030-local-only-handoff-targets.md),
-which preserves Raw/Clean selection without LLM or decision requests.
+which preserves configured Raw/Clean selection without LLM or decision requests.
 This does not change saved configuration or disable separately opted-in
 metadata telemetry, so `--local` is not an all-network-off switch. Downloads and
 software updates are separate network actions.

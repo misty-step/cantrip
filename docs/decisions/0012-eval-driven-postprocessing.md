@@ -84,13 +84,15 @@ endpoint is a visible cleanup configuration failure, not alias-only mode.
 Validation and matching share one normalization: trim surrounding whitespace
 and apply full Unicode default case folding, including final sigma and
 multi-character folds such as `ß` → `ss`. Reject empty aliases and table terms,
-aliases equal to any canonical term (including their own), and aliases shared
-across terms after that normalization.
+aliases equal to another term's canonical spelling, and aliases shared across
+terms after that normalization. Aliases equal to their own normalized term are
+valid, so case-only aliases such as `Daybook` / `daybook` can correct capitalization.
 
 Matching is exact whole-phrase matching on word boundaries. Select the longest
 non-overlapping matches and emit canonical spellings without fuzzy matching or
-cascading replacements. The aliased text survives absent/skipped cleanup and
-cleanup failures or timeouts. History retains the recognizer's `raw_transcript`,
+cascading replacements. Skip spans already equal to the canonical spelling byte
+for byte; they do not count as substitutions. The aliased text survives absent
+or skipped cleanup and cleanup failures or timeouts. History retains the recognizer's `raw_transcript`,
 the resulting text, and a substitution count; operational logs contain counts only.
 
 This deterministic rule cannot disambiguate a deliberately spoken or quoted
