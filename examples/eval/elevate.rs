@@ -447,31 +447,53 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             "protected literal must occur in its synthetic source"
         );
     }
-    let case_by_id: BTreeMap<&str, &Case> =
-        included.cases.iter().map(|case| (case.id.as_str(), case)).collect();
+    let case_by_id: BTreeMap<&str, &Case> = included
+        .cases
+        .iter()
+        .map(|case| (case.id.as_str(), case))
+        .collect();
     let schedule_bytes = args.schedule.as_ref().map(fs::read).transpose()?;
     let planned = if let Some(bytes) = &schedule_bytes {
         let schedule: Schedule = serde_json::from_slice(bytes)?;
-        ensure!(schedule.schema == "cantrip.eval.elevate-schedule.v1"
-            && schedule.calls.len() == 246 && inherited_cases == 33,
-            "comparison requires exactly 41 cases x 3 repeats x 2 arms");
+        ensure!(
+            schedule.schema == "cantrip.eval.elevate-schedule.v1"
+                && schedule.calls.len() == 246
+                && inherited_cases == 33,
+            "comparison requires exactly 41 cases x 3 repeats x 2 arms"
+        );
         let mut schedule_ids = BTreeSet::new();
         let mut counts = BTreeMap::new();
         for call in &schedule.calls {
-            ensure!(case_by_id.contains_key(call.case.as_str()) && (1..=3).contains(&call.iteration),
-                "comparison schedule has an unknown case or repeat");
+            ensure!(
+                case_by_id.contains_key(call.case.as_str()) && (1..=3).contains(&call.iteration),
+                "comparison schedule has an unknown case or repeat"
+            );
             let id = call.id.as_deref().unwrap_or_default();
-            ensure!(id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && schedule_ids.insert(id), "comparison schedule IDs must be unique opaque hashes");
-            *counts.entry((call.case.as_str(), call.iteration)).or_insert(0) += 1;
+            ensure!(
+                id.len() == 32
+                    && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && schedule_ids.insert(id),
+                "comparison schedule IDs must be unique opaque hashes"
+            );
+            *counts
+                .entry((call.case.as_str(), call.iteration))
+                .or_insert(0) += 1;
         }
-        ensure!(counts.len() == 123 && counts.values().all(|count| *count == 2),
-            "every case/repeat requires two scheduled calls");
+        ensure!(
+            counts.len() == 123 && counts.values().all(|count| *count == 2),
+            "every case/repeat requires two scheduled calls"
+        );
         schedule.calls
     } else {
-        included.cases.iter().map(|case| ScheduledCall {
-            id: None, case: case.id.clone(), iteration: 1,
-        }).collect()
+        included
+            .cases
+            .iter()
+            .map(|case| ScheduledCall {
+                id: None,
+                case: case.id.clone(),
+                iteration: 1,
+            })
+            .collect()
     };
     let mut cfg = PostprocConfig {
         mode: Mode::Elevate,
@@ -529,7 +551,9 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         write_private(&args.out.join("receipt.json"), &receipt)?;
         eprintln!(
             "[eval] Elevate dry-run inherited={} added={} planned={} paid_calls=0",
-            inherited_cases, added_cases, planned.len()
+            inherited_cases,
+            added_cases,
+            planned.len()
         );
         return Ok(());
     }
@@ -539,8 +563,11 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         .ok_or_else(|| anyhow!("--allow-paid requires the native credential broker --endpoint"))?;
     receipt.accounting = broker_accounting(endpoint)?;
     if let Some(schedule_hash) = &receipt.comparison_schedule_sha256 {
-        ensure!(receipt.accounting["comparison"]["worker_schedule_sha256"].as_str()
-            == Some(schedule_hash.as_str()), "native broker/client schedule mismatch");
+        ensure!(
+            receipt.accounting["comparison"]["worker_schedule_sha256"].as_str()
+                == Some(schedule_hash.as_str()),
+            "native broker/client schedule mismatch"
+        );
     }
     for scheduled in planned {
         let case = case_by_id[scheduled.case.as_str()];

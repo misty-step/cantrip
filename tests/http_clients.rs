@@ -218,6 +218,15 @@ fn elevate_sends_verbatim_operator_prompt_and_its_own_model_in_one_pass() {
     assert_eq!(body["reasoning"]["effort"], "low");
     let system = body["messages"][0]["content"].as_str().unwrap();
     assert!(system.starts_with(postproc::ELEVATE_SYSTEM_PROMPT));
+    let addendum = include_str!("../crates/engine/src/elevate-fidelity.txt");
+    assert!((1..=5).contains(&addendum.lines().count()));
+    let after_operator = system
+        .strip_prefix(postproc::ELEVATE_SYSTEM_PROMPT)
+        .unwrap();
+    assert!(after_operator
+        .strip_prefix('\n')
+        .is_some_and(|suffix| suffix.starts_with(addendum)));
+    assert_eq!(system.matches(addendum).count(), 1);
     assert!(system.contains("Cantrip"));
     assert!(!system.contains("PRIVATE-ALIAS-MARKER"));
     assert!(!system.contains("CLEAN-ONLY-GUIDANCE"));

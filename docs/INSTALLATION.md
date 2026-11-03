@@ -591,6 +591,7 @@ microphone, or host clipboard are needed.
 4. Open **Settings… → Modes**. Confirm Elevate, its description, both model
    fields, and the same ordered pipeline. Confirm Raw and Clean can also be
    selected and saved, then return to Elevate.
+   At 1440×900 with the Dock visible, confirm **Save & Apply** is fully on screen.
 5. Start a take and play `samples/jfk.wav` into BlackHole. Capture the recording
    HUD. While recording, choose Raw from the menu. The menu's default changes,
    but the current HUD must retain Elevate and its original pipeline.
@@ -605,7 +606,8 @@ microphone, or host clipboard are needed.
 8. Start a second take without an override. Expect Raw in the HUD, only a
    transcription request, and the unmodified dummy recognizer text on the guest
    clipboard. Repeat menu, Modes pane, and active HUD captures in Light and Dark.
-   Check text wrapping, square corners, and passive click-through.
+   Check text wrapping, square corners, passive click-through, and the fully
+   visible **Save & Apply** control with the Dock showing.
 9. Quit the guest app, stop only this fixture server, and dispose of the VM.
    Retain text-free screenshots and a revision-bound result. The
    [cloud evaluation receipt](../eval/baselines/2026-11-03-elevate/run.json)
