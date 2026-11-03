@@ -48,6 +48,9 @@ struct Args {
     /// Explicit, hash-bound semantic judgments; performs no inference requests.
     #[arg(long)]
     review: Option<PathBuf>,
+    /// Opaque paired-comparison schedule. Arm identities remain in the native broker.
+    #[arg(long, conflicts_with = "review")]
+    schedule: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -98,8 +101,25 @@ enum Failure {
     Formatting,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Schedule {
+    schema: String,
+    calls: Vec<ScheduledCall>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduledCall {
+    id: Option<String>,
+    case: String,
+    iteration: u8,
+}
+
 #[derive(Deserialize, Serialize)]
 struct Call {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schedule_id: Option<String>,
     case: String,
     category: String,
     iteration: u8,
@@ -125,6 +145,10 @@ struct Receipt {
     inherited_corpus_sha256: String,
     inherited_cases: usize,
     added_cases: usize,
+    #[serde(default)]
+    planned_calls: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comparison_schedule_sha256: Option<String>,
     model: String,
     reasoning_effort: String,
     production_path: String,
@@ -140,6 +164,8 @@ struct Receipt {
 
 #[derive(Deserialize, Serialize)]
 struct PrivateOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    schedule_id: Option<String>,
     case: String,
     iteration: u8,
     source: String,
@@ -270,6 +296,11 @@ fn deterministic(checks: &Checks, text: &str) -> BTreeSet<Failure> {
 
 fn summarize(receipt: &mut Receipt) {
     let count = receipt.calls.len();
+    let planned = if receipt.planned_calls == 0 {
+        receipt.inherited_cases + receipt.added_cases
+    } else {
+        receipt.planned_calls
+    };
     let failures: Vec<_> = receipt.calls.iter().filter(|call| !call.failures.is_empty())
         .map(|call| json!({"case": call.case, "iteration": call.iteration, "categories": call.failures}))
         .collect();
@@ -283,7 +314,7 @@ fn summarize(receipt: &mut Receipt) {
     };
     let known_cost: f64 = receipt.calls.iter().filter_map(|call| call.cost_usd).sum();
     receipt.summary = json!({
-        "scheduled": receipt.inherited_cases + receipt.added_cases,
+        "scheduled": planned,
         "submitted": count,
         "reviewed": reviewed,
         "passed": receipt.calls.iter().filter(|call| call.reviewed && call.failures.is_empty()).count(),
@@ -294,7 +325,7 @@ fn summarize(receipt: &mut Receipt) {
         "reported_cost_usd": known_cost,
         "unknown_cost_calls": receipt.calls.iter().filter(|call| call.cost_usd.is_none()).count(),
         "latency_ms": {"p50": percentile(50), "p95": percentile(95), "max": latencies.last()},
-        "gate": if count != receipt.inherited_cases + receipt.added_cases || reviewed != count { "unverified" }
+        "gate": if count != planned || reviewed != count { "unverified" }
             else if failures.is_empty() { "pass" } else { "fail" }
     });
 }
@@ -416,6 +447,32 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             "protected literal must occur in its synthetic source"
         );
     }
+    let case_by_id: BTreeMap<&str, &Case> =
+        included.cases.iter().map(|case| (case.id.as_str(), case)).collect();
+    let schedule_bytes = args.schedule.as_ref().map(fs::read).transpose()?;
+    let planned = if let Some(bytes) = &schedule_bytes {
+        let schedule: Schedule = serde_json::from_slice(bytes)?;
+        ensure!(schedule.schema == "cantrip.eval.elevate-schedule.v1"
+            && schedule.calls.len() == 246 && inherited_cases == 33,
+            "comparison requires exactly 41 cases x 3 repeats x 2 arms");
+        let mut schedule_ids = BTreeSet::new();
+        let mut counts = BTreeMap::new();
+        for call in &schedule.calls {
+            ensure!(case_by_id.contains_key(call.case.as_str()) && (1..=3).contains(&call.iteration),
+                "comparison schedule has an unknown case or repeat");
+            let id = call.id.as_deref().unwrap_or_default();
+            ensure!(id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && schedule_ids.insert(id), "comparison schedule IDs must be unique opaque hashes");
+            *counts.entry((call.case.as_str(), call.iteration)).or_insert(0) += 1;
+        }
+        ensure!(counts.len() == 123 && counts.values().all(|count| *count == 2),
+            "every case/repeat requires two scheduled calls");
+        schedule.calls
+    } else {
+        included.cases.iter().map(|case| ScheduledCall {
+            id: None, case: case.id.clone(), iteration: 1,
+        }).collect()
+    };
     let mut cfg = PostprocConfig {
         mode: Mode::Elevate,
         ..PostprocConfig::default()
@@ -440,6 +497,8 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         inherited_corpus_sha256: hash(included_bytes),
         inherited_cases,
         added_cases,
+        planned_calls: planned.len(),
+        comparison_schedule_sha256: schedule_bytes.as_ref().map(hash),
         model: MODEL.to_owned(),
         reasoning_effort: "low".to_owned(),
         production_path: "vocabulary::apply then postproc::refine (production prompt, request serialization, response normalization, usage and shared deadline)".to_owned(),
@@ -456,13 +515,21 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             "The native broker adds only disclosed test-only generation/price bounds; system/user/model/reasoning remain the production request.".to_owned(),
         ],
     };
+    if args.schedule.is_some() {
+        receipt.schema = "cantrip.eval.elevate-comparison-private.v1".to_owned();
+        receipt.limitations = vec![
+            "One precommitted paired comparison: 41 cases x 3 repeats x 2 opaque routes. No paid retries or model judge.".to_owned(),
+            "The native broker inserts only the fixed candidate addendum for its precommitted opaque route; all requests originate in production postproc::refine.".to_owned(),
+            "Independent blinded semantic grades are primary. Exact-number checks are diagnostics; preserve numeric values, meaningful modality and literal content without imposing Clean wording.".to_owned(),
+        ];
+    }
     let mut private = Vec::new();
     if args.dry_run {
         summarize(&mut receipt);
         write_private(&args.out.join("receipt.json"), &receipt)?;
         eprintln!(
-            "[eval] Elevate dry-run inherited={} added={} paid_calls=0",
-            inherited_cases, added_cases
+            "[eval] Elevate dry-run inherited={} added={} planned={} paid_calls=0",
+            inherited_cases, added_cases, planned.len()
         );
         return Ok(());
     }
@@ -471,16 +538,25 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         .as_deref()
         .ok_or_else(|| anyhow!("--allow-paid requires the native credential broker --endpoint"))?;
     receipt.accounting = broker_accounting(endpoint)?;
-    for case in included.cases {
+    if let Some(schedule_hash) = &receipt.comparison_schedule_sha256 {
+        ensure!(receipt.accounting["comparison"]["worker_schedule_sha256"].as_str()
+            == Some(schedule_hash.as_str()), "native broker/client schedule mismatch");
+    }
+    for scheduled in planned {
+        let case = case_by_id[scheduled.case.as_str()];
+        if let Some(id) = &scheduled.id {
+            cfg.endpoint = format!("{endpoint}/eval/{id}");
+        }
         let (source, substitutions) = vocabulary::apply(&case.input, &manifest.vocabulary);
         let started = Instant::now();
         // No key lookup, evaluator request copy, provider fallback or paid retry.
         let refinement = postproc::refine(&source, &cfg, &manifest.vocabulary, None, None);
         let latency_ms = started.elapsed().as_millis();
         let mut call = Call {
+            schedule_id: scheduled.id.clone(),
             case: case.id.clone(),
-            category: case.category,
-            iteration: 1,
+            category: case.category.clone(),
+            iteration: scheduled.iteration,
             latency_ms,
             input_tokens: None,
             output_tokens: None,
@@ -504,10 +580,11 @@ pub(super) fn run(args: &[String]) -> Result<()> {
                 call.output_sha256 = Some(output_hash.clone());
                 call.failures = deterministic(&case.checks, &refined.text);
                 private.push(PrivateOutput {
-                    case: case.id,
-                    iteration: 1,
+                    schedule_id: scheduled.id,
+                    case: case.id.clone(),
+                    iteration: scheduled.iteration,
                     alias_corrected_source: source.into_owned(),
-                    source: case.input,
+                    source: case.input.clone(),
                     text: refined.text,
                     output_sha256: output_hash,
                 });
@@ -517,8 +594,9 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             }
         }
         eprintln!(
-            "[eval] Elevate case={} iteration=1 ms={} deterministic_failures={}",
+            "[eval] Elevate case={} iteration={} ms={} deterministic_failures={}",
             call.case,
+            call.iteration,
             call.latency_ms,
             call.failures.len()
         );

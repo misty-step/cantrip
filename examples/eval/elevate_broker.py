@@ -3,8 +3,9 @@
 
 Run via pass-env with the dedicated SPEECH_EVAL entry, never on Boat. Reverse
 forward this loopback port with `boat forward ID --reverse --local PORT --remote
-PORT --bind 127.0.0.1`. Every upstream body originates in postproc::refine; only
-max_completion_tokens and provider price/fallback guards are added here.
+PORT --bind 127.0.0.1`. Every upstream body originates in postproc::refine.
+The optional comparison inserts only its precommitted fidelity addendum; all
+requests receive identical max_completion_tokens and provider price guards.
 
 --inspect reads the live counter/catalog without inference. --out must be fresh,
 private scratch outside the repo. Only accounting.json is publishable; raw-*.json
@@ -15,6 +16,9 @@ post-call counter halts the broker; a new invocation is not a paid retry permit.
 byte-identical production request hashes replay retained responses locally; they
 are never submitted upstream again. Backwards counter reads retain the observed
 high-water mark and all known charges rather than manufacturing refunded room.
+--comparison-plan requires one opaque per-slot endpoint for all 246 precommitted
+samples. Slot identity, arm, repeat and exact production hash distinguish fresh
+repeats from replay; identical bodies never merge independently scheduled draws.
 """
 
 import argparse
@@ -47,6 +51,10 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--inspect", action="store_true")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--comparison-plan", type=Path)
+    parser.add_argument("--operator-prompt", type=Path)
+    parser.add_argument("--candidate-addendum", type=Path)
+    parser.add_argument("--base-system-sha256")
     args = parser.parse_args()
     key = os.environ.pop("OPENROUTER_API_KEY", "").removesuffix("\n")
     if not key or not key.isascii() or not all(33 <= ord(c) <= 126 for c in key):
@@ -109,6 +117,47 @@ def main():
         "calls": [],
         "halted": start >= CEILING,
     }
+    plan = None
+    plan_calls = []
+    operator = None
+    addendum = None
+    if args.comparison_plan is not None:
+        if args.operator_prompt is None or args.candidate_addendum is None or args.base_system_sha256 is None:
+            raise RuntimeError("comparison_prompt_assets_required")
+        plan_bytes = args.comparison_plan.read_bytes()
+        plan = json.loads(plan_bytes)
+        operator_bytes = args.operator_prompt.read_bytes()
+        addendum_bytes = args.candidate_addendum.read_bytes()
+        if (plan["schema"] != "cantrip.eval.elevate-comparison-plan.v1"
+                or len(plan["calls"]) != 246
+                or len(addendum_bytes) != 263 or len(addendum_bytes.splitlines()) != 3
+                or digest(operator_bytes) != plan["operator_sha256"]
+                or digest(addendum_bytes) != plan["addendum_sha256"]):
+            raise RuntimeError("comparison_precommit_mismatch")
+        plan_calls = plan["calls"]
+        slots = set()
+        coverage = {}
+        for slot in plan_calls:
+            if (not re.fullmatch(r"[0-9a-f]{32}", slot["id"]) or slot["id"] in slots
+                    or slot["arm"] not in ("operator", "candidate") or slot["iteration"] not in (1, 2, 3)):
+                raise RuntimeError("comparison_schedule_invalid")
+            slots.add(slot["id"])
+            key_tuple = (slot["case"], slot["iteration"], slot["arm"])
+            coverage[key_tuple] = coverage.get(key_tuple, 0) + 1
+        if len({slot["case"] for slot in plan_calls}) != 41 or any(count != 1 for count in coverage.values()):
+            raise RuntimeError("comparison_schedule_coverage_invalid")
+        operator = operator_bytes.decode("utf-8")
+        addendum = addendum_bytes.decode("utf-8")
+        accounting["comparison"] = {
+            "plan_sha256": digest(plan_bytes),
+            "worker_schedule_sha256": plan["worker_schedule_sha256"],
+            "operator_sha256": digest(operator_bytes),
+            "addendum_sha256": digest(addendum_bytes),
+            "addendum_bytes": len(addendum_bytes),
+            "base_system_sha256": args.base_system_sha256,
+            "planned_calls": 246,
+            "seed": plan["seed"],
+        }
     reported_total = Decimal(0)
     high_water = start
     replays = []
@@ -117,7 +166,8 @@ def main():
         previous = json.loads((args.resume / "accounting.json").read_bytes())
         if (previous["model"] != MODEL or previous["reasoning_effort"] != "low"
                 or previous["provider_guards"] != accounting["provider_guards"]
-                or previous["test_only_max_completion_tokens"] != COMPLETION_CAP):
+                or previous["test_only_max_completion_tokens"] != COMPLETION_CAP
+                or previous.get("comparison") != accounting.get("comparison")):
             raise RuntimeError("checkpoint_protocol_mismatch")
         fresh_counter = start
         start = Decimal(str(previous["key_usage_start_usd"]))
@@ -135,7 +185,7 @@ def main():
             reported_total += charge
             high_water = max(high_water, Decimal(str(record["key_usage_before_usd"])),
                              Decimal(str(record["key_usage_after_usd"])))
-            replays.append((record["production_request_sha256"], response))
+            replays.append((record.get("schedule_slot"), record["production_request_sha256"], response))
             shutil.copyfile(args.resume / f"raw-{record['sequence']:03d}.json",
                             args.out / f"raw-{record['sequence']:03d}.json")
         if fresh_counter < start + reported_total:
@@ -198,7 +248,9 @@ def main():
 
         def do_POST(self):
             nonlocal reported_total, high_water, replay_index
-            if self.path != "/api/v1/chat/completions" or accounting["halted"]:
+            route = re.fullmatch(r"/api/v1/eval/([0-9a-f]{32})/chat/completions", self.path)
+            route_allowed = route is not None if plan is not None else self.path == "/api/v1/chat/completions"
+            if not route_allowed or accounting["halted"]:
                 self.reply(403, {"error": "broker_halted_or_route_not_allowed"})
                 return
             record = None
@@ -218,20 +270,35 @@ def main():
                                for message in body["messages"])):
                     raise RuntimeError("production_request_shape_invalid")
                 request_hash = digest(original)
+                slot = None
+                if plan is not None:
+                    next_index = replay_index if replay_index < len(replays) else len(accounting["calls"])
+                    if next_index >= len(plan_calls):
+                        raise RuntimeError("comparison_complete_no_more_submissions")
+                    slot = plan_calls[next_index]
+                    if route.group(1) != slot["id"]:
+                        raise RuntimeError("comparison_slot_order_mismatch")
+                    system = body["messages"][0]["content"]
+                    if digest(system.encode()) != args.base_system_sha256 or not system.startswith(operator):
+                        raise RuntimeError("comparison_production_system_mismatch")
+                    if slot["arm"] == "candidate":
+                        body["messages"][0]["content"] = operator + "\n" + addendum + system[len(operator):]
                 if replay_index < len(replays):
-                    expected_hash, retained = replays[replay_index]
-                    if request_hash != expected_hash:
+                    expected_slot, expected_hash, retained = replays[replay_index]
+                    if request_hash != expected_hash or slot != expected_slot:
                         raise RuntimeError("checkpoint_production_request_hash_mismatch")
                     replay_index += 1
                     accounting["local_replays"] = replay_index
                     persist()
                     self.reply(200, retained)
                     return
-                if any(prior["production_request_sha256"] == request_hash for prior in accounting["calls"]):
+                if any((prior.get("schedule_slot") == slot if plan is not None
+                        else prior["production_request_sha256"] == request_hash) for prior in accounting["calls"]):
                     raise RuntimeError("duplicate_upstream_submission_refused")
                 before = usage()
+                evaluated = json.dumps(body, separators=(",", ":")).encode()
                 # UTF-8 bytes upper-bound text tokens; extra framing/JSON bytes are conservative.
-                reserve = ((Decimal(size + 256) * prompt_price
+                reserve = ((Decimal(max(size, len(evaluated)) + 256) * prompt_price
                             + Decimal(COMPLETION_CAP) * completion_price + request_price)
                            * Decimal("1.10"))
                 high_water = max(high_water, before)
@@ -240,7 +307,9 @@ def main():
                     raise RuntimeError("absolute_key_ceiling_reservation_refused")
                 record = {
                     "sequence": len(accounting["calls"]) + 1,
+                    "schedule_slot": slot,
                     "production_request_sha256": request_hash,
+                    "evaluated_request_sha256": digest(evaluated),
                     "system_prompt_sha256": digest(body["messages"][0]["content"].encode()),
                     "user_prompt_sha256": digest(body["messages"][1]["content"].encode()),
                     "key_usage_before_usd": float(before),
