@@ -34,7 +34,7 @@ class NativeReleaseChecks(unittest.TestCase):
                 "pull_requests": [{"number": 133}],
                 "status": "completed", "conclusion": "action_required",
             }
-            for identifier, workflow in enumerate(("ci.yml", "macos.yml", "site.yml"), 100)
+            for identifier, workflow in enumerate(("ci.yml", "macos.yml", "site.yml", "pr-title.yml"), 100)
         }
         self.responses = {workflow: [[check]] for workflow, check in self.checks.items()}
         self.reads = []
@@ -70,7 +70,7 @@ class NativeReleaseChecks(unittest.TestCase):
         self.fail(f"unexpected GitHub lookup: {path}")
 
     def test_waits_for_all_native_runs_and_approves_each_once(self):
-        extra = {**self.checks["ci.yml"], "id": 103}
+        extra = {**self.checks["ci.yml"], "id": 104}
         self.responses["ci.yml"] = [[], [self.checks["ci.yml"], extra]]
         self.responses["site.yml"] = [[], [], [self.checks["site.yml"]]]
         self.approve(133, self.revision)
@@ -79,10 +79,10 @@ class NativeReleaseChecks(unittest.TestCase):
             [call.args for call in self.transport.call_args_list],
             [("gh", "api", "--method", "POST",
               f"repos/misty-step/cantrip/actions/runs/{identifier}/approve")
-             for identifier in (101, 100, 103, 102)],
+             for identifier in (101, 103, 100, 104, 102)],
         )
         self.assertEqual([call.kwargs["timeout"] for call in self.transport.call_args_list],
-                         [5, 3, 3, 1])
+                         [5, 5, 3, 3, 1])
         self.assertEqual(self.reads.count(self.query("ci.yml")), 2)
         self.assertEqual(self.reads.count(self.query("macos.yml")), 1)
         self.assertEqual(self.reads.count(self.query("site.yml")), 3)
@@ -94,7 +94,7 @@ class NativeReleaseChecks(unittest.TestCase):
         self.assertEqual(self.seconds, 5)
         self.assertEqual(self.clock.sleep.call_args_list,
                          [mock.call(2), mock.call(2), mock.call(1)])
-        self.assertEqual(self.transport.call_count, 2)
+        self.assertEqual(self.transport.call_count, 3)
         self.assertEqual(self.reads.count(self.query("site.yml")), 3)
 
     def test_existing_approvals_and_failed_runs_are_not_retried(self):
@@ -159,7 +159,7 @@ class NativeReleaseChecks(unittest.TestCase):
 
     def test_discovery_api_error_stops_waiting_without_retry(self):
         self.responses["ci.yml"] = [[], RELEASE["ReleaseError"]("GitHub lookup refused")]
-        for workflow in ("macos.yml", "site.yml"):
+        for workflow in ("macos.yml", "site.yml", "pr-title.yml"):
             self.responses[workflow] = [[{**self.checks[workflow], "conclusion": "success"}]]
         with self.assertRaisesRegex(RELEASE["ReleaseError"], "GitHub lookup refused"):
             self.approve(133, self.revision)
@@ -177,7 +177,7 @@ class NativeReleaseChecks(unittest.TestCase):
 
 class ReleaseGates(unittest.TestCase):
     def test_title_check_uses_literal_environment_input(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (ROOT / ".github/workflows/pr-title.yml").read_text()
         command = next(line.strip() for line in workflow.splitlines() if "python3 -c" in line)
         self.assertNotIn("${{", command)
         for title, expected in (

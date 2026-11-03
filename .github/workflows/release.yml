@@ -15,6 +15,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  native:
+    # Qualification runs alongside planning/build/runtime proof, not in front
+    # of metadata-only release-PR preparation. Publication waits for all of it.
+    uses: ./.github/workflows/macos.yml
+
   plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -148,7 +153,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: [build, verify]
+    needs: [build, verify, native]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

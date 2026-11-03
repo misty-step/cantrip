@@ -342,7 +342,7 @@ def ensure_release_pr(version, revision):
 def approve_release_checks(number, revision):
     """Wait for native bot-PR checks, then approve only this exact PR head."""
     deadline = time.monotonic() + RELEASE_CHECK_WAIT_SECONDS
-    pending = ["ci.yml", "macos.yml", "site.yml"]
+    pending = ["ci.yml", "macos.yml", "site.yml", "pr-title.yml"]
 
     def remaining():
         seconds = deadline - time.monotonic()

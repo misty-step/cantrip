@@ -220,7 +220,8 @@ they are not production transcription deadlines.
 - **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): independent
   `./scripts/check rust` and `./scripts/check contracts` tiers run on standard
   hosted Linux runners. Required `check` accepts only both successes; the full
-  secret scan and Conventional Commit title remain separate required checks.
+  secret scan and checkout-free [PR title](.github/workflows/pr-title.yml)
+  validation remain separate required checks; metadata edits do not recompile.
   Master and twice-daily runs also qualify both native Mac architectures.
 - **Native macOS CI** ([`.github/workflows/macos.yml`](.github/workflows/macos.yml)):
   arm64 workspace, development packaging and relocated public-fixture proof on

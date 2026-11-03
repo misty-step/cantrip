@@ -1,0 +1,24 @@
+name: PR metadata
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cantrip-pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require a Conventional Commit title (the squash commit input)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 -c 'import os, re; assert re.fullmatch(r"(?:feat|fix|perf|revert|chore|docs|test|build|ci|refactor|style)(?:\([^()\r\n]+\))?!?: [^\r\n]+", os.environ["PR_TITLE"]), "Use a Conventional Commit PR title"'

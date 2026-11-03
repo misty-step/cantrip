@@ -316,6 +316,10 @@ fallback. The validated runtime is saved immediately, so a later app-verificatio
 failure does not discard a successful source build. Both architectures retain
 formatting, Clippy for every workspace target, workspace tests, the eval example,
 Python release tests, and relocated-app proof.
+PRs run the arm64 native tier. After Linux gates pass on master, both native
+architectures run alongside release planning/build verification; publication
+waits for their success. The twice-daily full battery also qualifies both
+architectures. See [Decision 0035](decisions/0035-bounded-ci-feedback.md).
 Clippy also compiles the targets previously compiled by a separate `cargo check`.
 Smoke-command failures report the command, exit status, and at most the last
 4096 bytes of stderr, never transcript-bearing stdout.

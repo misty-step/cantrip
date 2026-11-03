@@ -4,7 +4,7 @@ on:
   push:
     branches: [master]
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
   schedule:
     - cron: '17 5,17 * * *'
@@ -22,16 +22,6 @@ env:
   TRUFFLEHOG_VERSION: v3.96.0
 
 jobs:
-  pr-title:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    steps:
-      - name: Require a Conventional Commit title (the squash commit input)
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          python3 -c 'import os, re; assert re.fullmatch(r"(?:feat|fix|perf|revert|chore|docs|test|build|ci|refactor|style)(?:\([^()\r\n]+\))?!?: [^\r\n]+", os.environ["PR_TITLE"]), "Use a Conventional Commit PR title"'
 
   rust:
     # One compile graph: clippy metadata and test codegen share dependencies.
@@ -105,12 +95,12 @@ jobs:
       - name: TruffleHog — working-tree scan (fails on any finding)
         run: /tmp/th/trufflehog filesystem . --exclude-paths .trufflehog-exclude --fail
 
-  native:
-    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+  nightly-native:
+    if: github.event_name == 'schedule'
     uses: ./.github/workflows/macos.yml
 
   release:
-    needs: [check, secret-scan, native]
+    needs: [check, secret-scan]
     if: github.ref == 'refs/heads/master' && contains(fromJSON('["push","workflow_dispatch"]'), github.event_name)
     permissions:
       contents: write

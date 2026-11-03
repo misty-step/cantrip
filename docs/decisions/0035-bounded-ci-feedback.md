@@ -49,7 +49,7 @@ not decommission that machine or its other workloads.
 | Every PR, in parallel: `scripts/check contracts` | Omarchy, source/binary installers, release identity/promotion, website smoke contracts | required `check` |
 | Every PR, in parallel: full-history gitleaks and working-tree TruffleHog; literal Conventional Commit title | unchanged secret and squash-title contracts | required `secret-scan`, `pr-title` |
 | Every PR, in parallel: native arm64 | locked workspace, development app packaging, relocated public-file STT, capture refusal, HUD/windows | native PR check |
-| Every master push and twice daily: both native architectures plus every Linux tier and full secret scans | all the above plus Intel ABI/runtime/native artifact qualification; refresh default-branch caches | successful native and Linux jobs precede release |
+| Master after Linux gates, and twice daily: both native architectures | Intel ABI/runtime/native artifact qualification; refresh default-branch caches | successful native and Linux jobs precede publication |
 | Release candidate: existing build → downloaded artifact verification → attestation/publication | CPU-only Ubuntu baseline, checksums/source identity, offline public-file STT, install/update/rollback/uninstall and retained-state preservation on the exact published bytes | publication requires successful qualification and runtime proof |
 
 `check` remains the required context, not the name of a chosen shard. It runs
@@ -57,13 +57,17 @@ with `always()` and accepts only successful Rust **and** contract results;
 failure, cancellation or skipping cannot turn an incomplete gate green. There
 are no path filters that silently omit a required check. New PR pushes cancel
 superseded work. Master/release writers are not cancelled by newer PRs.
+Title validation has its own checkout-free `pr-title.yml` workflow. Editing a
+PR title or evidence body reruns metadata validation, not compilation/scanning;
+the code workflows run only on opening, reopening or a new head.
 
 Intel qualification moves from each PR to master and the twice-daily full
-battery. This is safe for publication because CI explicitly depends on the
-complete reusable native workflow before calling the release workflow. The
-same master SHA is checked out in both; a failed or skipped native job cannot
-publish. Scheduled runs qualify but do not publish releases or deploy the
-website. The Linux release's downloaded-artifact verification remains intact.
+battery. Release planning and native qualification run independently; the
+metadata-only release PR need not wait for a compiler. Artifact build/runtime
+proof also overlap native qualification. Publication explicitly depends on
+successful native, build and runtime jobs for the same master SHA, so a failed
+or skipped native job cannot publish. Scheduled runs qualify but do not publish
+releases or deploy the website. Downloaded Linux release proof remains intact.
 No Linux test, scanner, native packaging or public-fixture proof is deleted.
 An Intel regression can still reach master before it is found; the release
 barrier is deliberate, not a claim that arm64 proves Intel behavior.
@@ -106,9 +110,11 @@ assumed a shell would write a PID file within the production five-second
 budget. A loaded runner could exhaust that budget before the shell ran, so
 `NotFound` tested scheduling rather than process survival. Establish fixture
 readiness before testing termination, keep the production absolute deadline
-starting before spawn, and prove real child/group termination portably instead
-of relying on Linux `/proc` absence. Do not extend production timeouts or rerun
-failed tests to hide the race.
+starting before spawn, and prove real child/group termination through FIFO EOF
+and the direct child's SIGKILL instead of Linux `/proc` absence. Use `select`
+for the fixture wait: measured on Darwin, `poll` reports FIFO data but misses
+EOF, while `select` reports both. Do not extend production timeouts or rerun
+failed tests to hide a race.
 
 [#227](https://github.com/misty-step/cantrip/issues/227): GitHub creates native
 release-PR runs asynchronously. The release adapter waits at most 120 seconds
