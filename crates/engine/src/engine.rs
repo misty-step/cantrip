@@ -3722,14 +3722,26 @@ mod tests {
 
         fn event(&mut self) -> Option<u8> {
             let deadline = Instant::now() + Duration::from_secs(60);
-            let mut fd = libc::pollfd {
-                fd: self.lifetime.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
+            let fd = self.lifetime.as_raw_fd();
+            assert!((fd as usize) < libc::FD_SETSIZE);
             loop {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                let ready = unsafe { libc::poll(&mut fd, 1, remaining.as_millis() as i32) };
+                let mut readable = unsafe { std::mem::zeroed::<libc::fd_set>() };
+                unsafe { libc::FD_SET(fd, &mut readable) };
+                let mut timeout = libc::timeval {
+                    tv_sec: remaining.as_secs() as libc::time_t,
+                    tv_usec: remaining.subsec_micros() as libc::suseconds_t,
+                };
+                // Darwin poll reports FIFO data but not EOF; select reports both.
+                let ready = unsafe {
+                    libc::select(
+                        fd + 1,
+                        &mut readable,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut timeout,
+                    )
+                };
                 if ready < 0 && std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
                     continue;
                 }
