@@ -1,17 +1,17 @@
 name: Native macOS
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
+  workflow_call:
+  schedule:
+    - cron: '17 5,17 * * *'
 
 permissions:
   contents: read
 
 concurrency:
-  group: cantrip-macos-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: cantrip-macos-${{ github.run_id }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,46 +20,48 @@ env:
 
 jobs:
   native:
-    name: macOS ${{ matrix.architecture }} workspace and native app
+    name: ${{ github.event_name == 'schedule' && 'Warm Intel runtime' || format('macOS {0} workspace and native app', matrix.runner == 'macos-15' && 'arm64' || 'x86_64') }}
     # GitHub documents macos-15 as Apple Silicon and macos-15-intel as Intel:
     # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
     # Runner images remain mutable patched labels; actions are SHA-pinned.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 150
+    env:
+      TARGET: ${{ matrix.runner == 'macos-15' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+      ARCHITECTURE: ${{ matrix.runner == 'macos-15' && 'arm64' || 'x86_64' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            architecture: arm64
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            architecture: x86_64
-            target: x86_64-apple-darwin
+        # Tier policy: docs/decisions/0035-bounded-ci-feedback.md
+        runner: ${{ fromJSON(github.event_name == 'schedule' && '["macos-15-intel"]' || '["macos-15","macos-15-intel"]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Require the documented native runner architecture
         env:
-          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+          EXPECTED_ARCHITECTURE: ${{ env.ARCHITECTURE }}
         run: |
           test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
           xcrun --find clang
+      - name: Install the repository-pinned Rust toolchain
+        if: github.event_name != 'schedule'
+        run: |
           rustup install
           rustc --version --verbose
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: github.event_name != 'schedule'
         with:
-          shared-key: macos-${{ matrix.architecture }}-cpu
+          shared-key: macos-${{ env.ARCHITECTURE }}-cpu
       - name: Identify the pinned Intel runtime cache
-        if: matrix.architecture == 'x86_64'
+        if: matrix.runner == 'macos-15-intel'
         id: runtime-cache
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: ${{ env.TARGET }}
           RUNNER_IMAGE: ${{ matrix.runner }}
         run: |
           python3 - <<'PY'
@@ -98,7 +100,7 @@ jobs:
           print(json.dumps(identity, indent=2, sort_keys=True))
           PY
       - name: Restore the pinned Intel CPU runtime
-        if: matrix.architecture == 'x86_64'
+        if: matrix.runner == 'macos-15-intel'
         id: runtime-cache-restore
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -109,18 +111,18 @@ jobs:
             ${{ steps.runtime-cache.outputs.path }}/source
             ${{ steps.runtime-cache.outputs.path }}/build/**/*.a
           key: ${{ steps.runtime-cache.outputs.key }}
-      # A warm PR run must still pass the script's fail-closed integrity checks.
+      # A warm run must still pass the script's fail-closed integrity checks.
       - name: Prepare the pinned CPU runtime omitted by upstream Intel prebuilts
-        if: matrix.architecture == 'x86_64'
+        if: matrix.runner == 'macos-15-intel'
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: ${{ env.TARGET }}
           RUNTIME_OUTPUT: ${{ steps.runtime-cache.outputs.path }}
         run: |
           python3 scripts/prepare-macos-runtime --target "$TARGET" \
             --output "$RUNTIME_OUTPUT" --github-env "$GITHUB_ENV"
       # Preserve a validated runtime even if a later, unrelated app check fails.
       - name: Save the validated Intel CPU runtime
-        if: matrix.architecture == 'x86_64' && steps.runtime-cache-restore.outputs.cache-hit != 'true'
+        if: matrix.runner == 'macos-15-intel' && steps.runtime-cache-restore.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
@@ -129,6 +131,7 @@ jobs:
             ${{ steps.runtime-cache.outputs.path }}/build/**/*.a
           key: ${{ steps.runtime-cache.outputs.key }}
       - name: Check every crate and native target against the lockfile
+        if: github.event_name != 'schedule'
         run: |
           cargo fmt --all --check
           cargo clippy --workspace --locked --all-targets -- -D warnings
@@ -136,22 +139,25 @@ jobs:
           cargo test --locked --package cantrip --example eval
           python3 -m unittest discover -s tests -p 'test_release_*.py'
       - name: Build and package an explicit development app (never a production release)
+        if: github.event_name != 'schedule'
         env:
-          TARGET: ${{ matrix.target }}
-          SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          TARGET: ${{ env.TARGET }}
+          SOURCE_REVISION: ${{ github.sha }}
         run: |
           python3 scripts/package-macos --target "$TARGET" --ad-hoc \
             --source-revision "$SOURCE_REVISION" --output "$RUNNER_TEMP/native-app"
       - name: Exercise relocated app, real public-file STT, capture refusal, native HUD and windows
+        if: github.event_name != 'schedule'
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: ${{ env.TARGET }}
         run: |
           python3 scripts/verify-macos --app "$RUNNER_TEMP/native-app/Cantrip.app" \
             --target "$TARGET" --output "$RUNNER_TEMP/native-proof"
       - name: Upload only sanitized public-fixture verification and own-panel screenshots
+        if: github.event_name != 'schedule'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cantrip-macos-${{ matrix.architecture }}-public-fixture-proof
+          name: cantrip-macos-${{ env.ARCHITECTURE }}-public-fixture-proof
           path: |
             ${{ runner.temp }}/native-proof/verification.json
             ${{ runner.temp }}/native-proof/hud-*.png

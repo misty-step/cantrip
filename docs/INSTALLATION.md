@@ -316,6 +316,8 @@ fallback. The validated runtime is saved immediately, so a later app-verificatio
 failure does not discard a successful source build. Both architectures retain
 formatting, Clippy for every workspace target, workspace tests, the eval example,
 Python release tests, and relocated-app proof.
+For CI tiers, scheduling and publication policy, see
+[Decision 0035](decisions/0035-bounded-ci-feedback.md).
 Clippy also compiles the targets previously compiled by a separate `cargo check`.
 Smoke-command failures report the command, exit status, and at most the last
 4096 bytes of stderr, never transcript-bearing stdout.

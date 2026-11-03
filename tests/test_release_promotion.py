@@ -212,6 +212,33 @@ class MonotonicPromotion(unittest.TestCase):
         self.assertEqual(receipt["candidate_source"], self.candidate)
         self.assertEqual(self.writes, [])
 
+    def test_release_data_refresh_preserves_a_newer_qualified_website(self):
+        self.deployed["annotations"]["workers/message"] = f"git:{self.newer} run:43"
+        receipt = self.root / "workflow-output"
+        with mock.patch("sys.argv", ["scripts/release", "site-refresh-source"]), \
+                mock.patch.dict(os.environ, GITHUB_OUTPUT=str(receipt)), \
+                redirect_stdout(io.StringIO()) as output:
+            RELEASE["main"]()
+        selected = json.loads(output.getvalue())["source_revision"]
+        self.assertEqual(receipt.read_text(), f"source_revision={self.newer}\n")
+        self.assertEqual(selected, self.newer)
+        # Refresh the live, previously qualified source, not the older release
+        # checkout or a newer master revision that has never been deployed.
+        self.git("switch", "--quiet", "--detach", selected)
+        promotion = json.loads(self.invoke("check_site_promotion"))
+        self.assertEqual(promotion["candidate_source"], self.newer)
+        self.assertEqual(promotion["deployed_source"], self.newer)
+        self.assertEqual(self.writes, [])
+
+    def test_release_data_refresh_rejects_foreign_or_unknown_live_source(self):
+        self.deployed["annotations"]["workers/message"] = f"git:{self.divergent} run:43"
+        with self.assertRaisesRegex(RELEASE["ReleaseError"], "older than or divergent"):
+            self.invoke("site_refresh_source")
+        self.deployed["annotations"]["workers/message"] = "untrusted"
+        with self.assertRaisesRegex(RELEASE["ReleaseError"], "no trusted source"):
+            self.invoke("site_refresh_source")
+        self.assertEqual(self.writes, [])
+
     def test_website_reverse_completion_and_divergent_live_source_refuse(self):
         for source in (self.newer, self.divergent):
             self.deployed["annotations"]["workers/message"] = f"git:{source} run:43"

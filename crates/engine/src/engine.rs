@@ -2631,6 +2631,14 @@ fn run_handoff(
     take_id: &str,
 ) -> std::result::Result<(), &'static str> {
     let deadline = Instant::now() + target.timeout();
+    let mut child = spawn_handoff(target, take_id)?;
+    complete_handoff(text, &mut child, deadline)
+}
+
+fn spawn_handoff(
+    target: &crate::config::HandoffTarget,
+    take_id: &str,
+) -> std::result::Result<std::process::Child, &'static str> {
     let mut command = ProcessCommand::new(&target.command[0]);
     // A receiver that must only ever get local transcripts can refuse any take without this.
     if target.local_only {
@@ -2643,7 +2651,7 @@ fn run_handoff(
         Ok(audio) => command.env("CANTRIP_TAKE_AUDIO", audio),
         Err(_) => command.env_remove("CANTRIP_TAKE_AUDIO"),
     };
-    let mut child = command
+    command
         .args(&target.command[1..])
         .env("CANTRIP_TAKE_ID", take_id)
         .stdin(Stdio::piped())
@@ -2651,23 +2659,30 @@ fn run_handoff(
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-        .map_err(|_| "handoff-failed")?;
+        .map_err(|_| "handoff-failed")
+}
+
+fn complete_handoff(
+    text: &str,
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> std::result::Result<(), &'static str> {
     let Some(mut stdin) = child.stdin.take() else {
-        kill_handoff(&mut child);
+        kill_handoff(child);
         return Err("handoff-failed");
     };
     let fd = stdin.as_raw_fd();
     // A child that stops reading must not block the worker's write past the deadline.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        kill_handoff(&mut child);
+        kill_handoff(child);
         return Err("handoff-failed");
     }
     let bytes = text.as_bytes();
     let mut written = 0;
     while written < bytes.len() {
         if Instant::now() >= deadline {
-            kill_handoff(&mut child);
+            kill_handoff(child);
             return Err("handoff-timeout");
         }
         match stdin.write(&bytes[written..]) {
@@ -2682,12 +2697,12 @@ fn run_handoff(
     }
     drop(stdin);
     if written != bytes.len() {
-        kill_handoff(&mut child);
+        kill_handoff(child);
         return Err("handoff-failed");
     }
     loop {
         if Instant::now() >= deadline {
-            kill_handoff(&mut child);
+            kill_handoff(child);
             return Err("handoff-timeout");
         }
         match child.try_wait() {
@@ -2695,13 +2710,13 @@ fn run_handoff(
                 return if status.success() {
                     Ok(())
                 } else {
-                    kill_handoff(&mut child);
+                    kill_handoff(child);
                     Err("handoff-failed")
                 }
             }
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(_) => {
-                kill_handoff(&mut child);
+                kill_handoff(child);
                 return Err("handoff-failed");
             }
         }
@@ -3808,6 +3823,128 @@ mod tests {
         (root, target)
     }
 
+    struct HandoffTimeoutFixture {
+        root: PathBuf,
+        target: crate::config::HandoffTarget,
+        lifetime: fs::File,
+        // Closing this after unlinking the fixtures releases even an unowned
+        // receiver from the public-entry-point test if its timeout regresses.
+        _release: fs::File,
+        child: Option<std::process::Child>,
+    }
+
+    impl HandoffTimeoutFixture {
+        fn new(script: &str) -> Self {
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let (root, mut target) = handoff_fixture(script);
+            let lifetime = root.join("lifetime");
+            let blocked = root.join("blocked");
+            for path in [&lifetime, &blocked] {
+                let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+                target.command.push(path.to_str().unwrap().to_owned());
+            }
+            let lifetime = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(lifetime)
+                .unwrap();
+            let reader = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&blocked)
+                .unwrap();
+            let release = fs::OpenOptions::new().write(true).open(blocked).unwrap();
+            drop(reader);
+            Self {
+                root,
+                target,
+                lifetime,
+                _release: release,
+                child: None,
+            }
+        }
+
+        fn event(&mut self) -> Option<u8> {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let fd = self.lifetime.as_raw_fd();
+            assert!((fd as usize) < libc::FD_SETSIZE);
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let mut readable = unsafe { std::mem::zeroed::<libc::fd_set>() };
+                unsafe { libc::FD_SET(fd, &mut readable) };
+                let mut timeout = libc::timeval {
+                    tv_sec: remaining.as_secs() as libc::time_t,
+                    tv_usec: remaining.subsec_micros() as libc::suseconds_t,
+                };
+                // Darwin poll reports FIFO data but not EOF; select reports both.
+                let ready = unsafe {
+                    libc::select(
+                        fd + 1,
+                        &mut readable,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut timeout,
+                    )
+                };
+                if ready < 0 && std::io::Error::last_os_error().kind() == ErrorKind::Interrupted {
+                    continue;
+                }
+                assert_eq!(ready, 1, "handoff fixture did not become ready or exit");
+                let mut token = [0];
+                match self.lifetime.read(&mut token) {
+                    Ok(0) => return None,
+                    Ok(_) => return Some(token[0]),
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => panic!("handoff fixture pipe failed: {error}"),
+                }
+            }
+        }
+
+        fn assert_timeout(mut self, processes: usize, text: &str) {
+            use std::os::unix::process::ExitStatusExt;
+
+            // Keep the FIFO connected until the receiver opens its own writer.
+            let startup = fs::OpenOptions::new()
+                .write(true)
+                .open(self.root.join("lifetime"))
+                .unwrap();
+            // Model startup consuming the entire budget, without a scheduling
+            // assumption or sleep. Readiness must precede the termination proof,
+            // not the public deadline (which still starts before spawning).
+            let deadline = Instant::now();
+            self.child = Some(spawn_handoff(&self.target, "take").unwrap());
+            for _ in 0..processes {
+                assert_eq!(self.event(), Some(b'R'));
+            }
+            drop(startup);
+            let mut token = [0];
+            assert_eq!(
+                self.lifetime.read(&mut token).unwrap_err().kind(),
+                ErrorKind::WouldBlock,
+                "fixture processes must be alive before the timeout"
+            );
+            let result = complete_handoff(text, self.child.as_mut().unwrap(), deadline);
+            // Every fixture process holds fd 3 until it exits. EOF, unlike a
+            // missing PID or /proc entry, proves all writers died on both OSes.
+            assert_eq!(self.event(), None, "a handoff process survived its timeout");
+            let status = self.child.take().unwrap().wait().unwrap();
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert_eq!(result, Err("handoff-timeout"));
+        }
+    }
+
+    impl Drop for HandoffTimeoutFixture {
+        fn drop(&mut self) {
+            if let Some(child) = self.child.as_mut() {
+                kill_handoff(child);
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
     #[test]
     fn unknown_handoff_rejected_before_capture_starts() {
         let mut daemon = idle_daemon();
@@ -4130,58 +4267,40 @@ mod tests {
 
     #[test]
     fn handoff_timeout_kills_child() {
-        let (root, mut target) = handoff_fixture("printf '%s' \"$$\" > \"$1\"\nexec sleep 30");
-        let pid_file = root.join("pid");
-        target.command.push(pid_file.display().to_string());
-        target.timeout_seconds = 5;
-        let report = deliver_handoff(
-            "private words",
-            &target,
-            "take",
-            false,
-            &AtomicBool::new(false),
-        );
-        assert_eq!(report.delivery, Delivery::Failed);
-        assert_eq!(report.error, Some("handoff-timeout"));
-        let pid = fs::read_to_string(&pid_file).unwrap();
-        assert!(!PathBuf::from(format!("/proc/{}", pid.trim())).exists());
-        fs::remove_dir_all(root).unwrap();
+        HandoffTimeoutFixture::new("exec 3>\"$1\"\nprintf R >&3\nIFS= read -r release < \"$2\"")
+            .assert_timeout(1, "private words");
     }
 
     #[test]
     fn handoff_timeout_kills_a_wrapper_scripts_children() {
-        // A wrapper without `exec` leaves its client as a grandchild holding the pipe.
-        let (root, mut target) = handoff_fixture("sleep 30 &\nprintf '%s' \"$!\" > \"$1\"\nwait");
-        let pid_file = root.join("pid");
-        target.command.push(pid_file.display().to_string());
-        target.timeout_seconds = 5;
-        let report = deliver_handoff(
-            "private words",
-            &target,
-            "take",
-            false,
-            &AtomicBool::new(false),
-        );
-        assert_eq!(report.error, Some("handoff-timeout"));
-        let pid = fs::read_to_string(&pid_file).unwrap();
-        let alive = || {
-            fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
-                .map(|stat| {
-                    !stat
-                        .rsplit(')')
-                        .next()
-                        .unwrap_or("")
-                        .trim_start()
-                        .starts_with('Z')
-                })
-                .unwrap_or(false)
-        };
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while alive() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!alive(), "grandchild {pid} outlived the handoff timeout");
-        fs::remove_dir_all(root).unwrap();
+        // A wrapper without `exec` leaves a real grandchild holding fd 3.
+        HandoffTimeoutFixture::new(
+            "exec 3>\"$1\"\nprintf R >&3\n/bin/sh -c 'printf R >&3; IFS= read -r release < \"$1\"' sh \"$2\" &\nwait",
+        )
+        .assert_timeout(2, "");
+    }
+
+    #[test]
+    fn handoff_timeout_bounds_a_receiver_that_never_reads_stdin() {
+        let mut fixture =
+            HandoffTimeoutFixture::new("exec 3>\"$1\"\nIFS= read -r release < \"$2\"");
+        fixture.target.timeout_seconds = 1;
+        let target = fixture.target.clone();
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            // Exceed the pipe capacity, so a non-reading receiver cannot make
+            // the public entry point block forever while writing the take.
+            let text = "x".repeat(8 * 1024 * 1024);
+            let started = Instant::now();
+            let result = run_handoff(&text, &target, "take");
+            let _ = sender.send((result, started.elapsed()));
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(30));
+        drop(fixture);
+        worker.join().unwrap();
+        let (result, elapsed) = result.unwrap();
+        assert_eq!(result, Err("handoff-timeout"));
+        assert!(elapsed >= Duration::from_secs(1));
     }
 
     fn recording_take(handoff: Option<&str>) -> Daemon {

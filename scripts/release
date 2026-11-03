@@ -110,9 +110,7 @@ def require_release_source(revision, version, *, publishing=False):
         raise ReleaseError("candidate cannot replace an equal or newer published version")
 
 
-def check_site_promotion():
-    revision = head()
-    require_ancestor(revision, github("git/ref/heads/master")["object"]["sha"])
+def deployed_site_source():
     config = json.loads((ROOT / "site/wrangler.jsonc").read_text())
     base = (f"https://api.cloudflare.com/client/v4/accounts/{config['account_id']}"
             f"/workers/scripts/{config['name']}")
@@ -148,6 +146,19 @@ def check_site_promotion():
         source = "ad4fac9f31ce0acebee1bcdab5117fb45a6d5127"
     else:
         raise ReleaseError("website has no trusted source metadata; recover explicitly before promotion")
+    return source, prior
+
+
+def site_refresh_source():
+    source, _ = deployed_site_source()
+    require_ancestor(source, github("git/ref/heads/master")["object"]["sha"])
+    emit(source_revision=source)
+
+
+def check_site_promotion():
+    revision = head()
+    require_ancestor(revision, github("git/ref/heads/master")["object"]["sha"])
+    source, prior = deployed_site_source()
     require_ancestor(source, revision)
     emit(deployed_source=source, candidate_source=revision, prior_version=prior)
 
@@ -311,7 +322,7 @@ def emit(**values):
                 destination.write(f"{key}={value}\n")
 
 
-def ensure_release_pr(version, revision):
+def ensure_release_pr(version):
     prs = json.loads(run("gh", "pr", "list", "--repo", REPOSITORY, "--head", BRANCH, "--base", "master", "--state", "open", "--json", "number,url").stdout)
     if len(prs) > 1:
         raise ReleaseError("multiple release PRs need operator reconciliation")
@@ -325,39 +336,12 @@ def ensure_release_pr(version, revision):
             "Reading order: `.landmark/release-plan.json`, the public notes in "
             "`docs/releases/`, the separate technical changelog, then Cargo metadata. "
             "Public Markdown is reviewable/editable; published formats are rendered from the approved Markdown.\n\n"
-            "Merge only after CI passes and the version/notes are approved. Merging starts the baseline build, "
-            "clean-runtime verification, signed provenance, and guarded publication. No release is public yet.\n"
+            "After the author's real-path proof, merge the generated version/notes without PR CI. "
+            "Then dispatch `release.yml` on master for the candidate's qualification, baseline build, "
+            "clean-runtime verification, signed provenance and guarded publication. No release is public yet.\n"
         )
         url = run("gh", "pr", "create", "--repo", REPOSITORY, "--base", "master", "--head", BRANCH, "--title", f"chore(release): prepare {version}", "--body", body).stdout.strip()
-    approve_release_checks(int(url.rstrip("/").split("/")[-1]), revision)
     print(f"Release PR: {url}")
-
-
-def approve_release_checks(number, revision):
-    """Approve only native bot-PR checks; dispatch checks cannot satisfy protection."""
-    pr = github(f"pulls/{number}")
-    if (
-        pr["state"] != "open" or pr["user"]["login"] != "github-actions[bot]"
-        or pr["base"]["ref"] != "master" or pr["head"]["ref"] != BRANCH
-        or pr["head"]["repo"]["full_name"] != REPOSITORY
-        or pr["head"]["sha"] != revision
-    ):
-        raise ReleaseError("release PR identity moved or is not the same-repository generator PR")
-    for workflow in ("ci.yml", "macos.yml", "site.yml"):
-        runs = github(f"actions/workflows/{workflow}/runs?event=pull_request&head_sha={revision}&per_page=100")["workflow_runs"]
-        if not runs:
-            raise ReleaseError(f"native {workflow} checks are missing for the release PR; retry preparation once GitHub has created them")
-        for check in runs:
-            if (
-                check["event"] != "pull_request" or check["head_sha"] != revision
-                or check["head_repository"]["full_name"] != REPOSITORY
-                or not any(item["number"] == number for item in check["pull_requests"])
-            ):
-                raise ReleaseError("native release check does not belong to the exact generator PR head")
-            if check["status"] == "completed" and check["conclusion"] == "action_required":
-                if github(f"pulls/{number}")["head"]["sha"] != revision:
-                    raise ReleaseError("release PR moved before workflow approval")
-                run("gh", "api", "--method", "POST", f"repos/{REPOSITORY}/actions/runs/{check['id']}/approve")
 
 
 def release_branch_merged(revision, source):
@@ -397,7 +381,7 @@ def prepare(binary, evidence):
             old_plan = json.loads(git("show", f"{old_revision}:{PLAN}").stdout)
             validate_plan(old_plan, old_revision)
             if old_plan["base_revision"] == source and old_plan["version"] == version:
-                ensure_release_pr(version, old_revision)
+                ensure_release_pr(version)
                 emit(mode="prepared", version=version)
                 return
             if (remote.get("author") or {}).get("login") != "github-actions[bot]":
@@ -442,7 +426,7 @@ def prepare(binary, evidence):
     revision = head()
     validate_plan(plan, revision)
     git("-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "push", f"--force-with-lease=refs/heads/{BRANCH}:{old_revision}", "origin", f"HEAD:refs/heads/{BRANCH}")
-    ensure_release_pr(version, revision)
+    ensure_release_pr(version)
     emit(mode="prepared", version=version)
 
 
@@ -598,6 +582,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("decide", help="prepare a reviewable release PR, or select its merged candidate")
     commands.add_parser("check-site-promotion", help="require deployed-source <= tested-source <= master")
+    commands.add_parser("site-refresh-source", help="select the already-deployed source for release-data refresh")
     for name in ("assemble", "finalize", "publish"):
         command = commands.add_parser(name)
         command.add_argument("--directory", type=Path, required=True)
@@ -609,6 +594,8 @@ def main():
             decide()
         elif args.command == "check-site-promotion":
             check_site_promotion()
+        elif args.command == "site-refresh-source":
+            site_refresh_source()
         elif args.command == "assemble":
             assemble(args.directory.resolve())
         elif args.command == "finalize":

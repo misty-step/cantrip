@@ -1,12 +1,10 @@
-"""Release gate regressions; real files/git/shell, GitHub transport only mocked."""
+"""Release gate regressions; real files/git/shell and a fake GitHub transport."""
 
-import copy
 import hashlib
 import json
 import os
 from pathlib import Path
 import runpy
-import shlex
 import subprocess
 import tempfile
 import unittest
@@ -18,68 +16,41 @@ RELEASE = runpy.run_path(str(ROOT / "scripts/release"))
 
 
 class ReleaseGates(unittest.TestCase):
-    def test_title_check_uses_literal_environment_input(self):
-        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
-        command = next(line.strip() for line in workflow.splitlines() if "python3 -c" in line)
-        self.assertNotIn("${{", command)
-        for title, expected in (
-            ("fix(stt): preserve completed chunks", 0),
-            ("feat!: change the supported interface", 0),
-            ("chore(release): prepare 0.1.4", 0),
-            ("docs: describe $(false) literally", 0),
-            ("Add an unclassified change", 1),
-            ("fix: first\nfeat: second", 1),
-        ):
-            with self.subTest(title=title):
-                result = subprocess.run(shlex.split(command), env={**os.environ, "PR_TITLE": title}, capture_output=True)
-                self.assertEqual(result.returncode, expected)
-
-    def test_native_approval_is_exact_scoped_and_idempotent(self):
-        approve = RELEASE["approve_release_checks"]
-        revision = "a" * 40
-        pr = {
-            "state": "open", "user": {"login": "github-actions[bot]"},
-            "base": {"ref": "master"},
-            "head": {"ref": "landmark/release", "sha": revision, "repo": {"full_name": "misty-step/cantrip"}},
-        }
-        check = {
-            "id": 123, "event": "pull_request", "head_sha": revision,
-            "head_repository": {"full_name": "misty-step/cantrip"},
-            "pull_requests": [{"number": 133}],
-            "status": "completed", "conclusion": "action_required",
-        }
-
-        def exercise(candidate_pr, runs, moved=False):
-            reads = 0
-
-            def github(path):
-                nonlocal reads
-                if path == "pulls/133":
-                    reads += 1
-                    return {**candidate_pr, "head": {**candidate_pr["head"], "sha": "b" * 40}} if moved and reads > 1 else candidate_pr
-                return {"workflow_runs": runs}
-
-            transport = mock.Mock()
-            with mock.patch.dict(approve.__globals__, github=github, run=transport):
-                approve(133, revision)
-            return transport
-
-        self.assertEqual(exercise(pr, [check]).call_count, 3)
-        for conclusion in ("success", "failure", "skipped", "cancelled"):
-            self.assertEqual(exercise(pr, [{**check, "conclusion": conclusion}]).call_count, 0)
-        self.assertEqual(exercise(pr, [{**check, "status": "in_progress", "conclusion": None}]).call_count, 0)
-        bad_pr = copy.deepcopy(pr)
-        bad_pr["head"]["repo"]["full_name"] = "other/cantrip"
-        cases = [(bad_pr, [check], False), (pr, [], False), (pr, [check], True)]
-        for changes in (
-            {"head_sha": "b" * 40}, {"event": "workflow_dispatch"},
-            {"head_repository": {"full_name": "other/cantrip"}}, {"pull_requests": []},
-        ):
-            cases.append((pr, [{**check, **changes}], False))
-        for candidate_pr, runs, moved in cases:
-            with self.subTest(candidate_pr=candidate_pr, runs=runs, moved=moved):
-                with self.assertRaises(RELEASE["ReleaseError"]):
-                    exercise(candidate_pr, runs, moved)
+    def test_release_pr_preparation_neither_waits_for_nor_approves_pr_ci(self):
+        for existing in ([], [{"number": 133, "url": "https://github.com/misty-step/cantrip/pull/133"}]):
+            with self.subTest(existing=bool(existing)), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                log = root / "commands.jsonl"
+                gh = root / "gh"
+                gh.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, sys\n"
+                    "from pathlib import Path\n"
+                    "args = sys.argv[1:]\n"
+                    "with Path(os.environ['RELEASE_GH_LOG']).open('a') as log:\n"
+                    "    log.write(json.dumps(args) + '\\n')\n"
+                    "if args[:2] == ['pr', 'list']:\n"
+                    "    print(os.environ['RELEASE_EXISTING_PRS'])\n"
+                    "elif args[:2] == ['pr', 'create']:\n"
+                    "    print('https://github.com/misty-step/cantrip/pull/133')\n"
+                    "elif args[:2] != ['pr', 'edit']:\n"
+                    "    raise SystemExit('unexpected GitHub effect: ' + repr(args))\n"
+                )
+                gh.chmod(0o755)
+                with mock.patch.dict(os.environ, {
+                    "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                    "RELEASE_GH_LOG": str(log),
+                    "RELEASE_EXISTING_PRS": json.dumps(existing),
+                }):
+                    RELEASE["ensure_release_pr"]("0.1.4")
+                commands = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual([command[:2] for command in commands], [
+                    ["pr", "list"], ["pr", "edit" if existing else "create"],
+                ])
+                if not existing:
+                    body = commands[1][commands[1].index("--body") + 1]
+                    self.assertIn("without PR CI", body)
+                    self.assertIn("dispatch `release.yml` on master", body)
 
     def test_failed_skipped_or_foreign_runtime_proof_cannot_finalize(self):
         finalize = RELEASE["finalize"]
