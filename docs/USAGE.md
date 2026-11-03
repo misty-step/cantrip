@@ -301,6 +301,8 @@ cantrip mode --cycle        # Raw → Clean → Elevate → Raw
 
 Bind `cantrip mode --cycle` to one optional compositor or shell-based shortcut
 when switching the default is easier than maintaining three recording shortcuts.
+The managed Omarchy menu also includes Elevate recording and **Default mode:
+Raw / Clean / Elevate** actions.
 
 A per-take flag overrides `[postproc].mode` without changing the saved default.
 The mode is fixed at capture start; a different flag used to stop cannot change

@@ -1084,7 +1084,11 @@ mod tests {
         fs::write(fixture.path(), &external).expect("external edit");
         store::save_default_mode(fixture.path().as_path(), Mode::Elevate).expect("mode saved");
         assert!(form.save().is_none());
-        assert_eq!(form.edit.mode, Mode::Clean, "an unrelated change adopts nothing");
+        assert_eq!(
+            form.edit.mode,
+            Mode::Clean,
+            "an unrelated change adopts nothing"
+        );
     }
 
     #[test]

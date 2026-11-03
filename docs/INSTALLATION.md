@@ -509,3 +509,105 @@ the [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial
 shortcut/menu, login, and general-clipboard/manual-paste behavior. Intel runtime
 execution and production signing/notarization each require their own proof,
 not inference from an arm64 development app.
+
+### Mode picker and live HUD proof in a disposable Mac VM
+
+This is a conductor recipe, not a claim that live menu/HUD interaction ran in
+CI. Use the PR's exact-head arm64 development app in a disposable macOS VM, not
+the operator's desktop. Build inside the guest if an app artifact is unavailable.
+The [existing VM audio setup](evidence/verify-cantrip/2026-11-02-macos-hud-omarchy/README.md#setup)
+uses BlackHole 2ch, `audio_source = "BlackHole2ch_UID"`, system output routed to
+BlackHole, and the public `samples/jfk.wav`. Allow microphone access explicitly
+in that guest. No model downloads, provider credentials, paid requests, host
+microphone, or host clipboard are needed.
+
+1. Launch this dummy HTTP provider in the guest from the exact-head checkout.
+   It deliberately substitutes synthetic recognizer text and a fixed LLM reply:
+   this proves mode routing and presentation, not recognition or model quality.
+   Its request assertion checks the actual Elevate system prompt without logging
+   the prompt or transcript.
+
+   ```sh
+   python3 - <<'PY'
+   import json, time
+   from http.server import BaseHTTPRequestHandler, HTTPServer
+   from pathlib import Path
+   prompt = Path("crates/engine/src/elevate-prompt.txt").read_text()
+   class Provider(BaseHTTPRequestHandler):
+       def log_message(self, *_): pass
+       def do_POST(self):
+           body = self.rfile.read(int(self.headers["Content-Length"]))
+           time.sleep(4)
+           if self.path == "/v1/audio/transcriptions":
+               reply = {"text": "how can we make the vertical space between lines smaller without changing the font size of 16 px"}
+           elif self.path == "/v1/chat/completions":
+               request = json.loads(body)
+               assert request["model"] == "dummy-elevate"
+               assert request["messages"][0]["content"].startswith(prompt)
+               reply = {"choices": [{"message": {"content": "How can we reduce leading without changing the 16 px font size?"}}]}
+           else:
+               self.send_error(404); return
+           data = json.dumps(reply).encode()
+           self.send_response(200)
+           self.send_header("Content-Type", "application/json")
+           self.send_header("Content-Length", str(len(data)))
+           self.end_headers()
+           self.wfile.write(data)
+           print("[mode-proof] route=" + self.path + " request-complete", flush=True)
+   HTTPServer(("127.0.0.1", 9900), Provider).serve_forever()
+   PY
+   ```
+
+2. In the guest's otherwise disposable configuration, keep clipboard delivery
+   and the BlackHole input. Use this provider setup. The legacy `enabled` line
+   intentionally exercises [migration](CONFIGURATION.md#migration).
+
+   ```toml
+   [stt]
+   model = "dummy-stt"
+   endpoint = "http://127.0.0.1:9900/v1"
+
+   [postproc]
+   enabled = false
+   endpoint = "http://127.0.0.1:9900/v1"
+   api_key_id = ""
+   # keep this comment
+
+   [postproc.clean]
+   model = "dummy-clean"
+   reasoning_effort = ""
+
+   [postproc.elevate]
+   model = "dummy-elevate"
+   reasoning_effort = ""
+   ```
+
+3. Open Cantrip's menu. Confirm Raw is checked. Choose Elevate, reopen the menu,
+   and confirm Elevate is checked and the pipeline reads
+   `Elevate · STT dummy-stt (cloud) → aliases → dummy-elevate`.
+   Here “cloud” identifies the HTTP recognition lane; this fixture stays on
+   loopback. Confirm the file now owns `mode = "elevate"`, no legacy `enabled`
+   field remains in `[postproc]`, and the comment survives.
+4. Open **Settings… → Modes**. Confirm Elevate, its description, both model
+   fields, and the same ordered pipeline. Confirm Raw and Clean can also be
+   selected and saved, then return to Elevate.
+5. Start a take and play `samples/jfk.wav` into BlackHole. Capture the recording
+   HUD. While recording, choose Raw from the menu. The menu's default changes,
+   but the current HUD must retain Elevate and its original pipeline.
+6. Stop the take. Capture both the transcription and LLM-processing HUDs during
+   the fixture's four-second waits. Their mode must remain Elevate. Confirm
+   `cantrip status --json` reports the same active pipeline.
+7. After completion, compare the guest clipboard privately with the fixture's
+   elevated reply. Do not print clipboard contents into logs. Inspect only
+   `mode`, `mode_model`, and `postproc.status` from the take's archive; expect
+   Elevate, `dummy-elevate`, and `applied`. The fixture must have received one
+   transcription request and one chat request without a failed prompt assertion.
+8. Start a second take without an override. Expect Raw in the HUD, only a
+   transcription request, and the unmodified dummy recognizer text on the guest
+   clipboard. Repeat menu, Modes pane, and active HUD captures in Light and Dark.
+   Check text wrapping, square corners, and passive click-through.
+9. Quit the guest app, stop only this fixture server, and dispose of the VM.
+   Retain text-free screenshots and a revision-bound result. The
+   [cloud evaluation receipt](../eval/baselines/2026-11-03-elevate/run.json)
+   separately reports real Sol-low behavior.
+
