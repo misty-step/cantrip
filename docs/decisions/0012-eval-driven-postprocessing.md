@@ -78,6 +78,33 @@ fidelity, not Clean's wording rules. The required light
 synthetic corpus results and failures without transcript text. The prompt's
 aggressive transformation does not establish a guarantee of factual fidelity.
 
+#### Bounded fidelity comparison
+
+The first single-sample study produced 33/41 full-contract passes under builder
+review, with eight fidelity failures despite all eight new lexical upgrades.
+The operator then authorized one bounded A/B before review:
+
+- **A:** the existing operator prompt and transport framing.
+- **B:** the same operator bytes, then the three-line
+  [`fidelity addendum`](../../crates/engine/src/elevate-fidelity.txt), then the
+  same framing. It targets only modality/certainty, added or omitted facts and
+  distinct alternatives, and quoted literals; it does not replace elevation.
+- Run the same 41 cases three times per arm on Sol low, with identical request
+  settings, randomized/interleaved scheduling, and shuffled opaque labels for
+  independent semantic grading.
+- Count an output once if it has any speech-act, fact, numeric-value, negation,
+  modality, or protected-literal failure. Lexical upgrading is a separate
+  measure; faithful paraphrase and unquoted number-format changes are permitted.
+- Select the arm with fewer fidelity-failed outputs while retaining at least
+  21/24 lexical successes on the eight Elevate cases. Ties select A. This is a
+  relative choice, not a claim that the winner has zero fidelity risk.
+
+The existing receipt owns the arm counts, blindness record, source/prompt
+hashes, accounting, and selection. The dedicated key retains the absolute
+$4.50 ceiling; completed responses may be replayed by exact request hash, but
+never submitted twice for payment.
+
+
 
 ### Clean refinement contract (2026-11-02)
 
