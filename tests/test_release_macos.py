@@ -95,7 +95,7 @@ class MacCaptureRefusalContracts(unittest.TestCase):
     def test_permission_smoke_never_starts_an_undetermined_owner(self):
         for authorization, expected_error in (
             ("not-determined", None),
-            ("authorized", "capture-failed"),
+            ("authorized", "capture-source-missing"),
             ("denied", "microphone-denied"),
             ("restricted", "microphone-restricted"),
         ):

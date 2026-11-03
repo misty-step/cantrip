@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Attended capture-guidance proof in a disposable Mac VM, using BlackHole only.
+
+Prepare starts an isolated app; the conductor drives its real HUD/menu between
+checks. No transcript text, audio or raw status is exported as proof.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+import tomllib
+
+
+MISSING_UID = "cantrip-proof-absent-input-72a5c4b9"
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def run(command, *, env=None, timeout=30):
+    result = subprocess.run(command, env=env, capture_output=True, timeout=timeout)
+    require(result.returncode == 0, f"{Path(command[0]).name} failed ({result.returncode})")
+    return result.stdout
+
+
+def environment(root):
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("DYLD_", "ORT_"))}
+    env.update(HOME=str(root / "home"), RUST_LOG="info")
+    for variable, name in (("XDG_CONFIG_HOME", "c"), ("XDG_DATA_HOME", "d"),
+                           ("XDG_STATE_HOME", "s"), ("XDG_RUNTIME_DIR", "r")):
+        env[variable] = str(root / name)
+    return env
+
+
+def current_device(kind):
+    return json.loads(run(["SwitchAudioSource", "-c", "-t", kind, "-f", "json"]))
+
+
+def process_start(pid):
+    result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="], capture_output=True)
+    return result.stdout.decode().strip() if result.returncode == 0 else None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--app", type=Path, required=True)
+    parser.add_argument("--run", type=Path, required=True)
+    parser.add_argument("--pull-model", action="store_true", help="explicitly download public local model during prepare")
+    parser.add_argument("phase", choices=("prepare", "missing", "default", "silence", "play", "signal", "complete", "cleanup"))
+    args = parser.parse_args()
+    require(sys.platform == "darwin", "this proof requires a disposable macOS VM")
+    require("VirtualMac" in run(["/usr/sbin/sysctl", "-n", "hw.model"]).decode(),
+            "refusing the host: run only inside a disposable Apple VirtualMac guest")
+    root = args.run.expanduser().absolute()
+    binary = args.app.expanduser().resolve(strict=True) / "Contents" / "MacOS" / "cantrip"
+    env = environment(root)
+    config = root / "c" / "cantrip" / "config.toml"
+    session_file = root / "session.json"
+    if args.phase == "prepare":
+        require(args.pull_model, "prepare requires --pull-model for the deliberate isolated model download")
+        require(not root.exists(), "choose a fresh --run directory")
+        microphone, output = current_device("input"), current_device("output")
+        require("BlackHole" in microphone["name"] and microphone["uid"] == output["uid"],
+                "first explicitly select the same BlackHole device as guest input and output")
+        root.mkdir(mode=0o700, parents=True)
+        for name in ("home", "c", "d", "s", "r"):
+            (root / name).mkdir(mode=0o700)
+        config.parent.mkdir(mode=0o700)
+        config.write_text(f'injection = "clipboard"\nkeep_warm = false\naudio_source = "{MISSING_UID}"\n'
+                          '[postproc]\nenabled = false\n[telemetry]\nenabled = false\n')
+        config.chmod(0o600)
+        run([str(binary), "models", "pull"], env=env, timeout=1200)
+        with (root / "app.log").open("wb") as log:
+            app = subprocess.Popen([str(binary), "app"], env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        started = process_start(app.pid)
+        require(started is not None, "the isolated app did not start")
+        session_file.write_text(json.dumps({"pid": app.pid, "started": started,
+                                           "default_uid": microphone["uid"],
+                                           "initial_config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}))
+        print("Prepared. Press the guest shortcut; answer Allow if asked. Inspect the passive HUD and Cantrip menu, then run the missing phase.")
+        return
+    session = json.loads(session_file.read_text())
+    if args.phase == "cleanup":
+        if process_start(session["pid"]) == session["started"]:
+            os.kill(session["pid"], signal.SIGTERM)
+        print("Sent SIGTERM only to this proof's original app. The private run directory is retained; delete it after collecting sanitized proof.")
+        return
+    require(process_start(session["pid"]) == session["started"], "this proof's original app is not running")
+    if args.phase == "play":
+        require(current_device("output")["uid"] == session["default_uid"], "guest output moved away from the proof input")
+        sample = ROOT / "samples" / "jfk.wav"
+        require(hashlib.sha256(sample.read_bytes()).hexdigest() ==
+                "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e", "public sample changed")
+        run(["/usr/bin/afplay", str(sample)], timeout=30)
+        print("Played only the public fixture into the guest's BlackHole device.")
+        return
+    status = json.loads(run([str(binary), "status", "--json"], env=env))
+    selected = tomllib.loads(config.read_text()).get("audio_source")
+    guidance = status.get("capture_guidance") or {}
+    outcome = status.get("outcome") or {}
+    if args.phase == "missing":
+        require(status["state"] == "idle" and outcome.get("error") == "capture-source-missing", "press did not fail with capture-source-missing")
+        require(guidance.get("kind") == "missing-microphone" and guidance.get("source") == MISSING_UID, "missing-input guidance absent")
+        require(hashlib.sha256(config.read_bytes()).hexdigest() == session["initial_config_sha256"], "passive failure changed configuration")
+    elif args.phase == "default":
+        require(selected == session["default_uid"], "click Use <BlackHole name> instead in the real menu before checking")
+        require(status["state"] == "idle", "replacement must not start a take itself")
+    elif args.phase == "silence":
+        require(selected == session["default_uid"] and status["state"] == "recording", "start a fresh take on the explicitly selected virtual input")
+        require((status.get("signal") or {}).get("silent") is True, "wait at least three seconds with no playback")
+        require(guidance.get("kind") == "silent-input" and "BlackHole" in guidance.get("device_name", ""), "named silence guidance absent")
+        require(status["capabilities"]["stop"] and status["capabilities"]["cancel"], "silence blocked recording controls")
+    elif args.phase == "signal":
+        require(status["state"] == "recording" and (status.get("signal") or {}).get("level", 0) > 0, "check during public-fixture playback")
+        require(not guidance, "measured signal did not clear guidance")
+    elif args.phase == "complete":
+        deadline = time.monotonic() + 120
+        while status["state"] != "idle" and time.monotonic() < deadline:
+            time.sleep(0.2)
+            status = json.loads(run([str(binary), "status", "--json"], env=env))
+        outcome = status.get("outcome") or {}
+        require(status["state"] == "idle" and outcome.get("completeness") == "complete" and outcome.get("delivery") == "copied", "fixture take did not complete clipboard delivery")
+        require(outcome.get("artifacts", {}).get("audio") is True, "completed take lost durable audio")
+        require(tomllib.loads(config.read_text()).get("audio_source") == session["default_uid"], "recording changed the explicitly selected microphone")
+    proof = {"phase": args.phase, "result": "passed", "state": status["state"],
+             "error_class": outcome.get("error"), "guidance_kind": guidance.get("kind"),
+             "private_content_exported": False}
+    (root / f"proof-{args.phase}.json").write_text(json.dumps(proof, indent=2) + "\n")
+    print(json.dumps(proof))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError, KeyError) as error:
+        raise SystemExit(str(error)) from None

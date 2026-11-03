@@ -77,24 +77,20 @@ Monitoring grant is needed or requested.
 
 ## Capture and model preload
 
-On Linux, omit `audio_source` to use the default PipeWire input. Set it to a
-specific PipeWire node name or object serial only when you intend to select that
-microphone; it applies on the next capture. A missing selected microphone blocks
-capture and is reported by `doctor`; Cantrip never substitutes the default input.
-Inherited PipeWire properties are preserved except for the selected target and
-the no-fallback/no-reconnect safeguards. A ready `doctor` report confirms that
-the source exists, not that it records sound. Make an
-[attended trial](USAGE.md#first-dictation) after changing it.
+On Linux, `audio_source` selects a PipeWire node name or object serial.
+Omitting it uses the default PipeWire input. Inherited PipeWire properties are
+preserved except for the selected target and no-fallback/no-reconnect safeguards.
 
-On Mac, `audio_source` stores the stable **CoreAudio input UID**, not its
-display name or a transient numeric device index. Settings lists microphones
-and preserves an unavailable selection visibly. Omission chooses System default;
-an explicitly selected UID that disappears or changes refuses capture rather
-than falling back to another microphone. Microphone permission is requested only
-by a deliberate Allow action, always in the running Cantrip that records. Capture
-and `doctor` do not prompt or broaden permissions. Follow the
-[Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
-after selecting a device or granting access.
+On Mac, `audio_source` stores the stable **CoreAudio input UID**, not its display
+name or a transient numeric index. Settings lists the available microphones;
+omission chooses System default.
+
+The [capture setup contract](decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03)
+owns unavailable-input recovery, explicit replacement and signal-health guidance.
+The [capture-owner authorization decision](decisions/0033-capture-owner-microphone-authorization.md)
+owns first-press and permission behavior. After a setup change, use the
+[Linux attended trial](USAGE.md#first-dictation) or
+[Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial).
 
 `keep_warm` controls local-model preload when the daemon starts. Changing it
 requires a restart through the [existing startup owner](DESKTOP.md#keep-one-startup-owner),

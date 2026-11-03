@@ -22,6 +22,18 @@ impl Platform for NativePlatform {
         Ok(Box::new(crate::capture::Recorder::start(wav, source)?))
     }
 
+    #[cfg(target_os = "macos")]
+    fn input_device_name(&self, source: Option<&str>) -> Option<String> {
+        crate::capture::input_devices()
+            .ok()?
+            .into_iter()
+            .find(|device| match source {
+                Some(uid) => device.uid == uid,
+                None => device.is_default,
+            })
+            .map(|device| device.name)
+    }
+
     fn prepare_delivery(&self) {
         crate::inject::DeliveryGuard::prepare();
     }

@@ -89,8 +89,11 @@ fn exercise_failed_start(missing_source: bool) {
     assert!(outcome.message.starts_with(message));
     assert!(outcome.message.contains("Saved audio is available."));
     if missing_source {
-        assert!(message.contains("configured microphone `unplugged-microphone` not found"));
-        assert!(message.contains("Settings"));
+        assert!(message.contains("isn’t connected") && message.contains("Settings"));
+        let guidance = snapshot.capture_guidance.unwrap();
+        assert_eq!(guidance.kind, ipc::CaptureIssue::MissingMicrophone);
+        assert_eq!(guidance.source.as_deref(), Some("unplugged-microphone"));
+        assert_eq!(guidance.device_name, "Configured microphone");
     } else {
         assert_eq!(message, "Starting recording failed");
     }

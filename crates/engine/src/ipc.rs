@@ -463,6 +463,38 @@ impl MicrophoneAccess {
     }
 }
 
+/// Setup feedback is local UI content, not an operational log or telemetry field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureIssue {
+    MissingMicrophone,
+    SilentInput,
+    NoAudio,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureGuidance {
+    pub kind: CaptureIssue,
+    /// The source selected for this press, so an explicit replacement can reject
+    /// a stale menu action after configuration changes.
+    pub source: Option<String>,
+    pub device_name: String,
+    /// The default input named at the refused press; presentation only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_input_name: Option<String>,
+}
+
+impl CaptureGuidance {
+    pub fn message(&self) -> String {
+        match self.kind {
+            CaptureIssue::MissingMicrophone => format!("{} isn’t connected", self.device_name),
+            CaptureIssue::SilentInput | CaptureIssue::NoAudio => {
+                format!("No sound from {} — check the input", self.device_name)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusSnapshot {
     pub epoch: String,
@@ -488,6 +520,8 @@ pub struct StatusSnapshot {
     /// (Linux) or the owner predates this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microphone: Option<MicrophoneAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_guidance: Option<CaptureGuidance>,
 }
 
 impl StatusSnapshot {

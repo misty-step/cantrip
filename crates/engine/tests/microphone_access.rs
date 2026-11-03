@@ -103,8 +103,8 @@ impl Platform for PromptingOwner {
 struct SyntheticRecording(PathBuf);
 
 impl Recorder for SyntheticRecording {
-    fn input_signal(&mut self) -> Option<InputSignal> {
-        None
+    fn input_signal(&mut self) -> anyhow::Result<Option<InputSignal>> {
+        Ok(None)
     }
 
     fn request_stop(&mut self) -> anyhow::Result<()> {

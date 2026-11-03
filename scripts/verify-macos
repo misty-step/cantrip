@@ -51,7 +51,7 @@ def run(command, *, env, cwd, timeout=60, check=True):
 def capture_refusal(executable, root, env, before):
     authorization = (before.get("microphone") or {}).get("authorization")
     expected_errors = {
-        "authorized": "capture-failed",
+        "authorized": "capture-source-missing",
         "denied": "microphone-denied",
         "restricted": "microphone-restricted",
     }

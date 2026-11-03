@@ -740,6 +740,126 @@ impl Microphones {
             Ok(_) => None,
         }
     }
+
+    /// The listed input that is the system default now.
+    pub(crate) fn default_input(&self) -> Option<&crate::capture::InputDevice> {
+        let devices = self.0.as_ref().ok()?;
+        devices.iter().find(|device| device.is_default)
+    }
+
+    /// Whether the input with `uid` is listed now.
+    pub(crate) fn lists(&self, uid: &str) -> bool {
+        self.0
+            .as_ref()
+            .is_ok_and(|devices| devices.iter().any(|device| device.uid == uid))
+    }
+}
+
+/// One named input to record from instead of a configured microphone that is
+/// missing: the source the refused press used, and the input by the stable UID
+/// the menu showed, never whatever the system default becomes later.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Replacement {
+    pub(crate) replacing: String,
+    pub(crate) uid: String,
+    pub(crate) name: String,
+}
+
+/// What the menu offers for the capture owner's guidance: its sentence and,
+/// for a missing microphone, the current default input by name.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GuidanceOffer {
+    pub(crate) message: String,
+    pub(crate) replacement: Option<Replacement>,
+}
+
+#[cfg(target_os = "macos")]
+impl GuidanceOffer {
+    /// The offer for `guidance`. Only a missing microphone reads the saved file
+    /// and the inputs, naming the default input while the file still selects
+    /// the missing one. None once the file selects another microphone or the
+    /// missing one is listed again: the refused press no longer describes the
+    /// next one.
+    pub(crate) fn new(
+        guidance: &ipc::CaptureGuidance,
+        saved: impl FnOnce() -> Option<SettingsForm>,
+        microphones: impl FnOnce() -> Microphones,
+    ) -> Option<Self> {
+        let message = guidance.message();
+        let missing = match (guidance.kind, guidance.source.as_ref()) {
+            (ipc::CaptureIssue::MissingMicrophone, Some(source)) => source,
+            _ => {
+                return Some(Self {
+                    message,
+                    replacement: None,
+                })
+            }
+        };
+        let replacement = match saved().filter(|form| form.loaded_ok) {
+            // An unreadable file cannot confirm the selection being replaced.
+            None => None,
+            Some(form) if !form.selects(missing) => return None,
+            Some(_) => {
+                let microphones = microphones();
+                if microphones.lists(missing) {
+                    return None;
+                }
+                microphones.default_input().map(|device| Replacement {
+                    replacing: missing.clone(),
+                    uid: device.uid.clone(),
+                    name: device.name.clone(),
+                })
+            }
+        };
+        Some(Self {
+            message,
+            replacement,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl SettingsForm {
+    /// Whether the saved file selects microphone `source`.
+    fn selects(&self, source: &str) -> bool {
+        self.loaded_ok && self.edit.audio_source.trim() == source.trim()
+    }
+
+    /// Save `replacement` as the microphone and return the request to apply it,
+    /// only while the file still selects the microphone it replaces and its
+    /// input is still listed. Otherwise nothing is written and the refusal
+    /// says why.
+    pub(crate) fn replace_microphone(
+        &mut self,
+        replacement: &Replacement,
+        microphones: &Microphones,
+    ) -> Result<Apply, String> {
+        if !self.loaded_ok {
+            return Err(self.notice.as_ref().map_or_else(
+                || "Not changed: the configuration could not be read.".to_owned(),
+                |notice| notice.text.clone(),
+            ));
+        }
+        if !self.selects(&replacement.replacing) {
+            return Err(
+                "Not changed: the saved microphone changed since the menu opened.".to_owned(),
+            );
+        }
+        if !microphones.lists(&replacement.uid) {
+            return Err(format!(
+                "Not changed: {} is no longer available.",
+                replacement.name
+            ));
+        }
+        self.edit.audio_source.clone_from(&replacement.uid);
+        self.save().ok_or_else(|| {
+            self.notice
+                .as_ref()
+                .map_or_else(|| "Not saved.".to_owned(), |notice| notice.text.clone())
+        })
+    }
 }
 
 /// The microphone access row: the running Cantrip's answer, or why it is unknown.
@@ -1276,5 +1396,128 @@ mod tests {
         assert!(!fixture.path().exists(), "nothing was written");
         form.edit.hotkey = "Command+Shift+D".to_owned();
         assert!(form.save().is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    fn inputs(default: &str, listed: &[&str]) -> Microphones {
+        let devices = listed
+            .iter()
+            .map(|uid| crate::capture::InputDevice {
+                uid: (*uid).to_owned(),
+                name: format!("{uid} input"),
+                is_default: *uid == default,
+            })
+            .collect();
+        Microphones(Ok(devices))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn missing(source: &str) -> ipc::CaptureGuidance {
+        ipc::CaptureGuidance {
+            kind: ipc::CaptureIssue::MissingMicrophone,
+            source: Some(source.to_owned()),
+            device_name: "Configured microphone".to_owned(),
+            default_input_name: None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_missing_microphone_offers_the_default_input_only_while_still_selected() {
+        let fixture = ConfigFixture::new();
+        fs::write(fixture.path(), "audio_source = \"zone\"\n").expect("fixture");
+        let zone = missing("zone");
+        let saved = || Some(SettingsForm::load(fixture.path()));
+        let listed = || inputs("macbook", &["usb", "macbook"]);
+        let offer = GuidanceOffer::new(&zone, saved, listed)
+            .expect("the refused press still describes the saved selection");
+        assert_eq!(offer.message, zone.message());
+        assert_eq!(
+            offer.replacement,
+            Some(Replacement {
+                replacing: "zone".to_owned(),
+                uid: "macbook".to_owned(),
+                name: "macbook input".to_owned(),
+            })
+        );
+        // Without a default input to name, Settings is the only route.
+        let offer = GuidanceOffer::new(&zone, saved, || inputs("", &["usb"]));
+        assert!(offer.is_some_and(|offer| offer.replacement.is_none()));
+        // The configured microphone is listed again: the next press records from it.
+        assert_eq!(
+            GuidanceOffer::new(&zone, saved, || inputs("macbook", &["zone", "macbook"])),
+            None
+        );
+
+        // An unreadable file cannot confirm the selection being replaced.
+        fs::write(fixture.path(), "audio_source = [").expect("malformed fixture");
+        let offer = GuidanceOffer::new(&zone, saved, listed);
+        assert!(offer.is_some_and(|offer| offer.replacement.is_none()));
+
+        // Once another microphone is saved, the refused press no longer applies.
+        fs::write(fixture.path(), "audio_source = \"usb\"\n").expect("changed fixture");
+        assert_eq!(GuidanceOffer::new(&zone, saved, listed), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn silence_guidance_offers_settings_without_reading_configuration_or_inputs() {
+        let silent = ipc::CaptureGuidance {
+            kind: ipc::CaptureIssue::SilentInput,
+            source: None,
+            device_name: "USB Microphone".to_owned(),
+            default_input_name: None,
+        };
+        let offer = GuidanceOffer::new(
+            &silent,
+            || unreachable!("silence replaces no microphone"),
+            || unreachable!("silence replaces no microphone"),
+        );
+        assert_eq!(
+            offer,
+            Some(GuidanceOffer {
+                message: silent.message(),
+                replacement: None,
+            })
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn using_the_offered_input_saves_its_uid_only_while_the_choice_is_current() {
+        let fixture = ConfigFixture::new();
+        let original = "# mine\naudio_source = \"zone\"\n";
+        fs::write(fixture.path(), original).expect("fixture");
+        let macbook = Replacement {
+            replacing: "zone".to_owned(),
+            uid: "macbook".to_owned(),
+            name: "MacBook Microphone".to_owned(),
+        };
+
+        // The named input is gone: nothing is written.
+        let mut form = SettingsForm::load(fixture.path());
+        let gone = inputs("usb", &["usb"]);
+        assert!(form.replace_microphone(&macbook, &gone).is_err());
+        assert_eq!(fs::read_to_string(fixture.path()).unwrap(), original);
+
+        // Another microphone was saved after the menu opened: nothing is written.
+        let changed = "audio_source = \"usb\"\n";
+        fs::write(fixture.path(), changed).expect("changed fixture");
+        let mut form = SettingsForm::load(fixture.path());
+        let listed = inputs("macbook", &["usb", "macbook"]);
+        assert!(form.replace_microphone(&macbook, &listed).is_err());
+        assert_eq!(fs::read_to_string(fixture.path()).unwrap(), changed);
+
+        // A default that moved after the menu opened is not followed: the shown
+        // input's own UID is saved, and the file keeps its comments.
+        fs::write(fixture.path(), original).expect("fixture");
+        let mut form = SettingsForm::load(fixture.path());
+        let moved_default = inputs("usb", &["usb", "macbook"]);
+        assert!(form.replace_microphone(&macbook, &moved_default).is_ok());
+        assert!(form.applying(), "waits for the running Cantrip");
+        let saved = fs::read_to_string(fixture.path()).unwrap();
+        assert!(saved.contains("# mine"));
+        let config: Config = toml::from_str(&saved).expect("saved file parses");
+        assert_eq!(config.audio_source.as_deref(), Some("macbook"));
     }
 }
