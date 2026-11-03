@@ -43,7 +43,14 @@ impl std::error::Error for MicrophoneAccessUnsupported {}
 /// An owned live capture. Stop transfers its finalized WAV; failures retain the
 /// original path for the engine's durability/recovery path.
 pub trait Recorder: Send {
-    fn input_signal(&mut self) -> Option<InputSignal>;
+    /// Ok(None) means no complete PCM frames yet; Err means measurement is
+    /// unavailable, not evidence of silence or missing audio.
+    fn input_signal(&mut self) -> Result<Option<InputSignal>>;
+    /// Transfer a known actual input name once, without querying or changing
+    /// routing. A recorder need not retain display metadata after the press.
+    fn take_input_name(&mut self) -> Option<String> {
+        None
+    }
     fn request_stop(&mut self) -> Result<()>;
     fn stop(self: Box<Self>) -> Result<PathBuf>;
 }

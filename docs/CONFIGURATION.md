@@ -77,42 +77,20 @@ Monitoring grant is needed or requested.
 
 ## Capture and model preload
 
-On Linux, omit `audio_source` to use the default PipeWire input. Set it to a
-specific PipeWire node name or object serial only when you intend to select that
-microphone; it applies on the next capture. A missing selected microphone blocks
-capture and is reported by `doctor`; Cantrip never substitutes the default input.
-Inherited PipeWire properties are preserved except for the selected target and
-the no-fallback/no-reconnect safeguards. A ready `doctor` report confirms that
-the source exists, not that it records sound. Make an
-[attended trial](USAGE.md#first-dictation) after changing it.
+On Linux, `audio_source` selects a PipeWire node name or object serial.
+Omitting it uses the default PipeWire input. Inherited PipeWire properties are
+preserved except for the selected target and no-fallback/no-reconnect safeguards.
 
-On Mac, `audio_source` stores the stable **CoreAudio input UID**, not its
-display name or a transient numeric device index. Settings lists microphones
-and preserves an unavailable selection visibly. Omission chooses System default;
-an explicitly selected UID that disappears or changes refuses capture rather
-than falling back to another microphone. The HUD reports `capture-source-missing`
-and points to the Cantrip menu for **Open Settings** or
-**Use <default input name> instead**. Only clicking Use changes `audio_source`;
-it saves the displayed device's concrete UID. A stale action is refused rather
-than overwriting a newer selection or silently choosing a different default.
-No disconnected device name is inferred from its UID.
+On Mac, `audio_source` stores the stable **CoreAudio input UID**, not its display
+name or a transient numeric index. Settings lists the available microphones;
+omission chooses System default.
 
-Microphone access is requested by a deliberate Allow action or an admitted
-first dictation press, in the running Cantrip that records. An undetermined
-first press waits for your decision and continues into capture after Allow;
-Stop/Cancel consumes that pending press. `doctor`, status and opening Settings
-never prompt. Follow the
-[Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
-after selecting a device or granting access.
-
-The existing signal monitor warns when a take begins with about three seconds
-at or below its approximately −60 dBFS floor, with
-**No sound from <device> — check the input**. The non-blocking HUD notice points
-to Settings; capture continues and measured signal clears it. Later thinking
-pauses do not warn. No frames remains distinct from silent PCM, and a stopped,
-finalized zero-frame take reports `no-audio`. No microphone switch, silence
-threshold setting, speech detector or automatic deletion is added. See
-[setup recovery](USAGE.md#fix-microphone-setup).
+The [capture setup contract](decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03)
+owns unavailable-input recovery, explicit replacement and signal-health guidance.
+The [capture-owner authorization decision](decisions/0033-capture-owner-microphone-authorization.md)
+owns first-press and permission behavior. After a setup change, use the
+[Linux attended trial](USAGE.md#first-dictation) or
+[Mac attended trial](USAGE.md#first-dictation-macos-attended-clipboard-trial).
 
 `keep_warm` controls local-model preload when the daemon starts. Changing it
 requires a restart through the [existing startup owner](DESKTOP.md#keep-one-startup-owner),

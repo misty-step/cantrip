@@ -479,6 +479,9 @@ pub struct CaptureGuidance {
     /// a stale menu action after configuration changes.
     pub source: Option<String>,
     pub device_name: String,
+    /// The default input named at the refused press; presentation only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_input_name: Option<String>,
 }
 
 impl CaptureGuidance {

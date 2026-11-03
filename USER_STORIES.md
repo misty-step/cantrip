@@ -33,8 +33,7 @@ Criteria:
 5. WHILE recording, THE SYSTEM SHALL keep capturing through silence and at any take length until a toggle, stop, cancel, or daemon shutdown ends the take.
 6. WHEN a take stops recording, THE SYSTEM SHALL log which of those ended it, as a reason class without transcript text.
 7. WHEN an outcome needs attention, THE SYSTEM SHALL show bounded HUD feedback according to [HUD timing](docs/CONFIGURATION.md#hud--passive-status), then hide it without dismissing the outcome, clearing menu/status-bar attention, or removing recordings.
-8. IF the selected microphone is missing, THEN THE SYSTEM SHALL refuse that press with specific setup guidance and explicit Settings/default-input actions, never silently choose another microphone. Only the explicit replacement action SHALL persist a new source.
-9. IF a take begins with digitally silent or near-silent input for about three seconds, THEN THE SYSTEM SHALL show non-blocking, named-input Settings guidance and clear it when signal returns, without warning during later thinking pauses. A finalized stopped take with zero frames SHALL end `no-audio`; every accepted take SHALL keep the existing retention contract.
+8. THE SYSTEM SHALL follow the [capture setup and signal-health contract](docs/decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03) for input failures and their explicit repair actions.
 
 No-gos: no interactive notification popups or chatty notification daemon alerts.
 

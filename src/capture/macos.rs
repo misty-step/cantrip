@@ -1508,19 +1508,13 @@ impl Recorder {
         }
     }
 
-    pub fn input_signal(&mut self) -> Option<InputSignal> {
-        match self.signal_monitor.sample(&self.wav_path, Instant::now()) {
-            Ok(signal) => signal,
-            Err(_) => {
-                if !self.signal_monitor_warned {
-                    tracing::warn!(
-                        "[Capture] input signal monitor unavailable class=storage-failed"
-                    );
-                    self.signal_monitor_warned = true;
-                }
-                None
-            }
+    pub fn input_signal(&mut self) -> Result<Option<InputSignal>> {
+        let signal = self.signal_monitor.sample(&self.wav_path, Instant::now());
+        if signal.is_err() && !self.signal_monitor_warned {
+            tracing::warn!("[Capture] input signal monitor unavailable class=storage-failed");
+            self.signal_monitor_warned = true;
         }
+        signal
     }
 
     /// Nonblocking/idempotent stop request; the owned writer finalizes in order.
@@ -1551,7 +1545,7 @@ impl Recorder {
 }
 
 impl cantrip_engine::ports::Recorder for Recorder {
-    fn input_signal(&mut self) -> Option<InputSignal> {
+    fn input_signal(&mut self) -> Result<Option<InputSignal>> {
         Recorder::input_signal(self)
     }
 

@@ -68,13 +68,20 @@ const RECORDINGS_ACTION: &str = "Cantrip → Recordings and recovery";
 const SETTINGS_ACTION: &str = deliberately!("Open Settings");
 #[cfg(not(target_os = "macos"))]
 const SETTINGS_ACTION: &str = deliberately!("Settings");
-/// A missing microphone is replaced only deliberately: the macOS menu names the
-/// default input beside Open Settings; on Linux, Settings selects another input.
+/// Where a missing microphone is fixed: the macOS menu's Use item names the
+/// default input the owner found at the press, beside Open Settings. Without
+/// that name Settings is the only route, as it always is on Linux.
 #[cfg(target_os = "macos")]
-const MISSING_MICROPHONE_ACTION: &str =
-    deliberately!("Use default input instead, or Open Settings");
+fn missing_microphone_action(default_input: Option<&str>) -> String {
+    match default_input {
+        Some(name) => format!("Cantrip menu → Use {name} instead, or Open Settings"),
+        None => SETTINGS_ACTION.to_owned(),
+    }
+}
 #[cfg(not(target_os = "macos"))]
-const MISSING_MICROPHONE_ACTION: &str = SETTINGS_ACTION;
+fn missing_microphone_action(_default_input: Option<&str>) -> String {
+    SETTINGS_ACTION.to_owned()
+}
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -1112,10 +1119,11 @@ fn guidance_caption(guidance: &CaptureGuidance) -> Caption {
         title: guidance.message(),
         detail: String::new(),
         action: match guidance.kind {
-            CaptureIssue::MissingMicrophone => MISSING_MICROPHONE_ACTION,
-            CaptureIssue::SilentInput | CaptureIssue::NoAudio => SETTINGS_ACTION,
-        }
-        .to_owned(),
+            CaptureIssue::MissingMicrophone => {
+                missing_microphone_action(guidance.default_input_name.as_deref())
+            }
+            CaptureIssue::SilentInput | CaptureIssue::NoAudio => SETTINGS_ACTION.to_owned(),
+        },
     }
 }
 
@@ -2365,7 +2373,7 @@ pub enum ScreenshotState {
 /// The input that screenshot guidance names.
 const PREVIEW_INPUT: &str = "USB Microphone";
 
-fn preview_snapshot(state: StateKind) -> StatusSnapshot {
+pub(crate) fn preview_snapshot(state: StateKind) -> StatusSnapshot {
     StatusSnapshot {
         epoch: "preview-epoch".to_owned(),
         operation_id: if state == StateKind::Idle {
@@ -2402,7 +2410,7 @@ fn preview_snapshot(state: StateKind) -> StatusSnapshot {
     }
 }
 
-fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
+pub(crate) fn preview_outcome(completeness: Completeness, delivery: Delivery) -> TerminalOutcome {
     TerminalOutcome {
         event_id: 1,
         operation_id: Some("preview-take".to_owned()),
@@ -2441,6 +2449,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
             kind: CaptureIssue::MissingMicrophone,
             source: Some("preview-headset".to_owned()),
             device_name: "Configured microphone".to_owned(),
+            default_input_name: Some(PREVIEW_INPUT.to_owned()),
         });
         let refused_at = now - (SETTLE + Duration::from_millis(200));
         model.apply(refused, refused_at);
@@ -2481,6 +2490,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
                 kind: CaptureIssue::SilentInput,
                 source: None,
                 device_name: PREVIEW_INPUT.to_owned(),
+                default_input_name: None,
             });
         }
         _ => {}
@@ -2771,6 +2781,7 @@ mod tests {
             kind,
             source: Some("usb".to_owned()),
             device_name: PREVIEW_INPUT.to_owned(),
+            default_input_name: None,
         }
     }
 
@@ -3324,6 +3335,14 @@ mod tests {
         assert_eq!(model.caption.title, silent.message());
         assert_eq!(model.caption.action, SETTINGS_ACTION);
         assert!(model.active(), "the notice never ends the take");
+        // The monitor fails after measuring: the owner withdraws its sample and
+        // its guidance, so the input is unconfirmed rather than silent.
+        model.apply(recording(9, None), now + Duration::from_millis(9500));
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert!(model.caption.title.contains("unavailable"));
+        assert_ne!(model.caption.title, silent.message());
+        assert!(model.active(), "an unknown input never ends the take");
+        // A fresh measured sample clears both notices.
         model.apply(
             recording(10, Some(signal(true))),
             now + Duration::from_secs(10),
@@ -3334,23 +3353,16 @@ mod tests {
             Caption::default(),
             "a cleared notice must not latch words"
         );
-        // No frames at all: the owner's named guidance replaces the generic
-        // unconfirmed-input caption.
-        let no_audio = guidance(CaptureIssue::NoAudio);
-        let mut status = recording(11, None);
-        status.capture_guidance = Some(no_audio.clone());
-        model.apply(status, now + Duration::from_secs(11));
-        assert_eq!(model.kind, Some(Kind::Attention));
-        assert_eq!(model.caption.title, no_audio.message());
-        assert_eq!(model.caption.action, SETTINGS_ACTION);
     }
 
     #[test]
     fn idle_guidance_routes_its_failure_to_a_deliberate_input_choice() {
         let now = Instant::now();
-        for (issue, route) in [
-            (CaptureIssue::MissingMicrophone, MISSING_MICROPHONE_ACTION),
-            (CaptureIssue::NoAudio, SETTINGS_ACTION),
+        let default_input = "MacBook Pro Microphone";
+        for (issue, named) in [
+            (CaptureIssue::MissingMicrophone, Some(default_input)),
+            (CaptureIssue::MissingMicrophone, None),
+            (CaptureIssue::NoAudio, Some(default_input)),
         ] {
             let mut status = preview_snapshot(StateKind::Idle);
             let mut outcome = preview_outcome(Completeness::Failed, Delivery::None);
@@ -3364,15 +3376,21 @@ mod tests {
                 };
             }
             status.outcome = Some(outcome.clone());
-            status.capture_guidance = Some(guidance(issue));
+            let mut guided = guidance(issue);
+            guided.default_input_name = named.map(str::to_owned);
+            status.capture_guidance = Some(guided.clone());
             let view = present_outcome(&outcome, &status, now, false);
             assert_eq!(view.kind, Kind::Attention);
-            assert_eq!(view.caption.title, guidance(issue).message());
-            assert!(
-                view.caption.action.starts_with(route),
-                "{issue:?}: {}",
-                view.caption.action
-            );
+            assert_eq!(view.caption.title, guided.message());
+            let route = view.caption.action.lines().next().unwrap_or_default();
+            // Only the macOS menu offers Use, for a missing microphone whose
+            // default replacement the owner named; silence never swaps inputs.
+            let offers_use = cfg!(target_os = "macos")
+                && issue == CaptureIssue::MissingMicrophone
+                && named.is_some();
+            let use_named = format!("Use {default_input} instead");
+            assert_eq!(route.contains(&use_named), offers_use, "{route}");
+            assert!(route.contains("Settings"), "{route}");
             assert!(!view.caption.action.contains("Recover"), "{issue:?}");
         }
     }

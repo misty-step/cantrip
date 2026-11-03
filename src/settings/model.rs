@@ -1417,6 +1417,7 @@ mod tests {
             kind: ipc::CaptureIssue::MissingMicrophone,
             source: Some(source.to_owned()),
             device_name: "Configured microphone".to_owned(),
+            default_input_name: None,
         }
     }
 
@@ -1465,6 +1466,7 @@ mod tests {
             kind: ipc::CaptureIssue::SilentInput,
             source: None,
             device_name: "USB Microphone".to_owned(),
+            default_input_name: None,
         };
         let offer = GuidanceOffer::new(
             &silent,

@@ -443,11 +443,26 @@ fn microphone_item(
 fn guidance_items(offer: &GuidanceOffer) -> Vec<(String, Choice)> {
     let mut items = Vec::with_capacity(2);
     if let Some(replacement) = &offer.replacement {
-        let title = format!("Use {} Instead", replacement.name);
+        let title = format!("Use {} instead", replacement.name);
         items.push((title, Choice::UseInput(replacement.clone())));
     }
     items.push(("Open Settings…".to_owned(), Choice::InputSettings));
     items
+}
+
+/// The latest outcome's line beneath the state line. While idle, an offered
+/// guidance block replaces the outcome it came with, so its sentence is not
+/// said twice; a stale offer shows no block, and the outcome keeps its line.
+fn outcome_line(status: &ipc::StatusSnapshot, offer: Option<&GuidanceOffer>) -> Option<String> {
+    let outcome = status.outcome.as_ref()?;
+    let replaced = status.state == StateKind::Idle && offer.is_some();
+    if outcome.dismissed || replaced {
+        return None;
+    }
+    Some(match &outcome.handoff {
+        Some(handoff) => format!("{} · to {}", outcome.message, handoff.label),
+        None => outcome.message.clone(),
+    })
 }
 
 /// Every piece of app state the AppKit thread owns, created at launch.
@@ -885,16 +900,15 @@ impl Host {
         // The owner's capture guidance and its deliberate fixes come first. Only
         // a missing microphone reads the saved file and the inputs, to name the
         // input that could replace it.
-        let guidance = status.and_then(|status| status.capture_guidance.as_ref());
-        let offer = guidance.and_then(|guidance| {
-            GuidanceOffer::new(
-                guidance,
-                || paths::config_file().ok().map(SettingsForm::load),
-                Microphones::list,
-            )
-        });
-        // Idle guidance describes the outcome it came with and replaces its line.
-        let guided = idle && guidance.is_some();
+        let offer = status
+            .and_then(|status| status.capture_guidance.as_ref())
+            .and_then(|guidance| {
+                GuidanceOffer::new(
+                    guidance,
+                    || paths::config_file().ok().map(SettingsForm::load),
+                    Microphones::list,
+                )
+            });
         menu.removeAllItems();
         let mut items = Items {
             menu,
@@ -904,12 +918,8 @@ impl Host {
         items.line(Some(&state));
         items.line(detail);
         items.line(
-            outcome
-                .filter(|_| !guided)
-                .map(|outcome| match &outcome.handoff {
-                    Some(handoff) => format!("{} · to {}", outcome.message, handoff.label),
-                    None => outcome.message.clone(),
-                })
+            status
+                .and_then(|status| outcome_line(status, offer.as_ref()))
                 .as_deref(),
         );
         let microphone_pending = status.is_some_and(|status| {
@@ -1292,34 +1302,30 @@ mod tests {
         }
     }
 
-    fn choices(offer: &GuidanceOffer) -> Vec<Choice> {
-        guidance_items(offer)
-            .into_iter()
-            .map(|(_, choice)| choice)
-            .collect()
-    }
-
     #[test]
-    fn guidance_actions_bind_the_input_named_as_the_menu_opened() {
-        let replacement = Replacement {
-            replacing: "zone".to_owned(),
-            uid: "macbook".to_owned(),
-            name: "MacBook Microphone".to_owned(),
-        };
-        let missing = GuidanceOffer {
+    fn the_outcome_line_yields_only_to_an_offered_guidance_block() {
+        let message = "Configured microphone isn’t connected.";
+        let mut status = crate::hud::preview_snapshot(StateKind::Idle);
+        let mut outcome = crate::hud::preview_outcome(Completeness::Failed, ipc::Delivery::None);
+        outcome.message = message.to_owned();
+        status.outcome = Some(outcome);
+        status.capture_guidance = Some(ipc::CaptureGuidance {
+            kind: ipc::CaptureIssue::MissingMicrophone,
+            source: Some("zone".to_owned()),
+            device_name: "Configured microphone".to_owned(),
+            default_input_name: None,
+        });
+        let offer = GuidanceOffer {
             message: "Configured microphone isn’t connected".to_owned(),
-            replacement: Some(replacement.clone()),
-        };
-        let items = guidance_items(&missing);
-        assert!(items[0].0.contains("MacBook Microphone"), "{}", items[0].0);
-        assert_eq!(
-            choices(&missing),
-            [Choice::UseInput(replacement), Choice::InputSettings]
-        );
-        let silent = GuidanceOffer {
-            message: "No sound from USB Microphone — check the input".to_owned(),
             replacement: None,
         };
-        assert_eq!(choices(&silent), [Choice::InputSettings]);
+        // The offered block says it, with its fixes: no second line.
+        assert_eq!(outcome_line(&status, Some(&offer)), None);
+        // A stale offer shows no block, so the outcome keeps its own words.
+        assert_eq!(outcome_line(&status, None).as_deref(), Some(message));
+        // While a take records, the earlier take's outcome keeps its line.
+        status.state = StateKind::Recording;
+        let recording = outcome_line(&status, Some(&offer));
+        assert_eq!(recording.as_deref(), Some(message));
     }
 }

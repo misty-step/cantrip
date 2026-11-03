@@ -127,7 +127,7 @@ enum State {
         config: Box<Config>,
         started: Instant,
         // Allocate the waveform cache once per take, not on each signal update.
-        signal: Box<Option<InputSignal>>,
+        signal: Box<std::result::Result<Option<InputSignal>, ()>>,
         next_signal_sample: Instant,
     },
     Processing {
@@ -259,6 +259,7 @@ struct Daemon {
     /// Local display metadata from this press; never logged or persisted.
     capture_source: Option<String>,
     capture_device_name: String,
+    capture_default_input_name: Option<String>,
     worker_available: bool,
     retainer: Option<JoinHandle<WorkerResult>>,
 }
@@ -295,6 +296,7 @@ impl Daemon {
             microphone,
             capture_source: None,
             capture_device_name: "microphone".to_owned(),
+            capture_default_input_name: None,
             worker_available: true,
             retainer: None,
         }
@@ -405,7 +407,7 @@ impl Daemon {
                 started, signal, ..
             } => (
                 started.elapsed().as_secs(),
-                signal.map(|signal| AudioSignal {
+                (**signal).ok().flatten().map(|signal| AudioSignal {
                     level: signal.level,
                     silent: signal.silent,
                     waveform: signal.waveform,
@@ -481,7 +483,7 @@ impl Daemon {
         let kind = match &self.state {
             State::Recording {
                 signal, started, ..
-            } => capture_issue(signal.as_ref().as_ref(), started.elapsed()),
+            } => capture_issue(**signal, started.elapsed()),
             State::Idle => {
                 let outcome = self.outcome.as_ref().filter(|outcome| !outcome.dismissed)?;
                 match outcome.error.as_deref() {
@@ -496,6 +498,7 @@ impl Daemon {
             kind,
             source: self.capture_source.clone(),
             device_name: self.capture_device_name.clone(),
+            default_input_name: self.capture_default_input_name.clone(),
         })
     }
 }
@@ -1248,6 +1251,7 @@ fn begin_capture(
     let take_id = &operation.identity.take_id;
     let wav = runtime_dir.join(format!("rec-{take_id}.wav"));
     daemon.capture_source = config.audio_source.clone();
+    daemon.capture_default_input_name = None;
     daemon.capture_device_name = daemon
         .platform
         .input_device_name(config.audio_source.as_deref())
@@ -1262,7 +1266,10 @@ fn begin_capture(
         .platform
         .start_recording(&wav, config.audio_source.as_deref())
     {
-        Ok(recorder) => {
+        Ok(mut recorder) => {
+            if let Some(name) = recorder.take_input_name() {
+                daemon.capture_device_name = name;
+            }
             let started = Instant::now();
             daemon.outcome = None;
             daemon.notice = None;
@@ -1272,17 +1279,19 @@ fn begin_capture(
                 wav,
                 config,
                 started,
-                signal: Box::new(None),
+                signal: Box::new(Ok(None)),
                 next_signal_sample: started,
             };
             daemon.reply(true, "recording", None)
         }
         Err(error) => {
             let (message, class) = if error.is::<crate::ports::MissingMicrophone>() {
+                daemon.capture_default_input_name = daemon.platform.input_device_name(None);
                 let guidance = CaptureGuidance {
                     kind: CaptureIssue::MissingMicrophone,
                     source: config.audio_source.clone(),
                     device_name: daemon.capture_device_name.clone(),
+                    default_input_name: daemon.capture_default_input_name.clone(),
                 };
                 (
                     format!("{}. Open Settings to select an input.", guidance.message()),
@@ -1716,15 +1725,16 @@ fn setup_failure(message: &str, error: &str) -> TerminalOutcome {
 
 /// Measured silence is a notice, not a stop/cancel or speech detector. A header
 /// with no PCM frames stays distinct from a live stream of digital silence.
-fn capture_issue(signal: Option<&InputSignal>, elapsed: Duration) -> Option<CaptureIssue> {
+fn capture_issue(
+    observation: std::result::Result<Option<InputSignal>, ()>,
+    elapsed: Duration,
+) -> Option<CaptureIssue> {
     if elapsed < audio::NO_SIGNAL_GRACE {
         return None;
     }
-    match signal {
+    match observation.ok()? {
         Some(signal) if signal.silent && !signal.observed_signal => Some(CaptureIssue::SilentInput),
-        Some(_) => None,
-        None if elapsed >= audio::NO_SIGNAL_GRACE => Some(CaptureIssue::NoAudio),
-        None => None,
+        Some(_) | None => None,
     }
 }
 
@@ -1742,9 +1752,7 @@ fn refresh_recording_signal(state: &mut State) {
     if now < *next_signal_sample {
         return;
     }
-    if let Some(sample) = recorder.input_signal() {
-        **signal = Some(sample);
-    }
+    **signal = recorder.input_signal().map_err(|_| ());
     *next_signal_sample = now + SIGNAL_SAMPLE_INTERVAL;
 }
 
@@ -2050,9 +2058,7 @@ fn run_job(
             Err(error) => {
                 // Empty finalized takes are retained too, but cancellation is
                 // not a capture failure merely because no frames arrived.
-                let empty = error.is::<audio::EmptyRecording>()
-                    || audio::verify_wav(&wav)
-                        .is_err_and(|error| error.is::<audio::EmptyRecording>());
+                let empty = error.is::<audio::EmptyRecording>();
                 let saved =
                     persist_attempt(context.id(), duration_ms, None, Some(&wav), false, true);
                 let mut outcome = if empty && context.cancelled() {
@@ -2064,6 +2070,7 @@ fn run_job(
                             kind: CaptureIssue::NoAudio,
                             source: context.config.audio_source.clone(),
                             device_name: input_name,
+                            default_input_name: None,
                         };
                         format!("{}. Open Settings to select an input.", guidance.message())
                     } else {
@@ -3153,7 +3160,7 @@ mod tests {
             wav: PathBuf::from("/tmp/unused.wav"),
             config: Box::new(Config::default()),
             started: Instant::now(),
-            signal: Box::new(None),
+            signal: Box::new(Ok(None)),
             next_signal_sample: Instant::now() + Duration::from_secs(30),
         };
         assert!(daemon.snapshot().signal.is_none());
@@ -3164,28 +3171,26 @@ mod tests {
     }
 
     #[test]
-    fn capture_guidance_distinguishes_no_frames_silence_and_restored_signal() {
+    fn capture_guidance_distinguishes_unavailable_no_frames_silence_and_restored_signal() {
         let signal = |silent| InputSignal {
             level: if silent { 0 } else { 30 },
             waveform: [[0, 0]; audio::AUDIO_WAVEFORM_BINS],
             silent,
             observed_signal: !silent,
         };
-        assert_eq!(capture_issue(None, Duration::from_millis(2_999)), None);
+        assert_eq!(capture_issue(Ok(None), Duration::from_millis(2_999)), None);
         assert_eq!(
-            capture_issue(Some(&signal(true)), Duration::from_millis(2_999)),
+            capture_issue(Ok(Some(signal(true))), Duration::from_millis(2_999)),
             None
         );
+        assert_eq!(capture_issue(Err(()), Duration::from_secs(3)), None);
+        assert_eq!(capture_issue(Ok(None), Duration::from_secs(3)), None);
         assert_eq!(
-            capture_issue(None, Duration::from_secs(3)),
-            Some(CaptureIssue::NoAudio)
-        );
-        assert_eq!(
-            capture_issue(Some(&signal(true)), Duration::from_secs(3)),
+            capture_issue(Ok(Some(signal(true))), Duration::from_secs(3)),
             Some(CaptureIssue::SilentInput)
         );
         assert_eq!(
-            capture_issue(Some(&signal(false)), Duration::from_secs(4)),
+            capture_issue(Ok(Some(signal(false))), Duration::from_secs(4)),
             None
         );
         let thinking_pause = InputSignal {
@@ -3193,35 +3198,41 @@ mod tests {
             ..signal(true)
         };
         assert_eq!(
-            capture_issue(Some(&thinking_pause), Duration::from_secs(10)),
+            capture_issue(Ok(Some(thinking_pause)), Duration::from_secs(10)),
             None
         );
     }
 
     #[test]
-    fn a_live_notice_preserves_recording_and_its_selected_source() {
+    fn monitor_failure_clears_cached_pcm_without_claiming_no_audio() {
         let mut daemon = idle_daemon();
-        daemon.capture_source = Some("chosen-input".to_owned());
-        daemon.capture_device_name = "Fixture input".to_owned();
-        let operation = daemon.operation("new".to_owned(), Some(OperationKind::Dictation), None);
+        let operation = daemon.operation(
+            "monitor-test".to_owned(),
+            Some(OperationKind::Dictation),
+            None,
+        );
         daemon.state = State::Recording {
             operation,
-            recorder: Box::new(FakeRecorder::default()),
-            wav: PathBuf::from("/tmp/unused.wav"),
+            recorder: Box::new(FakeRecorder {
+                signal: Err("injected monitor read failure"),
+                ..FakeRecorder::default()
+            }),
+            wav: PathBuf::from("/unused-monitor-test.wav"),
             config: Box::new(Config::default()),
-            started: Instant::now() - Duration::from_secs(3),
-            signal: Box::new(None),
+            started: Instant::now() - Duration::from_secs(4),
+            signal: Box::new(Ok(Some(InputSignal {
+                level: 0,
+                waveform: [[0, 0]; audio::AUDIO_WAVEFORM_BINS],
+                silent: true,
+                observed_signal: false,
+            }))),
             next_signal_sample: Instant::now(),
         };
+        assert!(daemon.snapshot().capture_guidance.is_some());
+        refresh_recording_signal(&mut daemon.state);
         let status = daemon.snapshot();
+        assert!(status.signal.is_none() && status.capture_guidance.is_none());
         assert_eq!(status.state, StateKind::Recording);
-        assert!(status.capabilities.stop && status.capabilities.cancel);
-        let guidance = status.capture_guidance.unwrap();
-        assert_eq!(guidance.source.as_deref(), Some("chosen-input"));
-        assert_eq!(guidance.device_name, "Fixture input");
-        assert_eq!(guidance.kind, CaptureIssue::NoAudio);
-        assert!(status.outcome.is_none());
-        assert_eq!(daemon.capture_source.as_deref(), Some("chosen-input"));
     }
 
     #[test]
@@ -3280,7 +3291,7 @@ mod tests {
             wav: PathBuf::from("/tmp/unused.wav"),
             config: Box::new(Config::default()),
             started: Instant::now(),
-            signal: Box::new(None),
+            signal: Box::new(Ok(None)),
             next_signal_sample: Instant::now(),
         };
         let (sender, receiver) = mpsc::channel();
@@ -3691,7 +3702,7 @@ mod tests {
             wav: PathBuf::from("/unused-test-capture.wav"),
             config: Box::new(daemon.config.clone()),
             started: Instant::now(),
-            signal: Box::new(None),
+            signal: Box::new(Ok(None)),
             next_signal_sample: Instant::now(),
         };
         daemon.config.injection = InjectionMode::Clipboard;
@@ -3753,7 +3764,7 @@ mod tests {
     }
 
     struct FakeRecorder {
-        signal: Option<InputSignal>,
+        signal: std::result::Result<Option<InputSignal>, &'static str>,
         stop_requested: Arc<AtomicBool>,
         stop_result: Result<PathBuf>,
     }
@@ -3761,7 +3772,7 @@ mod tests {
     impl Default for FakeRecorder {
         fn default() -> Self {
             Self {
-                signal: None,
+                signal: Ok(None),
                 stop_requested: Arc::new(AtomicBool::new(false)),
                 stop_result: Ok(PathBuf::from("/tmp/unused.wav")),
             }
@@ -3769,8 +3780,8 @@ mod tests {
     }
 
     impl Recorder for FakeRecorder {
-        fn input_signal(&mut self) -> Option<InputSignal> {
-            self.signal
+        fn input_signal(&mut self) -> Result<Option<InputSignal>> {
+            self.signal.map_err(anyhow::Error::msg)
         }
         fn request_stop(&mut self) -> Result<()> {
             self.stop_requested.store(true, Ordering::Release);
@@ -4196,7 +4207,7 @@ mod tests {
             wav: PathBuf::from("/tmp/unused.wav"),
             config: Box::new(config),
             started: Instant::now(),
-            signal: Box::new(None),
+            signal: Box::new(Ok(None)),
             next_signal_sample: Instant::now() + Duration::from_secs(30),
         };
         daemon

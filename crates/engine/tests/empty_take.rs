@@ -25,12 +25,17 @@ fn write_empty(path: &Path) {
     assert_eq!(fs::metadata(path).unwrap().len(), 44);
 }
 
-struct EmptyCapture;
-struct EmptyRecorder(PathBuf);
+struct EmptyCapture {
+    fail_stop: bool,
+}
+struct EmptyRecorder {
+    path: PathBuf,
+    fail_stop: bool,
+}
 
 impl Recorder for EmptyRecorder {
-    fn input_signal(&mut self) -> Option<InputSignal> {
-        None
+    fn input_signal(&mut self) -> anyhow::Result<Option<InputSignal>> {
+        Ok(None)
     }
 
     fn request_stop(&mut self) -> anyhow::Result<()> {
@@ -38,16 +43,22 @@ impl Recorder for EmptyRecorder {
     }
 
     fn stop(self: Box<Self>) -> anyhow::Result<PathBuf> {
+        if self.fail_stop {
+            anyhow::bail!("injected finalization failure before any PCM frames");
+        }
         // Exercise the shared verification used by both native recorders.
-        audio::verify_wav(&self.0)?;
-        Ok(self.0)
+        audio::verify_wav(&self.path)?;
+        Ok(self.path)
     }
 }
 
 impl Platform for EmptyCapture {
     fn start_recording(&self, path: &Path, _: Option<&str>) -> anyhow::Result<Box<dyn Recorder>> {
         write_empty(path);
-        Ok(Box::new(EmptyRecorder(path.to_owned())))
+        Ok(Box::new(EmptyRecorder {
+            path: path.to_owned(),
+            fail_stop: self.fail_stop,
+        }))
     }
 
     fn input_device_name(&self, _: Option<&str>) -> Option<String> {
@@ -89,13 +100,13 @@ impl DeliveryPermit for NoDelivery {
     }
 }
 
-fn start_daemon() -> std::thread::JoinHandle<anyhow::Result<()>> {
+fn start_daemon(fail_stop: bool) -> std::thread::JoinHandle<anyhow::Result<()>> {
     let mut config = Config::default();
     // Admit capture without loading a model or contacting any provider.
     config.stt.endpoint = Some("http://127.0.0.1:1/v1".to_owned());
     let (ready, receiver) = mpsc::channel();
     let daemon = std::thread::spawn(move || {
-        engine::run(config, false, Arc::new(EmptyCapture), || {
+        engine::run(config, false, Arc::new(EmptyCapture { fail_stop }), || {
             ready.send(()).unwrap()
         })
     });
@@ -165,7 +176,7 @@ fn startup_imports_empty_leftover_with_existing_identical_durable_copy() {
             assert_eq!(recovery::get(&id).unwrap().duration_ms, Some(2062));
             // Startup must also consume the exact duplicate without a discovery notice.
             fs::write(&source, &expected).unwrap();
-            let daemon = start_daemon();
+            let daemon = start_daemon(false);
             let snapshot = ipc::status().unwrap();
             engine::request_shutdown();
             daemon.join().unwrap().unwrap();
@@ -193,8 +204,8 @@ fn startup_import_retains_a_fresh_finalized_empty_leftover() {
     );
 }
 
-fn exercise_capture(cancel: bool) {
-    let daemon = start_daemon();
+fn exercise_capture(cancel: bool, fail_stop: bool) {
+    let daemon = start_daemon(fail_stop);
     assert!(
         ipc::command(Command::Start {
             postproc: None,
@@ -203,21 +214,18 @@ fn exercise_capture(cancel: bool) {
         .unwrap()
         .ok
     );
-    if !cancel {
+    if !cancel && !fail_stop {
         let deadline = Instant::now() + Duration::from_secs(6);
         let waiting = loop {
             let waiting = ipc::status().unwrap();
-            if waiting.capture_guidance.is_some() || Instant::now() >= deadline {
+            if waiting.elapsed >= 3 || Instant::now() >= deadline {
                 break waiting;
             }
             std::thread::sleep(Duration::from_millis(20));
         };
         assert_eq!(waiting.state, ipc::StateKind::Recording);
         assert!(waiting.signal.is_none());
-        assert_eq!(
-            waiting.capture_guidance.unwrap().kind,
-            ipc::CaptureIssue::NoAudio
-        );
+        assert!(waiting.capture_guidance.is_none());
         assert!(waiting.capabilities.stop && waiting.capabilities.cancel);
     }
     assert!(
@@ -259,9 +267,15 @@ fn exercise_capture(cancel: bool) {
     );
     assert_eq!(
         outcome.error.as_deref(),
-        if cancel { None } else { Some("no-audio") }
+        if cancel {
+            None
+        } else if fail_stop {
+            Some("capture-failed")
+        } else {
+            Some("no-audio")
+        }
     );
-    if !cancel {
+    if !cancel && !fail_stop {
         assert!(outcome.message.contains("No sound from Fixture microphone"));
         assert!(outcome.message.contains("Settings"));
         assert_eq!(
@@ -287,7 +301,7 @@ fn exercise_capture(cancel: bool) {
 fn cancelled_empty_capture_is_retained_without_failure_or_storage_warning() {
     isolated(
         "cancelled_empty_capture_is_retained_without_failure_or_storage_warning",
-        || exercise_capture(true),
+        || exercise_capture(true, false),
     );
 }
 
@@ -295,7 +309,15 @@ fn cancelled_empty_capture_is_retained_without_failure_or_storage_warning() {
 fn stopped_empty_capture_reports_microphone_failure_not_storage_failure() {
     isolated(
         "stopped_empty_capture_reports_microphone_failure_not_storage_failure",
-        || exercise_capture(false),
+        || exercise_capture(false, false),
+    );
+}
+
+#[test]
+fn failed_stop_with_an_empty_finalized_wav_is_not_no_audio() {
+    isolated(
+        "failed_stop_with_an_empty_finalized_wav_is_not_no_audio",
+        || exercise_capture(false, true),
     );
 }
 
