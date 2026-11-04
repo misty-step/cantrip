@@ -137,6 +137,12 @@ network and has no per-request API charge.
 The supported local name and configuration default come from the same model
 specification in `src/models.rs`.
 
+Local inference uses low-energy splits near 30 seconds, with a three-second
+search window. A split reserves at least eight seconds for the final chunk,
+moving the boundary earlier instead of recognizing a short pause/speech fragment
+alone. This preserves the 33-second local chunk ceiling and exact, nonoverlapping
+audio coverage. An entire recording shorter than the target still runs once.
+
 **Cloud.** Set `endpoint` to an OpenAI-compatible API **base** URL (for example
 `https://api.openai.com/v1`). Cantrip posts to `{endpoint}/audio/transcriptions`.
 Also set `model` and `api_key_id`. Store the credential id ahead of time:
@@ -157,12 +163,14 @@ not in the default configuration.
 
 **Long recordings.** A WAV whose complete multipart request fits 24,000,000 bytes,
 including headers and vocabulary, is sent unchanged in one cloud request.
-The local Parakeet encoder's 30-second limit does not split a bounded cloud upload.
+The local Parakeet encoder's 30-second target does not split a bounded cloud upload.
 Larger PCM/IEEE-float WAVs are split before upload, keeping source sample bytes,
-rate, channels, and format intact. Over-cap native Cantrip capture still uses
-low-energy splits around 30 seconds (up to 33 seconds); other PCM formats split
-on frame boundaries at most 30 seconds apart. Results are joined in order, with
-one cleanup/delivery step.
+rate, channels, and format intact. Over-cap native Cantrip capture uses
+low-energy splits near five minutes (up to 303 seconds); other PCM formats split
+on frame boundaries at most five minutes apart. Both reserve final-chunk context
+without exceeding the multipart byte cap. If that cap permits less than sixteen
+seconds per request, the reserved context is reduced to half the permitted
+chunk duration. Results are joined in order, with one cleanup/delivery step.
 
 This avoids OpenRouter's documented 25 MB multipart cliff without a recording
 cutoff or codec process. Providers can still impose smaller limits or time out.
@@ -176,7 +184,7 @@ to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
 upload, or response deadline. A valid response after five or sixty seconds is
 still selected; a twenty-minute take is valid. Elapsed recognition time never
 triggers local fallback, and neither take duration nor the local encoder's
-30-second input limit supplies a cloud inference budget. There is no STT timeout
+30-second chunk target supplies a cloud inference budget. There is no STT timeout
 knob. See [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
 
 Providers may enforce their own timeouts and return real failures. The native
