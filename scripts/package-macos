@@ -7,6 +7,8 @@ if sys.version_info < (3, 11):
     raise SystemExit("package-macos requires Python 3.11+; invoke it with an existing/private Python 3.11+ interpreter")
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,7 @@ import runpy
 import shutil
 import stat
 import subprocess
+import ssl
 import tempfile
 import tomllib
 
@@ -25,13 +28,15 @@ RELEASE = runpy.run_path(str(ROOT / "scripts" / "package-release"))
 RUNTIME = runpy.run_path(str(ROOT / "scripts" / "prepare-macos-runtime"))
 ReleaseError = RELEASE["ReleaseError"]
 TARGETS = RUNTIME["TARGETS"]
+EXPECTED_TEAM_ID = "A56K8A636Z"
+LOGIN_KEYCHAIN = Path.home() / "Library" / "Keychains" / "login.keychain-db"
 GUIDES = ("INSTALLATION", "USAGE", "CONFIGURATION", "DESKTOP", "PRIVACY")
 LOAD_COMMANDS = {
     "LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB",
 }
 
 
-def run(command, *, cwd=None, timeout=60, check=True, env=None):
+def run(command, *, cwd=None, timeout=60, check=True, env=None, input=None):
     environment = {
         key: value for key, value in os.environ.items()
         if not key.startswith(("DYLD_", "ORT_"))
@@ -42,7 +47,7 @@ def run(command, *, cwd=None, timeout=60, check=True, env=None):
     try:
         result = subprocess.run(
             list(map(str, command)), cwd=cwd, env=environment,
-            capture_output=True, timeout=timeout,
+            capture_output=True, timeout=timeout, input=input,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ReleaseError(f"cannot run {command[0]}: {error}") from error
@@ -50,6 +55,63 @@ def run(command, *, cwd=None, timeout=60, check=True, env=None):
         message = result.stderr.decode("utf-8", errors="replace").strip()
         raise ReleaseError(f"{command[0]} failed ({result.returncode}): {message}")
     return result
+
+
+def developer_identity(team_id, requested=None):
+    if not team_id or not re.fullmatch(r"[A-Z0-9]{10}", team_id):
+        raise ReleaseError("--team-id must be the ten-character Apple Developer Team ID")
+    if team_id != EXPECTED_TEAM_ID:
+        raise ReleaseError(f"Cantrip production signing requires expected Apple team {EXPECTED_TEAM_ID}")
+    if requested and not re.fullmatch(r"[0-9A-Fa-f]{40}", requested):
+        raise ReleaseError("--sign-identity must be the certificate's full forty-character SHA-1; names are not selectors")
+    identities = run(["security", "find-identity", "-v", "-p", "codesigning", LOGIN_KEYCHAIN]).stdout.decode()
+    available = re.findall(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"\n]+)"', identities, re.MULTILINE)
+    selected = [
+        (digest.upper(), name) for digest, name in available
+        if name.startswith("Developer ID Application: ") and name.endswith(f"({team_id})")
+        and (not requested or requested.upper() == digest.upper())
+    ]
+    if len(selected) != 1:
+        raise ReleaseError("select exactly one valid Developer ID Application identity with a private key in the login Keychain; disambiguate only by SHA-1")
+    digest, name = selected[0]
+    certificates = run(["security", "find-certificate", "-a", "-p", LOGIN_KEYCHAIN]).stdout.decode()
+    for pem in re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", certificates, re.DOTALL):
+        der = ssl.PEM_cert_to_DER_cert(pem)
+        if hashlib.sha1(der).hexdigest().upper() == digest:
+            expiry = run(["openssl", "x509", "-inform", "DER", "-noout", "-enddate"], input=der).stdout.decode().strip()
+            expires = datetime.strptime(expiry.removeprefix("notAfter="), "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            if expires <= datetime.now(timezone.utc):
+                raise ReleaseError("Developer ID Application certificate has expired")
+            return {"name": name, "team_id": team_id, "sha1": digest, "expires_utc": expires.isoformat()}
+    raise ReleaseError("selected Developer ID identity's public certificate was not found in the login Keychain")
+
+
+def production_preflight(team_id, profile, requested=None):
+    if sys.platform != "darwin":
+        raise ReleaseError("production preflight requires macOS")
+    tools = {}
+    for tool in ("security", "openssl", "codesign", "spctl", "xcode-select", "xcrun"):
+        if not shutil.which(tool):
+            raise ReleaseError(f"required signing tool is missing: {tool}")
+    tools["developer_directory"] = run(["xcode-select", "-p"]).stdout.decode().strip()
+    for tool in ("clang", "notarytool", "stapler"):
+        tools[tool] = run(["xcrun", "--find", tool]).stdout.decode().strip()
+    identity = developer_identity(team_id, requested)
+    if not profile:
+        return {
+            "identity": identity, "notary_profile_authenticated": None,
+            "notary_profile_state": "not-configured", "xcode_tools": tools,
+        }
+    authenticated = run([
+        "xcrun", "notarytool", "history", "--keychain-profile", profile,
+        "--keychain", LOGIN_KEYCHAIN, "--output-format", "json",
+    ], check=False)
+    if authenticated.returncode:
+        raise ReleaseError("notarytool profile did not authenticate from the login Keychain; check it with notarytool locally")
+    return {
+        "identity": identity, "notary_profile_authenticated": True,
+        "notary_profile_state": "authenticated", "xcode_tools": tools,
+    }
 
 
 def native_prerequisites(target, args):
@@ -88,22 +150,7 @@ def native_prerequisites(target, args):
         # Self-signed local identities need not be trusted by Apple's PKI.
         # codesign selects the private key, and sign_bundle verifies its binding.
         return args.dev_sign_identity.upper()
-    run(["xcrun", "--find", "notarytool"])
-    run(["xcrun", "--find", "stapler"])
-    identities = run(["security", "find-identity", "-v", "-p", "codesigning"]).stdout.decode()
-    available = re.findall(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"\n]+)"', identities, re.MULTILINE)
-    selected = [
-        (digest, name) for digest, name in available
-        if args.sign_identity in (digest, digest.lower(), name)
-    ]
-    if len(selected) != 1:
-        raise ReleaseError("--sign-identity must select exactly one valid certificate/private-key identity in the Keychain")
-    digest, name = selected[0]
-    if not name.startswith("Developer ID Application: ") or not name.endswith(f"({args.team_id})"):
-        raise ReleaseError("production signing requires a Developer ID Application identity belonging to --team-id")
-    # Fail before the build if the named Keychain profile cannot authenticate.
-    run(["xcrun", "notarytool", "history", "--keychain-profile", args.notary_profile, "--output-format", "json"])
-    return digest
+    return production_preflight(args.team_id, args.notary_profile, args.sign_identity)["identity"]["sha1"]
 
 
 def snapshot(source, destination, *, executable=False):
@@ -340,12 +387,15 @@ def notarize(app, staging, profile):
     zip_bundle(app, submission)
     result = run([
         "xcrun", "notarytool", "submit", submission, "--keychain-profile", profile,
-        "--wait", "--timeout", "30m", "--output-format", "json",
+        "--keychain", LOGIN_KEYCHAIN, "--wait", "--timeout", "30m", "--output-format", "json",
     ], timeout=1900)
     status = json.loads(result.stdout)
     if status.get("status") != "Accepted" or not status.get("id"):
         raise ReleaseError("Apple notarization was not Accepted; no distributable assets were produced")
-    log = json.loads(run(["xcrun", "notarytool", "log", status["id"], "--keychain-profile", profile]).stdout)
+    log = json.loads(run([
+        "xcrun", "notarytool", "log", status["id"], "--keychain-profile", profile,
+        "--keychain", LOGIN_KEYCHAIN,
+    ]).stdout)
     issues = log.get("issues") or []
     if log.get("status") != "Accepted" or any(issue.get("severity") == "error" for issue in issues):
         raise ReleaseError("notarization log contains errors; no distributable assets were produced")
@@ -417,6 +467,7 @@ def package(args):
             "source_revision": revision, "source_tree_dirty": dirty, "rust_toolchain": toolchain,
             "signing": "ad-hoc-development" if args.ad_hoc else "local-identity-development" if development else "developer-id",
             "signing_identity_sha1": None if args.ad_hoc else identity,
+            "team_identifier": None if development else args.team_id,
             "hardened_runtime": not development,
             "system_libraries": system, "onnxruntime": runtime_identity,
         }
@@ -425,7 +476,7 @@ def package(args):
         entitlement_file.write_bytes(plistlib.dumps(entitlements))
         sign_bundle(
             app, libraries, entitlement_file, identity, args.team_id,
-            development=development, keychain=args.keychain,
+            development=development, keychain=args.keychain if development else LOGIN_KEYCHAIN,
         )
         executable = app / "Contents" / "MacOS" / "cantrip"
         reported = run([executable, "--version"], cwd=staging).stdout.decode().strip()
@@ -462,8 +513,8 @@ Stable local development identity (caller unlocks the Keychain first):
 
 Production build, sign, notarize, staple, and Gatekeeper-assess (no publication):
   python3 scripts/package-macos --target aarch64-apple-darwin --output dist/mac-arm64 \\
-    --sign-identity 'Developer ID Application: ORGANIZATION (TEAMID)' \\
-    --team-id TEAMID --notary-profile cantrip-notary
+    --sign-identity CERTIFICATE_SHA1 \\
+    --team-id A56K8A636Z --notary-profile cantrip-notary
 
 Prerequisites: a matching native Mac, the repository-pinned Rust toolchain,
 Python 3.11+, Xcode command-line tools, CMake 3.28+ for the Intel source-runtime
@@ -476,26 +527,35 @@ installation; arm64 uses ort-sys' checksum-pinned prebuilt CPU runtime unless
 Production has no unsigned, unnotarized, or development-signing fallback.
 --ad-hoc and --dev-sign-identity are DEVELOPMENT ONLY: no hardened runtime or
 notarization. A local identity keeps its certificate-pinned designated requirement
-across updates; ad-hoc signatures change with the code. Passwords are never read
-by this script: unlock a separate signing keychain before invoking it.
+across updates, but no-team Keychain partitions still follow cdhash, not that
+requirement. Ad-hoc signatures also change with the code. Passwords are never
+read by this script: unlock a separate development keychain before invoking it.
 
 The ZIP contains Cantrip.app and every non-system native dylib. End users expand
 the ZIP and move Cantrip.app in Finder; no source, Rust, Python, Homebrew, or
 installer is required. Nothing downloads models, changes config, enables startup,
 grants permissions, or launches the application. Existing output is never replaced.
 """)
-    parser.add_argument("--target", required=True, choices=TARGETS)
+    parser.add_argument("--preflight", action="store_true", help="read-only Developer ID, expiry, login-Keychain notary profile and Xcode check; no build, signing or submission")
+    parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--source-revision")
     parser.add_argument("--source-runtime", action="store_true", help="build the pinned CPU ONNX Runtime from source (automatic for Intel; needs CMake 3.28+)")
     parser.add_argument("--ad-hoc", action="store_true", help="explicit DEVELOPMENT ad-hoc signing, without notarization")
     parser.add_argument("--dev-sign-identity", help="DEVELOPMENT signing with a local certificate's full SHA-1, without notarization")
     parser.add_argument("--keychain", type=lambda value: Path(value).expanduser(), help="optional keychain containing --dev-sign-identity; caller must unlock it first")
-    parser.add_argument("--sign-identity", help="Developer ID Application certificate name or SHA-1 Keychain identity")
-    parser.add_argument("--team-id", help="Apple Developer Team ID bound to the signing identity")
-    parser.add_argument("--notary-profile", help="existing authenticated notarytool Keychain profile name")
+    parser.add_argument("--sign-identity", help="full public SHA-1 of the Developer ID Application identity; never a display name")
+    parser.add_argument("--team-id", help=f"expected Cantrip Apple Developer Team ID ({EXPECTED_TEAM_ID})")
+    parser.add_argument("--notary-profile", help="existing notarytool Keychain profile; omitting it is allowed only for read-only certificate preflight, never packaging")
     args = parser.parse_args()
     try:
+        if args.preflight:
+            if args.ad_hoc or args.dev_sign_identity or args.keychain or args.output or args.source_revision or args.source_runtime:
+                raise ReleaseError("--preflight accepts only production identity, team, profile and optional target inputs")
+            print(json.dumps(production_preflight(args.team_id, args.notary_profile, args.sign_identity), indent=2, sort_keys=True))
+            return
+        if not args.target:
+            raise ReleaseError("--target is required for packaging")
         output = package(args)
     except (ReleaseError, OSError, ValueError, KeyError, RuntimeError, plistlib.InvalidFileException) as error:
         parser.exit(1, f"package-macos: {error}\n")

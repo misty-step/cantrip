@@ -195,6 +195,29 @@ jobs:
         run: |
           cp "$PROVENANCE_BUNDLE" "$RUNNER_TEMP/candidate/provenance.json"
           python3 scripts/release publish --directory "$RUNNER_TEMP/candidate"
+      - name: Record the local macOS publication handoff (no signing credentials in CI)
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import runpy
+          from pathlib import Path
+          tag = json.loads(Path(os.environ["RUNNER_TEMP"], "candidate", "release.json").read_text())["tag"]
+          team = runpy.run_path("scripts/package-macos")["EXPECTED_TEAM_ID"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(
+                  f"\n### macOS publication for {tag}\n\n"
+                  "This workflow published Linux assets only. Production Mac assets must be "
+                  "signed and notarized locally using the operator's login Keychain. "
+                  "No Mac production asset is claimed by native development qualification.\n\n"
+                  "Follow [the local publish runbook](https://github.com/misty-step/cantrip/blob/"
+                  f"{tag}/docs/INSTALLATION.md#publish-macos-assets-for-an-already-released-tag) "
+                  f"and run `python3 scripts/publish-macos --tag {tag} "
+                  f"--target aarch64-apple-darwin --team-id {team} "
+                  "--notary-profile cantrip-notary --output /path/to/new/mac-output` "
+                  "from a clean worktree at that tag.\n"
+              )
+          PY
 
   website:
     needs: publish

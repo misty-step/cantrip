@@ -1,5 +1,6 @@
 """Native bundle boundaries: real Mach-O dependency relocation and fail-closed signing."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import platform
 import plistlib
 import runpy
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "package-macos"
 PACKAGE = runpy.run_path(str(SCRIPT))
 VERIFY = runpy.run_path(str(ROOT / "scripts" / "verify-macos"))
+PUBLISH = runpy.run_path(str(ROOT / "scripts" / "publish-macos"))
+TEAM_ID = PACKAGE["EXPECTED_TEAM_ID"]
 VERSION = "0.1.0"
 
 
@@ -62,6 +66,148 @@ class MacSigningPrerequisiteContracts(unittest.TestCase):
             for invalid in ("-", "Cantrip Development", "A" * 39, "G" * 40):
                 with self.subTest(identity=invalid):
                     self.assertIn("full forty-character SHA-1", self.invoke(directory, "--dev-sign-identity", invalid))
+
+
+class MacProductionReleaseContracts(unittest.TestCase):
+    def test_preflight_rejects_development_without_building(self):
+        for options in (["--ad-hoc"], ["--dev-sign-identity", "A" * 40]):
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--preflight", *options],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("accepts only production", result.stderr)
+
+    def test_identity_selection_rejects_development_foreign_and_ambiguous_certificates(self):
+        identity = PACKAGE["developer_identity"]
+        for names in (
+            ["Cantrip Development (local)"],
+            ["Developer ID Application: Fixture (OTHERTEAM1)"],
+            [f"Developer ID Application: One ({TEAM_ID})", f"Developer ID Application: Two ({TEAM_ID})"],
+        ):
+            listing = "".join(f' {index}) {str(index) * 40} "{name}"\n' for index, name in enumerate(names, 1))
+            result = subprocess.CompletedProcess([], 0, listing.encode(), b"")
+            with mock.patch.dict(identity.__globals__, {"run": mock.Mock(return_value=result)}):
+                with self.assertRaisesRegex(PACKAGE["ReleaseError"], "exactly one valid Developer ID"):
+                    identity(TEAM_ID)
+
+    def test_preflight_emits_only_public_receipt_and_redacts_profile_responses(self):
+        identity = {
+            "name": f"Developer ID Application: Fixture ({TEAM_ID})", "team_id": TEAM_ID,
+            "sha1": "A" * 40, "expires_utc": "2030-01-01T00:00:00+00:00",
+        }
+        preflight = PACKAGE["production_preflight"]
+        failed = False
+        calls = []
+        def native(command, **_):
+            calls.append(command)
+            if command[0:3] == ["xcrun", "notarytool", "history"]:
+                return subprocess.CompletedProcess(command, 1 if failed else 0, b"PROFILE_BODY_MUST_NOT_LEAK", b"PROFILE_ERROR_MUST_NOT_LEAK")
+            return subprocess.CompletedProcess(command, 0, b"/public/tool/path\n", b"")
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.dict(
+            preflight.__globals__, {"run": native, "developer_identity": mock.Mock(return_value=identity)},
+        ), mock.patch.object(shutil, "which", return_value="/public/tool/path"):
+            pending = preflight(TEAM_ID, None)
+            self.assertEqual(pending["identity"], identity)
+            self.assertEqual(pending["notary_profile_state"], "not-configured")
+            self.assertIsNone(pending["notary_profile_authenticated"])
+            self.assertFalse(any("history" in command for command in calls))
+            receipt = preflight(TEAM_ID, "fixture-profile")
+            self.assertEqual(receipt["identity"], identity)
+            self.assertTrue(receipt["notary_profile_authenticated"])
+            self.assertNotIn("PROFILE_", json.dumps(receipt))
+            failed = True
+            with self.assertRaises(PACKAGE["ReleaseError"]) as error:
+                preflight(TEAM_ID, "fixture-profile")
+            self.assertNotIn("PROFILE_", str(error.exception))
+        self.assertTrue(any("--keychain" in command and PACKAGE["LOGIN_KEYCHAIN"] in command for command in calls))
+        self.assertFalse(any("--password" in command or "store-credentials" in command for command in calls))
+
+    def test_identity_receipt_binds_public_certificate_digest_and_expiry(self):
+        der = b"public-certificate-parser-fixture"
+        digest = hashlib.sha1(der).hexdigest().upper()
+        expiry = "Jan  1 00:00:00 2030 GMT"
+        def native(command, **options):
+            if command[1] == "find-identity":
+                stdout = f' 1) {digest} "Developer ID Application: Fixture ({TEAM_ID})"\n'.encode()
+            elif command[1] == "find-certificate":
+                stdout = (
+                    ssl.DER_cert_to_PEM_cert(b"old-same-name-certificate-without-local-private-key")
+                    + ssl.DER_cert_to_PEM_cert(der)
+                ).encode()
+            else:
+                self.assertEqual(command[:2], ["openssl", "x509"])
+                self.assertEqual(options["input"], der)
+                stdout = f"notAfter={expiry}\n".encode()
+            return subprocess.CompletedProcess(command, 0, stdout, b"")
+        with mock.patch.dict(PACKAGE["developer_identity"].__globals__, {"run": native}):
+            receipt = PACKAGE["developer_identity"](TEAM_ID, digest.lower())
+            self.assertEqual(receipt["sha1"], digest)
+            self.assertEqual(receipt["expires_utc"], "2030-01-01T00:00:00+00:00")
+            with self.assertRaisesRegex(PACKAGE["ReleaseError"], "names are not selectors"):
+                PACKAGE["developer_identity"](TEAM_ID, f"Developer ID Application: Fixture ({TEAM_ID})")
+            with self.assertRaisesRegex(PACKAGE["ReleaseError"], "expected Apple team"):
+                PACKAGE["developer_identity"]("OTHERTEAM1", digest)
+            expiry = "Jan  1 00:00:00 2020 GMT"
+            with self.assertRaisesRegex(PACKAGE["ReleaseError"], "expired"):
+                PACKAGE["developer_identity"](TEAM_ID, digest)
+
+
+    def test_released_source_checks_real_clean_tag_and_github_tag_before_publication(self):
+        with tempfile.TemporaryDirectory(prefix="cantrip-mac-publish-") as directory:
+            root = Path(directory).resolve()
+            def git(*arguments):
+                return subprocess.run(
+                    ["git", "-C", str(root), *arguments], capture_output=True, text=True,
+                    check=True, timeout=10,
+                ).stdout.strip()
+            git("init", "-q")
+            git("config", "user.name", "Cantrip contract")
+            git("config", "user.email", "contract@example.invalid")
+            (root / "Cargo.toml").write_text(
+                '[package]\nname = "cantrip"\nversion.workspace = true\n'
+                '[workspace.package]\nversion = "1.2.3"\n'
+            )
+            git("add", "Cargo.toml")
+            git("-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture")
+            git("tag", "v1.2.3")
+            revision = git("rev-parse", "HEAD")
+            calls = []
+            remote_sha = revision
+            draft = False
+            def github(command, **_):
+                calls.append(command)
+                self.assertEqual(command[0], "gh")
+                if command[1] == "api":
+                    response = {"object": {"type": "commit", "sha": remote_sha}}
+                else:
+                    self.assertEqual(command[1:3], ["release", "view"])
+                    response = {"tagName": "v1.2.3", "isDraft": draft, "isPrerelease": False, "url": "https://example.invalid", "assets": []}
+                return subprocess.CompletedProcess(command, 0, json.dumps(response).encode(), b"")
+            with mock.patch.dict(PUBLISH["released_source"].__globals__, {"ROOT": root, "run": github}):
+                measured, version, _ = PUBLISH["released_source"]("v1.2.3")
+                self.assertEqual((measured, version), (revision, "1.2.3"))
+                calls.clear()
+                (root / "untracked").write_text("dirty")
+                with self.assertRaisesRegex(PUBLISH["ReleaseError"], "dirty"):
+                    PUBLISH["released_source"]("v1.2.3")
+                self.assertEqual(calls, [], "dirty checkout reached GitHub")
+                (root / "untracked").unlink()
+                remote_sha = "b" * 40
+                with self.assertRaisesRegex(PUBLISH["ReleaseError"], "does not match"):
+                    PUBLISH["released_source"]("v1.2.3")
+                remote_sha = revision
+                draft = True
+                with self.assertRaisesRegex(PUBLISH["ReleaseError"], "existing published stable"):
+                    PUBLISH["released_source"]("v1.2.3")
+            self.assertFalse(any("upload" in command for command in calls))
+
+    def test_mac_upload_names_cannot_clobber_linux_or_the_other_architecture(self):
+        arm = set(PUBLISH["asset_names"]("1.2.3", "aarch64-apple-darwin"))
+        intel = set(PUBLISH["asset_names"]("1.2.3", "x86_64-apple-darwin"))
+        self.assertEqual(len(arm), 3)
+        self.assertFalse(arm & intel)
+        self.assertFalse((arm | intel) & {"SHA256SUMS", "manifest.json", "release.json", "provenance.json"})
 
 
 class MacSmokeDiagnosticsContracts(unittest.TestCase):
