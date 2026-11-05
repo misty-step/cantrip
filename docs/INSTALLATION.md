@@ -439,19 +439,25 @@ for cancellation and denied-access guidance.
 The Developer ID private key and notarization credentials stay in this Mac's
 **login Keychain**. Nothing exports a private key, imports a `.p12` into CI,
 creates a GitHub signing secret, or changes the operator's installed app.
-Production signing remains unproved until the real Apple account prerequisites
-below exist and the production path succeeds. Enrollment is the operator's job.
+Production signing remains unproved until the real Apple identity/profile
+prerequisites below exist and the production path succeeds.
 
-1. Sign in to [Apple Developer Account](https://developer.apple.com/account/).
-   Open **Membership details** and copy its ten-character **Team ID**. This is
-   public identity metadata, not the Apple Account password.
-2. On this Mac, open **Xcode > Settings > Accounts**, add/select that Apple
+1. **Done.** The individual Apple Developer team is **A56K8A636Z** and its
+   agreement is accepted. The expected team is enforced by `package-macos`.
+   The public Team ID is visible at
+   [Apple Developer Account > Membership details](https://developer.apple.com/account/).
+2. **Open.** Install the new local Developer ID Application identity. On this
+   Mac, open **Xcode > Settings > Accounts**, add/select that Apple
    Account, select the enrolled team, then **Manage Certificates > + >
    Developer ID Application**. Use a local certificate, not a cloud-managed
    signing service. In **Keychain Access > login > My Certificates**, expand
    the certificate and verify that its private key is underneath it. Do not
    choose Apple Development, Apple Distribution, or Developer ID Installer.
    Developer ID certificate creation requires the team's Account Holder.
+   An existing certificate for this team expires 2031-03-03, but its private
+   key is elsewhere and it is not a signing identity on this Mac. Do not revoke
+   it or import its private key. The operator is creating a new certificate
+   from a local CSR; same-team display names are not unique selectors.
 3. If Xcode is unavailable, use Apple's
    [CSR procedure](https://developer.apple.com/help/account/certificates/create-a-certificate-signing-request/)
    on this Mac. Open Keychain Access, choose **Certificate Assistant > Request a
@@ -462,14 +468,14 @@ below exist and the production path succeeds. Enrollment is the operator's job.
    upload only that `.certSigningRequest`, download the public `.cer`, and
    double-click it to install into **login**. The CSR's private key never leaves
    this Mac. Verify the certificate/private-key pair in My Certificates.
-4. At [account.apple.com](https://account.apple.com), choose **Sign-In and
+4. **Open.** At [account.apple.com](https://account.apple.com), choose **Sign-In and
    Security > App-Specific Passwords > Generate an app-specific password**.
    Give it a Cantrip notarization label. Then run this command yourself,
-   substituting your Apple ID and Team ID:
+   substituting only your Apple ID:
 
    ```sh
    xcrun notarytool store-credentials cantrip-notary \
-     --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID \
+     --apple-id YOUR_APPLE_ID --team-id A56K8A636Z \
      --keychain "$HOME/Library/Keychains/login.keychain-db"
    ```
 
@@ -480,16 +486,24 @@ below exist and the production path succeeds. Enrollment is the operator's job.
 
    ```sh
    python3 scripts/package-macos --preflight \
-     --team-id YOUR_TEAM_ID --notary-profile cantrip-notary
+     --team-id A56K8A636Z --notary-profile cantrip-notary
    ```
 
    It prints the selected Developer ID Application name, Team ID, full public
    SHA-1, UTC expiry, Xcode tool paths, and whether the stored profile
-   authenticates. If multiple valid identities belong to the team, add
-   `--sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1`. It reads only public
-   certificate metadata and uses `notarytool history`; it never exports keys
-   or prints the stored profile or its response.
-6. When `codesign` first asks to use that certificate's **private key**, verify
+   authenticates. Only valid identities that have a private key **in this
+   Mac's login Keychain** are candidates; an old public certificate alone is
+   excluded. Selection and `codesign` use the full SHA-1, never a display name.
+   If multiple local private-key identities match, add
+   `--sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1`. To list public fingerprints:
+
+   ```sh
+   security find-identity -v -p codesigning "$HOME/Library/Keychains/login.keychain-db"
+   ```
+
+   The preflight reads only public certificate metadata and uses `notarytool
+   history`; it never exports keys or prints the stored profile or its response.
+6. **Open.** When `codesign` first asks to use that certificate's **private key**, verify
    that the requester is `/usr/bin/codesign`, enter your login Keychain
    password yourself, and choose **Always Allow**. This authorizes the signing
    tool, not Cantrip's provider key. Do not broaden access to every application.
@@ -516,7 +530,7 @@ RUN="$HOME/.cache/tmp/cantrip-publish-vX.Y.Z"
 mkdir -p "$RUN/tmp"
 CARGO_BUILD_JOBS=4 TMPDIR="$RUN/tmp" python3 scripts/publish-macos \
   --tag vX.Y.Z --target aarch64-apple-darwin \
-  --team-id YOUR_TEAM_ID --notary-profile cantrip-notary \
+  --team-id A56K8A636Z --notary-profile cantrip-notary \
   --output "$RUN/arm64"
 ```
 
@@ -549,17 +563,18 @@ These local Mac assets are not covered by the Linux GitHub build attestation.
 Mac has only `aarch64-apple-darwin` installed. Native CI uses `macos-15-intel`
 and source-builds checksum/revision-pinned CPU ONNX Runtime 1.24.2 because
 `ort-sys` supplies no Intel prebuilt. That CI app is ad-hoc development output,
-not a distributable substitute. On a native Intel Mac with the same local
-Keychain custody requirements, the publisher accepts
-`--target x86_64-apple-darwin` and produces the corresponding distinct asset
-names. No Intel production asset is promised from this arm64 Mac.
+not a distributable substitute. Do not move the signing private key or notary
+profile to an Intel runner or another Mac. The publisher's generic
+`--target x86_64-apple-darwin` option does not remove the native-build guard.
+This local path publishes arm64 only on this Mac; no Intel production asset
+or second signing home is authorized by this setup.
 
 For packaging without GitHub publication, continue to use:
 
 ```sh
 python3 scripts/package-macos --target aarch64-apple-darwin \
   --sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1 \
-  --team-id YOUR_TEAM_ID --notary-profile cantrip-notary \
+  --team-id A56K8A636Z --notary-profile cantrip-notary \
   --output /path/to/new/production-output
 ```
 
@@ -605,7 +620,7 @@ Once a real Developer ID certificate exists, the exact preparation command is:
 ```sh
 proof="$HOME/.cache/tmp/cantrip-keychain-developer-id"
 CARGO_BUILD_JOBS=4 python3 scripts/verify-keychain-persistence-macos prepare \
-  --output "$proof" --arm developer-id --team-id YOUR_TEAM_ID
+  --output "$proof" --arm developer-id --team-id A56K8A636Z
 ```
 
 Add `--sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1` only if needed to disambiguate.

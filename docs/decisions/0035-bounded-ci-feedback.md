@@ -111,9 +111,10 @@ a silent CI gap. Signing in CI could automate both native architectures, but
 would require exporting the private key and delegating notarization credentials,
 contrary to the custody requirement. That alternative is rejected, not scaffolded.
 The arm64 host cannot use the repository's native-only Intel runtime/build
-contract. Intel publication needs a native Intel signing Mac under the same
-custody rules or a future operator-approved toolchain/custody decision. Do not
-turn CI's ad-hoc Intel app into an advertised release.
+contract. This setup does not authorize moving credentials to an Intel Mac or
+runner. Intel publication requires a future operator-approved, verified build
+boundary that still signs on this Mac. Do not turn CI's ad-hoc Intel app into
+an advertised release or create a second signing home.
 
 Developer ID Keychain persistence is measured, not assumed from notarization.
 The [disposable-VM experiment](../INSTALLATION.md#measure-keychain-grants-across-code-updates)

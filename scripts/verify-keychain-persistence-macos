@@ -286,7 +286,7 @@ def main():
     parser.add_argument("--base-app", type=Path, help="reuse an already-built real Cantrip.app from this exact source HEAD")
     parser.add_argument("--dev-sign-identity")
     parser.add_argument("--keychain", type=lambda value: Path(value).expanduser())
-    parser.add_argument("--sign-identity")
+    parser.add_argument("--sign-identity", help="full public Developer ID Application certificate SHA-1; never a display name")
     parser.add_argument("--team-id")
     parser.add_argument("--always-allow", nargs=2, type=int, metavar=("X", "Y"))
     parser.add_argument("--password-env", help="optional environment variable for the disposable guest's password; never the host login password")

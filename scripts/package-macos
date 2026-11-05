@@ -28,6 +28,7 @@ RELEASE = runpy.run_path(str(ROOT / "scripts" / "package-release"))
 RUNTIME = runpy.run_path(str(ROOT / "scripts" / "prepare-macos-runtime"))
 ReleaseError = RELEASE["ReleaseError"]
 TARGETS = RUNTIME["TARGETS"]
+EXPECTED_TEAM_ID = "A56K8A636Z"
 LOGIN_KEYCHAIN = Path.home() / "Library" / "Keychains" / "login.keychain-db"
 GUIDES = ("INSTALLATION", "USAGE", "CONFIGURATION", "DESKTOP", "PRIVACY")
 LOAD_COMMANDS = {
@@ -59,15 +60,19 @@ def run(command, *, cwd=None, timeout=60, check=True, env=None, input=None):
 def developer_identity(team_id, requested=None):
     if not team_id or not re.fullmatch(r"[A-Z0-9]{10}", team_id):
         raise ReleaseError("--team-id must be the ten-character Apple Developer Team ID")
+    if team_id != EXPECTED_TEAM_ID:
+        raise ReleaseError(f"Cantrip production signing requires expected Apple team {EXPECTED_TEAM_ID}")
+    if requested and not re.fullmatch(r"[0-9A-Fa-f]{40}", requested):
+        raise ReleaseError("--sign-identity must be the certificate's full forty-character SHA-1; names are not selectors")
     identities = run(["security", "find-identity", "-v", "-p", "codesigning", LOGIN_KEYCHAIN]).stdout.decode()
     available = re.findall(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"\n]+)"', identities, re.MULTILINE)
     selected = [
         (digest.upper(), name) for digest, name in available
         if name.startswith("Developer ID Application: ") and name.endswith(f"({team_id})")
-        and (not requested or requested in (digest, digest.lower(), name))
+        and (not requested or requested.upper() == digest.upper())
     ]
     if len(selected) != 1:
-        raise ReleaseError("select exactly one valid Developer ID Application identity for --team-id in the login Keychain (name or SHA-1)")
+        raise ReleaseError("select exactly one valid Developer ID Application identity with a private key in the login Keychain; disambiguate only by SHA-1")
     digest, name = selected[0]
     certificates = run(["security", "find-certificate", "-a", "-p", LOGIN_KEYCHAIN]).stdout.decode()
     for pem in re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", certificates, re.DOTALL):
@@ -502,8 +507,8 @@ Stable local development identity (caller unlocks the Keychain first):
 
 Production build, sign, notarize, staple, and Gatekeeper-assess (no publication):
   python3 scripts/package-macos --target aarch64-apple-darwin --output dist/mac-arm64 \\
-    --sign-identity 'Developer ID Application: ORGANIZATION (TEAMID)' \\
-    --team-id TEAMID --notary-profile cantrip-notary
+    --sign-identity CERTIFICATE_SHA1 \\
+    --team-id A56K8A636Z --notary-profile cantrip-notary
 
 Prerequisites: a matching native Mac, the repository-pinned Rust toolchain,
 Python 3.11+, Xcode command-line tools, CMake 3.28+ for the Intel source-runtime
@@ -533,8 +538,8 @@ grants permissions, or launches the application. Existing output is never replac
     parser.add_argument("--ad-hoc", action="store_true", help="explicit DEVELOPMENT ad-hoc signing, without notarization")
     parser.add_argument("--dev-sign-identity", help="DEVELOPMENT signing with a local certificate's full SHA-1, without notarization")
     parser.add_argument("--keychain", type=lambda value: Path(value).expanduser(), help="optional keychain containing --dev-sign-identity; caller must unlock it first")
-    parser.add_argument("--sign-identity", help="Developer ID Application certificate name or SHA-1 Keychain identity")
-    parser.add_argument("--team-id", help="Apple Developer Team ID bound to the signing identity")
+    parser.add_argument("--sign-identity", help="full public SHA-1 of the Developer ID Application identity; never a display name")
+    parser.add_argument("--team-id", help=f"expected Cantrip Apple Developer Team ID ({EXPECTED_TEAM_ID})")
     parser.add_argument("--notary-profile", help="existing authenticated notarytool Keychain profile name")
     args = parser.parse_args()
     try:

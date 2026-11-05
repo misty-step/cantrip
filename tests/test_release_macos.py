@@ -22,6 +22,7 @@ SCRIPT = ROOT / "scripts" / "package-macos"
 PACKAGE = runpy.run_path(str(SCRIPT))
 VERIFY = runpy.run_path(str(ROOT / "scripts" / "verify-macos"))
 PUBLISH = runpy.run_path(str(ROOT / "scripts" / "publish-macos"))
+TEAM_ID = PACKAGE["EXPECTED_TEAM_ID"]
 VERSION = "0.1.0"
 
 
@@ -82,17 +83,17 @@ class MacProductionReleaseContracts(unittest.TestCase):
         for names in (
             ["Cantrip Development (local)"],
             ["Developer ID Application: Fixture (OTHERTEAM1)"],
-            ["Developer ID Application: One (ABCDEFGHIJ)", "Developer ID Application: Two (ABCDEFGHIJ)"],
+            [f"Developer ID Application: One ({TEAM_ID})", f"Developer ID Application: Two ({TEAM_ID})"],
         ):
             listing = "".join(f' {index}) {str(index) * 40} "{name}"\n' for index, name in enumerate(names, 1))
             result = subprocess.CompletedProcess([], 0, listing.encode(), b"")
             with mock.patch.dict(identity.__globals__, {"run": mock.Mock(return_value=result)}):
                 with self.assertRaisesRegex(PACKAGE["ReleaseError"], "exactly one valid Developer ID"):
-                    identity("ABCDEFGHIJ")
+                    identity(TEAM_ID)
 
     def test_preflight_emits_only_public_receipt_and_redacts_profile_responses(self):
         identity = {
-            "name": "Developer ID Application: Fixture (ABCDEFGHIJ)", "team_id": "ABCDEFGHIJ",
+            "name": f"Developer ID Application: Fixture ({TEAM_ID})", "team_id": TEAM_ID,
             "sha1": "A" * 40, "expires_utc": "2030-01-01T00:00:00+00:00",
         }
         preflight = PACKAGE["production_preflight"]
@@ -106,13 +107,13 @@ class MacProductionReleaseContracts(unittest.TestCase):
         with mock.patch.object(sys, "platform", "darwin"), mock.patch.dict(
             preflight.__globals__, {"run": native, "developer_identity": mock.Mock(return_value=identity)},
         ), mock.patch.object(shutil, "which", return_value="/public/tool/path"):
-            receipt = preflight("ABCDEFGHIJ", "fixture-profile")
+            receipt = preflight(TEAM_ID, "fixture-profile")
             self.assertEqual(receipt["identity"], identity)
             self.assertTrue(receipt["notary_profile_authenticated"])
             self.assertNotIn("PROFILE_", json.dumps(receipt))
             failed = True
             with self.assertRaises(PACKAGE["ReleaseError"]) as error:
-                preflight("ABCDEFGHIJ", "fixture-profile")
+                preflight(TEAM_ID, "fixture-profile")
             self.assertNotIn("PROFILE_", str(error.exception))
         self.assertTrue(any("--keychain" in command and PACKAGE["LOGIN_KEYCHAIN"] in command for command in calls))
         self.assertFalse(any("--password" in command or "store-credentials" in command for command in calls))
@@ -123,21 +124,28 @@ class MacProductionReleaseContracts(unittest.TestCase):
         expiry = "Jan  1 00:00:00 2030 GMT"
         def native(command, **options):
             if command[1] == "find-identity":
-                stdout = f' 1) {digest} "Developer ID Application: Fixture (ABCDEFGHIJ)"\n'.encode()
+                stdout = f' 1) {digest} "Developer ID Application: Fixture ({TEAM_ID})"\n'.encode()
             elif command[1] == "find-certificate":
-                stdout = ssl.DER_cert_to_PEM_cert(der).encode()
+                stdout = (
+                    ssl.DER_cert_to_PEM_cert(b"old-same-name-certificate-without-local-private-key")
+                    + ssl.DER_cert_to_PEM_cert(der)
+                ).encode()
             else:
                 self.assertEqual(command[:2], ["openssl", "x509"])
                 self.assertEqual(options["input"], der)
                 stdout = f"notAfter={expiry}\n".encode()
             return subprocess.CompletedProcess(command, 0, stdout, b"")
         with mock.patch.dict(PACKAGE["developer_identity"].__globals__, {"run": native}):
-            receipt = PACKAGE["developer_identity"]("ABCDEFGHIJ", digest.lower())
+            receipt = PACKAGE["developer_identity"](TEAM_ID, digest.lower())
             self.assertEqual(receipt["sha1"], digest)
             self.assertEqual(receipt["expires_utc"], "2030-01-01T00:00:00+00:00")
+            with self.assertRaisesRegex(PACKAGE["ReleaseError"], "names are not selectors"):
+                PACKAGE["developer_identity"](TEAM_ID, f"Developer ID Application: Fixture ({TEAM_ID})")
+            with self.assertRaisesRegex(PACKAGE["ReleaseError"], "expected Apple team"):
+                PACKAGE["developer_identity"]("OTHERTEAM1", digest)
             expiry = "Jan  1 00:00:00 2020 GMT"
             with self.assertRaisesRegex(PACKAGE["ReleaseError"], "expired"):
-                PACKAGE["developer_identity"]("ABCDEFGHIJ", digest)
+                PACKAGE["developer_identity"](TEAM_ID, digest)
 
 
     def test_released_source_checks_real_clean_tag_and_github_tag_before_publication(self):

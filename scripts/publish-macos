@@ -105,7 +105,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--target", choices=PACKAGE["TARGETS"], default={"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}.get(platform.machine()))
-    parser.add_argument("--sign-identity", help="optional exact Developer ID Application name or SHA-1 if this team has multiple identities")
+    parser.add_argument("--sign-identity", help="optional full Developer ID Application SHA-1 if multiple local private-key identities exist; never a name")
     parser.add_argument("--team-id", required=True)
     parser.add_argument("--notary-profile", required=True)
     parser.add_argument("--output", type=Path, required=True, help="new local output directory; keep it outside the clean source worktree")
