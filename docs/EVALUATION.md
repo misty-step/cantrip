@@ -166,6 +166,41 @@ selection, strict exact counts, and recommended `min_chars` live in the
 [receipt's `review_round`](../eval/baselines/2026-11-02-hone-clean/run.json).
 Earlier private quality numbers do not evaluate a second pass or decision model.
 
+### 2026-11-04 mode model study
+
+The [aggregate receipt](../eval/baselines/2026-11-04-models/run.json) records
+the new $6 commission, independent of earlier speech-study spending.
+Its starting eval-key counter is $3.204799119. Admission uses the larger of
+the counter delta and known call charges, plus unresolved reservations and
+the next call's worst-case charge, so delayed counter updates do not create
+more spending authority. Paid requests are not retried.
+
+Clean uses the shipped v5 prompt, canonical vocabulary, all 33 strict cases,
+and 11 fixed private hypotheses. The decision rule selects the fastest lane
+with zero hard fidelity failures under blind builder review. Strict exact
+matches are reported independently and never relabeled by semantic review.
+Elevate compares all four requested frontier families at low and medium
+reasoning; Opus has a smaller, explicitly matched subset.
+Blind builder preference measures intent inference and domain register,
+not an independent human verdict or a paid model judgment.
+The final Elevate comparison has 304 retained responses of 322 planned.
+One submitted control was interrupted without a response, and 17 were not
+submitted at the conductor's cutoff. Preference uses the 18 fully matched
+cases, not the 20 planned cases. Incomplete or unsubmitted work is not a pass.
+
+The conductor explicitly removed vocabulary arms from scope before execution.
+No noun precision, recall, or vocabulary-placement improvement is claimed.
+
+Timings are complete-request latency, not TTFT or stop-to-delivery proof.
+Short and long private slices have six and five Clean takes respectively;
+their p95 is the observed maximum, not a production tail estimate.
+Costs per 1,000 takes scale observed charges at each stated corpus mix.
+The study adds output-token and route-price caps to enforce its budget;
+these are evaluation controls, not changes to production requests.
+Private text, vocabulary, audio, and individual receipts remain owner-only
+outside Git and workers. No local model or live application is used.
+
+
 
 ### Local weekly schedule
 

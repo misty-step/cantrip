@@ -181,8 +181,8 @@ pub struct PostprocConfig {
 struct PostprocInput {
     mode: Option<Mode>,
     enabled: Option<bool>,
-    clean: Option<ModeModelConfig>,
-    elevate: Option<ModeModelConfig>,
+    clean: Option<ModeModelInput>,
+    elevate: Option<ModeModelInput>,
     model: Option<String>,
     reasoning_effort: Option<String>,
     endpoint: Option<String>,
@@ -195,6 +195,25 @@ struct PostprocInput {
     decision_model: Option<String>,
     decision_endpoint: Option<String>,
     decision_api_key_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ModeModelInput {
+    model: Option<String>,
+    #[serde(deserialize_with = "present_optional_string")]
+    reasoning_effort: Option<Option<String>>,
+}
+
+impl ModeModelInput {
+    fn apply_to(self, config: &mut ModeModelConfig) {
+        if let Some(model) = self.model {
+            config.model = model;
+        }
+        if let Some(effort) = self.reasoning_effort {
+            config.reasoning_effort = effort;
+        }
+    }
 }
 
 fn present_optional_string<'de, D: serde::Deserializer<'de>>(
@@ -233,7 +252,7 @@ impl From<PostprocInput> for PostprocConfig {
             }
         });
         if let Some(clean) = input.clean {
-            config.clean = clean;
+            clean.apply_to(&mut config.clean);
         } else if let Some(model) = input.model {
             config.clean = ModeModelConfig {
                 model,
@@ -246,7 +265,7 @@ impl From<PostprocInput> for PostprocConfig {
             config.clean.reasoning_effort = None;
         }
         if let Some(elevate) = input.elevate {
-            config.elevate = elevate;
+            elevate.apply_to(&mut config.elevate);
         }
         if let Some(endpoint) = input.endpoint {
             config.endpoint = endpoint;
@@ -392,7 +411,10 @@ impl Default for PostprocConfig {
     fn default() -> Self {
         Self {
             mode: Mode::Raw,
-            clean: ModeModelConfig::default(),
+            clean: ModeModelConfig {
+                model: "deepseek/deepseek-v4.1-flash-1017:nitro".to_owned(),
+                reasoning_effort: Some("low".to_owned()),
+            },
             elevate: ModeModelConfig::default(),
             endpoint: "https://openrouter.ai/api/v1".to_owned(),
             api_key_id: Some("openrouter".to_owned()),
@@ -599,6 +621,38 @@ mod tests {
     }
 
     #[test]
+    fn partial_mode_tables_keep_their_own_model_defaults() {
+        let defaults = PostprocConfig::default();
+        assert_eq!(
+            defaults.clean.model,
+            "deepseek/deepseek-v4.1-flash-1017:nitro"
+        );
+        assert_eq!(defaults.clean.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(defaults.elevate.model, "openai/gpt-6.1-sol");
+        assert_eq!(defaults.elevate.reasoning_effort.as_deref(), Some("low"));
+        let config: Config = toml::from_str(
+            r#"[postproc]
+mode = "clean"
+[postproc.clean]
+reasoning_effort = "medium"
+[postproc.elevate]
+model = "explicit-elevate"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.postproc.clean.model, defaults.clean.model);
+        assert_eq!(
+            config.postproc.clean.reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(config.postproc.elevate.model, "explicit-elevate");
+        assert_eq!(
+            config.postproc.elevate.reasoning_effort,
+            defaults.elevate.reasoning_effort
+        );
+    }
+
+    #[test]
     fn clean_without_a_cleanup_model_is_valid_for_local_aliases() {
         let config = Config {
             postproc: PostprocConfig {
@@ -717,7 +771,10 @@ reasoning_effort = "medium"
         // Only entries that own an alias have a spelling to fix.
         assert_eq!(raw.spellings, 1);
         let clean = config.pipeline_display(Mode::Clean);
-        assert_eq!(clean.llm_model.as_deref(), Some("openai/gpt-6.1-sol"));
+        assert_eq!(
+            clean.llm_model.as_deref(),
+            Some("deepseek/deepseek-v4.1-flash-1017:nitro")
+        );
         assert_eq!(clean.llm_hosts, ["openrouter.ai"]);
         // The selected mode is only a default; each mode names its own model.
         config.postproc.elevate.model = "provider/articulate".into();

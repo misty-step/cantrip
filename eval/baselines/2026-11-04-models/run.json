@@ -1,0 +1,1156 @@
+{
+  "schema": "cantrip.eval.mode-models.v1",
+  "date": "2026-11-04",
+  "claim_type": "Measured request execution and accounting. Fidelity and preference are frozen blind builder judgments, not independent human review. Recommendations are inference from this bounded sample.",
+  "source_revision": "4a4840f",
+  "commission": {
+    "id": "operator-2026-11-04-mode-models",
+    "new_cap_usd": 6,
+    "start_key_usage_usd": 3.204799119,
+    "prior_commissions_unchanged": true,
+    "no_paid_judges": true,
+    "no_local_models": true,
+    "no_paid_retries": true
+  },
+  "model_identity_resolution": {
+    "operator_oregon": "Inferred intended name Gemini 4 Argon; exact current ID google/gemini-4-argon, not Oregon.",
+    "current_flash_lite": "Measured current text model google/gemini-3.5-flash-lite.",
+    "additional_fast_candidate": "DeepSeek V4.1 Flash 1017 with :nitro throughput routing and low effort, a previously evaluated fast refinement family with verified current routing and prices."
+  },
+  "catalog": [
+    {
+      "id": "inception/mercury-3",
+      "canonical_slug": "inception/mercury-3-20261019",
+      "standard_input_usd_per_million": 0.09999999999999999,
+      "standard_output_usd_per_million": 0.35,
+      "supported_efforts": [
+        "high",
+        "medium",
+        "low",
+        "none"
+      ],
+      "source": "https://openrouter.ai/api/v1/models/inception/mercury-3/endpoints"
+    },
+    {
+      "id": "google/gemini-3.5-flash-lite",
+      "canonical_slug": "google/gemini-3.5-flash-lite-20260721",
+      "standard_input_usd_per_million": 0.3,
+      "standard_output_usd_per_million": 2.5,
+      "supported_efforts": [
+        "high",
+        "medium",
+        "low",
+        "minimal"
+      ],
+      "source": "https://openrouter.ai/api/v1/models/google/gemini-3.5-flash-lite/endpoints"
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash-1017",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20261017",
+      "standard_input_usd_per_million": 0.15,
+      "standard_output_usd_per_million": 0.6,
+      "supported_efforts": [
+        "max",
+        "high",
+        "low",
+        "none"
+      ],
+      "source": "https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints",
+      "evaluated_variant": "deepseek/deepseek-v4.1-flash-1017:nitro",
+      "evaluated_route_price_ceiling_input_output_usd_per_million": [
+        0.3,
+        1.2
+      ]
+    },
+    {
+      "id": "openai/gpt-6.1-sol",
+      "canonical_slug": "openai/gpt-6.1-sol-20260929",
+      "standard_input_usd_per_million": 2.0,
+      "standard_output_usd_per_million": 10.0,
+      "supported_efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "source": "https://openrouter.ai/api/v1/models/openai/gpt-6.1-sol/endpoints"
+    },
+    {
+      "id": "google/gemini-4-argon",
+      "canonical_slug": "google/gemini-4-argon-20261013",
+      "standard_input_usd_per_million": 2.0,
+      "standard_output_usd_per_million": 10.0,
+      "supported_efforts": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "source": "https://openrouter.ai/api/v1/models/google/gemini-4-argon/endpoints"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5.5",
+      "canonical_slug": "anthropic/claude-sonnet-5.5-20260928",
+      "standard_input_usd_per_million": 2.0,
+      "standard_output_usd_per_million": 10.0,
+      "supported_efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "source": "https://openrouter.ai/api/v1/models/anthropic/claude-sonnet-5.5/endpoints"
+    },
+    {
+      "id": "anthropic/claude-opus-5.5",
+      "canonical_slug": "anthropic/claude-opus-5.5-20260921",
+      "standard_input_usd_per_million": 4.0,
+      "standard_output_usd_per_million": 20.0,
+      "supported_efforts": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ],
+      "source": "https://openrouter.ai/api/v1/models/anthropic/claude-opus-5.5/endpoints"
+    }
+  ],
+  "clean_decision_rule": "Among candidates with zero hard fidelity failures in strict cases and private takes, select the lowest private-take request-to-final p50; use p95 then cost as tie breaks. Exact accepted strings remain strict and separately reported. If none qualifies retain shipped Sol low; do not declare a winner.",
+  "elevate_decision_rule": "Review every completed output for speech-act, fact and literal fidelity. Compare blind intent-inference and domain-register preferences on the shared 20-case subset before consulting model identities. Eligible promotion requires zero hard fidelity failures on its tested subset; full-arm diagnostic failures remain disqualifying. If no model qualifies, retain shipped Sol low and name the best observed tradeoff without claiming promotion. Prefer low over medium when quality is tied. Opus has a deliberately smaller subset.",
+  "methods": {
+    "clean": {
+      "strict_cases": 33,
+      "private_takes": 11,
+      "arms": 4,
+      "calls_per_arm": 44,
+      "short_private_takes": 6,
+      "long_private_takes": 5,
+      "short_definition_seconds": "<=30",
+      "source_is_frozen_native_hypothesis": true,
+      "prompt_version": 5
+    },
+    "elevate": {
+      "planned_inherited_cases": 33,
+      "added_cases": 8,
+      "private_takes_planned_full_arm": 6,
+      "planned_non_opus_arms": 6,
+      "planned_cases_per_non_opus_arm": 47,
+      "opus_arms": 2,
+      "planned_cases_per_opus_arm": 20,
+      "retained_responses": 304,
+      "completed_nonempty_responses": 302,
+      "interrupted_submitted": 1,
+      "not_submitted": 17,
+      "planned_common_comparison_cases": 20,
+      "completed_common_comparison_cases": 18,
+      "prompt_version": 2,
+      "requested_efforts": [
+        "low",
+        "medium"
+      ],
+      "maximum_reasoning_used": false,
+      "grading": "First 300 opaque-labeled outputs frozen before interim unblinding; four later opaque-labeled outputs frozen before their own map was opened. Earlier model identities were known during the later batch. No paid judge.",
+      "quality_scale": {
+        "intent_inference": {
+          "1": "Misses or changes core intent",
+          "2": "Mostly repeats or loosely reframes",
+          "3": "Faithful clear intent with little additional conceptual precision",
+          "4": "Sharpens intended mechanism, tradeoff or verification criterion without adding facts",
+          "5": "Exceptionally precise intent clarification while retaining all core content"
+        },
+        "domain_register": {
+          "1": "Wrong domain or unusable prose",
+          "2": "Readable but casual or mostly verbatim",
+          "3": "Clean professional prose with limited lexical upgrading",
+          "4": "Crisp senior-practitioner register with correct terms of art",
+          "5": "Outstanding high-signal domain-native phrasing"
+        },
+        "pairwise_rule": "At each matched case a faithful output beats a hard-failed output. Two hard-failed outputs are ineligible/tied. Among faithful outputs compare sum of builder intent and register ratings; equal ratings tie. Aggregate pairwise wins/losses/ties on the common 20-case subset, with denominators. No paid judge. Ratings and failure reasons frozen before identity map is read."
+      },
+      "pairwise_denominator_per_lane": 126,
+      "collection_cutoff": "Conductor requested immediate defaults PR. One Sonnet-low control returned no response far beyond the production 30s cleanup budget; only the owned client was interrupted, no retry. Unsubmitted controls are not passes."
+    },
+    "vocabulary": {
+      "execution": "not_run",
+      "authority": "Conductor explicitly narrowed scope to shipping model defaults and directed no vocabulary-arm calls.",
+      "finding": "No new noun recall/precision comparison or placement recommendation. Existing source and primary docs show local Parakeet has no hints and OpenRouter ignores the current multipart prompt field. That is not a measured cloud hint benefit.",
+      "local_decoder_issue": "https://github.com/misty-step/cantrip/issues/244"
+    },
+    "latency": "Request open through final parsed response body, not TTFT or app stop-to-delivery; nearest-rank successful-call p50/p95, with failures separate. Fresh HTTPS connection per call; provider/network bound, not locally profiled. Distinct takes, one call each; no stable production-tail claim.",
+    "request_deviations": "Production prompt bytes and Source boundary, single pass, canonical vocabulary. Add 3072/8192 completion cap and provider max-price bound only to enforce budget. No temperature, exclude-reasoning, tools, or streaming. No client retries, no paid resubmission. Length finish is a hard failure. Default router standard-price-or-cheaper routes; priority excluded. No release-to-delivery claim.",
+    "host": {
+      "load_average": "2.94 3.07 3.74",
+      "logical_cores": 10,
+      "network": "public HTTPS from macOS; not isolated or profiled; request-to-final not real app stop-to-delivery",
+      "timing_limit": "Distinct takes, one call per arm/take, interleaved; not repeated physical-device measurement. Network and provider service latency cannot be separated; no throughput or causal speedup claim."
+    },
+    "unit_cost": "Observed per-call reported cost multiplied by 1000 at the stated corpus mix. Not a price guarantee or a 1000-take trial. Includes reasoning and any automatic caching/discount; no assumed free errors."
+  },
+  "privacy": "Aggregate only. No private source/output text, audio, vocabulary terms, take identifiers, paths, request bodies, or provider generation IDs. Full artifacts remain owner-only outside Git and workers.",
+  "hashes": {
+    "clean_prompt": "bdcc34d888a270ff9d45989b05a8e4a53b23501a6a432accd5fd4326b1dfb95d",
+    "elevate_prompt": "429388c152142ddd044da369593080c5ce5551b3604c0f27865d5dc1d4e7602a",
+    "vocab": "e9bce6fa85f46af0dbfd243cd247d145452a5fb0b95f9c6944dce7a29107b57c",
+    "strict_corpus": "447c382098bdd4d0a20d34f909dcd57a81a1a6d6f80b70cc910e3d2d024f1885",
+    "references": "279db83eb0d3a5f7ef6a5ef1f8215f3f037b4a807d6dd8752e559200d7123418",
+    "runner_after_accounting_amendment": "e3bcde7a2e422baa019813052a97a0b057d47f3aec57c1466c88b62016903713",
+    "runner_vocabulary_phase": "881175441cb258e0529f920f356aad4106a4cb2a9d8fb0d0a9380970527c7418",
+    "noun_scorer": "9bd9e8bbf8e6be1a6f4b525a2d58a1308ddfa8c86dddcecb7ef3f2de4993f8f0",
+    "clean_blind_grades": "744249d5075f6c4d8e34e32e91c27861cf67c0e1d9569fb4e09813d5fed804c7",
+    "elevate_first_blind_grades": "fdd7b42cf72416ac42695ca9f85ea1d8164b19e298cafb96fae01fc05978efa8",
+    "elevate_last_blind_grades": "5c9ce9a11c5cd11e775ee95063868d4df1a809c333b78014eac7d33e144a4991",
+    "private_protocol": "98560b2cca02d45989642704439a75dd0bee947cb3d0ccdeadb540c11618fe90",
+    "private_ledger": "71ee3c4a02d540bcb04ad85325e2d1c14f4e92c352f5e9871dcda4d962aaf5a5"
+  },
+  "sources": [
+    "https://openrouter.ai/api/v1/models",
+    "https://openrouter.ai/api/v1/models/inception/mercury-3/endpoints",
+    "https://openrouter.ai/inception/mercury-3",
+    "https://openrouter.ai/api/v1/models/google/gemini-3.5-flash-lite/endpoints",
+    "https://openrouter.ai/api/v1/models/google/gemini-4-argon/endpoints",
+    "https://openrouter.ai/google/gemini-4-argon",
+    "https://openrouter.ai/api/v1/models/openai/gpt-6.1-sol/endpoints",
+    "https://openrouter.ai/api/v1/models/anthropic/claude-sonnet-5.5/endpoints",
+    "https://openrouter.ai/api/v1/models/anthropic/claude-opus-5.5/endpoints",
+    "https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints",
+    "https://openrouter.ai/docs/guides/overview/multimodal/stt",
+    "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/mai-transcribe",
+    "https://openrouter.ai/api/v1/models/microsoft/mai-transcribe-2/endpoints",
+    "https://openrouter.ai/microsoft/mai-transcribe-2",
+    "https://github.com/misty-step/cantrip/issues/244"
+  ],
+  "limitations": [
+    "Single operator, one draw per distinct case/lane, small short and long slices, no speaker/session holdout.",
+    "Builder semantic and preference ratings are subjective; exact-accepted scores remain strict and are not relabeled by semantic judgment.",
+    "Private references are MAI-derived silver and favor that transcription family; no independent listening or operator adjudication.",
+    "No local inference, live app/config/keyring changes, build, native GUI, or real delivery proof in the study. Main owns code verification.",
+    "OpenRouter :nitro routing and advertised prices can change. Current endpoint observations are dated sources, not a future SLO.",
+    "Elevate is incomplete by explicit cutoff: 304 retained of 322 planned, one interrupted request and 17 unsubmitted. Common preference subset is 18 cases, not 20.",
+    "The study client did not enforce production's shared 30s cleanup deadline. Four completed Argon responses exceeded it, and an unresolved Sonnet-low request required explicit client interruption. These are not production-path passes.",
+    "Vocabulary arms were explicitly not run; no placement or noun-recall improvement is claimed."
+  ],
+  "decisions": {
+    "clean": {
+      "model": "deepseek/deepseek-v4.1-flash-1017:nitro",
+      "reasoning_effort": "low",
+      "basis": "Fastest tested lane with zero blind-builder hard fidelity failures; strict 26/33 exact score remains a disclosed mismatch, not relabeled passes."
+    },
+    "elevate": {
+      "model": "openai/gpt-6.1-sol",
+      "reasoning_effort": "low",
+      "basis": "Retained shipped default. All frontiers have hard failures; Sol low leads the completed matched-subset fidelity/preference tradeoff. No zero-failure Elevate winner."
+    },
+    "raw_default_unchanged": true,
+    "explicit_config_models_unchanged": true,
+    "production_prompts_unchanged": true,
+    "vocabulary_forwarding_unchanged": true
+  },
+  "clean": {
+    "deepseek-low": {
+      "submitted": 44,
+      "completed": 44,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.014015628,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "Together": 43,
+        "Relace": 1
+      },
+      "timing": {
+        "all": {
+          "n": 44,
+          "p50_ms": 576.408,
+          "p95_ms": 2714.867,
+          "min_ms": 324.66837496031076,
+          "max_ms": 6538.051125011407,
+          "observed_usd_per_1000": 0.318537
+        },
+        "private": {
+          "n": 11,
+          "p50_ms": 780.572,
+          "p95_ms": 6538.051,
+          "min_ms": 391.9464589562267,
+          "max_ms": 6538.051125011407,
+          "observed_usd_per_1000": 0.8340807272727272
+        },
+        "short": {
+          "n": 6,
+          "p50_ms": 446.247,
+          "p95_ms": 780.572,
+          "min_ms": 391.9464589562267,
+          "max_ms": 780.5717089213431,
+          "observed_usd_per_1000": 0.10845799999999998
+        },
+        "long": {
+          "n": 5,
+          "p50_ms": 2714.867,
+          "p95_ms": 6538.051,
+          "min_ms": 1376.172124990262,
+          "max_ms": 6538.051125011407,
+          "observed_usd_per_1000": 1.7048279999999998
+        }
+      },
+      "strict": {
+        "exact_accepted": 26,
+        "n": 33
+      },
+      "fidelity": {
+        "hard_failed_outputs": 0,
+        "reviewed": 44,
+        "private_failed_outputs": 0,
+        "failure_classes": {}
+      },
+      "qualified": true
+    },
+    "lite-minimal": {
+      "submitted": 44,
+      "completed": 44,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.014954199999999999,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "Google": 44
+      },
+      "timing": {
+        "all": {
+          "n": 44,
+          "p50_ms": 882.298,
+          "p95_ms": 1238.238,
+          "min_ms": 694.7002090746537,
+          "max_ms": 1715.9113750094548,
+          "observed_usd_per_1000": 0.3398681818181818
+        },
+        "private": {
+          "n": 11,
+          "p50_ms": 925.683,
+          "p95_ms": 1715.911,
+          "min_ms": 797.6389169925824,
+          "max_ms": 1715.9113750094548,
+          "observed_usd_per_1000": 0.5482181818181817
+        },
+        "short": {
+          "n": 6,
+          "p50_ms": 824.602,
+          "p95_ms": 925.683,
+          "min_ms": 797.6389169925824,
+          "max_ms": 925.6831250386313,
+          "observed_usd_per_1000": 0.2667833333333334
+        },
+        "long": {
+          "n": 5,
+          "p50_ms": 1234.156,
+          "p95_ms": 1715.911,
+          "min_ms": 1101.0256659938022,
+          "max_ms": 1715.9113750094548,
+          "observed_usd_per_1000": 0.88594
+        }
+      },
+      "strict": {
+        "exact_accepted": 14,
+        "n": 33
+      },
+      "fidelity": {
+        "hard_failed_outputs": 4,
+        "reviewed": 44,
+        "private_failed_outputs": 3,
+        "failure_classes": {
+          "changed_qualification": 1,
+          "changed_fact": 1,
+          "omitted_distinct_detail": 1,
+          "changed_literal": 1,
+          "changed_number_written_form": 1
+        }
+      },
+      "qualified": false
+    },
+    "mercury-none": {
+      "submitted": 44,
+      "completed": 44,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.00231873,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "Inception": 44
+      },
+      "timing": {
+        "all": {
+          "n": 44,
+          "p50_ms": 493.821,
+          "p95_ms": 856.174,
+          "min_ms": 398.47437501884997,
+          "max_ms": 1476.459041936323,
+          "observed_usd_per_1000": 0.052698409090909094
+        },
+        "private": {
+          "n": 11,
+          "p50_ms": 676.696,
+          "p95_ms": 1476.459,
+          "min_ms": 405.3872500080615,
+          "max_ms": 1476.459041936323,
+          "observed_usd_per_1000": 0.08690090909090908
+        },
+        "short": {
+          "n": 6,
+          "p50_ms": 493.821,
+          "p95_ms": 689.347,
+          "min_ms": 405.3872500080615,
+          "max_ms": 689.347208943218,
+          "observed_usd_per_1000": 0.03708333333333333
+        },
+        "long": {
+          "n": 5,
+          "p50_ms": 809.512,
+          "p95_ms": 1476.459,
+          "min_ms": 676.6960000386462,
+          "max_ms": 1476.459041936323,
+          "observed_usd_per_1000": 0.146682
+        }
+      },
+      "strict": {
+        "exact_accepted": 24,
+        "n": 33
+      },
+      "fidelity": {
+        "hard_failed_outputs": 4,
+        "reviewed": 44,
+        "private_failed_outputs": 3,
+        "failure_classes": {
+          "changed_qualification": 1,
+          "changed_name": 1,
+          "changed_speech_act_person": 1,
+          "omitted_distinct_detail": 1
+        }
+      },
+      "qualified": false
+    },
+    "sol-low": {
+      "submitted": 44,
+      "completed": 44,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.0890145,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "OpenAI": 44
+      },
+      "timing": {
+        "all": {
+          "n": 44,
+          "p50_ms": 1610.819,
+          "p95_ms": 2890.159,
+          "min_ms": 1401.054457994178,
+          "max_ms": 4896.630082977936,
+          "observed_usd_per_1000": 2.023056818181818
+        },
+        "private": {
+          "n": 11,
+          "p50_ms": 2779.426,
+          "p95_ms": 4896.63,
+          "min_ms": 1487.0738750323653,
+          "max_ms": 4896.630082977936,
+          "observed_usd_per_1000": 2.8409545454545455
+        },
+        "short": {
+          "n": 6,
+          "p50_ms": 1714.28,
+          "p95_ms": 2779.426,
+          "min_ms": 1487.0738750323653,
+          "max_ms": 2779.4260419905186,
+          "observed_usd_per_1000": 1.7000000000000002
+        },
+        "long": {
+          "n": 5,
+          "p50_ms": 2890.159,
+          "p95_ms": 4896.63,
+          "min_ms": 2865.856165997684,
+          "max_ms": 4896.630082977936,
+          "observed_usd_per_1000": 4.2101
+        }
+      },
+      "strict": {
+        "exact_accepted": 28,
+        "n": 33
+      },
+      "fidelity": {
+        "hard_failed_outputs": 1,
+        "reviewed": 44,
+        "private_failed_outputs": 1,
+        "failure_classes": {
+          "omitted_distinct_detail": 1
+        }
+      },
+      "qualified": false
+    }
+  },
+  "elevate": {
+    "argon-low": {
+      "completed": 45,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.091222,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "Google": 45
+      },
+      "timing": {
+        "all": {
+          "n": 45,
+          "p50_ms": 3397.753,
+          "p95_ms": 25277.976,
+          "min_ms": 1952.6774999685585,
+          "max_ms": 33289.47224991862,
+          "observed_usd_per_1000": 2.027155555555556
+        },
+        "private": {
+          "n": 6,
+          "p50_ms": 5515.847,
+          "p95_ms": 33289.472,
+          "min_ms": 2871.742459014058,
+          "max_ms": 33289.47224991862,
+          "observed_usd_per_1000": 3.3539999999999996
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 2871.742,
+          "p95_ms": 33289.472,
+          "min_ms": 2871.742459014058,
+          "max_ms": 33289.47224991862,
+          "observed_usd_per_1000": 1.777
+        },
+        "long": {
+          "n": 4,
+          "p50_ms": 5515.847,
+          "p95_ms": 25277.976,
+          "min_ms": 4392.081415979192,
+          "max_ms": 25277.97583397478,
+          "observed_usd_per_1000": 4.1425
+        }
+      },
+      "completed_over_production_30s_budget": 2,
+      "reported_reasoning_tokens": 0,
+      "planned_cases": 47,
+      "unresolved_submitted": 0,
+      "not_submitted": 2,
+      "fidelity": {
+        "reviewed": 45,
+        "hard_failed_outputs": 7,
+        "failure_classes": {
+          "changed_condition": 1,
+          "added_fact": 2,
+          "changed_literal": 1,
+          "changed_modality": 2,
+          "changed_quantity_requirement": 1
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 4,
+        "intent_mean": 3.4444444444444446,
+        "register_mean": 3.611111111111111,
+        "wins_losses_ties": {
+          "wins": 26,
+          "losses": 24,
+          "ties": 76
+        },
+        "p50_ms": 3394.515,
+        "p95_ms": 33289.472,
+        "observed_usd_per_1000": 2.056
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 45,
+      "paid_submissions": 45,
+      "total_request_failures_including_interruption": 0
+    },
+    "argon-medium": {
+      "completed": 45,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.096152,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "Google": 45
+      },
+      "timing": {
+        "all": {
+          "n": 45,
+          "p50_ms": 3479.932,
+          "p95_ms": 24165.54,
+          "min_ms": 2282.9065000405535,
+          "max_ms": 63447.24791601766,
+          "observed_usd_per_1000": 2.136711111111111
+        },
+        "private": {
+          "n": 6,
+          "p50_ms": 4801.636,
+          "p95_ms": 8852.72,
+          "min_ms": 3479.931707959622,
+          "max_ms": 8852.719792048447,
+          "observed_usd_per_1000": 3.415666666666666
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 3479.932,
+          "p95_ms": 4090.654,
+          "min_ms": 3479.931707959622,
+          "max_ms": 4090.6536250840873,
+          "observed_usd_per_1000": 1.787
+        },
+        "long": {
+          "n": 4,
+          "p50_ms": 4874.825,
+          "p95_ms": 8852.72,
+          "min_ms": 4801.635624957271,
+          "max_ms": 8852.719792048447,
+          "observed_usd_per_1000": 4.23
+        }
+      },
+      "completed_over_production_30s_budget": 2,
+      "reported_reasoning_tokens": 453,
+      "planned_cases": 47,
+      "unresolved_submitted": 0,
+      "not_submitted": 2,
+      "fidelity": {
+        "reviewed": 45,
+        "hard_failed_outputs": 8,
+        "failure_classes": {
+          "changed_condition": 2,
+          "added_fact": 1,
+          "changed_literal": 1,
+          "changed_requirement": 1,
+          "changed_quantity_or_modality": 1,
+          "changed_quantity_requirement": 1,
+          "changed_optional_requirement": 1
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 5,
+        "intent_mean": 3.4444444444444446,
+        "register_mean": 3.5555555555555554,
+        "wins_losses_ties": {
+          "wins": 16,
+          "losses": 30,
+          "ties": 80
+        },
+        "p50_ms": 3439.605,
+        "p95_ms": 36111.099,
+        "observed_usd_per_1000": 2.2315555555555555
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 45,
+      "paid_submissions": 45,
+      "total_request_failures_including_interruption": 0
+    },
+    "opus-low": {
+      "completed": 19,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.135192,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "Claude Platform on AWS": 19
+      },
+      "timing": {
+        "all": {
+          "n": 19,
+          "p50_ms": 1850.611,
+          "p95_ms": 4765.722,
+          "min_ms": 1550.8935000980273,
+          "max_ms": 4765.721999923699,
+          "observed_usd_per_1000": 7.115368421052631
+        },
+        "private": {
+          "n": 4,
+          "p50_ms": 3965.157,
+          "p95_ms": 4765.722,
+          "min_ms": 1558.0457500182092,
+          "max_ms": 4765.721999923699,
+          "observed_usd_per_1000": 10.247
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 1558.046,
+          "p95_ms": 3965.157,
+          "min_ms": 1558.0457500182092,
+          "max_ms": 3965.156584046781,
+          "observed_usd_per_1000": 7.26
+        },
+        "long": {
+          "n": 2,
+          "p50_ms": 3974.729,
+          "p95_ms": 4765.722,
+          "min_ms": 3974.729166016914,
+          "max_ms": 4765.721999923699,
+          "observed_usd_per_1000": 13.234
+        }
+      },
+      "completed_over_production_30s_budget": 0,
+      "reported_reasoning_tokens": 214,
+      "planned_cases": 20,
+      "unresolved_submitted": 0,
+      "not_submitted": 1,
+      "fidelity": {
+        "reviewed": 19,
+        "hard_failed_outputs": 5,
+        "failure_classes": {
+          "changed_condition": 1,
+          "added_mechanism": 1,
+          "changed_certainty": 1,
+          "changed_modality": 1,
+          "changed_optional_requirement": 1
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 4,
+        "intent_mean": 3.5555555555555554,
+        "register_mean": 3.611111111111111,
+        "wins_losses_ties": {
+          "wins": 19,
+          "losses": 16,
+          "ties": 91
+        },
+        "p50_ms": 1850.611,
+        "p95_ms": 4765.722,
+        "observed_usd_per_1000": 7.192444444444444
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 19,
+      "paid_submissions": 19,
+      "total_request_failures_including_interruption": 0
+    },
+    "opus-medium": {
+      "completed": 18,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.176424,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "Claude Platform on AWS": 18
+      },
+      "timing": {
+        "all": {
+          "n": 18,
+          "p50_ms": 3302.999,
+          "p95_ms": 10625.122,
+          "min_ms": 2178.0691670719534,
+          "max_ms": 10625.121875084005,
+          "observed_usd_per_1000": 9.801333333333334
+        },
+        "private": {
+          "n": 4,
+          "p50_ms": 4052.111,
+          "p95_ms": 10625.122,
+          "min_ms": 3309.438540949486,
+          "max_ms": 10625.121875084005,
+          "observed_usd_per_1000": 14.527
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 3309.439,
+          "p95_ms": 4052.111,
+          "min_ms": 3309.438540949486,
+          "max_ms": 4052.110541961156,
+          "observed_usd_per_1000": 8.76
+        },
+        "long": {
+          "n": 2,
+          "p50_ms": 5148.938,
+          "p95_ms": 10625.122,
+          "min_ms": 5148.937583086081,
+          "max_ms": 10625.121875084005,
+          "observed_usd_per_1000": 20.294
+        }
+      },
+      "completed_over_production_30s_budget": 0,
+      "reported_reasoning_tokens": 2596,
+      "planned_cases": 20,
+      "unresolved_submitted": 0,
+      "not_submitted": 2,
+      "fidelity": {
+        "reviewed": 18,
+        "hard_failed_outputs": 3,
+        "failure_classes": {
+          "changed_condition": 1,
+          "added_mechanism": 1,
+          "changed_certainty": 1
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 3,
+        "intent_mean": 3.5555555555555554,
+        "register_mean": 3.5,
+        "wins_losses_ties": {
+          "wins": 20,
+          "losses": 25,
+          "ties": 81
+        },
+        "p50_ms": 3302.999,
+        "p95_ms": 10625.122,
+        "observed_usd_per_1000": 9.801333333333334
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 18,
+      "paid_submissions": 18,
+      "total_request_failures_including_interruption": 0
+    },
+    "sol-low": {
+      "completed": 44,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.0849325,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "OpenAI": 44
+      },
+      "timing": {
+        "all": {
+          "n": 44,
+          "p50_ms": 1767.503,
+          "p95_ms": 3714.672,
+          "min_ms": 1466.6671250015497,
+          "max_ms": 5711.352749960497,
+          "observed_usd_per_1000": 1.9302840909090908
+        },
+        "private": {
+          "n": 6,
+          "p50_ms": 3281.444,
+          "p95_ms": 5711.353,
+          "min_ms": 1544.0394999459386,
+          "max_ms": 5711.352749960497,
+          "observed_usd_per_1000": 3.2687499999999994
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 1544.039,
+          "p95_ms": 1590.004,
+          "min_ms": 1544.0394999459386,
+          "max_ms": 1590.0040830019861,
+          "observed_usd_per_1000": 1.6949999999999998
+        },
+        "long": {
+          "n": 4,
+          "p50_ms": 3714.672,
+          "p95_ms": 5711.353,
+          "min_ms": 3281.4437500201166,
+          "max_ms": 5711.352749960497,
+          "observed_usd_per_1000": 4.055625
+        }
+      },
+      "completed_over_production_30s_budget": 0,
+      "reported_reasoning_tokens": 0,
+      "planned_cases": 47,
+      "unresolved_submitted": 0,
+      "not_submitted": 3,
+      "fidelity": {
+        "reviewed": 44,
+        "hard_failed_outputs": 2,
+        "failure_classes": {
+          "changed_condition": 2
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 2,
+        "intent_mean": 3.5555555555555554,
+        "register_mean": 3.7777777777777777,
+        "wins_losses_ties": {
+          "wins": 34,
+          "losses": 5,
+          "ties": 87
+        },
+        "p50_ms": 1807.259,
+        "p95_ms": 4089.856,
+        "observed_usd_per_1000": 1.9655555555555555
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 44,
+      "paid_submissions": 44,
+      "total_request_failures_including_interruption": 0
+    },
+    "sol-medium": {
+      "completed": 45,
+      "failures": 0,
+      "failure_classes": {},
+      "known_cost_usd": 0.0898045,
+      "unknown_cost_calls": 0,
+      "provider_counts": {
+        "OpenAI": 45
+      },
+      "timing": {
+        "all": {
+          "n": 45,
+          "p50_ms": 1959.597,
+          "p95_ms": 4156.13,
+          "min_ms": 1526.7414170084521,
+          "max_ms": 8817.66187492758,
+          "observed_usd_per_1000": 1.9956555555555553
+        },
+        "private": {
+          "n": 6,
+          "p50_ms": 3751.272,
+          "p95_ms": 8817.662,
+          "min_ms": 1724.9426670605317,
+          "max_ms": 8817.66187492758,
+          "observed_usd_per_1000": 3.5054166666666666
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 1724.943,
+          "p95_ms": 3751.272,
+          "min_ms": 1724.9426670605317,
+          "max_ms": 3751.271874993108,
+          "observed_usd_per_1000": 1.98
+        },
+        "long": {
+          "n": 4,
+          "p50_ms": 4156.13,
+          "p95_ms": 8817.662,
+          "min_ms": 3067.0981670264155,
+          "max_ms": 8817.66187492758,
+          "observed_usd_per_1000": 4.268125
+        }
+      },
+      "completed_over_production_30s_budget": 0,
+      "reported_reasoning_tokens": 285,
+      "planned_cases": 47,
+      "unresolved_submitted": 0,
+      "not_submitted": 2,
+      "fidelity": {
+        "reviewed": 45,
+        "hard_failed_outputs": 5,
+        "failure_classes": {
+          "changed_condition": 2,
+          "omitted_fact_or_changed_modality": 1,
+          "changed_modality": 1,
+          "changed_optional_requirement": 1
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 3,
+        "intent_mean": 3.5555555555555554,
+        "register_mean": 3.7777777777777777,
+        "wins_losses_ties": {
+          "wins": 31,
+          "losses": 10,
+          "ties": 85
+        },
+        "p50_ms": 1970.752,
+        "p95_ms": 4538.088,
+        "observed_usd_per_1000": 2.031111111111111
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 45,
+      "paid_submissions": 45,
+      "total_request_failures_including_interruption": 0
+    },
+    "sonnet-low": {
+      "completed": 43,
+      "failures": 1,
+      "failure_classes": {
+        "empty_reply": 1
+      },
+      "known_cost_usd": 0.14533,
+      "unknown_cost_calls": 2,
+      "provider_counts": {
+        "Claude Platform on AWS": 44
+      },
+      "timing": {
+        "all": {
+          "n": 43,
+          "p50_ms": 1336.436,
+          "p95_ms": 2945.071,
+          "min_ms": 988.0189580144361,
+          "max_ms": 4292.2531249932945,
+          "observed_usd_per_1000": 3.379767441860465
+        },
+        "private": {
+          "n": 6,
+          "p50_ms": 2047.313,
+          "p95_ms": 4292.253,
+          "min_ms": 1079.0398339740932,
+          "max_ms": 4292.2531249932945,
+          "observed_usd_per_1000": 5.533333333333334
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 1079.04,
+          "p95_ms": 1394.894,
+          "min_ms": 1079.0398339740932,
+          "max_ms": 1394.8940000263974,
+          "observed_usd_per_1000": 2.97
+        },
+        "long": {
+          "n": 4,
+          "p50_ms": 2945.071,
+          "p95_ms": 4292.253,
+          "min_ms": 2047.3127500154078,
+          "max_ms": 4292.2531249932945,
+          "observed_usd_per_1000": 6.8149999999999995
+        }
+      },
+      "completed_over_production_30s_budget": 0,
+      "reported_reasoning_tokens": 0,
+      "planned_cases": 47,
+      "unresolved_submitted": 1,
+      "not_submitted": 2,
+      "fidelity": {
+        "reviewed": 44,
+        "hard_failed_outputs": 10,
+        "failure_classes": {
+          "changed_fact": 2,
+          "changed_condition": 1,
+          "changed_modality": 1,
+          "changed_quantity": 1,
+          "added_fact": 1,
+          "changed_quantity_requirement": 1,
+          "added_mechanism": 1,
+          "incomplete_reply": 1,
+          "changed_speech_act": 1
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 5,
+        "intent_mean": 3.388888888888889,
+        "register_mean": 3.388888888888889,
+        "wins_losses_ties": {
+          "wins": 18,
+          "losses": 32,
+          "ties": 76
+        },
+        "p50_ms": 1394.894,
+        "p95_ms": 3412.413,
+        "observed_usd_per_1000": 3.541777777777778
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 44,
+      "paid_submissions": 45,
+      "total_request_failures_including_interruption": 2
+    },
+    "sonnet-medium": {
+      "completed": 43,
+      "failures": 1,
+      "failure_classes": {
+        "empty_reply": 1
+      },
+      "known_cost_usd": 0.14636,
+      "unknown_cost_calls": 1,
+      "provider_counts": {
+        "Claude Platform on AWS": 44
+      },
+      "timing": {
+        "all": {
+          "n": 43,
+          "p50_ms": 1251.108,
+          "p95_ms": 2946.908,
+          "min_ms": 1002.8354999376461,
+          "max_ms": 4567.269084043801,
+          "observed_usd_per_1000": 3.403720930232558
+        },
+        "private": {
+          "n": 6,
+          "p50_ms": 2864.188,
+          "p95_ms": 4567.269,
+          "min_ms": 1073.4376249602064,
+          "max_ms": 4567.269084043801,
+          "observed_usd_per_1000": 5.741666666666666
+        },
+        "short": {
+          "n": 2,
+          "p50_ms": 1073.438,
+          "p95_ms": 1861.619,
+          "min_ms": 1073.4376249602064,
+          "max_ms": 1861.618584021926,
+          "observed_usd_per_1000": 3.3150000000000004
+        },
+        "long": {
+          "n": 4,
+          "p50_ms": 2946.908,
+          "p95_ms": 4567.269,
+          "min_ms": 2864.1880420036614,
+          "max_ms": 4567.269084043801,
+          "observed_usd_per_1000": 6.955
+        }
+      },
+      "completed_over_production_30s_budget": 0,
+      "reported_reasoning_tokens": 0,
+      "planned_cases": 47,
+      "unresolved_submitted": 0,
+      "not_submitted": 3,
+      "fidelity": {
+        "reviewed": 44,
+        "hard_failed_outputs": 12,
+        "failure_classes": {
+          "changed_fact": 2,
+          "changed_condition": 1,
+          "changed_modality": 3,
+          "protocol_or_speech_act": 1,
+          "added_fact": 1,
+          "changed_quantity_requirement": 1,
+          "added_mechanism": 1,
+          "incomplete_reply": 1,
+          "protocol_and_added_fact": 1
+        }
+      },
+      "common_subset": {
+        "cases": 18,
+        "hard_failed_outputs": 7,
+        "intent_mean": 3.2777777777777777,
+        "register_mean": 3.388888888888889,
+        "wins_losses_ties": {
+          "wins": 14,
+          "losses": 36,
+          "ties": 76
+        },
+        "p50_ms": 1331.018,
+        "p95_ms": 3365.658,
+        "observed_usd_per_1000": 3.533444444444445
+      },
+      "eligible_for_zero_failure_promotion": false,
+      "retained_responses": 44,
+      "paid_submissions": 44,
+      "total_request_failures_including_interruption": 1
+    }
+  },
+  "scope_change": {
+    "authority": "Conductor 2026-11-04 instruction: skip vocabulary, open defaults PR now, then return.",
+    "vocabulary": "not_run",
+    "elevate_cutoff": {
+      "retained_responses": 304,
+      "planned_responses": 322,
+      "interrupted_submitted": 1,
+      "not_submitted": 17,
+      "reason": "Current Sonnet-low control produced no response far beyond production cleanup budget. Only owned client was cancelled; no paid retry."
+    },
+    "paid_execution": "closed in append-only journal; admission refuses new paid requests"
+  },
+  "accounting": {
+    "start_usage_usd": 3.204799119,
+    "usage_usd": 4.293373177,
+    "commission_spend_usd": 1.088574058,
+    "key_limit_usd": 10,
+    "cap_usd": 6,
+    "known_reported_call_cost_usd": 1.085720058,
+    "unallocated_counter_delta_usd": 0.002854,
+    "unknown_cost_call_count": 3,
+    "retained_unknown_cost_reservations_usd": 0.113494,
+    "conservative_counter_plus_unknown_reservations_usd": 1.202068058,
+    "paid_submissions": 481,
+    "retained_responses": 480,
+    "paid_retries": 0,
+    "paid_judges": 0,
+    "local_inference_calls": 0,
+    "vocabulary_inference_calls": 0,
+    "paid_execution_closed": true,
+    "key_limit_note": "Conductor raised the key limit from $5 to $10 with operator approval. This did not change the commission cap or starting counter.",
+    "unknown_charge_note": "Two empty provider replies omit per-call cost; one submitted request was interrupted without a response. Counter delta is authoritative and these per-call unknown flags/reservations remain retained, not assigned zero or retried."
+  }
+}

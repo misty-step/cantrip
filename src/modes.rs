@@ -21,8 +21,9 @@ pub const GLYPH_SIZE: usize = 5;
 
 /// Display names for the models Cantrip documents, by the id's last path
 /// segment. Any other model shows that segment as configured.
-const MODEL_NAMES: [(&str, &str); 6] = [
+const MODEL_NAMES: [(&str, &str); 7] = [
     (PARAKEET_V3_INT8.dir_name, "Parakeet v3"),
+    ("deepseek-v4.1-flash-1017:nitro", "DeepSeek V4.1 Flash"),
     ("gpt-6.1-sol", "GPT-6.1 Sol"),
     ("gpt-4o-mini-transcribe", "GPT-4o mini Transcribe"),
     ("gpt-4o-transcribe", "GPT-4o Transcribe"),
