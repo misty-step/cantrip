@@ -771,7 +771,10 @@ reasoning_effort = "medium"
         // Only entries that own an alias have a spelling to fix.
         assert_eq!(raw.spellings, 1);
         let clean = config.pipeline_display(Mode::Clean);
-        assert_eq!(clean.llm_model.as_deref(), Some("openai/gpt-6.1-sol"));
+        assert_eq!(
+            clean.llm_model.as_deref(),
+            Some("deepseek/deepseek-v4.1-flash-1017:nitro")
+        );
         assert_eq!(clean.llm_hosts, ["openrouter.ai"]);
         // The selected mode is only a default; each mode names its own model.
         config.postproc.elevate.model = "provider/articulate".into();
