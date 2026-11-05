@@ -24,6 +24,8 @@ pub enum PostprocStatus {
     Failed { ms: u128 },
     /// Clean mode, but the transcript was under `min_chars`.
     SkippedShort { chars: usize },
+    /// Native authorization is still required; aliases remain usable.
+    KeychainPending,
 }
 
 /// Entry point that produced a transcript history record.
@@ -428,7 +430,9 @@ impl Pipeline<'_> {
             PostprocStatus::Applied { ms } | PostprocStatus::Failed { ms } => {
                 Some(duration_ms(*ms))
             }
-            PostprocStatus::Off | PostprocStatus::SkippedShort { .. } => None,
+            PostprocStatus::Off
+            | PostprocStatus::SkippedShort { .. }
+            | PostprocStatus::KeychainPending => None,
         };
         let archive = match save(archive::Entry {
             take_id: context.take_id,
@@ -457,6 +461,7 @@ impl Pipeline<'_> {
                 PostprocStatus::Applied { .. } => "applied",
                 PostprocStatus::Failed { .. } => "failed",
                 PostprocStatus::SkippedShort { .. } => "skipped_short",
+                PostprocStatus::KeychainPending => "keychain_pending",
             },
             postproc_model: attempted_postproc
                 .then_some(postproc_cfg.model_config().model.as_str()),
@@ -617,6 +622,13 @@ fn cleanup(
     let key = resolve_api_key(cfg.api_key_id.as_deref(), deadline, cancel);
     if stt::is_cancelled(cancel) {
         return (PostprocStatus::Off, None, None);
+    }
+    if key
+        .as_ref()
+        .is_err_and(|error| error.is::<crate::keys::AuthorizationRequired>())
+    {
+        tracing::info!("[Postproc] cleanup skipped class=keychain-pending");
+        return (PostprocStatus::KeychainPending, None, None);
     }
     match key.and_then(|key| {
         postproc::refine_until(raw, cfg, vocabulary, key.as_deref(), cancel, deadline)

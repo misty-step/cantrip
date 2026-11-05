@@ -193,9 +193,20 @@ enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 enum KeyCommand {
-    Set { id: String },
-    Rm { id: String },
-    Status { id: String },
+    Set {
+        id: String,
+    },
+    Rm {
+        id: String,
+    },
+    Status {
+        id: String,
+    },
+    /// Ask the running Cantrip to authorize this Keychain ID (macOS).
+    /// Returns before you answer the native prompt; use status --json to check readiness.
+    Allow {
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -549,6 +560,13 @@ fn run_key(command: KeyCommand) -> Result<()> {
             }
             Ok(())
         }
+        KeyCommand::Allow { id } => {
+            send_command(Command::AllowKeychain { id })?;
+            println!(
+                "Keychain authorization requested; answer any native prompt, then use 'cantrip status --json' to check readiness."
+            );
+            Ok(())
+        }
     }
 }
 
@@ -798,15 +816,25 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
     }
     match &outcome.text {
         Ok(text) => {
-            if matches!(outcome.postproc, pipeline::PostprocStatus::Failed { .. }) {
-                eprintln!(
+            match outcome.postproc {
+                pipeline::PostprocStatus::KeychainPending => eprintln!(
+                    "{} The {} transcript is preserved.",
+                    ipc::KEYCHAIN_PENDING_REASON,
+                    if outcome.alias_substitutions > 0 {
+                        "alias-corrected"
+                    } else {
+                        "original"
+                    }
+                ),
+                pipeline::PostprocStatus::Failed { .. } => eprintln!(
                     "post-processing failed; showing the {} transcript",
                     if outcome.alias_substitutions > 0 {
                         "alias-corrected"
                     } else {
                         "original"
                     }
-                );
+                ),
+                _ => {}
             }
             println!("{text}");
             if outcome.partial {
@@ -844,6 +872,8 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         Some("stt-failed".to_owned())
     } else if outcome.partial {
         Some("stt-partial".to_owned())
+    } else if matches!(outcome.postproc, pipeline::PostprocStatus::KeychainPending) {
+        Some("cleanup-keychain-pending".to_owned())
     } else {
         None
     };
@@ -851,6 +881,7 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         pipeline::PostprocStatus::Applied { ms } => ("applied", Some(*ms as u64)),
         pipeline::PostprocStatus::Failed { ms } => ("failed", Some(*ms as u64)),
         pipeline::PostprocStatus::SkippedShort { .. } => ("skipped_short", None),
+        pipeline::PostprocStatus::KeychainPending => ("keychain_pending", None),
         pipeline::PostprocStatus::Off => ("off", None),
     };
     let attempted = matches!(
