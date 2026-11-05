@@ -84,6 +84,13 @@
     "Details open pushed Save & Apply under the Dock at 1440x900; recognizer row dropped, Details rows 8 pt apart, instructions 50 pt",
     "AppKit disclosure triangle 1.84:1 and borderless Details title 4.00:1 in Light; one borderless toggle in the label color"
   ],
+  "after_proof": {
+    "source_revision": "a0336c4",
+    "change": "on macOS the take line's promise, stage at work and destination are fitted in lightness until their most covered painted pixel reads at 4.5:1",
+    "pre_fix_offscreen_render_dark": {"pixel": [17, 130, 253], "surface": [30, 30, 30], "ratio": 4.47},
+    "test": "hud::tests::the_take_line_reads_at_4_5_to_1_as_painted, AppKit Light and Dark palettes at 1x",
+    "vm_recaptured": false
+  },
   "not_proven": [
     "2x rendering",
     "menu tooltips (no hover in macvm; unit-tested text)",

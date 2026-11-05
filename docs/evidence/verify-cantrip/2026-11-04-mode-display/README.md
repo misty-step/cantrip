@@ -78,9 +78,16 @@ strongest-contrast pixel of the element against its background.
 | HUD privacy cue, lit | 4.47:1 | 4.47:1 |
 | Settings explanations, glyphs, Details toggle | 14.94:1 | 10.71:1 |
 
-The lit cue uses the same accent as the working word, measured at
-4.51:1 and 4.54:1. The cue's 11-point strokes are anti-aliased at 1x, so no
-single pixel reaches the full accent.
+The lit cue used the same accent as the working word (4.51:1 and 4.54:1), but
+its anti-aliased 12-point strokes never painted the full accent at 1x. An
+offscreen render of 4420f4f in Dark reproduced the gap: (17,130,253) on
+(30,30,30), 4.47:1.
+
+**Fixed after this proof, in a0336c4 (measured by unit test, not re-captured).**
+On macOS the take line's promise, stage at work and destination are fitted, in
+lightness only, until their most covered painted pixel reads at 4.5:1. The test
+`the_take_line_reads_at_4_5_to_1_as_painted` reads those pixels in Light and
+Dark. The VM was not rerun.
 
 ## Found during the proof and fixed in 4420f4f
 
