@@ -216,14 +216,20 @@ explicit text-output command is `cantrip transcribe`; its stdout is the
 transcript, with diagnostics on stderr. Actions and `recordings` show metadata
 rather than transcript content.
 
-Store credentials interactively with `key set ID`; only the credential id
-belongs in configuration. Linux cloud features require an unlocked Secret
-Service keyring and the correct user-session D-Bus connection; Mac uses the
-native login Keychain. Do not put keys in unit files, command lines, source
-control, screenshots, or TOML files. Binary/app installation, update, rollback,
-and uninstall do not remove keyring entries; `key rm ID` is a separate deliberate
-action. Missing credentials do not authorize a file-secret fallback or provider
-switch.
+Credentials live in the OS keyring: Secret Service on Linux and the native login
+Keychain on macOS. Only the credential ID belongs in configuration. Cantrip
+never caches credentials, including results from explicit authorization, and
+discards the secret returned by that authorization lookup. The CLI approval
+command sends only the ID to the running daemon and never reads the key.
+Status exposes the ID and authorization state, not the secret.
+
+Do not put keys in unit files, command lines, source control, screenshots, or
+TOML files. Binary/app installation, update, rollback, and uninstall do not remove
+keyring entries; `key rm ID` is a separate deliberate action. Entry retention
+does not promise that macOS approval persists across builds. Missing credentials
+do not authorize a file-secret fallback or provider switch. See
+[credential setup and macOS approval](CONFIGURATION.md#credentials) for the
+approval flow, take behavior, and wait limits.
 
 Langfuse's daemon exporter and evaluation publisher both use standard padded
 Base64 for HTTP Basic authentication. Encoding is not encryption; keep remote
