@@ -201,6 +201,7 @@ def prepare(args, output):
                 **source,
                 "signing": "ad-hoc-development" if identity == "-" else "local-identity-development" if development else "developer-id",
                 "signing_identity_sha1": None if identity == "-" else identity,
+                "team_identifier": None if development else args.team_id,
                 "hardened_runtime": not development,
                 "keychain_persistence_variant": f"{arm}-{variant}", "not_for_distribution": True,
             }
