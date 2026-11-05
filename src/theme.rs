@@ -145,6 +145,18 @@ impl Palette {
             .find(|&color| contrast(luminance(color), surface) >= TEXT_CONTRAST)
             .unwrap_or(self.foreground)
     }
+
+    /// `color` for anti-aliased text on this palette's surface, whose most
+    /// covered pixel `peak` measures: on macOS, adjusted only in lightness so
+    /// that pixel, not just the ink, reads at 4.5:1 on the surface; Omarchy's
+    /// colors are drawn as the theme gives them, and `peak` is never measured.
+    pub fn painted(&self, color: [u8; 3], peak: impl FnOnce() -> f32) -> [u8; 3] {
+        if cfg!(target_os = "macos") {
+            painted_legible(color, self.surface, peak())
+        } else {
+            color
+        }
+    }
 }
 
 /// `from` moved `amount` of the way to `to`, per sRGB channel.
@@ -244,16 +256,42 @@ fn contrasting(color: [u8; 3], backgrounds: [[u8; 3]; 2], minimum: f32) -> [u8; 
             .map(|&background| contrast(value, background))
             .fold(f32::INFINITY, f32::min)
     };
-    let passes = |color| minimum_contrast(luminance(color)) >= minimum;
-    if passes(color) {
-        return color;
-    }
-    let [hue, saturation, lightness] = hsl(color);
     let end = if minimum_contrast(0.0) >= minimum_contrast(1.0) {
         0.0
     } else {
         1.0
     };
+    fit_lightness(color, end, |color| {
+        minimum_contrast(luminance(color)) >= minimum
+    })
+}
+
+/// `color` with only its lightness moved, as little as eight-bit channels
+/// allow, so that `coverage` of it painted over `surface`, as the HUD blends
+/// anti-aliased text, reads at 4.5:1 there; as it is when nothing is painted.
+fn painted_legible(color: [u8; 3], surface: [u8; 3], coverage: f32) -> [u8; 3] {
+    if coverage <= 0.0 {
+        return color;
+    }
+    let background = luminance(surface);
+    let end = if contrast(0.0, background) >= contrast(1.0, background) {
+        0.0
+    } else {
+        1.0
+    };
+    fit_lightness(color, end, |color| {
+        contrast(luminance(mix(surface, color, coverage)), background) >= TEXT_CONTRAST
+    })
+}
+
+/// `color` itself when it `passes`; otherwise its hue and saturation at the
+/// lightness nearest its own, toward `end` (black at 0, white at 1), that
+/// passes, or `end` itself when none does.
+fn fit_lightness(color: [u8; 3], end: f32, passes: impl Fn([u8; 3]) -> bool) -> [u8; 3] {
+    if passes(color) {
+        return color;
+    }
+    let [hue, saturation, lightness] = hsl(color);
     let mut chosen = rgb(hue, saturation, end);
     let (mut low, mut high) = (0.0, 1.0);
     // Eight bisections match the precision of the final eight-bit channels.
@@ -456,7 +494,10 @@ mod native {
 
 #[cfg(test)]
 mod contrast_tests {
-    use super::{contrast, contrast_ratio, hsl, hue_distance, legible, luminance, Palette};
+    use super::{
+        contrast, contrast_ratio, hsl, hue_distance, legible, luminance, mix, painted_legible,
+        Palette,
+    };
 
     #[test]
     fn native_accents_remain_readable_on_light_and_dark_surfaces() {
@@ -481,6 +522,29 @@ mod contrast_tests {
                     assert_eq!(adjusted, original);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn text_is_fitted_until_its_most_covered_pixel_reads_at_4_5_to_1() {
+        // AppKit's Light and Dark surfaces.
+        for surface in [[255; 3], [30; 3]] {
+            // An accent fitted at full coverage only just reads at 4.5:1.
+            let accent = legible([0, 122, 255], [surface, surface]);
+            assert_eq!(painted_legible(accent, surface, 1.0), accent);
+            for coverage in [0.98, 0.9, 0.75] {
+                let ink = painted_legible(accent, surface, coverage);
+                let painted = mix(surface, ink, coverage);
+                assert!(
+                    contrast_ratio(painted, surface) >= 4.5,
+                    "{ink:?} at {coverage} on {surface:?}"
+                );
+                // Only lightness moves, toward more contrast.
+                assert!(hue_distance(hsl(accent)[0], hsl(ink)[0]) < 2.0);
+                assert!(contrast_ratio(ink, surface) > contrast_ratio(accent, surface));
+            }
+            // Nothing painted, nothing to fit.
+            assert_eq!(painted_legible(accent, surface, 0.0), accent);
         }
     }
 

@@ -9,7 +9,7 @@
 //! The model and software painter live here; `wayland` and `macos` only size,
 //! place and present its pixels on their native surfaces.
 
-use ab_glyph::{point, Font, FontRef, ScaleFont};
+use ab_glyph::{point, Font, FontRef, OutlinedGlyph, ScaleFont};
 use anyhow::{Context, Result};
 use cantrip_engine::{
     config::{Mode, PipelineDisplay},
@@ -2679,29 +2679,48 @@ impl Canvas<'_> {
         size: f32,
         rgb: [u8; 3],
     ) -> f32 {
-        let font_size = size * self.scale;
-        let scaled = font.as_scaled(font_size);
-        let advance = scaled.h_advance(font.glyph_id('M'));
-        let baseline = y * self.scale + scaled.ascent();
-        let start = x * self.scale;
-        let mut cursor = start;
-        for character in characters {
-            let glyph = font
-                .glyph_id(character)
-                .with_scale_and_position(font_size, point(cursor, baseline));
-            if let Some(outlined) = font.outline_glyph(glyph) {
-                let bounds = outlined.px_bounds();
-                outlined.draw(|gx, gy, coverage| {
-                    let px = bounds.min.x as i32 + gx as i32;
-                    let py = bounds.min.y as i32 + gy as i32;
-                    if px >= 0 && py >= 0 {
-                        self.pixel(px as u32, py as u32, rgb, coverage);
-                    }
-                });
-            }
-            cursor += advance;
-        }
-        (cursor - start) / self.scale
+        lay_out(font, characters, [x, y], size, self.scale, |outlined| {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px >= 0 && py >= 0 {
+                    self.pixel(px as u32, py as u32, rgb, coverage);
+                }
+            });
+        })
+    }
+
+    /// [`Canvas::run`] in `rgb` as `palette` fits it for its painted pixels:
+    /// anti-aliasing never paints the full ink where strokes fall between
+    /// pixels, so the run's most covered pixel, not the ink, must read at
+    /// 4.5:1 on the surface.
+    #[allow(clippy::too_many_arguments)] // Raster text geometry, font and colors are explicit.
+    fn legible_run(
+        &mut self,
+        font: &FontRef<'_>,
+        characters: impl IntoIterator<Item = char> + Clone,
+        x: f32,
+        y: f32,
+        size: f32,
+        rgb: [u8; 3],
+        palette: Palette,
+    ) -> f32 {
+        let ink = palette.painted(rgb, || {
+            let mut peak: f32 = 0.0;
+            lay_out(
+                font,
+                characters.clone(),
+                [x, y],
+                size,
+                self.scale,
+                |outlined| {
+                    outlined.draw(|_, _, coverage| peak = peak.max(coverage));
+                },
+            );
+            peak.min(1.0)
+        });
+        self.run(font, characters, x, y, size, ink)
     }
 
     /// `mode`'s glyph from its top-left corner, each cell on whole pixels.
@@ -2746,7 +2765,8 @@ impl Canvas<'_> {
         match fit.middle {
             Middle::Nothing => {}
             Middle::Promise => {
-                self.run(font, line.promise.chars(), cursor, y, LINE_SIZE, muted);
+                let promise = line.promise.chars();
+                self.legible_run(font, promise, cursor, y, LINE_SIZE, muted, palette);
             }
             Middle::Working { lights } => {
                 cursor += advance;
@@ -2769,7 +2789,7 @@ impl Canvas<'_> {
                     cursor += lights_width(line.lights.len());
                 }
                 let working = line.working.unwrap_or_default();
-                self.run(font, working.chars(), cursor, y, LINE_SIZE, active);
+                self.legible_run(font, working.chars(), cursor, y, LINE_SIZE, active, palette);
             }
         }
         let length: usize = line
@@ -2778,16 +2798,40 @@ impl Canvas<'_> {
             .map(|(text, _)| text.chars().count())
             .sum();
         let shortened = fit.privacy < length;
-        let mut budget = fit.privacy.saturating_sub(usize::from(shortened));
-        let mut cursor = x + width - fit.privacy as f32 * advance;
-        for (text, lit) in &line.privacy {
-            let shown = text.chars().count().min(budget);
-            let ink = if *lit { active } else { muted };
-            cursor += self.run(font, text.chars().take(shown), cursor, y, LINE_SIZE, ink);
-            budget -= shown;
+        let start = x + width - fit.privacy as f32 * advance;
+        // Each span's shown characters, where it starts, and whether it is lit.
+        let spans = || {
+            let mut budget = fit.privacy.saturating_sub(usize::from(shortened));
+            let mut at = start;
+            line.privacy.iter().map(move |(text, lit)| {
+                let shown = text.chars().count().min(budget);
+                budget -= shown;
+                let span = (text.chars().take(shown), at, *lit);
+                at += shown as f32 * advance;
+                span
+            })
+        };
+        // One color per ink across the cue, fitted to the most covered pixel of
+        // every span drawn in it, so the arrow and its provider match.
+        let scale = self.scale;
+        let peak_coverage = |lit: bool| {
+            let mut peak: f32 = 0.0;
+            for (characters, at, _) in spans().filter(|span| span.2 == lit) {
+                lay_out(font, characters, [at, y], LINE_SIZE, scale, |outlined| {
+                    outlined.draw(|_, _, coverage| peak = peak.max(coverage));
+                });
+            }
+            peak.min(1.0)
+        };
+        let lit_ink = palette.painted(active, || peak_coverage(true));
+        let muted_ink = palette.painted(muted, || peak_coverage(false));
+        let mut end = start;
+        for (characters, at, lit) in spans() {
+            let ink = if lit { lit_ink } else { muted_ink };
+            end = at + self.run(font, characters, at, y, LINE_SIZE, ink);
         }
         if shortened && fit.privacy > 0 {
-            self.run(font, ['…'], cursor, y, LINE_SIZE, muted);
+            self.legible_run(font, ['…'], end, y, LINE_SIZE, muted, palette);
         }
     }
 }
@@ -2796,6 +2840,35 @@ fn line_capacity(font: &FontRef<'_>, width: f32, size: f32) -> usize {
     (width / font.as_scaled(size).h_advance(font.glyph_id('M')))
         .floor()
         .max(1.0) as usize
+}
+
+/// Lay `characters` out one advance apart from `x` on the line whose top is
+/// `y`, at `scale`, handing each outlined glyph to `each`; return the logical
+/// width they take. Painting and measuring a run share this layout.
+fn lay_out(
+    font: &FontRef<'_>,
+    characters: impl IntoIterator<Item = char>,
+    [x, y]: [f32; 2],
+    size: f32,
+    scale: f32,
+    mut each: impl FnMut(OutlinedGlyph),
+) -> f32 {
+    let font_size = size * scale;
+    let scaled = font.as_scaled(font_size);
+    let advance = scaled.h_advance(font.glyph_id('M'));
+    let baseline = y * scale + scaled.ascent();
+    let start = x * scale;
+    let mut cursor = start;
+    for character in characters {
+        let glyph = font
+            .glyph_id(character)
+            .with_scale_and_position(font_size, point(cursor, baseline));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            each(outlined);
+        }
+        cursor += advance;
+    }
+    (cursor - start) / scale
 }
 
 /// How far below a line's top the middle of its capitals sits.
@@ -3943,17 +4016,73 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_take_line_reads_at_4_5_to_1_on_its_surface() {
+    fn the_take_line_reads_at_4_5_to_1_as_painted() {
         use crate::theme::contrast_ratio;
+        let now = Instant::now();
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let advance = font.as_scaled(LINE_SIZE).h_advance(font.glyph_id('M'));
+        let width = header_width(CONTAINER_WIDTH);
         for (palette, _) in appkit_palettes() {
-            // The name, the promise and destinations, and the lit stage and glyph.
-            for color in [palette.foreground, palette.muted(), palette.accent] {
-                let ratio = contrast_ratio(color, palette.surface);
-                assert!(
-                    ratio >= 4.5,
-                    "{color:?} on {:?} reads {ratio}:1",
-                    palette.surface
+            let surface = palette.surface;
+            for (state, mode) in [
+                (ScreenshotState::Recording, Mode::Raw),
+                (ScreenshotState::Recording, Mode::Elevate),
+                (ScreenshotState::Transcribing, Mode::Clean),
+                (ScreenshotState::Cleaning, Mode::Clean),
+                (ScreenshotState::Cleaning, Mode::Elevate),
+            ] {
+                let model = screenshot_model(state, now, None, Some(mode));
+                let header = model.header.as_ref();
+                let line = header
+                    .and_then(|header| header.line.as_ref())
+                    .expect("a take line");
+                let (bytes, [left, top, _, _]) = painted(&model, palette, now);
+                // Anti-aliasing paints the full ink only where a stroke covers
+                // whole pixels: each run's most contrasting pixel must read.
+                let rows = top + 5..top + header_height(header) as u32;
+                let strongest = |from: f32, to: f32| {
+                    (from.floor() as u32..to.ceil() as u32)
+                        .flat_map(|x| rows.clone().map(move |y| (x, y)))
+                        .map(|(x, y)| rgb_at(&bytes, x, y))
+                        .max_by(|a, b| {
+                            contrast_ratio(*a, surface).total_cmp(&contrast_ratio(*b, surface))
+                        })
+                        .unwrap()
+                };
+                // Each run's place, as the line lays them out.
+                let fit = LineFit::new(line, advance, width);
+                let x = left as f32 + 10.0;
+                let name_end = x + GLYPH_EXTENT + advance + fit.name as f32 * advance;
+                let span = |text: &str| text.chars().count() as f32 * advance;
+                let middle = match fit.middle {
+                    Middle::Promise => name_end..name_end + span(&line.promise),
+                    Middle::Working { lights } => {
+                        let lights = if lights {
+                            lights_width(line.lights.len())
+                        } else {
+                            0.0
+                        };
+                        let start = name_end + advance + lights;
+                        start..start + span(line.working.unwrap_or_default())
+                    }
+                    Middle::Nothing => panic!("{state:?} {mode:?} shows no promise or stage"),
+                };
+                let destination = x + width - fit.privacy as f32 * advance..x + width;
+                // The destination is lit while the provider receives the text.
+                let lit = line.privacy.iter().any(|(_, lit)| *lit);
+                assert_eq!(
+                    lit,
+                    state == ScreenshotState::Cleaning,
+                    "{state:?} {mode:?}"
                 );
+                for (part, range) in [("middle", middle), ("destination", destination)] {
+                    let drawn = strongest(range.start, range.end);
+                    let ratio = contrast_ratio(drawn, surface);
+                    assert!(
+                        ratio >= 4.5,
+                        "{state:?} {mode:?} {part}: {drawn:?} on {surface:?} reads {ratio}:1"
+                    );
+                }
             }
         }
     }
