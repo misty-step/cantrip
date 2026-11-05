@@ -395,19 +395,6 @@ impl<'a> ModeView<'a> {
         }
     }
 
-    /// The recognizer's raw id and where it runs: "parakeet-tdt-0.6b-v3-int8
-    /// on this Mac", "gpt-4o-mini-transcribe at api.openai.com".
-    pub fn recognizer(self) -> String {
-        match self.places(Step::Transcribe).first() {
-            Some(Place::Here) | None => format!("{} on {THIS_DEVICE}", self.pipeline.stt_model),
-            Some(place) => format!(
-                "{} at {}",
-                self.pipeline.stt_model,
-                place.host().map_or_else(|| place.name(), Cow::Borrowed)
-            ),
-        }
-    }
-
     /// The raw ids behind `step`: its model id and every host it reaches.
     pub fn raw(self, step: Step) -> String {
         let model = match step {
@@ -507,10 +494,6 @@ mod tests {
             format!("Transcribe on {THIS_DEVICE} · Fix spellings · Refine with GPT-6.1 Sol")
         );
         assert_eq!(view.detail(Step::Transcribe), "Parakeet v3");
-        assert_eq!(
-            view.recognizer(),
-            format!("parakeet-tdt-0.6b-v3-int8 on {THIS_DEVICE}")
-        );
         assert_eq!(view.detail(Step::Spellings), "2 vocabulary terms");
         assert_eq!(view.detail(Step::Refine), "at OpenRouter");
         assert_eq!(
@@ -591,7 +574,7 @@ mod tests {
         assert_eq!(view.title(Step::Transcribe), "Transcribe at OpenAI");
         assert_eq!(view.detail(Step::Transcribe), "GPT-4o mini Transcribe");
         assert_eq!(
-            view.recognizer(),
+            view.raw(Step::Transcribe),
             "gpt-4o-mini-transcribe at api.openai.com"
         );
         assert_eq!(

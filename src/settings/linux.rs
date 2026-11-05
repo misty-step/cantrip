@@ -502,17 +502,11 @@ impl SettingsApp {
             });
             ui.add_space(6.0);
         }
-        // Every mode shares the recognizer.
-        let view = ModeView::new(&pipelines[0]);
         egui::CollapsingHeader::new("Details").show(ui, |ui| {
             egui::Grid::new("postproc")
                 .num_columns(2)
                 .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Recognizer").weak());
-                    ui.label(view.recognizer());
-                    ui.end_row();
-
                     for (label, model, effort) in [
                         ("Clean", &mut edit.clean_model, &mut edit.clean_effort),
                         ("Elevate", &mut edit.elevate_model, &mut edit.elevate_effort),

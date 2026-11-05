@@ -41,13 +41,14 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationTerminateReply, NSBeep, NSControlStateValueOff, NSControlStateValueOn, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusBarButton, NSStatusItem,
+    NSApplicationTerminateReply, NSAttributedStringAttachmentConveniences, NSBeep,
+    NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontAttributeName, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextAttachment,
     NSVariableStatusItemLength, NSWorkspace, NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{
-    ns_string, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSRunLoop,
-    NSRunLoopCommonModes, NSString, NSTimer, NSURL,
+    ns_string, NSAttributedString, NSBundle, NSMutableAttributedString, NSNotification, NSObject,
+    NSObjectProtocol, NSRange, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSURL,
 };
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use recordings::{AppRequest, Open, RecordingsWindow};
@@ -428,7 +429,7 @@ fn mode_items(items: &mut Items<'_>, saved: Option<&(Mode, [PipelineDisplay; 3])
         for mode in Mode::ALL {
             items
                 .add(mode.label(), None)
-                .setImage(Some(&mark::mode_glyph(mode)));
+                .setAttributedTitle(Some(&glyph_title(mode, mode.label())));
         }
         items.line(Some(
             "Modes unavailable until the configuration is repaired",
@@ -445,7 +446,7 @@ fn mode_items(items: &mut Items<'_>, saved: Option<&(Mode, [PipelineDisplay; 3])
             format!("{} · {}", view.name(), view.subtitle())
         };
         let item = items.add(&title, Some(Choice::Mode(view.mode())));
-        item.setImage(Some(&mark::mode_glyph(view.mode())));
+        item.setAttributedTitle(Some(&glyph_title(view.mode(), &title)));
         // SAFETY: always an image, never the None the setter might not allow.
         unsafe { item.setOnStateImage(Some(&chosen)) };
         item.setOffStateImage(Some(&other));
@@ -459,6 +460,26 @@ fn mode_items(items: &mut Items<'_>, saved: Option<&(Mode, [PipelineDisplay; 3])
         }
         item.setToolTip(Some(&NSString::from_str(&view.tooltip())));
     }
+}
+
+/// `title` led by `mode`'s glyph, in the menu's font and ink. The glyph rides in
+/// the title as a text attachment: the macOS 27 status menu draws no item
+/// images, but it draws attachments.
+fn glyph_title(mode: Mode, title: &str) -> Retained<NSAttributedString> {
+    let attachment = NSTextAttachment::new();
+    attachment.setImage(Some(&mark::mode_glyph(mode)));
+    let text = NSMutableAttributedString::from_attributed_nsstring(
+        &NSAttributedString::attributedStringWithAttachment(&attachment),
+    );
+    text.appendAttributedString(&NSAttributedString::from_nsstring(&NSString::from_str(
+        &format!("  {title}"),
+    )));
+    let font = NSFont::menuFontOfSize(0.0);
+    // SAFETY: the font attribute's value is an NSFont.
+    unsafe {
+        text.addAttribute_value_range(NSFontAttributeName, &font, NSRange::new(0, text.length()));
+    }
+    Retained::into_super(text)
 }
 
 /// The menu's microphone item, from the access the capture owner reports:

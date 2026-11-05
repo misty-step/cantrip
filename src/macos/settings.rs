@@ -29,12 +29,13 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
-    NSBezelStyle, NSBorderType, NSButton, NSButtonType, NSColor, NSControlTextEditingDelegate,
-    NSFont, NSFontWeightRegular, NSGridView, NSImageView, NSLayoutConstraintOrientation, NSMenu,
-    NSMenuDelegate, NSPopUpButton, NSScrollView, NSStackView, NSStackViewGravity, NSTableColumn,
-    NSTableColumnResizingOptions, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewStyle, NSTextField, NSTextFieldDelegate, NSTextView, NSToolbar, NSToolbarDelegate,
-    NSToolbarItem, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWindowToolbarStyle,
+    NSBorderType, NSButton, NSButtonType, NSCellImagePosition, NSColor,
+    NSControlTextEditingDelegate, NSFont, NSFontWeightRegular, NSGridView, NSImageView,
+    NSLayoutConstraintOrientation, NSMenu, NSMenuDelegate, NSPopUpButton, NSScrollView,
+    NSStackView, NSStackViewGravity, NSTableColumn, NSTableColumnResizingOptions, NSTableView,
+    NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField, NSTextFieldDelegate,
+    NSTextView, NSToolbar, NSToolbarDelegate, NSToolbarItem, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSInteger, NSNotification, NSPoint, NSRect, NSSize, NSString,
@@ -187,7 +188,6 @@ struct Views {
     /// The disclosure that shows `details`: the raw ids and their settings.
     details_toggle: Retained<NSButton>,
     details: Retained<NSGridView>,
-    recognizer: Retained<NSTextField>,
     clean_model: Retained<NSTextField>,
     clean_effort: Retained<NSTextField>,
     elevate_model: Retained<NSTextField>,
@@ -417,13 +417,10 @@ define_class!(
             self.show_form_state();
         }
 
-        /// The disclosure triangle, or its "Details" title beside it.
+        /// The Details disclosure.
         #[unsafe(method(toggleDetails:))]
-        fn toggle_details(&self, sender: &NSButton) {
+        fn toggle_details(&self, _sender: &NSButton) {
             let views = self.views();
-            if !std::ptr::eq(sender, &*views.details_toggle) {
-                ui::set_checked(&views.details_toggle, !ui::checked(&views.details_toggle));
-            }
             ui::show_in_form(&views.details, ui::checked(&views.details_toggle));
             self.fit(true);
         }
@@ -987,10 +984,6 @@ impl SettingsWindow {
             ui::set_text(&views.promises[index], view.headline());
             ui::set_text(&views.effects[index], &view.effect());
             ui::set_text(&views.summaries[index], &view.summary());
-            if index == 0 {
-                // Every mode shares the recognizer.
-                ui::set_text(&views.recognizer, &view.recognizer());
-            }
         }
         views.notice.show(
             form.notice.as_ref().map(|notice| notice.text.as_str()),
@@ -1253,6 +1246,7 @@ impl SettingsWindow {
         let mut choices: Vec<Retained<NSStackView>> = Vec::with_capacity(2 * modes.len());
         for (index, mode) in Mode::ALL.into_iter().enumerate() {
             let glyph = NSImageView::imageViewWithImage(&mark::mode_glyph(mode), mtm);
+            glyph.setContentTintColor(Some(&NSColor::labelColor()));
             choices.push(ui::row(
                 mtm,
                 &[&modes[index], &glyph, &promises[index]],
@@ -1273,17 +1267,17 @@ impl SettingsWindow {
         let views: Vec<&NSView> = choices.iter().map(|view| &***view).collect();
         let mode_group = ui::column(mtm, &views, 3.0);
         for lines in choices.iter().skip(1).step_by(2).take(Mode::ALL.len() - 1) {
-            mode_group.setCustomSpacing_afterView(12.0, lines);
+            mode_group.setCustomSpacing_afterView(8.0, lines);
         }
-        let details_toggle = ui::button(mtm, "", target, sel!(toggleDetails:));
-        details_toggle.setBezelStyle(NSBezelStyle::Disclosure);
-        details_toggle.setButtonType(NSButtonType::PushOnPushOff);
-        details_toggle.setAccessibilityLabel(Some(&ui::ns("Details")));
-        let details_title = ui::button(mtm, "Details", target, sel!(toggleDetails:));
-        details_title.setBordered(false);
-        details_title.setRefusesFirstResponder(true);
-        let disclosure = ui::row(mtm, &[&details_toggle, &details_title], 4.0);
-        let recognizer = ui::label(mtm, "");
+        // A borderless toggle in the label color: AppKit's disclosure triangle
+        // and borderless titles draw below 4.5:1 in Light.
+        let details_toggle = ui::button(mtm, "Details", target, sel!(toggleDetails:));
+        details_toggle.setBordered(false);
+        details_toggle.setButtonType(NSButtonType::Toggle);
+        details_toggle.setImage(ui::symbol("chevron.right", "").as_deref());
+        details_toggle.setAlternateImage(ui::symbol("chevron.down", "").as_deref());
+        details_toggle.setImagePosition(NSCellImagePosition::ImageLeading);
+        details_toggle.setContentTintColor(Some(&NSColor::labelColor()));
         let columns = ui::row(
             mtm,
             &[
@@ -1336,11 +1330,10 @@ impl SettingsWindow {
             "Shorter transcripts skip Clean's model; 0 never skips.",
             CONTROL,
         );
-        let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 66.0, false);
+        let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 50.0, false);
         let details = ui::form(
             mtm,
             &[
-                (Some("Recognizer:"), &recognizer),
                 (None, &columns),
                 (Some("Clean:"), &clean_row),
                 (Some("Elevate:"), &elevate_row),
@@ -1355,11 +1348,14 @@ impl SettingsWindow {
                 (Some("Clean instructions:"), &instructions_scroll),
             ],
         );
+        // A little denser than the form above it, so Save & Apply stays above
+        // the Dock at 1440×900 with Details open.
+        details.setRowSpacing(8.0);
         let modes_form = ui::form(
             mtm,
             &[
                 (Some("Mode:"), &mode_group),
-                (None, &disclosure),
+                (None, &details_toggle),
                 (None, &details),
             ],
         );
@@ -1529,7 +1525,6 @@ impl SettingsWindow {
             summaries,
             details_toggle,
             details,
-            recognizer,
             clean_model,
             clean_effort,
             elevate_model,
