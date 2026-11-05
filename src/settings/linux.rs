@@ -9,6 +9,7 @@ use super::model::{
 };
 use super::store::injection_str;
 use super::{apply_theme, color};
+use crate::modes::{self, ModeView};
 use crate::theme;
 use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{config::Mode, ipc, paths};
@@ -44,6 +45,22 @@ fn dictation_state(status: &ipc::StatusSnapshot) -> String {
         },
         ToString::to_string,
     )
+}
+
+/// `mode`'s glyph in the text color, cell for cell as the HUD paints it.
+fn mode_glyph(ui: &mut egui::Ui, mode: Mode) {
+    const CELL: f32 = 2.0;
+    let side = modes::GLYPH_SIZE as f32 * CELL;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    let color = ui.visuals().text_color();
+    for (column, row) in modes::glyph_cells(mode) {
+        let corner = rect.min + egui::vec2(column as f32 * CELL, row as f32 * CELL);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(corner, egui::vec2(CELL, CELL)),
+            0.0,
+            color,
+        );
+    }
 }
 
 struct SettingsApp {
@@ -462,108 +479,126 @@ impl SettingsApp {
             });
     }
 
-    /// The default mode, the pipeline it runs in order, each mode's own model,
-    /// and the provider and tuning they share.
+    /// Each mode's name, glyph and promise, what it does to the text, and what
+    /// leaves this computer and its model; then under Details the raw ids,
+    /// each mode's own model, and the provider and tuning they share.
     fn modes_section(&mut self, ui: &mut egui::Ui) {
         let edit = &mut self.form.edit;
-        for mode in Mode::ALL {
-            ui.radio_value(&mut edit.mode, mode, mode.label());
-            ui.indent(mode.as_str(), |ui| {
-                ui.label(egui::RichText::new(mode.description()).weak().small());
+        let pipelines = Mode::ALL.map(|mode| edit.pipeline(mode));
+        for pipeline in &pipelines {
+            let view = ModeView::new(pipeline);
+            ui.horizontal(|ui| {
+                ui.radio_value(
+                    &mut edit.mode,
+                    view.mode(),
+                    egui::RichText::new(view.name()).strong(),
+                );
+                mode_glyph(ui, view.mode());
+                ui.label(view.headline());
             });
+            ui.indent(view.mode().as_str(), |ui| {
+                ui.label(egui::RichText::new(view.effect()).small());
+                ui.label(egui::RichText::new(view.summary()).small());
+            });
+            ui.add_space(6.0);
         }
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new("Pipeline").weak());
-            ui.label(egui::RichText::new(edit.pipeline()).strong());
-        });
-        ui.add_space(4.0);
-        egui::Grid::new("postproc")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                for (label, model, effort) in [
-                    ("Clean", &mut edit.clean_model, &mut edit.clean_effort),
-                    ("Elevate", &mut edit.elevate_model, &mut edit.elevate_effort),
-                ] {
-                    ui.label(egui::RichText::new(format!("{label} model")).weak());
+        // Every mode shares the recognizer.
+        let view = ModeView::new(&pipelines[0]);
+        egui::CollapsingHeader::new("Details").show(ui, |ui| {
+            egui::Grid::new("postproc")
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("Recognizer").weak());
+                    ui.label(view.recognizer());
+                    ui.end_row();
+
+                    for (label, model, effort) in [
+                        ("Clean", &mut edit.clean_model, &mut edit.clean_effort),
+                        ("Elevate", &mut edit.elevate_model, &mut edit.elevate_effort),
+                    ] {
+                        ui.label(egui::RichText::new(format!("{label} model")).weak());
+                        ui.add(
+                            egui::TextEdit::singleline(model)
+                                .hint_text("none — spelling fixes only")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new(format!("{label} reasoning effort")).weak());
+                        ui.add(
+                            egui::TextEdit::singleline(effort)
+                                .hint_text("not sent")
+                                .desired_width(120.0),
+                        );
+                        ui.end_row();
+                    }
+
+                    ui.label(egui::RichText::new("Endpoint (Clean and Elevate)").weak());
                     ui.add(
-                        egui::TextEdit::singleline(model)
-                            .hint_text("none — aliases only")
+                        egui::TextEdit::singleline(&mut edit.pp_endpoint)
                             .desired_width(f32::INFINITY),
                     );
                     ui.end_row();
 
-                    ui.label(egui::RichText::new(format!("{label} reasoning effort")).weak());
+                    ui.label(egui::RichText::new("API key id (keyring)").weak());
                     ui.add(
-                        egui::TextEdit::singleline(effort)
-                            .hint_text("not sent")
-                            .desired_width(120.0),
+                        egui::TextEdit::singleline(&mut edit.pp_key)
+                            .hint_text("none")
+                            .desired_width(f32::INFINITY),
                     );
                     ui.end_row();
-                }
 
-                ui.label(egui::RichText::new("Endpoint (Clean and Elevate)").weak());
-                ui.add(
-                    egui::TextEdit::singleline(&mut edit.pp_endpoint).desired_width(f32::INFINITY),
-                );
-                ui.end_row();
-
-                ui.label(egui::RichText::new("API key id (keyring)").weak());
-                ui.add(
-                    egui::TextEdit::singleline(&mut edit.pp_key)
-                        .hint_text("none")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.end_row();
-
-                ui.label(egui::RichText::new("Timeout (ms)").weak());
-                ui.add(
-                    egui::DragValue::new(&mut edit.pp_timeout)
-                        .speed(500)
-                        .range(1000..=120_000)
-                        .clamp_existing_to_range(false),
-                );
-                ui.end_row();
-
-                ui.label(egui::RichText::new("Clean passes").weak());
-                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Timeout (ms)").weak());
                     ui.add(
-                        egui::DragValue::new(&mut edit.pp_passes)
-                            .speed(0.1)
-                            .range(1..=3)
+                        egui::DragValue::new(&mut edit.pp_timeout)
+                            .speed(500)
+                            .range(1000..=120_000)
                             .clamp_existing_to_range(false),
                     );
-                    ui.label(
-                        egui::RichText::new("2 adds a proofread pass; Elevate makes one")
-                            .weak()
-                            .small(),
-                    );
-                });
-                ui.end_row();
+                    ui.end_row();
 
-                ui.label(egui::RichText::new("Clean min chars").weak());
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::DragValue::new(&mut edit.pp_min_chars)
-                            .speed(1.0)
-                            .range(0..=10_000)
-                            .clamp_existing_to_range(false),
-                    );
-                    ui.label(
-                        egui::RichText::new("shorter text skips Clean's model (0 = never skip)")
+                    ui.label(egui::RichText::new("Clean passes").weak());
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut edit.pp_passes)
+                                .speed(0.1)
+                                .range(1..=3)
+                                .clamp_existing_to_range(false),
+                        );
+                        ui.label(
+                            egui::RichText::new("2 adds a proofread pass; Elevate makes one")
+                                .weak()
+                                .small(),
+                        );
+                    });
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("Clean min chars").weak());
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut edit.pp_min_chars)
+                                .speed(1.0)
+                                .range(0..=10_000)
+                                .clamp_existing_to_range(false),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "shorter text skips Clean's model (0 = never skip)",
+                            )
                             .weak()
                             .small(),
-                    );
+                        );
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-            });
-        ui.label(egui::RichText::new("Clean instructions (extra guidance)").weak());
-        ui.add(
-            egui::TextEdit::multiline(&mut edit.pp_instructions)
-                .desired_rows(4)
-                .desired_width(f32::INFINITY),
-        );
+            ui.label(egui::RichText::new("Clean instructions (extra guidance)").weak());
+            ui.add(
+                egui::TextEdit::multiline(&mut edit.pp_instructions)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+        });
     }
 
     fn save(&mut self) {

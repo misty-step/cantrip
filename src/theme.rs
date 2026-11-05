@@ -134,6 +134,25 @@ impl Palette {
             ..palette
         }
     }
+
+    /// Secondary text on the surface: the foreground eased toward the surface
+    /// as far as WCAG's 4.5:1 text contrast allows, on every platform.
+    pub fn muted(&self) -> [u8; 3] {
+        let surface = luminance(self.surface);
+        [0.45, 0.35, 0.25, 0.15]
+            .into_iter()
+            .map(|amount| mix(self.foreground, self.surface, amount))
+            .find(|&color| contrast(luminance(color), surface) >= TEXT_CONTRAST)
+            .unwrap_or(self.foreground)
+    }
+}
+
+/// `from` moved `amount` of the way to `to`, per sRGB channel.
+pub fn mix(from: [u8; 3], to: [u8; 3], amount: f32) -> [u8; 3] {
+    std::array::from_fn(|channel| {
+        (f32::from(from[channel]) + (f32::from(to[channel]) - f32::from(from[channel])) * amount)
+            .round() as u8
+    })
 }
 
 /// `[hue°, saturation, lightness]`.
@@ -178,7 +197,6 @@ fn hue_distance(a: f32, b: f32) -> f32 {
     difference.min(360.0 - difference)
 }
 
-#[cfg(any(target_os = "macos", test))]
 fn luminance(color: [u8; 3]) -> f32 {
     let [r, g, b] = color.map(|channel| {
         let value = f32::from(channel) / 255.0;
@@ -191,19 +209,17 @@ fn luminance(color: [u8; 3]) -> f32 {
     0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
-#[cfg(any(target_os = "macos", test))]
 fn contrast(a: f32, b: f32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 /// The WCAG contrast ratio of two sRGB colors.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 pub(crate) fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
     contrast(luminance(a), luminance(b))
 }
 
 /// WCAG 2's minimum contrast for text (1.4.3).
-#[cfg(any(target_os = "macos", test))]
 const TEXT_CONTRAST: f32 = 4.5;
 /// WCAG 2's minimum contrast for a component's boundary (1.4.11).
 #[cfg(target_os = "macos")]
@@ -440,7 +456,7 @@ mod native {
 
 #[cfg(test)]
 mod contrast_tests {
-    use super::{contrast, hsl, hue_distance, legible, luminance};
+    use super::{contrast, contrast_ratio, hsl, hue_distance, legible, luminance, Palette};
 
     #[test]
     fn native_accents_remain_readable_on_light_and_dark_surfaces() {
@@ -466,6 +482,45 @@ mod contrast_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn secondary_text_eases_toward_the_surface_but_reads_at_4_5_to_1() {
+        let surfaces = [
+            // Tokyo Night, the fallback; AppKit Light and Dark; a pale theme.
+            Palette::default(),
+            Palette {
+                surface: [255; 3],
+                foreground: [0x26; 3],
+                ..Palette::default()
+            },
+            Palette {
+                surface: [0x1e; 3],
+                foreground: [0xdd; 3],
+                ..Palette::default()
+            },
+            Palette {
+                surface: [0xef, 0xf1, 0xf5],
+                foreground: [0x4c, 0x4f, 0x69],
+                ..Palette::default()
+            },
+        ];
+        for palette in surfaces {
+            let muted = palette.muted();
+            assert!(contrast_ratio(muted, palette.surface) >= 4.5, "{palette:?}");
+            assert!(
+                contrast_ratio(muted, palette.surface)
+                    < contrast_ratio(palette.foreground, palette.surface),
+                "{palette:?}"
+            );
+        }
+        // Text already at the limit stays itself.
+        let faint = Palette {
+            surface: [255; 3],
+            foreground: [0x76; 3],
+            ..Palette::default()
+        };
+        assert_eq!(faint.muted(), faint.foreground);
     }
 }
 

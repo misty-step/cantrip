@@ -48,6 +48,10 @@ enum CliCommand {
         /// with this label, tinted in the live theme's first target color.
         #[arg(long, value_name = "LABEL", requires = "screenshot")]
         handoff: Option<String>,
+        /// Compose the --screenshot scenario for a take in this mode, with local
+        /// recognition, two vocabulary spellings and OpenRouter refinement.
+        #[arg(long, value_name = "raw|clean|elevate", requires = "screenshot")]
+        postproc: Option<Mode>,
     },
     /// Review production HUD states and transitions without running dictation.
     #[command(hide = true)]
@@ -331,7 +335,8 @@ fn run(cli: Cli) -> Result<()> {
             screenshot,
             state,
             handoff,
-        } => hud::run(screenshot, state, handoff),
+            postproc,
+        } => hud::run(screenshot, state, handoff, postproc),
         CliCommand::HudGallery { screenshot } => hud::gallery::run(screenshot),
         #[cfg(target_os = "macos")]
         CliCommand::Settings { screenshot, pane } => settings::run(screenshot, pane),
@@ -625,7 +630,9 @@ fn print_status(json: bool) -> Result<()> {
     }
     println!("state: {}", status.state_name());
     if let Some(pipeline) = &status.pipeline {
-        println!("pipeline: {}", pipeline.label());
+        let view = cantrip::modes::ModeView::new(pipeline);
+        println!("mode: {} · {}", view.name(), view.subtitle());
+        println!("pipeline: {}", view.stages());
     }
     if status.state != ipc::StateKind::Idle {
         println!("elapsed: {}s", status.elapsed);

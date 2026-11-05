@@ -53,9 +53,14 @@ alias substitutions or an attempted/skipped cleanup support an inferred Clean;
 otherwise recovery conservatively uses Raw. Mark this inference in the existing
 recovery metadata rather than presenting it as a recorded selection.
 
-Both settings surfaces and the macOS menu show a mode picker, description, and
-ordered stage/model display. Recording and processing HUDs show the active
-snapshot, not a subsequently changed default.
+Every surface presents a mode through one shared view-model,
+[`src/modes.rs`](../../src/modes.rs): its name, pixel glyph and promise; its
+stages in plain words with friendly model names; and where the take goes. Raw
+ids stay in the macOS menu's tooltips and the Settings details. The engine's
+pipeline snapshot names the hosts each stage reaches; a field an older engine
+omits reads as an unnamed provider, never as staying local. Recording and
+processing HUDs show the active snapshot, not a subsequently changed default,
+and light only the stages the engine reports.
 
 #### Elevate prompt boundary
 

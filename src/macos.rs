@@ -20,6 +20,7 @@ pub(crate) mod shortcut;
 pub(crate) mod ui;
 
 use crate::hud::macos::{runtime_dir, LiveHud};
+use crate::modes::ModeView;
 use crate::settings::model::{GuidanceOffer, Microphones, Replacement, SettingsForm};
 use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{
@@ -40,9 +41,9 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationTerminateReply, NSBeep, NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSStatusBar, NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSWorkspace,
-    NSWorkspaceOpenConfiguration,
+    NSApplicationTerminateReply, NSBeep, NSControlStateValueOff, NSControlStateValueOn, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusBarButton, NSStatusItem,
+    NSVariableStatusItemLength, NSWorkspace, NSWorkspaceOpenConfiguration,
 };
 use objc2_foundation::{
     ns_string, NSBundle, NSNotification, NSObject, NSObjectProtocol, NSRunLoop,
@@ -405,36 +406,59 @@ fn sentence(text: &str) -> String {
     })
 }
 
-/// The pipeline new takes run with the saved default mode, read from the file
-/// as the menu opens. None while the file cannot be read or parsed; Settings
-/// offers its repair.
-fn saved_pipeline() -> Option<PipelineDisplay> {
+/// The saved default mode for new takes, and what each mode would run with the
+/// saved configuration, read from the file as the menu opens. None while the
+/// file cannot be read or parsed; Settings offers its repair.
+fn saved_modes() -> Option<(Mode, [PipelineDisplay; 3])> {
     use crate::settings::store::{load_editable_config, EditableConfigLoad};
     match load_editable_config(&paths::config_file().ok()?) {
-        EditableConfigLoad::Ready { config, .. } => Some(config.pipeline_display()),
+        EditableConfigLoad::Ready { config, .. } => Some((
+            config.postproc.mode,
+            Mode::ALL.map(|mode| config.pipeline_display(mode)),
+        )),
         EditableConfigLoad::Blocked { .. } => None,
     }
 }
 
-/// The default mode for new takes, with what each does, then the pipeline the
-/// default runs, in order. A per-take override never moves the check mark.
-fn mode_items(items: &mut Items<'_>, saved: Option<&PipelineDisplay>) {
-    for mode in Mode::ALL {
-        let item = items.add(mode.label(), saved.is_some().then_some(Choice::Mode(mode)));
-        if saved.is_some_and(|pipeline| pipeline.mode == mode) {
-            item.setState(NSControlStateValueOn);
+/// The default mode for new takes as radio items: each mode's glyph and name,
+/// and one line with its promise and where the take goes. The stages and their
+/// raw ids are in the tooltip. A per-take override never moves the choice.
+fn mode_items(items: &mut Items<'_>, saved: Option<&(Mode, [PipelineDisplay; 3])>) {
+    let Some((default, pipelines)) = saved else {
+        for mode in Mode::ALL {
+            items
+                .add(mode.label(), None)
+                .setImage(Some(&mark::mode_glyph(mode)));
         }
-        let description = NSString::from_str(mode.description());
-        item.setToolTip(Some(&description));
-        if objc2::available!(macos = 14.4) {
-            item.setSubtitle(Some(&description));
+        items.line(Some(
+            "Modes unavailable until the configuration is repaired",
+        ));
+        return;
+    };
+    let (chosen, other) = (mark::radio(true), mark::radio(false));
+    for pipeline in pipelines {
+        let view = ModeView::new(pipeline);
+        let subtitles = objc2::available!(macos = 14.4);
+        let title = if subtitles {
+            view.name().to_owned()
+        } else {
+            format!("{} · {}", view.name(), view.subtitle())
+        };
+        let item = items.add(&title, Some(Choice::Mode(view.mode())));
+        item.setImage(Some(&mark::mode_glyph(view.mode())));
+        // SAFETY: always an image, never the None the setter might not allow.
+        unsafe { item.setOnStateImage(Some(&chosen)) };
+        item.setOffStateImage(Some(&other));
+        item.setState(if view.mode() == *default {
+            NSControlStateValueOn
+        } else {
+            NSControlStateValueOff
+        });
+        if subtitles {
+            item.setSubtitle(Some(&NSString::from_str(&view.subtitle())));
         }
+        item.setToolTip(Some(&NSString::from_str(&view.tooltip())));
     }
-    let pipeline = saved.map_or_else(
-        || "Modes unavailable until the configuration is repaired".to_owned(),
-        PipelineDisplay::label,
-    );
-    items.line(Some(&pipeline));
 }
 
 /// The menu's microphone item, from the access the capture owner reports:
@@ -1001,7 +1025,7 @@ impl Host {
             .add(&title, repair.then_some(Choice::Settings))
             .setToolTip(shortcut_problem.map(NSString::from_str).as_deref());
         items.separator();
-        mode_items(&mut items, saved_pipeline().as_ref());
+        mode_items(&mut items, saved_modes().as_ref());
         items.separator();
         if let Some(outcome) = outcome {
             // Deliberate actions for the outcome shown, bound to its own take.

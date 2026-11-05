@@ -8,6 +8,7 @@ use super::{
     FRAME_INTERVAL, POLL_INTERVAL, SURFACE_HEIGHT, SURFACE_WIDTH,
 };
 use anyhow::{Context, Result};
+use cantrip_engine::config::Mode;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     delegate_registry,
@@ -108,6 +109,7 @@ pub(super) fn run_native(
     screenshot: Option<PathBuf>,
     state: Option<ScreenshotState>,
     handoff: Option<String>,
+    mode: Option<Mode>,
 ) -> Result<()> {
     let _lock = if screenshot.is_some() {
         None
@@ -128,7 +130,8 @@ pub(super) fn run_native(
         .context("allocating HUD buffer pool")?;
     let now = Instant::now();
     let instrument = if screenshot.is_some() {
-        Instrument::preview(state.unwrap_or(ScreenshotState::Recording), handoff, now)?
+        let state = state.unwrap_or(ScreenshotState::Recording);
+        Instrument::preview(state, handoff, mode, now)?
     } else {
         Instrument::live(now)?
     };
