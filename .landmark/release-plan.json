@@ -1,11 +1,11 @@
 {
-  "base_revision": "121ac03fe2566d9a89030319b2676370c9582964",
+  "base_revision": "6f0d7af36c755543c38534c3e124cc46afb39ca1",
   "landmark_sha256": "d3e7400abcf72428f801aae3d9ed74412d5ced31eecc6be753a48027a6441ed9",
   "landmark_version": "0.28.7",
   "previous_tag": "v0.1.14",
   "schema_version": 1,
   "tag": "v0.1.15",
-  "technical_changelog_sha256": "e8e3e76dbff41b69f078a55b6b91c1ebc96393139b04d3ba3fef0584ed710787",
+  "technical_changelog_sha256": "02342f13522982cc8185830971352c342ac478542c18497cea494da820a9a572",
   "version": "0.1.15",
   "version_decision": {
     "api_evidence": {
@@ -23,8 +23,8 @@
     "api_evidence_bump": "none",
     "bump": "patch",
     "commit_bump": "minor",
-    "commit_count": 5,
-    "conventional_commit_count": 5,
+    "commit_count": 7,
+    "conventional_commit_count": 7,
     "decisive_commit": "64054f1 feat(macos): prepare local Developer ID publication and prove Keychain persistence (#267)",
     "decisive_signals": [
       "commit:64054f1 feat(macos): prepare local Developer ID publication and prove Keychain persistence (#267)",
