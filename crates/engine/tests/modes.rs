@@ -119,6 +119,9 @@ fn exercise_modes() {
                     Err(error) => panic!("provider fixture accept: {error}"),
                 }
             };
+            // Accepted sockets inherit the listener's nonblocking mode on
+            // macOS; reads must block until the request arrives.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
