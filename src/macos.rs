@@ -260,6 +260,7 @@ enum Choice {
     MicrophoneSettings,
     /// Settings on its General pane, where the microphone is chosen.
     InputSettings,
+    KeySettings,
     /// Record from this input instead of the missing one, while still current.
     UseInput(Replacement),
     StartEngine,
@@ -539,43 +540,35 @@ fn keychain_block(
     idle: bool,
     reason_shown: bool,
 ) -> Option<KeychainBlock> {
-    let ask = || {
-        idle.then(|| {
-            Choice::Send(Command::AllowKeychain {
-                id: access.key_id.clone(),
+    let state = access.authorization;
+    if state == KeychainAuthorization::Ready {
+        return None;
+    }
+    let choice = match state {
+        KeychainAuthorization::NotSet => Some(Choice::KeySettings),
+        KeychainAuthorization::NeedsAuthorization | KeychainAuthorization::Denied => {
+            idle.then(|| {
+                Choice::Send(Command::AllowKeychain {
+                    id: access.key_id.clone(),
+                })
             })
-        })
+        }
+        KeychainAuthorization::Busy
+        | KeychainAuthorization::TimedOut
+        | KeychainAuthorization::Unavailable => idle.then_some(Choice::Send(Command::Reload)),
+        KeychainAuthorization::Checking
+        | KeychainAuthorization::Authorizing
+        | KeychainAuthorization::Ready => None,
     };
-    Some(match access.authorization {
-        KeychainAuthorization::Ready => return None,
-        KeychainAuthorization::Checking => KeychainBlock {
-            attention: None,
-            title: format!(
-                "Checking Keychain access to {}…",
-                crate::hud::keychain_key(&access.key_id)
-            ),
-            choice: None,
-            note: None,
-        },
-        KeychainAuthorization::NeedsAuthorization => KeychainBlock {
-            attention: (!reason_shown)
-                .then(|| "Takes skip cleanup until Keychain access is allowed".to_owned()),
-            title: format!("{}…", crate::hud::allow_keychain_item(&access.key_id)),
-            choice: ask(),
-            note: Some(crate::hud::KEYCHAIN_BUTTONS),
-        },
-        KeychainAuthorization::Authorizing => KeychainBlock {
-            attention: None,
-            title: crate::hud::KEYCHAIN_WAITING.to_owned(),
-            choice: None,
-            note: Some(crate::hud::KEYCHAIN_BUTTONS),
-        },
-        KeychainAuthorization::Unavailable => KeychainBlock {
-            attention: Some(crate::hud::keychain_unavailable(&access.key_id)),
-            title: "Try Keychain Access Again…".to_owned(),
-            choice: ask(),
-            note: Some("Save a missing key from Check Setup."),
-        },
+    Some(KeychainBlock {
+        attention: (!reason_shown && state.action().is_some())
+            .then(|| state.message(&access.key_id)),
+        title: state.action().map_or_else(
+            || state.message(&access.key_id),
+            |action| format!("{action}…"),
+        ),
+        choice,
+        note: state.note(),
     })
 }
 
@@ -620,13 +613,27 @@ fn outcome_line(status: &ipc::StatusSnapshot, offer: Option<&GuidanceOffer>) -> 
     if outcome.dismissed || replaced {
         return None;
     }
-    let message = match outcome.message.split_once(ipc::KEYCHAIN_PENDING_REASON) {
-        Some((before, after)) if outcome.cleanup == Cleanup::KeychainPending => {
-            format!("{} {}", before.trim_end(), after.trim_start())
-                .trim()
-                .to_owned()
+    let message = if let Some(state) = outcome.cleanup.credential_state() {
+        let id = status
+            .keychain
+            .as_ref()
+            .map_or("openrouter", |access| access.key_id.as_str());
+        match outcome.message.split_once(&state.message(id)) {
+            Some((before, after)) => {
+                let mut after = after.trim_start_matches('.').trim_start();
+                if let Some(note) = state.note() {
+                    after = after.strip_prefix(note).unwrap_or(after).trim_start();
+                }
+                if let Some(action) = state.action() {
+                    after = after.strip_prefix(action).unwrap_or(after);
+                    after = after.trim_start_matches('.').trim_start();
+                }
+                format!("{} {}", before.trim_end(), after).trim().to_owned()
+            }
+            None => outcome.message.clone(),
         }
-        _ => outcome.message.clone(),
+    } else {
+        outcome.message.clone()
     };
     Some(match &outcome.handoff {
         Some(handoff) => format!("{message} · to {}", handoff.label),
@@ -1085,14 +1092,16 @@ impl Host {
         items.line(shown.as_deref());
         // A take that skipped cleanup says why on its own line, never cut short,
         // and marks it while the key still awaits the operator.
-        let reason_shown = shown.is_some()
-            && outcome.is_some_and(|outcome| outcome.cleanup == Cleanup::KeychainPending);
+        let reason = outcome.and_then(|outcome| outcome.cleanup.credential_state());
+        let reason_shown = shown.is_some() && reason.is_some();
         let keychain = status.and_then(|status| status.keychain.as_ref());
-        if reason_shown {
+        if let Some(reason) = reason.filter(|_| reason_shown) {
+            let id = keychain.map_or("openrouter", |access| access.key_id.as_str());
+            let message = reason.message(id);
             if keychain.is_none_or(|access| access.authorization == KeychainAuthorization::Ready) {
-                items.line(Some(ipc::KEYCHAIN_PENDING_REASON));
+                items.line(Some(&message));
             } else {
-                items.attention(ipc::KEYCHAIN_PENDING_REASON);
+                items.attention(&message);
             }
         }
         let microphone_pending = status.is_some_and(|status| {
@@ -1255,6 +1264,7 @@ impl Host {
             Choice::InstallModel => self.show_recordings(Open::Setup),
             Choice::MicrophoneSettings => open_microphone_settings(),
             Choice::InputSettings => self.show_settings(Some(Pane::General)),
+            Choice::KeySettings => self.show_settings(Some(Pane::Modes)),
             Choice::UseInput(replacement) => self.use_input(&replacement),
             Choice::StartEngine => {
                 self.start_engine();
@@ -1550,16 +1560,19 @@ mod tests {
         assert_eq!(block(Ready, true), None);
         for idle in [true, false] {
             let needed = block(NeedsAuthorization, idle).expect("approval is offered");
-            assert_eq!(needed.title, "Allow Cantrip to use your OpenRouter key…");
-            assert_eq!(needed.note, Some(crate::hud::KEYCHAIN_BUTTONS));
+            assert_eq!(needed.title, "Approve Keychain access…");
+            assert_eq!(needed.note, Some(ipc::KEYCHAIN_APPROVAL_NOTE));
             assert!(needed.attention.is_some());
             // During a take the item stays visible but starts no prompt.
             assert_eq!(needed.choice, idle.then(|| allow.clone()));
             let unavailable = block(Unavailable, idle).expect("retry is offered");
-            assert_eq!(unavailable.choice, idle.then(|| allow.clone()));
+            assert_eq!(
+                unavailable.choice,
+                idle.then_some(Choice::Send(Command::Reload))
+            );
             assert_eq!(
                 unavailable.attention.as_deref(),
-                Some("Keychain didn’t return your OpenRouter key")
+                Some("Keyring is unavailable")
             );
             // One native lookup at a time: a check or an open prompt starts nothing.
             for authorization in [Checking, Authorizing] {
@@ -1569,11 +1582,11 @@ mod tests {
             }
         }
         let waiting = block(Authorizing, true).unwrap();
-        assert_eq!(waiting.title, crate::hud::KEYCHAIN_WAITING);
-        assert_eq!(waiting.note, Some(crate::hud::KEYCHAIN_BUTTONS));
+        assert_eq!(waiting.title, ipc::KEYCHAIN_WAITING);
+        assert_eq!(waiting.note, Some(ipc::KEYCHAIN_APPROVAL_NOTE));
         // Another configured ID is named as written, and the action carries it.
         let other = keychain_block(&keychain(NeedsAuthorization, "groq"), true, false).unwrap();
-        assert_eq!(other.title, "Allow Cantrip to use your “groq” key…");
+        assert_eq!(other.title, "Approve Keychain access…");
         assert_eq!(
             other.choice,
             Some(Choice::Send(Command::AllowKeychain {
@@ -1617,6 +1630,10 @@ mod tests {
             (KeychainAuthorization::NeedsAuthorization, true),
             (KeychainAuthorization::Authorizing, true),
             (KeychainAuthorization::Unavailable, true),
+            (KeychainAuthorization::NotSet, true),
+            (KeychainAuthorization::Denied, true),
+            (KeychainAuthorization::Busy, true),
+            (KeychainAuthorization::TimedOut, true),
             (KeychainAuthorization::Ready, false),
         ] {
             status.keychain = Some(keychain(authorization, "openrouter"));

@@ -558,17 +558,16 @@ fn run_key(command: KeyCommand) -> Result<()> {
             Ok(())
         }
         KeyCommand::Status { id } => {
-            if keys::exists(&id)? {
-                println!("present");
-            } else {
-                println!("absent");
-            }
+            let access = ipc::KeychainAuthorization::from_result(keys::get(&id).map(drop));
+            println!("{}", key_state_diagnosis(&id, access));
             Ok(())
         }
         KeyCommand::Allow { id } => {
             send_command(Command::AllowKeychain { id })?;
             println!(
-                "Keychain authorization requested; answer any native prompt, then use 'cantrip status --json' to check readiness."
+                "{} {} Use 'cantrip status --json' to check readiness.",
+                ipc::KEYCHAIN_WAITING,
+                ipc::KEYCHAIN_APPROVAL_NOTE,
             );
             Ok(())
         }
@@ -826,13 +825,38 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
             match outcome.postproc {
                 pipeline::PostprocStatus::KeychainPending => eprintln!(
                     "{} The {} transcript is preserved.",
-                    ipc::KEYCHAIN_PENDING_REASON,
+                    key_state_diagnosis(
+                        config
+                            .postproc
+                            .api_key_id
+                            .as_deref()
+                            .unwrap_or("openrouter"),
+                        ipc::KeychainAuthorization::NeedsAuthorization,
+                    ),
                     if outcome.alias_substitutions > 0 {
                         "alias-corrected"
                     } else {
                         "original"
                     }
                 ),
+                pipeline::PostprocStatus::CredentialUnavailable { reason } => {
+                    eprintln!(
+                        "{} The {} transcript is preserved.",
+                        key_state_diagnosis(
+                            config
+                                .postproc
+                                .api_key_id
+                                .as_deref()
+                                .unwrap_or("openrouter"),
+                            ipc::KeychainAuthorization::from_error(reason),
+                        ),
+                        if outcome.alias_substitutions > 0 {
+                            "alias-corrected"
+                        } else {
+                            "original"
+                        },
+                    );
+                }
                 pipeline::PostprocStatus::Failed { .. } => eprintln!(
                     "post-processing failed; showing the {} transcript",
                     if outcome.alias_substitutions > 0 {
@@ -881,6 +905,10 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         Some("stt-partial".to_owned())
     } else if matches!(outcome.postproc, pipeline::PostprocStatus::KeychainPending) {
         Some("cleanup-keychain-pending".to_owned())
+    } else if let pipeline::PostprocStatus::CredentialUnavailable { reason } = outcome.postproc {
+        ipc::Cleanup::from_key_error(reason)
+            .error_class()
+            .map(str::to_owned)
     } else {
         None
     };
@@ -889,6 +917,9 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         pipeline::PostprocStatus::Failed { ms } => ("failed", Some(*ms as u64)),
         pipeline::PostprocStatus::SkippedShort { .. } => ("skipped_short", None),
         pipeline::PostprocStatus::KeychainPending => ("keychain_pending", None),
+        pipeline::PostprocStatus::CredentialUnavailable { reason } => {
+            (ipc::Cleanup::from_key_error(*reason).name(), None)
+        }
         pipeline::PostprocStatus::Off => ("off", None),
     };
     let attempted = matches!(
@@ -943,10 +974,11 @@ fn telemetry_diagnosis(config: &Config) -> String {
         return "telemetry: blocked (public_key is empty)".to_owned();
     }
     let key_id = config.telemetry.api_key_id.as_deref().unwrap_or("langfuse");
-    let credential = if keys::exists(key_id).unwrap_or(false) {
-        "present"
+    let access = ipc::KeychainAuthorization::from_result(keys::get(key_id).map(drop));
+    let credential = if access == ipc::KeychainAuthorization::NotSet {
+        format!("Not set; run: cantrip key set {key_id}")
     } else {
-        "absent — run: cantrip key set langfuse"
+        key_state_diagnosis(key_id, access)
     };
     format!(
         "telemetry: enabled (endpoint={}; credential={}; content=counts-only)",
@@ -994,6 +1026,9 @@ fn doctor() -> Result<()> {
     if let Ok(config) = &config {
         println!("{}", stt_diagnosis(config));
         println!("{}", cleanup_diagnosis(config));
+        if let Some(diagnosis) = cleanup_access_diagnosis(config, None) {
+            println!("{diagnosis}");
+        }
         println!("{}", telemetry_diagnosis(config));
         println!("{}", injection_diagnosis(config.injection, tools));
         for (name, target) in &config.handoff {
@@ -1048,6 +1083,12 @@ fn doctor() -> Result<()> {
     if let Ok(config) = &config {
         println!("{}", stt_diagnosis(config));
         println!("{}", cleanup_diagnosis(config));
+        if let Some(diagnosis) = cleanup_access_diagnosis(
+            config,
+            status.as_ref().and_then(|status| status.keychain.as_ref()),
+        ) {
+            println!("{diagnosis}");
+        }
         println!("{}", telemetry_diagnosis(config));
         let available = inject::delivery_availability();
         println!(
@@ -1318,6 +1359,59 @@ fn credential_status(id: Option<&str>) -> &'static str {
     } else {
         "none"
     }
+}
+
+fn key_state_diagnosis(id: &str, access: ipc::KeychainAuthorization) -> String {
+    let mut message = format!("{}: {}", access.label(), access.message(id));
+    if let Some(note) = access.note() {
+        message.push_str(". ");
+        message.push_str(note);
+    }
+    let command = match access {
+        ipc::KeychainAuthorization::NotSet => Some("cantrip settings".to_owned()),
+        ipc::KeychainAuthorization::NeedsAuthorization | ipc::KeychainAuthorization::Denied => {
+            Some(format!("cantrip key allow {id}"))
+        }
+        ipc::KeychainAuthorization::Busy
+        | ipc::KeychainAuthorization::TimedOut
+        | ipc::KeychainAuthorization::Unavailable => Some("cantrip reload".to_owned()),
+        _ => None,
+    };
+    if let Some(command) = command {
+        message.push_str("; run: ");
+        message.push_str(&command);
+    }
+    message
+}
+
+fn cleanup_access_diagnosis(
+    config: &Config,
+    owner: Option<&ipc::KeychainAccess>,
+) -> Option<String> {
+    let id = config
+        .postproc
+        .api_key_id
+        .as_deref()
+        .filter(|id| !id.is_empty())?;
+    if config.postproc.mode == Mode::Raw || config.postproc.model_config().model.is_empty() {
+        return None;
+    }
+    let access = owner
+        .filter(|access| access.key_id == id)
+        .map(|access| access.authorization);
+    #[cfg(target_os = "macos")]
+    let access = match access {
+        Some(access) => access,
+        None => {
+            return Some(
+                "cleanup key: unknown; open Cantrip to check its own Keychain access".to_owned(),
+            )
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let access =
+        access.unwrap_or_else(|| ipc::KeychainAuthorization::from_result(keys::get(id).map(drop)));
+    Some(format!("cleanup key: {}", key_state_diagnosis(id, access)))
 }
 
 /// Show only a URL origin. Userinfo, path, query, and fragment can contain

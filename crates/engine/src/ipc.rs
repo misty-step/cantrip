@@ -19,7 +19,10 @@ pub type AudioWaveform = [[i16; 2]; AUDIO_WAVEFORM_BINS];
 pub(crate) const REQUEST_LIMIT: usize = 4_096;
 pub(crate) const REPLY_LIMIT: usize = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-pub const KEYCHAIN_PENDING_REASON: &str = "Cleanup skipped — Keychain access not yet allowed.";
+pub const KEYCHAIN_PENDING_REASON: &str = "Approve Keychain access.";
+pub const KEYCHAIN_WAITING: &str = "Approve Keychain access in the macOS prompt";
+pub const KEYCHAIN_APPROVAL_NOTE: &str =
+    "Choose Always Allow so future takes can use the key. Allow covers only this request.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
@@ -187,6 +190,65 @@ pub enum Cleanup {
     Skipped,
     Failed,
     KeychainPending,
+    KeyNotSet,
+    KeychainDenied,
+    KeyringBusy,
+    KeyringTimedOut,
+    KeyringUnavailable,
+}
+
+impl Cleanup {
+    pub fn from_key_error(error: crate::keys::AccessError) -> Self {
+        use crate::keys::AccessError;
+        match error {
+            AccessError::NotSet => Self::KeyNotSet,
+            AccessError::NeedsApproval => Self::KeychainPending,
+            AccessError::Denied => Self::KeychainDenied,
+            AccessError::Busy => Self::KeyringBusy,
+            AccessError::TimedOut => Self::KeyringTimedOut,
+            AccessError::Unavailable => Self::KeyringUnavailable,
+        }
+    }
+
+    pub fn credential_state(self) -> Option<KeychainAuthorization> {
+        Some(match self {
+            Self::KeyNotSet => KeychainAuthorization::NotSet,
+            Self::KeychainPending => KeychainAuthorization::NeedsAuthorization,
+            Self::KeychainDenied => KeychainAuthorization::Denied,
+            Self::KeyringBusy => KeychainAuthorization::Busy,
+            Self::KeyringTimedOut => KeychainAuthorization::TimedOut,
+            Self::KeyringUnavailable => KeychainAuthorization::Unavailable,
+            Self::Off | Self::Applied | Self::Skipped | Self::Failed => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Applied => "applied",
+            Self::Skipped => "skipped_short",
+            Self::Failed => "failed",
+            Self::KeychainPending => "keychain_pending",
+            Self::KeyNotSet => "key_not_set",
+            Self::KeychainDenied => "keychain_denied",
+            Self::KeyringBusy => "keyring_busy",
+            Self::KeyringTimedOut => "keyring_timed_out",
+            Self::KeyringUnavailable => "keyring_unavailable",
+        }
+    }
+
+    pub fn error_class(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Failed => "cleanup-failed",
+            Self::KeychainPending => "cleanup-keychain-pending",
+            Self::KeyNotSet => "cleanup-key-not-set",
+            Self::KeychainDenied => "cleanup-keychain-denied",
+            Self::KeyringBusy => "cleanup-keyring-busy",
+            Self::KeyringTimedOut => "cleanup-keyring-timed-out",
+            Self::KeyringUnavailable => "cleanup-keyring-unavailable",
+            Self::Off | Self::Applied | Self::Skipped => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -442,7 +504,86 @@ pub enum KeychainAuthorization {
     NeedsAuthorization,
     Authorizing,
     Ready,
+    NotSet,
+    Denied,
+    Busy,
+    TimedOut,
     Unavailable,
+}
+
+impl KeychainAuthorization {
+    pub fn from_result(result: anyhow::Result<()>) -> Self {
+        match result {
+            Ok(()) => Self::Ready,
+            Err(error) => Self::from_error(crate::keys::access_error(&error)),
+        }
+    }
+
+    pub fn from_error(error: crate::keys::AccessError) -> Self {
+        use crate::keys::AccessError;
+        match error {
+            AccessError::NotSet => Self::NotSet,
+            AccessError::NeedsApproval => Self::NeedsAuthorization,
+            AccessError::Denied => Self::Denied,
+            AccessError::Busy => Self::Busy,
+            AccessError::TimedOut => Self::TimedOut,
+            AccessError::Unavailable => Self::Unavailable,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Checking => "Checking…",
+            Self::NotSet => "Not set",
+            Self::NeedsAuthorization => "Needs approval",
+            Self::Authorizing => "Waiting for approval…",
+            Self::Ready => "Approved",
+            Self::Denied => "Access denied",
+            Self::Busy => "Keyring busy",
+            Self::TimedOut => "Read timed out",
+            Self::Unavailable => "Unavailable",
+        }
+    }
+
+    pub fn message(self, key_id: &str) -> String {
+        match self {
+            Self::NotSet if key_id.eq_ignore_ascii_case("openrouter") => {
+                "Add your OpenRouter key in Settings".to_owned()
+            }
+            Self::NotSet => format!("Add your “{key_id}” key in Settings"),
+            Self::NeedsAuthorization => KEYCHAIN_PENDING_REASON.trim_end_matches('.').to_owned(),
+            Self::Denied => "Keychain access denied".to_owned(),
+            Self::Busy => "Keyring is busy".to_owned(),
+            Self::TimedOut => "Keyring read timed out".to_owned(),
+            Self::Unavailable => "Keyring is unavailable".to_owned(),
+            Self::Checking => "Checking Keychain access…".to_owned(),
+            Self::Authorizing => KEYCHAIN_WAITING.to_owned(),
+            Self::Ready => "Keychain access approved".to_owned(),
+        }
+    }
+
+    pub fn action(self) -> Option<&'static str> {
+        match self {
+            Self::NotSet => Some("Open Settings"),
+            Self::NeedsAuthorization | Self::Denied => Some("Approve Keychain access"),
+            Self::Busy | Self::TimedOut | Self::Unavailable => Some("Retry keyring access"),
+            Self::Checking | Self::Authorizing | Self::Ready => None,
+        }
+    }
+
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Self::NeedsAuthorization | Self::Authorizing | Self::Denied => {
+                Some(KEYCHAIN_APPROVAL_NOTE)
+            }
+            Self::Busy => Some("Wait for the current keyring operation, then retry."),
+            Self::TimedOut => Some("Unlock the keyring, then retry."),
+            Self::Unavailable => {
+                Some("Unlock the keyring or replace the key in Settings, then retry.")
+            }
+            Self::Checking | Self::NotSet | Self::Ready => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -953,6 +1094,78 @@ mod tests {
         pending.dismissed = true;
         assert!(!pending.needs_attention());
         assert_eq!(pending.delivery, Delivery::Copied);
+    }
+
+    #[test]
+    fn credential_states_offer_the_matching_message_and_remediation() {
+        use crate::keys::AccessError;
+        for (error, state, label, message, action) in [
+            (
+                AccessError::NotSet,
+                KeychainAuthorization::NotSet,
+                "Not set",
+                "Add your OpenRouter key in Settings",
+                "Open Settings",
+            ),
+            (
+                AccessError::NeedsApproval,
+                KeychainAuthorization::NeedsAuthorization,
+                "Needs approval",
+                "Approve Keychain access",
+                "Approve Keychain access",
+            ),
+            (
+                AccessError::Denied,
+                KeychainAuthorization::Denied,
+                "Access denied",
+                "Keychain access denied",
+                "Approve Keychain access",
+            ),
+            (
+                AccessError::Busy,
+                KeychainAuthorization::Busy,
+                "Keyring busy",
+                "Keyring is busy",
+                "Retry keyring access",
+            ),
+            (
+                AccessError::TimedOut,
+                KeychainAuthorization::TimedOut,
+                "Read timed out",
+                "Keyring read timed out",
+                "Retry keyring access",
+            ),
+            (
+                AccessError::Unavailable,
+                KeychainAuthorization::Unavailable,
+                "Unavailable",
+                "Keyring is unavailable",
+                "Retry keyring access",
+            ),
+        ] {
+            assert_eq!(KeychainAuthorization::from_result(Err(error.into())), state);
+            assert_eq!(state.label(), label);
+            assert_eq!(state.message("openrouter"), message);
+            assert_eq!(state.action(), Some(action));
+            assert_eq!(
+                Cleanup::from_key_error(error).credential_state(),
+                Some(state)
+            );
+            if matches!(
+                state,
+                KeychainAuthorization::NeedsAuthorization | KeychainAuthorization::Denied
+            ) {
+                assert!(state.note().unwrap().contains("Always Allow"));
+                assert!(!state.message("openrouter").contains("Add your"));
+            }
+        }
+        let ready = KeychainAuthorization::from_result(Ok(()));
+        assert_eq!(ready.label(), "Approved");
+        assert_eq!(ready.action(), None);
+        assert_eq!(
+            KeychainAuthorization::NotSet.message("custom-provider"),
+            "Add your “custom-provider” key in Settings",
+        );
     }
 
     #[test]

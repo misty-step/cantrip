@@ -262,16 +262,6 @@ fn cleanup_keychain_id(config: &Config) -> Option<&str> {
     .filter(|id| !id.is_empty())
 }
 
-fn keychain_result(result: Result<()>) -> KeychainAuthorization {
-    match result {
-        Ok(()) => KeychainAuthorization::Ready,
-        Err(error) if error.is::<crate::keys::AuthorizationRequired>() => {
-            KeychainAuthorization::NeedsAuthorization
-        }
-        Err(_) => KeychainAuthorization::Unavailable,
-    }
-}
-
 struct Daemon {
     config: Config,
     platform: Arc<dyn Platform>,
@@ -387,7 +377,7 @@ impl Daemon {
                     )
                     .map(drop)
                 };
-                let _ = send.send(keychain_result(checked));
+                let _ = send.send(KeychainAuthorization::from_result(checked));
             });
         if started.is_ok() {
             self.keychain_check = Some(KeychainCheck { cancel, result });
@@ -1221,6 +1211,9 @@ fn allow_keychain(daemon: &mut Daemon, id: &str) -> CommandReply {
     if daemon.keychain_check.is_some() {
         return daemon.reply(true, "Keychain access is already being checked.", None);
     }
+    if access.authorization == KeychainAuthorization::NotSet {
+        return daemon.reject(&access.authorization.message(&access.key_id), "key-not-set");
+    }
     daemon.start_keychain_check(true);
     if daemon.keychain_check.is_none() {
         return daemon.reject(
@@ -2038,8 +2031,8 @@ fn apply_worker_result(
         operation.lifecycle.store(CANCEL_SEALED, Ordering::Release);
     }
     daemon.state = State::Idle;
-    if result.outcome.cleanup == Cleanup::KeychainPending && cfg!(target_os = "macos") {
-        if daemon.keychain.is_none() {
+    if let Some(authorization) = result.outcome.cleanup.credential_state() {
+        if cfg!(target_os = "macos") && daemon.keychain_check.is_none() {
             daemon.keychain = daemon
                 .config
                 .postproc
@@ -2047,16 +2040,8 @@ fn apply_worker_result(
                 .as_ref()
                 .map(|id| KeychainAccess {
                     key_id: id.clone(),
-                    authorization: KeychainAuthorization::NeedsAuthorization,
+                    authorization,
                 });
-        } else if let Some(access) = &mut daemon.keychain {
-            if daemon.keychain_check.is_none() {
-                if access.authorization == KeychainAuthorization::Ready {
-                    daemon.start_keychain_check(false);
-                } else {
-                    access.authorization = KeychainAuthorization::NeedsAuthorization;
-                }
-            }
         }
     }
     daemon.publish(result.outcome);
@@ -2626,11 +2611,7 @@ fn finish_audio(
         .or_else(|| match outcome.completeness {
             Completeness::Failed => Some("stt-failed".to_owned()),
             Completeness::Partial => Some("stt-partial".to_owned()),
-            _ if outcome.cleanup == Cleanup::Failed => Some("cleanup-failed".to_owned()),
-            _ if outcome.cleanup == Cleanup::KeychainPending => {
-                Some("cleanup-keychain-pending".to_owned())
-            }
-            _ => None,
+            _ => outcome.cleanup.error_class().map(str::to_owned),
         });
     outcome.message = report.deferred_message.take().unwrap_or_else(|| {
         describe_delivery(
@@ -2673,9 +2654,25 @@ fn finish_audio(
                 " Cleanup was unavailable; original text was used."
             });
     }
-    if outcome.cleanup == Cleanup::KeychainPending {
+    if let Some(access) = outcome.cleanup.credential_state() {
+        let id = context
+            .config
+            .postproc
+            .api_key_id
+            .as_deref()
+            .unwrap_or("openrouter");
         outcome.message.push(' ');
-        outcome.message.push_str(ipc::KEYCHAIN_PENDING_REASON);
+        outcome.message.push_str(&access.message(id));
+        outcome.message.push('.');
+        if let Some(note) = access.note() {
+            outcome.message.push(' ');
+            outcome.message.push_str(note);
+        }
+        if let Some(action) = access.action() {
+            outcome.message.push(' ');
+            outcome.message.push_str(action);
+            outcome.message.push('.');
+        }
         outcome
             .message
             .push_str(if pipeline.alias_substitutions > 0 {
@@ -2727,13 +2724,7 @@ fn finish_audio(
             stt_remote: pipeline.stt_backend != pipeline::SttBackend::Local,
             chars: text.map_or(0, |text| text.chars().count()),
             partial: pipeline.partial,
-            cleanup_state: match outcome.cleanup {
-                Cleanup::Applied => "applied",
-                Cleanup::Failed => "failed",
-                Cleanup::Skipped => "skipped_short",
-                Cleanup::Off => "off",
-                Cleanup::KeychainPending => "keychain_pending",
-            },
+            cleanup_state: outcome.cleanup.name(),
             cleanup_ms,
             cleanup_model: cleanup_ms.map(|_| context.config.postproc.model_config().model.clone()),
             tokens_in: pipeline
@@ -3164,6 +3155,7 @@ fn cleanup_from(status: &PostprocStatus) -> Cleanup {
         PostprocStatus::SkippedShort { .. } => Cleanup::Skipped,
         PostprocStatus::Failed { .. } => Cleanup::Failed,
         PostprocStatus::KeychainPending => Cleanup::KeychainPending,
+        PostprocStatus::CredentialUnavailable { reason } => Cleanup::from_key_error(*reason),
     }
 }
 

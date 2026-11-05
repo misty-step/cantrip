@@ -22,6 +22,7 @@
 //! `cantrip settings --screenshot <path>` renders the window to a PNG and
 //! exits, for visual testing without a screenshot utility.
 
+pub(crate) mod credential;
 #[cfg(not(target_os = "macos"))]
 mod linux;
 pub(crate) mod model;
