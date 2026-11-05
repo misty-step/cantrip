@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Generate the public synthetic short-tail regression WAV with Piper and FFmpeg."""
+
+import argparse
+import array
+import hashlib
+import math
+from pathlib import Path
+import random
+import subprocess
+import tempfile
+import wave
+
+RATE = 16_000
+VOICE_SHA256 = "6f52a751e2349abe7a76735eb09dc1875298c77ea2342ffd2fef79ff81b87f22"
+CONFIG_SHA256 = "141d612cc0a95ed7efc1ca936b845c2364967f2e9217c5dbfcf69fc4d6c65860"
+PREFIX = (
+    "We spent the morning discussing the plans for our new office. "
+    "There will be space for quiet work, a table for shared lunches, and a garden by the window. "
+    "The lighting needs to be gentle, and everyone should have room to move around. "
+    "We want the design to be simple and practical, without losing the character of the old building. "
+    "When the work is finished, the result should make the room"
+)
+TAIL = "a brighter and more welcoming place to work."
+
+
+def fit(text, seconds, name, root, args):
+    source, raw, fitted = (root / f"{name}{suffix}" for suffix in (".txt", "-raw.wav", "-fit.wav"))
+    source.write_text(text)
+    subprocess.run(
+        [args.piper, "-m", str(args.voice), "-i", str(source), "-f", str(raw),
+         "--noise-scale", "0", "--noise-w-scale", "0"], check=True,
+    )
+    with wave.open(str(raw)) as wav:
+        duration = wav.getnframes() / wav.getframerate()
+    tempo = math.sqrt(duration / seconds)
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-af", f"atempo={tempo},atempo={tempo}",
+         "-ar", str(RATE), "-ac", "1", "-c:a", "pcm_s16le", str(fitted)], check=True,
+    )
+    with wave.open(str(fitted)) as wav:
+        return array.array("h", wav.readframes(wav.getnframes()))[:round(seconds * RATE)]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--voice", type=Path, required=True, help="en_US-ljspeech-medium.onnx")
+    parser.add_argument("--piper", default="piper", help="Piper 1.8.0 executable")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.output.exists():
+        parser.error("--output already exists; choose a new path")
+    for path, expected in (
+        (args.voice, VOICE_SHA256), (Path(str(args.voice) + ".json"), CONFIG_SHA256),
+    ):
+        with path.open("rb") as source:
+            if hashlib.file_digest(source, "sha256").hexdigest() != expected:
+                parser.error(f"unexpected voice artifact: {path.name}")
+    with tempfile.TemporaryDirectory(prefix="stt-short-tail-") as temporary:
+        root = Path(temporary)
+        prefix = fit(PREFIX, 31.7, "prefix", root, args)
+        tail = fit(TAIL, 3.19, "tail", root, args)
+    samples = array.array("h", [1]) * round(35.78 * RATE)
+    samples[:len(prefix)] = prefix
+    offset = round(32.41 * RATE)
+    samples[offset:offset + len(tail)] = tail
+    for index, sample in enumerate(samples):
+        if sample == 0:
+            samples[index] = 1
+    # One unique quiet frame makes the old planner isolate the last 3.77 seconds.
+    samples[round(31.98 * RATE):round(32.01 * RATE)] = array.array("h", [0]) * 480
+    noise_start = round(32.01 * RATE)
+    rms = math.sqrt(sum(sample * sample for sample in samples[noise_start:]) / (len(samples) - noise_start))
+    sigma = rms * 10 ** (5.5 / 20)
+    random_source = random.Random(123)
+    for index in range(noise_start, len(samples)):
+        samples[index] = max(-32768, min(32767, round(samples[index] + random_source.gauss(0, sigma))))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(args.output), "wb") as wav:
+        wav.setparams((1, 2, RATE, len(samples), "NONE", "not compressed"))
+        wav.writeframes(samples.tobytes())
+
+
+if __name__ == "__main__":
+    main()
