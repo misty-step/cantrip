@@ -16,7 +16,7 @@ use super::{
 };
 use crate::theme::{self, Palette};
 use anyhow::{Context, Result};
-use cantrip_engine::ipc::StatusSnapshot;
+use cantrip_engine::{config::Mode, ipc::StatusSnapshot};
 use objc2::{
     define_class, msg_send,
     rc::{autoreleasepool, Retained},
@@ -59,6 +59,7 @@ pub(super) fn run_native(
     screenshot: Option<PathBuf>,
     state: Option<ScreenshotState>,
     handoff: Option<String>,
+    mode: Option<Mode>,
 ) -> Result<()> {
     let mtm = MainThreadMarker::new().context("the HUD must run on the main thread")?;
     if let Some(path) = screenshot {
@@ -67,6 +68,7 @@ pub(super) fn run_native(
             &path,
             state.unwrap_or(ScreenshotState::Recording),
             handoff,
+            mode,
         );
     }
     let app = NSApplication::sharedApplication(mtm);
@@ -105,11 +107,12 @@ fn render_offscreen(
     path: &Path,
     state: ScreenshotState,
     handoff: Option<String>,
+    mode: Option<Mode>,
 ) -> Result<()> {
     NSApplication::sharedApplication(mtm)
         .setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
     let now = Instant::now();
-    let mut instrument = Instrument::preview(state, handoff, now)?;
+    let mut instrument = Instrument::preview(state, handoff, mode, now)?;
     // The focused screen's geometry and scale, like the live panel; a session
     // without a screen renders at the Retina scale every current Mac uses.
     let placement = Placement::focused(mtm).unwrap_or(Placement {

@@ -48,6 +48,10 @@ enum CliCommand {
         /// with this label, tinted in the live theme's first target color.
         #[arg(long, value_name = "LABEL", requires = "screenshot")]
         handoff: Option<String>,
+        /// Compose the --screenshot scenario for a take in this mode, with local
+        /// recognition, two vocabulary spellings and OpenRouter refinement.
+        #[arg(long, value_name = "raw|clean|elevate", requires = "screenshot")]
+        postproc: Option<Mode>,
     },
     /// Review production HUD states and transitions without running dictation.
     #[command(hide = true)]
@@ -193,9 +197,20 @@ enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 enum KeyCommand {
-    Set { id: String },
-    Rm { id: String },
-    Status { id: String },
+    Set {
+        id: String,
+    },
+    Rm {
+        id: String,
+    },
+    Status {
+        id: String,
+    },
+    /// Ask the running Cantrip to authorize this Keychain ID (macOS).
+    /// Returns before you answer the native prompt; use status --json to check readiness.
+    Allow {
+        id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -331,7 +346,8 @@ fn run(cli: Cli) -> Result<()> {
             screenshot,
             state,
             handoff,
-        } => hud::run(screenshot, state, handoff),
+            postproc,
+        } => hud::run(screenshot, state, handoff, postproc),
         CliCommand::HudGallery { screenshot } => hud::gallery::run(screenshot),
         #[cfg(target_os = "macos")]
         CliCommand::Settings { screenshot, pane } => settings::run(screenshot, pane),
@@ -549,6 +565,13 @@ fn run_key(command: KeyCommand) -> Result<()> {
             }
             Ok(())
         }
+        KeyCommand::Allow { id } => {
+            send_command(Command::AllowKeychain { id })?;
+            println!(
+                "Keychain authorization requested; answer any native prompt, then use 'cantrip status --json' to check readiness."
+            );
+            Ok(())
+        }
     }
 }
 
@@ -625,7 +648,9 @@ fn print_status(json: bool) -> Result<()> {
     }
     println!("state: {}", status.state_name());
     if let Some(pipeline) = &status.pipeline {
-        println!("pipeline: {}", pipeline.label());
+        let view = cantrip::modes::ModeView::new(pipeline);
+        println!("mode: {} · {}", view.name(), view.subtitle());
+        println!("pipeline: {}", view.stages());
     }
     if status.state != ipc::StateKind::Idle {
         println!("elapsed: {}s", status.elapsed);
@@ -798,15 +823,25 @@ fn transcribe_file(wav: &Path, local: bool) -> Result<()> {
     }
     match &outcome.text {
         Ok(text) => {
-            if matches!(outcome.postproc, pipeline::PostprocStatus::Failed { .. }) {
-                eprintln!(
+            match outcome.postproc {
+                pipeline::PostprocStatus::KeychainPending => eprintln!(
+                    "{} The {} transcript is preserved.",
+                    ipc::KEYCHAIN_PENDING_REASON,
+                    if outcome.alias_substitutions > 0 {
+                        "alias-corrected"
+                    } else {
+                        "original"
+                    }
+                ),
+                pipeline::PostprocStatus::Failed { .. } => eprintln!(
                     "post-processing failed; showing the {} transcript",
                     if outcome.alias_substitutions > 0 {
                         "alias-corrected"
                     } else {
                         "original"
                     }
-                );
+                ),
+                _ => {}
             }
             println!("{text}");
             if outcome.partial {
@@ -844,6 +879,8 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         Some("stt-failed".to_owned())
     } else if outcome.partial {
         Some("stt-partial".to_owned())
+    } else if matches!(outcome.postproc, pipeline::PostprocStatus::KeychainPending) {
+        Some("cleanup-keychain-pending".to_owned())
     } else {
         None
     };
@@ -851,6 +888,7 @@ fn emit_transcribe_telemetry(config: &Config, outcome: &pipeline::Outcome) {
         pipeline::PostprocStatus::Applied { ms } => ("applied", Some(*ms as u64)),
         pipeline::PostprocStatus::Failed { ms } => ("failed", Some(*ms as u64)),
         pipeline::PostprocStatus::SkippedShort { .. } => ("skipped_short", None),
+        pipeline::PostprocStatus::KeychainPending => ("keychain_pending", None),
         pipeline::PostprocStatus::Off => ("off", None),
     };
     let attempted = matches!(

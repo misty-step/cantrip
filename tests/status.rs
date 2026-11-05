@@ -72,6 +72,7 @@ fn status_recommends_recovery_only_for_confirmed_undelivered_or_incomplete_takes
             hud: HudConfig::default(),
             handoff: None,
             microphone: None,
+            keychain: None,
             pipeline: None,
             capture_guidance: None,
         };

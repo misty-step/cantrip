@@ -35,14 +35,75 @@ pub(crate) fn get_until(
     deadline: Instant,
     cancel: Option<&AtomicBool>,
 ) -> Result<String> {
+    anyhow::ensure!(
+        !crate::stt::is_cancelled(cancel),
+        "OS keyring lookup cancelled"
+    );
+    #[cfg(target_os = "macos")]
+    if READING.load(Ordering::Acquire) {
+        return Err(AuthorizationRequired.into());
+    }
     let id = id.to_owned();
-    read_until(&READING, deadline, cancel, move || {
-        let secret = entry(&id)?
-            .get_password()
-            .map_err(|_| anyhow::anyhow!("OS keyring credential unavailable"))?;
-        validate_secret(&id, &secret)?;
-        Ok(secret)
-    })
+    read_until(&READING, deadline, cancel, move || read_secret(&id, false))
+}
+
+#[derive(Debug)]
+pub(crate) struct AuthorizationRequired;
+
+impl std::fmt::Display for AuthorizationRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Keychain access not yet allowed")
+    }
+}
+
+impl std::error::Error for AuthorizationRequired {}
+
+fn read_secret(id: &str, interactive: bool) -> Result<String> {
+    // keyring uses the legacy login Keychain. Per-query authentication UI flags
+    // do not suppress that store's prompts; serialize this process-wide guard.
+    #[cfg(target_os = "macos")]
+    let _interaction = if !interactive {
+        Some(
+            security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
+                .map_err(|_| anyhow::anyhow!("OS keyring interaction guard unavailable"))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = interactive;
+    let secret = entry(id)?.get_password().map_err(|error| {
+        if matches!(error, keyring::Error::NoEntry) {
+            return anyhow::Error::new(error);
+        }
+        #[cfg(target_os = "macos")]
+        if let keyring::Error::PlatformFailure(source) | keyring::Error::NoStorageAccess(source) =
+            &error
+        {
+            if source
+                .downcast_ref::<security_framework::base::Error>()
+                .is_some_and(|error| matches!(error.code(), -25293 | -25308 | -25315 | -128))
+            {
+                return anyhow::Error::new(AuthorizationRequired);
+            }
+        }
+        let _ = error;
+        anyhow::anyhow!("OS keyring credential unavailable")
+    })?;
+    validate_secret(id, &secret)?;
+    Ok(secret)
+}
+
+/// The explicit approval path has no deadline, but its caller can abandon it.
+/// Only the native worker may own the secret, and approval never retains it.
+pub(crate) fn authorize(id: &str, cancel: &AtomicBool) -> Result<()> {
+    let requested_id = id.to_owned();
+    read_with_deadline(&READING, None, Some(cancel), move || {
+        read_secret(&requested_id, true).map(drop)
+    })?;
+    // A one-time Allow may authorize only the discarded read. Ready means the
+    // next take can read without a prompt, not merely that a prompt was answered.
+    get_until(id, Instant::now() + LOOKUP_TIMEOUT, Some(cancel)).map(drop)
 }
 
 // Native keyring APIs cannot be interrupted. Leave at most one read outstanding,
@@ -54,16 +115,32 @@ fn read_until<T: Send + 'static>(
     cancel: Option<&AtomicBool>,
     read: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    let deadline = deadline.min(Instant::now() + LOOKUP_TIMEOUT);
+    read_with_deadline(
+        reading,
+        Some(deadline.min(Instant::now() + LOOKUP_TIMEOUT)),
+        cancel,
+        read,
+    )
+}
+
+fn read_with_deadline<T: Send + 'static>(
+    reading: &'static AtomicBool,
+    deadline: Option<Instant>,
+    cancel: Option<&AtomicBool>,
+    read: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
     let remaining = || -> Result<Duration> {
         anyhow::ensure!(
             !crate::stt::is_cancelled(cancel),
             "OS keyring lookup cancelled"
         );
-        deadline
-            .checked_duration_since(Instant::now())
-            .filter(|time| !time.is_zero())
-            .ok_or_else(|| anyhow::anyhow!("OS keyring lookup timed out"))
+        match deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .filter(|time| !time.is_zero())
+                .ok_or_else(|| anyhow::anyhow!("OS keyring lookup timed out")),
+            None => Ok(Duration::from_millis(25)),
+        }
     };
     loop {
         remaining()?;
@@ -121,17 +198,17 @@ pub fn delete(id: &str) -> Result<()> {
 }
 
 pub fn exists(id: &str) -> Result<bool> {
-    let id = id.to_owned();
-    read_until(
-        &READING,
-        Instant::now() + LOOKUP_TIMEOUT,
-        None,
-        move || match entry(&id)?.get_password() {
-            Ok(_) => Ok(true),
-            Err(keyring::Error::NoEntry) => Ok(false),
-            Err(_) => bail!("OS keyring credential unavailable"),
-        },
-    )
+    match get(id) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if error
+                .downcast_ref::<keyring::Error>()
+                .is_some_and(|error| matches!(error, keyring::Error::NoEntry)) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +264,36 @@ mod tests {
             panic!("expired lookup must not start")
         });
         assert!(expired.unwrap_err().to_string().contains("timed out"));
+    }
+
+    #[test]
+    fn explicit_authorization_can_wait_without_a_deadline_and_still_cancel() {
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        let (release, blocked) = mpsc::channel();
+        let (entered, native_started) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                read_with_deadline(&BUSY, None, Some(&cancel), move || {
+                    entered.send(()).unwrap();
+                    blocked.recv().unwrap();
+                    Ok("discard this late value")
+                })
+            });
+            native_started.recv().unwrap();
+            assert!(BUSY.load(Ordering::Acquire));
+            cancel.store(true, Ordering::Release);
+            assert!(waiter
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled"));
+        });
+        assert!(BUSY.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        let fresh = read_until(&BUSY, Instant::now() + LOOKUP_TIMEOUT, None, || Ok(()));
+        assert!(fresh.is_ok());
     }
 
     #[test]

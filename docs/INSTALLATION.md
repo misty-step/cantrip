@@ -585,7 +585,10 @@ path, including the app's exact source and installed-binary hash. The recipe
 below reproduces that path; dummy providers prove routing and presentation,
 not recognition or model quality. The
 [cloud evaluation receipt](../eval/baselines/2026-11-03-elevate/run.json)
-separately owns real Sol-low behavior and its remaining fidelity failures.
+separately owns real Sol-low behavior and its remaining fidelity failures. The
+[mode display captures](evidence/verify-cantrip/2026-11-04-mode-display/README.md)
+record the menu, Settings and HUD presentation in Light and Dark, before and
+after.
 
 Finish an ad-hoc development package **before** booting the VM. Use a fresh
 output path after a code change, and never rebuild while a proof VM is running:
@@ -694,22 +697,25 @@ requests, host microphone, or host clipboard are needed.
    enabled = false
    ```
 
-3. Open Cantrip's menu. Confirm Raw is checked. Select each mode and reopen the
-   menu to inspect its checkmark, description and ordered stage/model label.
+3. Open Cantrip's menu. Confirm Raw is the selected radio item. Select each mode
+   and reopen the menu to inspect its radio mark, glyph, promise and where the
+   take goes; the tooltip lists each stage with its raw model id and host.
    Choosing a mode persists the next-take default: the file must own `mode`,
    have no `[postproc].enabled`, and retain the unrelated comment.
-   In this fixture “cloud” identifies the HTTP recognition lane; all requests
-   stay on loopback.
+   In this fixture the recognizer is an HTTP lane on loopback, so the menu and
+   Settings name “a local server” and the HUD says “on this Mac”.
 4. Open **Settings… → Modes**, navigating from the shorter Transcripts pane.
    Select Clean and click **Save & Apply**. Confirm the persisted mode and
-   checked menu entry agree. Repeat for Elevate. Inspect exclusive selection,
-   descriptions, both model/effort fields and the shared endpoint/key ID.
+   selected menu entry agree. Repeat for Elevate. Inspect exclusive selection,
+   each mode's explanation, and under **Details** the raw ids, both model/effort
+   fields and the shared endpoint/key ID.
    At 1440×900 with the Dock visible, confirm **Save & Apply** is reachable,
-   including after the “Saved and applied” notice appears.
+   including after the “Saved and applied” notice appears and with Details open.
 5. Complete a take in each mode, playing `samples/jfk.wav` into BlackHole
-   while recording. Inspect the live recording and processing HUDs:
-   Raw names only STT; Clean and Elevate name STT → aliases → their own model.
-   Capture both transcription and LLM phases during the seven-second delays.
+   while recording. Inspect the live recording and processing HUDs: the line
+   names the mode and where the take goes; Raw lights transcribing, and Clean
+   and Elevate light transcribing, then refining with the spellings light filled.
+   Capture both stages during the seven-second delays.
 6. On the Elevate take, choose Raw from the menu **while recording**. The
    picker's next-take default changes, but the active HUD and the projected
    `status --json` pipeline must retain Elevate through both processing stages.

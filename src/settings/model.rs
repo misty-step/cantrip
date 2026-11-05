@@ -10,8 +10,8 @@ use crate::actions;
 use crate::inject::{self, DeliveryGuard};
 use anyhow::{anyhow, Result};
 use cantrip_engine::config::{
-    Config, HandoffTarget, HudConfig, Mode, ModeModelConfig, PostprocConfig, SttConfig,
-    TelemetryConfig, VocabularyEntry,
+    Config, HandoffTarget, HudConfig, Mode, ModeModelConfig, PipelineDisplay, PostprocConfig,
+    SttConfig, TelemetryConfig, VocabularyEntry,
 };
 use cantrip_engine::delivery::{InjectionFailureKind, InjectionMode};
 use cantrip_engine::{ipc, recovery};
@@ -157,16 +157,10 @@ impl Editable {
         }
     }
 
-    /// What new takes run with the values in the form, in the engine's words:
-    /// recognizer and where it runs, then aliases and the selected mode's model.
-    pub(crate) fn pipeline(&self) -> String {
-        Config {
-            stt: self.stt(),
-            postproc: self.postproc(),
-            ..Config::default()
-        }
-        .pipeline_display()
-        .label()
+    /// What a take in `mode` would run with the values in the form, including
+    /// the file's aliased vocabulary.
+    pub(crate) fn pipeline(&self, mode: Mode) -> PipelineDisplay {
+        self.to_config().pipeline_display(mode)
     }
 
     fn stt(&self) -> SttConfig {
@@ -1103,32 +1097,37 @@ mod tests {
     }
 
     #[test]
-    fn the_pipeline_follows_the_chosen_mode_and_that_modes_own_model() {
-        use cantrip_engine::config::PipelineDisplay;
-        let shown = |mode, llm_model: Option<&str>| {
-            PipelineDisplay {
-                mode,
-                stt_model: sample_config().stt.model,
-                stt_local: true,
-                llm_model: llm_model.map(str::to_owned),
-            }
-            .label()
-        };
-        let mut edit = Editable::from_config(&sample_config());
+    fn each_modes_pipeline_follows_the_values_in_the_form() {
+        let mut config = sample_config();
+        config.vocabulary.push(VocabularyEntry::Aliased {
+            term: "Cantrip".into(),
+            aliases: vec!["Gantrip".into()],
+        });
+        let mut edit = Editable::from_config(&config);
         edit.clean_model = " clean-model ".into();
         edit.elevate_model = "vendor/elevate-model".into();
-        edit.mode = Mode::Clean;
-        assert_eq!(edit.pipeline(), shown(Mode::Clean, Some("clean-model")));
-        edit.mode = Mode::Elevate;
+        edit.pp_endpoint = "https://openrouter.ai/api/v1".into();
+        // Each mode, not only the selected default, names its own model.
+        let clean = edit.pipeline(Mode::Clean);
+        assert_eq!(clean.mode, Mode::Clean);
+        assert_eq!(clean.llm_model.as_deref(), Some("clean-model"));
+        assert_eq!(clean.llm_hosts, ["openrouter.ai"]);
+        // The file's aliased entries count; plain terms typed in the form do not.
+        assert_eq!(clean.spellings, 1);
         assert_eq!(
-            edit.pipeline(),
-            shown(Mode::Elevate, Some("vendor/elevate-model"))
+            edit.pipeline(Mode::Elevate).llm_model.as_deref(),
+            Some("vendor/elevate-model")
         );
         // An empty model leaves only that mode without an LLM; Raw never has one.
         edit.elevate_model = "  ".into();
-        assert_eq!(edit.pipeline(), shown(Mode::Elevate, None));
-        edit.mode = Mode::Raw;
-        assert_eq!(edit.pipeline(), shown(Mode::Raw, None));
+        assert_eq!(edit.pipeline(Mode::Elevate).llm_model, None);
+        assert_eq!(edit.pipeline(Mode::Raw).llm_model, None);
+        // The recognizer follows the Transcription fields as they are typed.
+        edit.stt_endpoint = "https://api.openai.com/v1".into();
+        edit.stt_model = "gpt-4o-mini-transcribe".into();
+        let cloud = edit.pipeline(Mode::Raw);
+        assert!(!cloud.stt_local);
+        assert_eq!(cloud.stt_host.as_deref(), Some("api.openai.com"));
     }
 
     #[test]

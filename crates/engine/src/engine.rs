@@ -9,8 +9,9 @@ use crate::delivery::{
 };
 use crate::ipc::{
     self, Artifacts, AudioSignal, Capabilities, CaptureGuidance, CaptureIssue, Cleanup, Command,
-    CommandReply, Completeness, Delivery, InteractionNotice, MicrophoneAccess,
-    MicrophoneAuthorization, OperationKind, Request, StateKind, StatusSnapshot, TerminalOutcome,
+    CommandReply, Completeness, Delivery, InteractionNotice, KeychainAccess, KeychainAuthorization,
+    MicrophoneAccess, MicrophoneAuthorization, OperationKind, Request, StateKind, StatusSnapshot,
+    TerminalOutcome,
 };
 use crate::models;
 use crate::paths;
@@ -240,6 +241,37 @@ struct WorkerResult {
     telemetry: Option<(TelemetryConfig, telemetry::JobTelemetry)>,
 }
 
+struct KeychainCheck {
+    cancel: Arc<AtomicBool>,
+    result: Receiver<KeychainAuthorization>,
+}
+
+impl Drop for KeychainCheck {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+}
+
+fn cleanup_keychain_id(config: &Config) -> Option<&str> {
+    (cfg!(target_os = "macos")
+        && config.postproc.mode != Mode::Raw
+        && !config.postproc.model_config().model.trim().is_empty()
+        && !config.postproc.endpoint.trim().is_empty())
+    .then_some(config.postproc.api_key_id.as_deref())
+    .flatten()
+    .filter(|id| !id.is_empty())
+}
+
+fn keychain_result(result: Result<()>) -> KeychainAuthorization {
+    match result {
+        Ok(()) => KeychainAuthorization::Ready,
+        Err(error) if error.is::<crate::keys::AuthorizationRequired>() => {
+            KeychainAuthorization::NeedsAuthorization
+        }
+        Err(_) => KeychainAuthorization::Unavailable,
+    }
+}
+
 struct Daemon {
     config: Config,
     platform: Arc<dyn Platform>,
@@ -259,6 +291,8 @@ struct Daemon {
     /// re-read on a cadence and after an explicit request, and who macOS grants
     /// is fixed at start. Status clients share this cache.
     microphone: Option<MicrophoneAccess>,
+    keychain: Option<KeychainAccess>,
+    keychain_check: Option<KeychainCheck>,
     /// Local display metadata from this press; never logged or persisted.
     capture_source: Option<String>,
     capture_device_name: String,
@@ -297,11 +331,83 @@ impl Daemon {
             recordings,
             local_model,
             microphone,
+            keychain: None,
+            keychain_check: None,
             capture_source: None,
             capture_device_name: "microphone".to_owned(),
             capture_default_input_name: None,
             worker_available: true,
             retainer: None,
+        }
+    }
+
+    fn check_keychain(&mut self) {
+        let id = cleanup_keychain_id(&self.config);
+        if self.keychain_check.is_some()
+            && self
+                .keychain
+                .as_ref()
+                .is_some_and(|access| Some(access.key_id.as_str()) == id)
+        {
+            return;
+        }
+        self.keychain_check = None;
+        self.keychain = id.map(|id| KeychainAccess {
+            key_id: id.to_owned(),
+            authorization: KeychainAuthorization::Checking,
+        });
+        if self.keychain.is_some() {
+            self.start_keychain_check(false);
+        }
+    }
+
+    fn start_keychain_check(&mut self, authorize: bool) {
+        let Some(access) = &mut self.keychain else {
+            return;
+        };
+        access.authorization = if authorize {
+            KeychainAuthorization::Authorizing
+        } else {
+            KeychainAuthorization::Checking
+        };
+        let id = access.key_id.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let (send, result) = mpsc::sync_channel(1);
+        let started = thread::Builder::new()
+            .name("cantrip-keychain-access".to_owned())
+            .spawn(move || {
+                let checked = if authorize {
+                    crate::keys::authorize(&id, &worker_cancel)
+                } else {
+                    crate::keys::get_until(
+                        &id,
+                        Instant::now() + crate::keys::LOOKUP_TIMEOUT,
+                        Some(&worker_cancel),
+                    )
+                    .map(drop)
+                };
+                let _ = send.send(keychain_result(checked));
+            });
+        if started.is_ok() {
+            self.keychain_check = Some(KeychainCheck { cancel, result });
+        } else {
+            access.authorization = KeychainAuthorization::Unavailable;
+        }
+    }
+
+    fn poll_keychain(&mut self) {
+        let Some(check) = &self.keychain_check else {
+            return;
+        };
+        let authorization = match check.result.try_recv() {
+            Ok(authorization) => authorization,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => KeychainAuthorization::Unavailable,
+        };
+        self.keychain_check = None;
+        if let Some(access) = &mut self.keychain {
+            access.authorization = authorization;
         }
     }
 
@@ -330,7 +436,7 @@ impl Daemon {
             cancel: Arc::new(AtomicBool::new(false)),
             lifecycle: Arc::new(AtomicU8::new(CANCEL_OPEN)),
             hud: self.config.hud,
-            pipeline: self.config.pipeline_display(),
+            pipeline: self.config.pipeline_display(self.config.postproc.mode),
             handoff,
             started: Instant::now(),
         }
@@ -479,8 +585,9 @@ impl Daemon {
                 .operation()
                 .and_then(|operation| operation.handoff.clone()),
             microphone: self.microphone.clone(),
+            keychain: self.keychain.clone(),
             pipeline: Some(self.state.operation().map_or_else(
-                || self.config.pipeline_display(),
+                || self.config.pipeline_display(self.config.postproc.mode),
                 |operation| operation.pipeline.clone(),
             )),
             capture_guidance: self.capture_guidance(),
@@ -582,6 +689,7 @@ pub fn run(
         );
     }
     daemon.platform.prepare_delivery();
+    daemon.check_keychain();
     let warm = preload || daemon.config.keep_warm;
     let WorkerChannels {
         jobs: job_tx,
@@ -706,6 +814,7 @@ fn serve(
     let mut next_capability_refresh = Instant::now();
     let mut next_microphone_refresh = Instant::now() + MICROPHONE_REFRESH_INTERVAL;
     loop {
+        daemon.poll_keychain();
         drain_stage(daemon, stage_rx);
         drain_worker_results(daemon, result_rx, telemetry_reporter);
         if daemon
@@ -1076,6 +1185,7 @@ fn execute(
             Ok(config) => {
                 daemon.config = config;
                 daemon.local_model = local_model_ready(&SttConfig::default());
+                daemon.check_keychain();
                 tracing::info!("[Daemon] config reloaded");
                 daemon.reply(true, "reloaded", None)
             }
@@ -1085,7 +1195,44 @@ fn execute(
             ),
         },
         Command::AllowMicrophone => allow_microphone(daemon),
+        Command::AllowKeychain { id } => allow_keychain(daemon, &id),
     }
+}
+
+fn allow_keychain(daemon: &mut Daemon, id: &str) -> CommandReply {
+    if !matches!(daemon.state, State::Idle) {
+        return daemon.reject(
+            "Finish this take before allowing Keychain access.",
+            "keychain-during-take",
+        );
+    }
+    let Some(access) = &daemon.keychain else {
+        return daemon.reject(
+            "The selected mode has no Keychain credential to authorize.",
+            "keychain-not-configured",
+        );
+    };
+    if access.key_id != id {
+        return daemon.reject(
+            "The configured Keychain credential changed; choose the current action.",
+            "keychain-changed",
+        );
+    }
+    if daemon.keychain_check.is_some() {
+        return daemon.reply(true, "Keychain access is already being checked.", None);
+    }
+    daemon.start_keychain_check(true);
+    if daemon.keychain_check.is_none() {
+        return daemon.reject(
+            "Keychain authorization could not start; try again.",
+            "keychain-unavailable",
+        );
+    }
+    daemon.reply(
+        true,
+        "Waiting for Keychain approval. Choose Always Allow to permit future takes without another prompt.",
+        None,
+    )
 }
 
 fn start_recording(
@@ -1128,7 +1275,7 @@ fn start_recording(
         .as_ref()
         .map(|(name, target)| daemon.handoff_view(name, target));
     let mut operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
-    operation.pipeline = config.pipeline_display();
+    operation.pipeline = config.pipeline_display(config.postproc.mode);
     daemon.state = State::RequestingMicrophone {
         operation,
         config: Box::new(config),
@@ -1561,7 +1708,7 @@ fn recover_take(
         config.injection = InjectionMode::Clipboard;
     }
     let mut operation = daemon.operation(take.id, Some(OperationKind::Recovery), None);
-    operation.pipeline = config.pipeline_display();
+    operation.pipeline = config.pipeline_display(config.postproc.mode);
     let job = Job {
         operation: operation.clone(),
         config: Box::new(config),
@@ -1891,6 +2038,27 @@ fn apply_worker_result(
         operation.lifecycle.store(CANCEL_SEALED, Ordering::Release);
     }
     daemon.state = State::Idle;
+    if result.outcome.cleanup == Cleanup::KeychainPending && cfg!(target_os = "macos") {
+        if daemon.keychain.is_none() {
+            daemon.keychain = daemon
+                .config
+                .postproc
+                .api_key_id
+                .as_ref()
+                .map(|id| KeychainAccess {
+                    key_id: id.clone(),
+                    authorization: KeychainAuthorization::NeedsAuthorization,
+                });
+        } else if let Some(access) = &mut daemon.keychain {
+            if daemon.keychain_check.is_none() {
+                if access.authorization == KeychainAuthorization::Ready {
+                    daemon.start_keychain_check(false);
+                } else {
+                    access.authorization = KeychainAuthorization::NeedsAuthorization;
+                }
+            }
+        }
+    }
     daemon.publish(result.outcome);
 }
 
@@ -2459,6 +2627,9 @@ fn finish_audio(
             Completeness::Failed => Some("stt-failed".to_owned()),
             Completeness::Partial => Some("stt-partial".to_owned()),
             _ if outcome.cleanup == Cleanup::Failed => Some("cleanup-failed".to_owned()),
+            _ if outcome.cleanup == Cleanup::KeychainPending => {
+                Some("cleanup-keychain-pending".to_owned())
+            }
             _ => None,
         });
     outcome.message = report.deferred_message.take().unwrap_or_else(|| {
@@ -2500,6 +2671,17 @@ fn finish_audio(
                 " Cleanup was unavailable; alias-corrected text was used."
             } else {
                 " Cleanup was unavailable; original text was used."
+            });
+    }
+    if outcome.cleanup == Cleanup::KeychainPending {
+        outcome.message.push(' ');
+        outcome.message.push_str(ipc::KEYCHAIN_PENDING_REASON);
+        outcome
+            .message
+            .push_str(if pipeline.alias_substitutions > 0 {
+                " Alias-corrected text was used."
+            } else {
+                " Original text was used."
             });
     }
     let archive_failed = matches!(pipeline.archive, pipeline::ArchiveStatus::Failed(_));
@@ -2550,6 +2732,7 @@ fn finish_audio(
                 Cleanup::Failed => "failed",
                 Cleanup::Skipped => "skipped_short",
                 Cleanup::Off => "off",
+                Cleanup::KeychainPending => "keychain_pending",
             },
             cleanup_ms,
             cleanup_model: cleanup_ms.map(|_| context.config.postproc.model_config().model.clone()),
@@ -2980,6 +3163,7 @@ fn cleanup_from(status: &PostprocStatus) -> Cleanup {
         PostprocStatus::Applied { .. } => Cleanup::Applied,
         PostprocStatus::SkippedShort { .. } => Cleanup::Skipped,
         PostprocStatus::Failed { .. } => Cleanup::Failed,
+        PostprocStatus::KeychainPending => Cleanup::KeychainPending,
     }
 }
 
@@ -3084,6 +3268,63 @@ mod tests {
             false,
             Arc::new(TestPlatform),
         )
+    }
+
+    #[test]
+    fn keychain_approval_is_idle_only_and_bound_to_the_current_credential() {
+        let mut daemon = idle_daemon();
+        daemon.keychain = Some(KeychainAccess {
+            key_id: "current".to_owned(),
+            authorization: KeychainAuthorization::NeedsAuthorization,
+        });
+        let changed = allow_keychain(&mut daemon, "stale");
+        assert_eq!(changed.error.as_deref(), Some("keychain-changed"));
+        assert!(daemon.keychain_check.is_none());
+
+        let (mut active, _) = processing(WorkKind::Transcription);
+        active.keychain = daemon.keychain;
+        let refused = allow_keychain(&mut active, "current");
+        assert_eq!(refused.error.as_deref(), Some("keychain-during-take"));
+        assert!(active.keychain_check.is_none());
+    }
+
+    #[test]
+    fn reload_abandons_authorization_and_discards_its_late_result() {
+        let mut daemon = idle_daemon();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (send, result) = mpsc::channel();
+        daemon.keychain = Some(KeychainAccess {
+            key_id: "old".to_owned(),
+            authorization: KeychainAuthorization::Authorizing,
+        });
+        daemon.keychain_check = Some(KeychainCheck {
+            cancel: cancel.clone(),
+            result,
+        });
+        daemon.check_keychain();
+        assert!(cancel.load(Ordering::Acquire));
+        assert!(send.send(KeychainAuthorization::Ready).is_err());
+        daemon.poll_keychain();
+        assert!(daemon.keychain.is_none());
+    }
+
+    #[test]
+    fn duplicate_approval_actions_do_not_start_another_lookup() {
+        let mut daemon = idle_daemon();
+        let (_send, result) = mpsc::channel();
+        daemon.keychain = Some(KeychainAccess {
+            key_id: "current".to_owned(),
+            authorization: KeychainAuthorization::Authorizing,
+        });
+        daemon.keychain_check = Some(KeychainCheck {
+            cancel: Arc::new(AtomicBool::new(false)),
+            result,
+        });
+        assert!(allow_keychain(&mut daemon, "current").ok);
+        assert_eq!(
+            daemon.snapshot().keychain.unwrap().authorization,
+            KeychainAuthorization::Authorizing
+        );
     }
 
     fn processing(kind: WorkKind) -> (Daemon, Operation) {
@@ -4138,7 +4379,7 @@ mod tests {
             };
             assert_eq!(config.postproc.mode, mode);
             let selected = config.postproc.clone();
-            let display = config.pipeline_display();
+            let display = config.pipeline_display(mode);
             assert_eq!(daemon.snapshot().pipeline.as_ref(), Some(&display));
             // Reload replaces only this configured default. The active take
             // and its display continue to own the start-time config.

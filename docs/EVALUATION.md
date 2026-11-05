@@ -66,6 +66,27 @@ records the observed USD-per-token prices. The comparison's detailed board
 reports strict exact-accepted scores, nearest-rank percentiles, variability,
 and separately identified vocabulary corruptions without relaxing the oracle.
 
+## Local short-tail regression
+
+The checked-in synthetic [`stt-short-tail.wav`](../samples/stt-short-tail.wav)
+exercises a 35.78-second take whose old quiet split left a 3.77-second final
+fragment. Its [provenance](../samples/eval/PROVENANCE.md#short-final-chunk-regression)
+records the public-domain voice and construction.
+
+Run the real local Parakeet regression on a Boat worker with the same installed
+v3 int8 weights used by Cantrip:
+
+```sh
+CANTRIP_PARAKEET_MODEL_DIR=/absolute/path/to/parakeet-tdt-0.6b-v3-int8 \
+  cargo test --locked -p cantrip-engine --test stt_short_tail -- --ignored
+```
+
+This opt-in test runs the production WAV reader, planner, Parakeet inference,
+and ordered transcript join. It does not download weights or call a provider.
+The ordinary planner tests cover final-context boundaries and backend limits;
+the HTTP tests independently decode uploads and check their byte caps, source
+coverage, ordering, and final context.
+
 ## Living speech results
 
 The [speech results page](https://cantrip.mistystep.io/evals) publishes observed

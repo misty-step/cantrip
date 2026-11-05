@@ -123,6 +123,62 @@ table remain file-only and survive every Settings save, including clearing the
 plain terms. Edit those entries with `config edit`; Settings preserves their
 aliases rather than flattening them into strings.
 
+## Credentials
+
+Store a provider key with `cantrip key set ID`, then put only its ID in
+`api_key_id`. A configured ID does not prove that the key exists or the provider
+accepts it. See [credential storage and privacy](PRIVACY.md#logs-credentials-and-telemetry)
+for the storage and secret-handling boundary.
+
+Linux requires an unlocked Secret Service keyring and the daemon's user-session
+D-Bus connection. macOS uses the native login Keychain, not Linux D-Bus setup.
+
+### Allow macOS Keychain access before dictation
+
+At app launch, a saved default-mode change, and configuration reload, Cantrip
+preflights the selected cleanup credential without opening a Keychain prompt.
+The menu and HUD show whether access needs approval. The HUD is passive, so use
+the menu action rather than clicking the HUD.
+
+1. Store the key and configure its ID before selecting Clean or Elevate.
+2. While Cantrip is idle, choose **Allow Cantrip to use your OpenRouter key**
+   in the menu, or run `cantrip key allow openrouter`. For another ID, the
+   action names that ID. Pass that same ID to the CLI.
+3. Answer the native Keychain prompt. Choose **Always Allow** if you trust this
+   Cantrip build and want macOS to remember its access for takes.
+   **Allow** approves only the current authorization request. Later takes still
+   need permission to read without a prompt. An updated development build may
+   ask again.
+4. Inspect `cantrip status --json`. Its `keychain.key_id` identifies the live
+   owner's configured credential. `keychain.authorization` becomes `ready`
+   when Cantrip can read without prompting. A CLI acknowledgment is not approval.
+
+The menu and CLI authorize the running daemon, not the CLI executable. The
+action is unavailable during a take and rejects an ID that no longer matches
+the live configuration. Authorization runs asynchronously and has no deadline.
+It waits for your answer independently of take cancellation and cleanup budgets.
+
+Keychain reads during takes never open an approval prompt. If cleanup needs
+approval or authorization is still pending, the take continues without LLM
+cleanup. It reports `keychain-pending`, error class `cleanup-keychain-pending`,
+and "Cleanup skipped — Keychain access not yet allowed." Alias-corrected text
+is preserved, or the original transcript if no alias changed it. Raw remains
+unchanged and does not request cleanup.
+
+### Credential waits
+
+Ordinary native credential waits have an independent five-second maximum and
+honor cancellation promptly. Cleanup also charges that wait to its shared
+`postproc.timeout_ms` budget, so a nearly spent cleanup budget can shorten it.
+These limits do not apply to explicit Keychain authorization and are not STT
+or cleanup inference deadlines.
+
+Native keyring APIs cannot be interrupted. Cantrip permits only one outstanding
+native lookup, discards late results after an ordinary wait expires or is
+cancelled, and does not accumulate blocked lookups across later takes.
+Unavailable cloud STT credentials use ordinary installed-local recovery unless
+the take was cancelled.
+
 ## `[stt]` — transcription
 
 **Local (default).** `model` is a registry name. The model is not bundled with
@@ -137,6 +193,12 @@ network and has no per-request API charge.
 The supported local name and configuration default come from the same model
 specification in `src/models.rs`.
 
+Local inference uses low-energy splits near 30 seconds, with a three-second
+search window. A split reserves at least eight seconds for the final chunk,
+moving the boundary earlier instead of recognizing a short pause/speech fragment
+alone. This preserves the 33-second local chunk ceiling and exact, nonoverlapping
+audio coverage. An entire recording shorter than the target still runs once.
+
 **Cloud.** Set `endpoint` to an OpenAI-compatible API **base** URL (for example
 `https://api.openai.com/v1`). Cantrip posts to `{endpoint}/audio/transcriptions`.
 Also set `model` and `api_key_id`. Store the credential id ahead of time:
@@ -145,11 +207,8 @@ Also set `model` and `api_key_id`. Store the credential id ahead of time:
 "$HOME/.local/bin/cantrip" key set openai   # prompts for the key; stored in the OS keyring
 ```
 
-On Linux, an unlocked Secret Service keyring and the same user-session D-Bus
-connection must be available when the daemon uses that id. On Mac, credentials
-use the native login Keychain; do not transplant Linux D-Bus setup or put keys in
-the TOML file. A configured id is not proof that a key exists or the provider
-accepts it. Cloud recognition sends audio to the chosen endpoint; review the
+See [credentials](#credentials) for platform setup and macOS approval.
+Cloud recognition sends audio to the chosen endpoint; review the
 [network/content boundary](PRIVACY.md#what-leaves-the-machine)
 before opting in. Evaluated provider comparisons live in the
 [evaluation guide](https://github.com/misty-step/cantrip/blob/master/docs/EVALUATION.md),
@@ -157,12 +216,14 @@ not in the default configuration.
 
 **Long recordings.** A WAV whose complete multipart request fits 24,000,000 bytes,
 including headers and vocabulary, is sent unchanged in one cloud request.
-The local Parakeet encoder's 30-second limit does not split a bounded cloud upload.
+The local Parakeet encoder's 30-second target does not split a bounded cloud upload.
 Larger PCM/IEEE-float WAVs are split before upload, keeping source sample bytes,
-rate, channels, and format intact. Over-cap native Cantrip capture still uses
-low-energy splits around 30 seconds (up to 33 seconds); other PCM formats split
-on frame boundaries at most 30 seconds apart. Results are joined in order, with
-one cleanup/delivery step.
+rate, channels, and format intact. Over-cap native Cantrip capture uses
+low-energy splits near five minutes (up to 303 seconds); other PCM formats split
+on frame boundaries at most five minutes apart. Both reserve final-chunk context
+without exceeding the multipart byte cap. If that cap permits less than sixteen
+seconds per request, the reserved context is reduced to half the permitted
+chunk duration. Results are joined in order, with one cleanup/delivery step.
 
 This avoids OpenRouter's documented 25 MB multipart cliff without a recording
 cutoff or codec process. Providers can still impose smaller limits or time out.
@@ -176,7 +237,7 @@ to standard PCM WAV before `cantrip transcribe`. Local Parakeet still requires
 upload, or response deadline. A valid response after five or sixty seconds is
 still selected; a twenty-minute take is valid. Elapsed recognition time never
 triggers local fallback, and neither take duration nor the local encoder's
-30-second input limit supplies a cloud inference budget. There is no STT timeout
+30-second chunk target supplies a cloud inference budget. There is no STT timeout
 knob. See [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
 
 Providers may enforce their own timeouts and return real failures. The native
@@ -208,16 +269,8 @@ whether its installed files are available, not a successful inference. With
 External files outside Parakeet's native audio format can still fail locally;
 retain or convert the original file.
 
-**Native credentials.** Before cloud recognition, native keyring reads have a
-separate five-second maximum and honor cancellation promptly while waiting;
-this is not an STT inference deadline. If the credential is unavailable,
-ordinary installed-local recovery applies unless the take was cancelled.
-Native keyring APIs themselves cannot be interrupted: at most one read remains
-outstanding, its late result is discarded, and later takes do not accumulate
-more blocked lookups. No credential is cached or logged. Cleanup charges
-credential waits to its explicit shared budget below while retaining this
-independent lookup guard. Model loading and local inference are not
-hard-bounded by HTTP deadlines.
+See [credential waits](#credential-waits) for the independent native-lookup
+guard. Model loading and local inference are not hard-bounded by HTTP deadlines.
 
 **Cloud failure feedback.** A failed cloud chunk keeps a content-free cause even
 when local recognition completes the take. The settled HUD/status and file CLI
@@ -277,7 +330,9 @@ that mode's defaults; an empty effort string explicitly omits reasoning control.
    credential with `cantrip key set ID`, then set `api_key_id = "ID"`.
    Never paste a key into the file.
 3. Set the per-mode model fields, choose the mode, and save/reload.
-   Make a harmless attended trial and inspect `cleanup` in the settled outcome.
+   On macOS, complete [Keychain approval](#allow-macos-keychain-access-before-dictation)
+   before the trial. Make a harmless attended trial and inspect `cleanup` in
+   the settled outcome.
    `doctor` reports configuration and prerequisites, not provider availability
    or credential validity.
 
@@ -330,9 +385,9 @@ legacy owners. No key moves out of the OS keyring.
   `0` never skips). Elevate does not skip short questions or directives.
 - **`timeout_ms`.** Both LLM modes share these explicit milliseconds across
   native credentials, DNS, connections, response bodies, generative work, and
-  optional decisions. There is no hidden five-second inference clamp. Native
-  credential reads retain their independent five-second maximum and may use
-  less when the shared budget is nearly spent. See
+  optional decisions. There is no hidden five-second inference clamp.
+  [Credential waits](#credential-waits) retain their independent limit within
+  this budget. See
   [Decision 0032](decisions/0032-cloud-stt-without-inference-deadlines.md).
 - **`decision_model`.** Optional TypeSafe model, disabled when unset. Clean may
   use pre-generation triage; Elevate never skips its transformation because a

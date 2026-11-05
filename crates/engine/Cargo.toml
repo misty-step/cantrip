@@ -30,6 +30,7 @@ keyring = { version = "3", default-features = false, features = ["async-secret-s
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", default-features = false, features = ["apple-native"] }
+security-framework = "3"
 
 [features]
 default = []

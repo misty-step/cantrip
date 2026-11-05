@@ -52,6 +52,14 @@ pub(crate) fn note(mtm: MainThreadMarker, text: &str, width: f64) -> Retained<NS
     note
 }
 
+/// Small text in the label color, wrapping at `width`: explanation that must
+/// read at 4.5:1, where the secondary color would not in Light.
+pub(crate) fn small(mtm: MainThreadMarker, text: &str, width: f64) -> Retained<NSTextField> {
+    let small = note(mtm, text, width);
+    small.setTextColor(Some(&NSColor::labelColor()));
+    small
+}
+
 /// An editable single-line text field `width` points wide.
 pub(crate) fn field(mtm: MainThreadMarker, placeholder: &str, width: f64) -> Retained<NSTextField> {
     let field = NSTextField::textFieldWithString(&NSString::new(), mtm);

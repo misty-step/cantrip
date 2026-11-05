@@ -285,11 +285,16 @@ owns each mode's pipeline and text contract. Configure canonical spellings and
 aliases using the [`vocabulary` syntax](CONFIGURATION.md#vocabulary--spellings-and-aliases).
 
 On macOS, choose **Raw**, **Clean**, or **Elevate** from the Cantrip menu's mode
-picker. The checked item is the saved default. Settings has the same picker on
-macOS and Linux, plus the per-mode model controls. The description and ordered
-pipeline show which STT model runs locally or in the cloud, whether aliases run,
-and which LLM follows them. Recording and processing HUDs show the active take's
-mode and pipeline. A default change while a take is active applies only to the
+picker. Each radio item shows the mode's glyph, its promise (exact words, tidy &
+concise, expert rewrite) and where the take goes: on this Mac, a local server,
+or the provider that receives its audio or text. The selected item is the saved
+default; its tooltip lists each stage with the raw model id and host. Settings
+has the same picker on macOS and Linux. Each mode says what it does to the text,
+what leaves the computer and which model refines it; **Details** holds the raw
+ids and the per-mode model controls. The HUD's line names the active take's mode
+and where it goes, and while the take is processed lights each stage the engine
+reports. Fixing spellings takes no measurable time, so its light fills as
+refining begins. A default change while a take is active applies only to the
 next take.
 
 The scriptable equivalent persists the same default and reloads a running daemon:
@@ -354,6 +359,7 @@ operation finished.
 | `completeness: empty`, `failed`, or `cancelled` | No complete dictation was delivered. Read the notice and use the matching recording's available artifacts. |
 | `capture-source-missing`, `no-audio` or an input-health notice | Follow the [capture setup guidance](decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03). |
 | `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [mode fallback contract](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03). Repair provider configuration or deliberately leave that mode's model empty for aliases only. |
+| `cleanup: keychain-pending` | Follow [macOS Keychain approval](CONFIGURATION.md#allow-macos-keychain-access-before-dictation). The take keeps alias-corrected text, or the original when no alias changed it. |
 | Storage warning | Delivery and durable retention are separate. Inspect storage before relying on recovery or recording more. |
 | Disconnected/unknown HUD or failed `ping` | Use desktop diagnostics; do not infer Ready or start a competing owner. |
 
@@ -474,6 +480,7 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 | `cantrip models pull` / `status` | Deliberately download or inspect the local model |
 | `cantrip config show` / `edit` / `init` / `path` | Serialize effective file configuration, edit, create a missing file, or locate it |
 | `cantrip key set ID` / `rm ID` / `status ID` | Manage OS-keyring credentials by id |
+| `cantrip key allow ID` | Mac: ask the running daemon to authorize its configured cleanup key, then return before the native prompt is answered. See [Keychain approval](CONFIGURATION.md#allow-macos-keychain-access-before-dictation). |
 | `cantrip doctor` | Read the configuration and environment report; not a readiness exit code |
 | `cantrip recordings [--json]` | List recording IDs, times, durations, and artifact availability without transcript text |
 | `cantrip copy ID` | Copy this exact recording's saved transcript without sending keys |

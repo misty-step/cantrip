@@ -1,20 +1,22 @@
 //! Passive, bottom-anchored status instrument shared by every desktop.
 //!
 //! A signed pixel instrument, fluid work states, and words for actionable exceptions.
-//! Above the field, a take is named by the pipeline it started with (mode,
-//! recognizer, aliases, model) as the engine reports it, never the current default.
+//! Above the field, one line names the take by the pipeline it started with, as
+//! the engine reports it and never the current default: its mode's glyph, name
+//! and promise, the stage at work while it is processed, and where it goes.
 //! The engine owns operations, outcomes and acknowledgement. The HUD never sends
 //! mutations, takes focus, handles pointer input, or invents audio/progress.
 //! The model and software painter live here; `wayland` and `macos` only size,
 //! place and present its pixels on their native surfaces.
 
-use ab_glyph::{point, Font, FontRef, ScaleFont};
+use ab_glyph::{point, Font, FontRef, OutlinedGlyph, ScaleFont};
 use anyhow::{Context, Result};
 use cantrip_engine::{
     config::{Mode, PipelineDisplay},
     ipc::{
         self, AudioSignal, AudioWaveform, CaptureGuidance, CaptureIssue, Cleanup, Completeness,
-        Delivery, StateKind, StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
+        Delivery, KeychainAccess, KeychainAuthorization, StateKind, StatusSnapshot,
+        TerminalOutcome, AUDIO_WAVEFORM_BINS, KEYCHAIN_PENDING_REASON,
     },
     pipeline::Stage,
 };
@@ -32,7 +34,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::theme::{self, Palette};
+use crate::modes::{self, ModeView, Place, Step};
+use crate::theme::{self, mix, Palette};
 
 pub mod gallery;
 #[cfg(target_os = "macos")]
@@ -86,6 +89,60 @@ fn missing_microphone_action(_default_input: Option<&str>) -> String {
     SETTINGS_ACTION.to_owned()
 }
 
+/// What the menu and the HUD say while the native Keychain prompt the
+/// operator chose is open.
+pub(crate) const KEYCHAIN_WAITING: &str = "Waiting for your Keychain decision…";
+/// What that prompt's buttons mean for takes, said beside the menu's approval
+/// item and on the HUD while the prompt waits.
+pub(crate) const KEYCHAIN_BUTTONS: &str =
+    "Always Allow lets takes use the key; Allow covers only this request.";
+
+/// The cleanup credential as the HUD and the menu name it: the conventional
+/// `openrouter` ID by its provider, any other configured ID as written.
+pub(crate) fn keychain_key(key_id: &str) -> String {
+    if key_id.eq_ignore_ascii_case("openrouter") {
+        "your OpenRouter key".to_owned()
+    } else {
+        format!("your “{key_id}” key")
+    }
+}
+
+/// The HUD and the menu when Keychain could not return the key for a reason
+/// other than approval, such as a key that was never saved.
+pub(crate) fn keychain_unavailable(key_id: &str) -> String {
+    format!("Keychain didn’t return {}", keychain_key(key_id))
+}
+
+/// The menu item that asks macOS to let Cantrip read the key, named the same
+/// by the HUD's route to it.
+#[cfg(target_os = "macos")]
+pub(crate) fn allow_keychain_item(key_id: &str) -> String {
+    format!("Allow Cantrip to use {}", keychain_key(key_id))
+}
+
+/// Where Keychain access is allowed or retried while the owner still needs
+/// it: the macOS menu item of the same name. Only macOS reports Keychain
+/// access, so Linux names no route.
+#[cfg(target_os = "macos")]
+fn keychain_route(access: &KeychainAccess) -> Option<String> {
+    match access.authorization {
+        KeychainAuthorization::NeedsAuthorization => Some(format!(
+            "Cantrip menu → {}",
+            allow_keychain_item(&access.key_id)
+        )),
+        KeychainAuthorization::Unavailable => {
+            Some(deliberately!("Try Keychain access again").to_owned())
+        }
+        KeychainAuthorization::Checking
+        | KeychainAuthorization::Authorizing
+        | KeychainAuthorization::Ready => None,
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn keychain_route(_access: &KeychainAccess) -> Option<String> {
+    None
+}
+
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const PREFERENCE_INTERVAL: Duration = Duration::from_secs(2);
@@ -112,14 +169,18 @@ const SURFACE_WIDTH: u32 = 420;
 const SURFACE_HEIGHT: u32 = 56;
 const CONTAINER_WIDTH: f32 = 336.0;
 const TRACK_HEIGHT: f32 = 44.0;
-// Above the field, the take the instrument shows: the pipeline it snapshotted, in
-// order, and toward a non-default target an upper-left "to <label>" row. That
+// Above the field, the take the instrument shows: toward a non-default target an
+// upper-left "to <label>" row, then the line naming the take's pipeline. That
 // target's color also takes the border, a surface wash and the active field.
-const HEADER_LABEL_SIZE: f32 = 11.0;
-/// One header row, the first of which also clears the field's top edge.
-const HEADER_ROW: f32 = HEADER_LABEL_SIZE + 5.0;
-/// Rows a long pipeline may wrap to before it is shortened with an ellipsis.
-const PIPELINE_ROWS: usize = 2;
+const ROUTE_LABEL_SIZE: f32 = 11.0;
+const ROUTE_ROW: f32 = ROUTE_LABEL_SIZE + 5.0;
+const LINE_SIZE: f32 = 12.0;
+const LINE_ROW: f32 = LINE_SIZE + 5.0;
+/// One cell of a mode glyph, which sits a little taller than the line's capitals.
+const GLYPH_CELL: f32 = 2.0;
+const GLYPH_EXTENT: f32 = modes::GLYPH_SIZE as f32 * GLYPH_CELL;
+/// A waiting stage's light, dimmer than a lit one and brighter than the field at rest.
+const LIGHT_REST: f32 = 0.3;
 const ROUTE_WASH: f32 = 0.12;
 const ROUTE_LABEL_LIFT: f32 = 0.15;
 const CELLS: usize = AUDIO_WAVEFORM_BINS;
@@ -271,30 +332,215 @@ struct ResultView {
     waiting_for_settle: bool,
     /// The outcome's non-default target; the default flow and notices have none.
     route: Option<ipc::Handoff>,
+    /// Says Keychain access that needs the operator; withdrawn once that access
+    /// settles on another answer.
+    keychain: bool,
 }
 
-/// The take named above the field, formatted once per take rather than per
-/// painted frame.
+/// The take named above the field, rebuilt when its pipeline, target or stage
+/// at work changes rather than per painted frame.
 struct Header {
     /// The pipeline the take snapshotted when it started.
     pipeline: Option<PipelineDisplay>,
-    label: String,
+    work: Option<TakeWork>,
+    line: Option<HeaderLine>,
     /// A non-default target, named "to <label>".
     handoff: Option<ipc::Handoff>,
     route: String,
 }
 
 impl Header {
-    fn new(pipeline: Option<&PipelineDisplay>, handoff: Option<&ipc::Handoff>) -> Option<Self> {
+    fn new(
+        pipeline: Option<&PipelineDisplay>,
+        work: Option<TakeWork>,
+        handoff: Option<&ipc::Handoff>,
+    ) -> Option<Self> {
         (pipeline.is_some() || handoff.is_some()).then(|| Self {
-            label: pipeline.map(PipelineDisplay::label).unwrap_or_default(),
+            line: pipeline.map(|pipeline| HeaderLine::new(pipeline, work)),
             pipeline: pipeline.cloned(),
+            work,
             route: handoff
                 .map(|handoff| format!("to {}", handoff.label))
                 .unwrap_or_default(),
             handoff: handoff.cloned(),
         })
     }
+
+    /// Logical height above the field: the target's row and the take's line.
+    /// The first row also clears the field's top edge.
+    fn height(&self) -> f32 {
+        let route = if self.route.is_empty() {
+            0.0
+        } else {
+            ROUTE_ROW
+        };
+        let line = if self.line.is_some() { LINE_ROW } else { 0.0 };
+        route + line - 1.0
+    }
+}
+
+/// What the instrument shows a take doing, as the engine reported it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TakeWork {
+    /// This stage is at work.
+    Step(Step),
+    /// The take is being delivered; `refined` once its refinement was seen
+    /// at work.
+    Delivering { refined: bool },
+}
+
+/// One stage's light while its take is at work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Light {
+    Done,
+    AtWork,
+    Waiting,
+}
+
+/// The line naming a take: its mode's glyph and name; its promise, or while it
+/// is at work each stage's light and the stage at work; and at the right end
+/// where it goes, each provider lit while it receives the take.
+#[derive(Debug, PartialEq)]
+struct HeaderLine {
+    mode: Mode,
+    name: &'static str,
+    /// " · expert rewrite".
+    promise: String,
+    lights: Vec<Light>,
+    working: Option<&'static str>,
+    /// "on this Mac", or "↗ " then each provider, with whether it is lit.
+    privacy: Vec<(String, bool)>,
+}
+
+impl HeaderLine {
+    fn new(pipeline: &PipelineDisplay, work: Option<TakeWork>) -> Self {
+        let view = ModeView::new(pipeline);
+        let steps = view.steps();
+        let (lights, working, sending) = match work {
+            None => (Vec::new(), None, None),
+            Some(TakeWork::Step(step)) => {
+                let at = steps.iter().position(|candidate| *candidate == step);
+                let lights = (0..steps.len())
+                    .map(|index| match at {
+                        Some(at) if index < at => Light::Done,
+                        Some(at) if index == at => Light::AtWork,
+                        _ => Light::Waiting,
+                    })
+                    .collect();
+                (lights, Some(step.working()), Some(step))
+            }
+            Some(TakeWork::Delivering { refined }) => {
+                let lights = steps
+                    .iter()
+                    .map(|step| {
+                        if *step != Step::Refine || refined {
+                            Light::Done
+                        } else {
+                            Light::Waiting
+                        }
+                    })
+                    .collect();
+                (lights, Some("delivering…"), None)
+            }
+        };
+        let providers = view.providers();
+        let privacy = if providers.is_empty() {
+            vec![(format!("on {}", modes::THIS_DEVICE), false)]
+        } else {
+            let lit = |place: &Place| sending.is_some_and(|step| view.sends(step, place));
+            let mut spans = vec![("↗ ".to_owned(), providers.iter().any(lit))];
+            for (index, place) in providers.iter().enumerate() {
+                if index > 0 {
+                    spans.push((", ".to_owned(), false));
+                }
+                spans.push((place.name().into_owned(), lit(place)));
+            }
+            spans
+        };
+        Self {
+            mode: view.mode(),
+            name: view.name(),
+            promise: format!(" · {}", modes::promise(view.mode()).to_lowercase()),
+            lights,
+            working,
+            privacy,
+        }
+    }
+}
+
+/// What a header line shows in its middle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Middle {
+    Nothing,
+    Promise,
+    Working { lights: bool },
+}
+
+/// The parts of a header line that fit, in priority order: the glyph and mode,
+/// shortened only on a surface too narrow for its name; then where the take
+/// goes, shortened only if it must be; then the stage at work and its lights,
+/// or the promise.
+#[derive(Debug, PartialEq)]
+struct LineFit {
+    /// Characters of the mode's name shown, the last an ellipsis when short.
+    name: usize,
+    middle: Middle,
+    /// Characters of the privacy cue shown, the last an ellipsis when short.
+    privacy: usize,
+}
+
+impl LineFit {
+    fn new(line: &HeaderLine, advance: f32, width: f32) -> Self {
+        let span = |text: &str| text.chars().count() as f32 * advance;
+        let characters = |room: f32| (room / advance).floor().max(0.0) as usize;
+        let name = line
+            .name
+            .chars()
+            .count()
+            .min(characters(width - GLYPH_EXTENT - advance));
+        let lead = GLYPH_EXTENT + advance + name as f32 * advance;
+        let gap = 2.0 * advance;
+        let privacy: usize = line
+            .privacy
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .sum();
+        let privacy = privacy.min(characters(width - lead - gap));
+        let free = width - lead - gap - privacy as f32 * advance;
+        let middle = match line.working {
+            None if span(&line.promise) <= free => Middle::Promise,
+            None => Middle::Nothing,
+            Some(working) => {
+                let word = advance + span(working);
+                if line.lights.len() > 1 && word + lights_width(line.lights.len()) <= free {
+                    Middle::Working { lights: true }
+                } else if word <= free {
+                    Middle::Working { lights: false }
+                } else {
+                    Middle::Nothing
+                }
+            }
+        };
+        Self {
+            name,
+            middle,
+            privacy,
+        }
+    }
+}
+
+/// `text`'s first `shown` characters, the last an ellipsis when that is fewer
+/// than all of them.
+fn shortened(text: &str, shown: usize) -> impl Iterator<Item = char> + '_ {
+    let short = shown < text.chars().count();
+    text.chars()
+        .take(shown - usize::from(short && shown > 0))
+        .chain((short && shown > 0).then_some('…'))
+}
+
+/// The stage lights' width, with the space after them.
+fn lights_width(count: usize) -> f32 {
+    count as f32 * CELL_PITCH - (CELL_PITCH - CELL_SIZE) + CELL_PITCH
 }
 
 /// What one take's input showed: whether the owner ever measured it, and the
@@ -418,6 +664,11 @@ struct Model {
     header_revision: u64,
     /// The pipeline the watched take snapshotted, kept through its result.
     take_pipeline: Option<PipelineDisplay>,
+    /// The engine reported the watched take's refinement at work.
+    take_refined: bool,
+    /// The owner's last settled Keychain answer, so a recheck that reaches the
+    /// same answer is not said again.
+    keychain: Option<KeychainAccess>,
 }
 
 impl Model {
@@ -448,6 +699,8 @@ impl Model {
             header: None,
             header_revision: 0,
             take_pipeline: None,
+            take_refined: false,
+            keychain: None,
         }
     }
 
@@ -501,8 +754,12 @@ impl Model {
             self.result = None;
             self.interaction = None;
             self.elapsed_value = None;
+            self.take_refined = false;
         } else if phase_changed {
             self.phase_since = now;
+        }
+        if active && status.stage == Some(Stage::CleaningUp) {
+            self.take_refined = true;
         }
         if active {
             self.result = None;
@@ -555,12 +812,13 @@ impl Model {
                     self.result = Some(result);
                 }
             }
+            // A shown attention outcome names only the actions available now:
+            // its routes follow the owner's capabilities and Keychain access.
             if !fresh
                 && attention_outcome(outcome)
-                && self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|old| old.capabilities != status.capabilities)
+                && self.snapshot.as_ref().is_some_and(|old| {
+                    old.capabilities != status.capabilities || old.keychain != status.keychain
+                })
             {
                 if let Some(result) = &mut self.result {
                     if result.event_id == Some(outcome.event_id) {
@@ -604,7 +862,46 @@ impl Model {
                 presented: false,
                 waiting_for_settle: false,
                 route: None,
+                keychain: false,
             });
+        }
+        // Keychain access is said once each time it settles on an answer that
+        // needs the operator: at launch, after a mode change or reload, or after
+        // the operator answers its prompt. A recheck reaching the same answer
+        // says nothing, and a take or a result already shown says it instead.
+        if epoch_changed {
+            self.keychain = None;
+        }
+        let checking = status
+            .keychain
+            .as_ref()
+            .is_some_and(|access| access.authorization == KeychainAuthorization::Checking);
+        if !checking && self.keychain != status.keychain {
+            self.keychain = status.keychain.clone();
+            if self.result.as_ref().is_some_and(|result| result.keychain) {
+                self.result = None;
+            }
+            if !active && self.result.is_none() {
+                if let Some(caption) = status.keychain.as_ref().and_then(keychain_notice) {
+                    let dwell = ATTENTION_HOLD
+                        + if self.reduced_motion {
+                            Duration::ZERO
+                        } else {
+                            RESULT_FADE
+                        };
+                    self.result = Some(ResultView {
+                        event_id: None,
+                        kind: Kind::Attention,
+                        caption,
+                        visibility: Visibility(now + dwell),
+                        dwell,
+                        presented: false,
+                        waiting_for_settle: false,
+                        route: None,
+                        keychain: true,
+                    });
+                }
+            }
         }
         if status.notice.is_none() {
             self.interaction = None;
@@ -626,11 +923,11 @@ impl Model {
     }
 
     /// The header names only the take on the instrument: while it records or
-    /// processes, its snapshotted pipeline and any non-default target; then its
-    /// outcome's target, and its pipeline while that outcome is the one shown. An
-    /// idle engine reports the configured default, which never relabels a take.
-    /// Reconciled on every refresh so an expiring result cannot leave its tint or
-    /// label on later idle feedback.
+    /// processes, its snapshotted pipeline, the stage at work and any
+    /// non-default target; then its outcome's target, and its pipeline while
+    /// that outcome is the one shown. An idle engine reports the configured
+    /// default, which never relabels a take. Reconciled on every refresh so an
+    /// expiring result cannot leave its tint or label on later idle feedback.
     fn sync_header(&mut self) {
         let active = self.active();
         if active {
@@ -646,6 +943,7 @@ impl Model {
                 .as_ref()
                 .is_some_and(|result| self.outcome_of_take(result));
         let pipeline = self.take_pipeline.as_ref().filter(|_| shown);
+        let work = pipeline.and(self.take_work());
         let handoff = if active {
             self.snapshot
                 .as_ref()
@@ -655,12 +953,39 @@ impl Model {
                 .as_ref()
                 .and_then(|result| result.route.as_ref())
         };
-        let current = self.header.as_ref().map_or((None, None), |header| {
-            (header.pipeline.as_ref(), header.handoff.as_ref())
+        let current = self.header.as_ref().map_or((None, None, None), |header| {
+            (
+                header.pipeline.as_ref(),
+                header.work,
+                header.handoff.as_ref(),
+            )
         });
-        if current != (pipeline, handoff) {
-            self.header = Header::new(pipeline, handoff);
+        if current != (pipeline, work, handoff) {
+            self.header = Header::new(pipeline, work, handoff);
             self.header_revision = self.header_revision.wrapping_add(1);
+        }
+    }
+
+    /// What the instrument shows its take doing while the engine processes
+    /// it: the work phase it presents, or while no presentation paces the work,
+    /// the stage the engine reports. A finished take is at rest, and finishing
+    /// the recording is not yet a stage of the pipeline.
+    fn take_work(&self) -> Option<TakeWork> {
+        let status = self
+            .snapshot
+            .as_ref()
+            .filter(|status| status.state == StateKind::Processing)?;
+        let phase = match &self.work {
+            Some(work) => work.phase,
+            None => WorkPhase::from_stage(status.stage.as_ref())?,
+        };
+        match phase {
+            WorkPhase::Finalizing => None,
+            WorkPhase::Transcribing => Some(TakeWork::Step(Step::Transcribe)),
+            WorkPhase::Cleaning => Some(TakeWork::Step(Step::Refine)),
+            WorkPhase::Delivering => Some(TakeWork::Delivering {
+                refined: self.take_refined,
+            }),
         }
     }
 
@@ -766,7 +1091,10 @@ impl Model {
                 return;
             }
         }
-        if self.present_work(now) {
+        let presenting = self.present_work(now);
+        // Presenting the work may have advanced or ended its stage.
+        self.sync_header();
+        if presenting {
             return;
         }
         let Some(status) = &self.snapshot else {
@@ -862,6 +1190,10 @@ impl Model {
                     let kind = result.kind;
                     let caption = result.caption.clone();
                     self.set_composition(Some(kind), caption, None, None, now);
+                } else if let Some(caption) = status.keychain.as_ref().and_then(keychain_waiting) {
+                    // The menu closed on its choice; until the operator answers
+                    // the native prompt, say what its buttons mean for takes.
+                    self.set_composition(Some(Kind::Neutral), caption, None, None, now);
                 } else if self.interaction.is_some() {
                     self.set_composition(Some(Kind::Neutral), Caption::default(), None, None, now);
                 } else {
@@ -898,7 +1230,7 @@ impl Model {
                         outcome.delivery,
                         Delivery::Typed | Delivery::Pasted | Delivery::Copied | Delivery::HandedOff
                     )
-                    && outcome.cleanup != Cleanup::Failed
+                    && !matches!(outcome.cleanup, Cleanup::Failed | Cleanup::KeychainPending)
             });
         if self.reduced_motion || phase.is_none() && !successful {
             self.work = None;
@@ -1177,7 +1509,7 @@ fn attention_outcome(outcome: &TerminalOutcome) -> bool {
     ) || matches!(
         outcome.delivery,
         Delivery::Failed | Delivery::Uncertain | Delivery::Deferred
-    ))
+    ) || outcome.cleanup == Cleanup::KeychainPending)
 }
 
 /// The owner's capture guidance in HUD words: its sentence naming the input,
@@ -1196,6 +1528,54 @@ fn guidance_caption(guidance: &CaptureGuidance) -> Caption {
     }
 }
 
+/// What a take kept when cleanup did not run: the alias-corrected text, or
+/// the original when no alias changed it, copied or sent.
+fn kept_text(outcome: &TerminalOutcome) -> &'static str {
+    match (
+        outcome.delivery == Delivery::Copied,
+        outcome.alias_substitutions > 0,
+    ) {
+        (true, true) => "Alias-corrected text copied.",
+        (false, true) => "Alias-corrected text sent.",
+        (true, false) => "Original text copied.",
+        (false, false) => "Original text sent.",
+    }
+}
+
+/// Keychain access said once it settles needing the operator: why takes skip
+/// cleanup, and the menu item that fixes it. Checking and Ready say nothing,
+/// and the wait for an open prompt is live instead.
+fn keychain_notice(access: &KeychainAccess) -> Option<Caption> {
+    let (title, detail) = match access.authorization {
+        KeychainAuthorization::NeedsAuthorization => (
+            "Keychain access not yet allowed".to_owned(),
+            "Takes skip cleanup until you allow it.",
+        ),
+        KeychainAuthorization::Unavailable => (
+            keychain_unavailable(&access.key_id),
+            "Takes skip cleanup until it’s available.",
+        ),
+        KeychainAuthorization::Checking
+        | KeychainAuthorization::Authorizing
+        | KeychainAuthorization::Ready => return None,
+    };
+    Some(Caption {
+        title,
+        detail: detail.to_owned(),
+        action: keychain_route(access).unwrap_or_default(),
+    })
+}
+
+/// While the owner waits on the native prompt the operator chose from the
+/// menu, which has closed by then: what the prompt's buttons mean for takes.
+fn keychain_waiting(access: &KeychainAccess) -> Option<Caption> {
+    (access.authorization == KeychainAuthorization::Authorizing).then(|| Caption {
+        title: KEYCHAIN_WAITING.to_owned(),
+        detail: KEYCHAIN_BUTTONS.to_owned(),
+        action: String::new(),
+    })
+}
+
 fn present_outcome(
     outcome: &TerminalOutcome,
     status: &StatusSnapshot,
@@ -1208,6 +1588,10 @@ fn present_outcome(
         Delivery::Typed | Delivery::Pasted | Delivery::HandedOff
     );
     let copied = outcome.delivery == Delivery::Copied;
+    // Cleanup that waited for Keychain approval needs the operator even when
+    // its text arrived, so it never settles as success.
+    let keychain_pending = outcome.cleanup == Cleanup::KeychainPending
+        && outcome.completeness != Completeness::Cancelled;
     let mut caption = Caption::default();
     let mut kind = if attention {
         Kind::Attention
@@ -1276,13 +1660,11 @@ fn present_outcome(
         },
     }
     if outcome.cleanup == Cleanup::Failed && (delivered || copied) {
-        caption.title = match (copied, outcome.alias_substitutions > 0) {
-            (true, true) => "Alias-corrected text copied. Cleanup unavailable.",
-            (false, true) => "Alias-corrected text sent. Cleanup unavailable.",
-            (true, false) => "Original text copied. Cleanup unavailable.",
-            (false, false) => "Original text sent. Cleanup unavailable.",
-        }
-        .to_owned();
+        caption.title = format!("{} Cleanup unavailable.", kept_text(outcome));
+    }
+    if keychain_pending && outcome.completeness == Completeness::Complete && (delivered || copied) {
+        kind = Kind::Attention;
+        caption.title = kept_text(outcome).to_owned();
     }
     if matches!(
         outcome.completeness,
@@ -1385,6 +1767,20 @@ fn present_outcome(
         caption.title = guided.title;
         caption.action = guided.action;
     }
+    // The specific reason cleanup was skipped, and the menu item that allows the
+    // key while the owner still needs it; never the generic cleanup failure.
+    if keychain_pending {
+        if !caption.detail.is_empty() {
+            caption.detail.push('\n');
+        }
+        caption.detail.push_str(KEYCHAIN_PENDING_REASON);
+        if let Some(route) = status.keychain.as_ref().and_then(keychain_route) {
+            if !caption.action.is_empty() {
+                caption.action.push('\n');
+            }
+            caption.action.push_str(&route);
+        }
+    }
     if attention && status.capabilities.dismiss {
         if !caption.action.is_empty() {
             caption.action.push('\n');
@@ -1420,6 +1816,7 @@ fn present_outcome(
             && delivered
             && outcome.cleanup != Cleanup::Failed,
         route: outcome.handoff.clone(),
+        keychain: false,
     }
 }
 
@@ -1808,14 +2205,16 @@ impl Drop for Poller {
 }
 
 /// Run the native HUD surface. Screenshot mode skips IPC and the instance lock
-/// and renders a composed scenario, including deliberately aged transitions.
+/// and renders a composed scenario, including deliberately aged transitions,
+/// for a take in `mode` when one is given.
 pub fn run(
     screenshot: Option<PathBuf>,
     state: Option<ScreenshotState>,
     handoff: Option<String>,
+    mode: Option<Mode>,
 ) -> Result<()> {
     let visual_proof = screenshot.is_some();
-    let result = surface::run_native(screenshot, state, handoff);
+    let result = surface::run_native(screenshot, state, handoff, mode);
     if visual_proof {
         return result;
     }
@@ -1880,14 +2279,20 @@ impl Instrument {
 
     /// A screenshot scenario. A preview handoff is the first target in the live
     /// theme, like a real single configured target.
-    fn preview(state: ScreenshotState, handoff: Option<String>, now: Instant) -> Result<Self> {
+    fn preview(
+        state: ScreenshotState,
+        handoff: Option<String>,
+        mode: Option<Mode>,
+        now: Instant,
+    ) -> Result<Self> {
         let palette = theme::load();
         let handoff = handoff.map(|label| ipc::Handoff {
             name: label.to_lowercase(),
             color: palette.target(0),
             label,
         });
-        Self::with_model(screenshot_model(state, now, handoff.as_ref()), palette, now)
+        let model = screenshot_model(state, now, handoff.as_ref(), mode);
+        Self::with_model(model, palette, now)
     }
 
     /// Fold queued status readings and the stale-status clock into the model.
@@ -2055,7 +2460,7 @@ impl Canvas<'_> {
             Kind::Attention => palette.attention,
             Kind::Neutral => palette.foreground,
         };
-        // The target in its own color, then the take's pipeline in the text color.
+        // The target in its own color, then the line naming the take.
         let track_top = match header {
             Some(header) => {
                 let width = header_width(container_width);
@@ -2068,22 +2473,15 @@ impl Canvas<'_> {
                         left + 10.0,
                         y,
                         width,
-                        HEADER_LABEL_SIZE,
+                        ROUTE_LABEL_SIZE,
                         1,
                         palette.legible(ink),
                     );
                 }
-                self.text(
-                    font,
-                    &header.label,
-                    left + 10.0,
-                    y,
-                    width,
-                    HEADER_LABEL_SIZE,
-                    PIPELINE_ROWS,
-                    palette.foreground,
-                );
-                top + header_height(Some(header), font, container_width)
+                if let Some(line) = &header.line {
+                    self.header_line(font, line, left + 10.0, y, width, palette, active);
+                }
+                top + header.height()
             }
             None => top,
         };
@@ -2242,9 +2640,6 @@ impl Canvas<'_> {
         rgb: [u8; 3],
     ) -> f32 {
         let max_chars = line_capacity(font, width, size);
-        let font_size = size * self.scale;
-        let scaled = font.as_scaled(font_size);
-        let advance = scaled.h_advance(font.glyph_id('M'));
         let mut remaining = text.trim();
         let mut rows = 0;
         for row in 0..max_lines {
@@ -2259,27 +2654,185 @@ impl Canvas<'_> {
             } else {
                 max_chars
             };
-            let mut cursor = x * self.scale;
-            let baseline = (y + row as f32 * (size + 5.0)) * self.scale + scaled.ascent();
-            for character in line.chars().take(limit).chain(truncated.then_some('…')) {
-                let glyph = font
-                    .glyph_id(character)
-                    .with_scale_and_position(font_size, point(cursor, baseline));
-                if let Some(outlined) = font.outline_glyph(glyph) {
-                    let bounds = outlined.px_bounds();
-                    outlined.draw(|gx, gy, coverage| {
-                        let px = bounds.min.x as i32 + gx as i32;
-                        let py = bounds.min.y as i32 + gy as i32;
-                        if px >= 0 && py >= 0 {
-                            self.pixel(px as u32, py as u32, rgb, coverage);
-                        }
-                    });
-                }
-                cursor += advance;
-            }
+            let characters = line.chars().take(limit).chain(truncated.then_some('…'));
+            self.run(
+                font,
+                characters,
+                x,
+                y + row as f32 * (size + 5.0),
+                size,
+                rgb,
+            );
             rows += 1;
         }
         rows as f32 * (size + 5.0)
+    }
+
+    /// Draw `characters` one advance apart from `x` on the line whose top is
+    /// `y`, without wrapping; return the logical width they take.
+    fn run(
+        &mut self,
+        font: &FontRef<'_>,
+        characters: impl IntoIterator<Item = char>,
+        x: f32,
+        y: f32,
+        size: f32,
+        rgb: [u8; 3],
+    ) -> f32 {
+        lay_out(font, characters, [x, y], size, self.scale, |outlined| {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bounds.min.x as i32 + gx as i32;
+                let py = bounds.min.y as i32 + gy as i32;
+                if px >= 0 && py >= 0 {
+                    self.pixel(px as u32, py as u32, rgb, coverage);
+                }
+            });
+        })
+    }
+
+    /// [`Canvas::run`] in `rgb` as `palette` fits it for its painted pixels:
+    /// anti-aliasing never paints the full ink where strokes fall between
+    /// pixels, so the run's most covered pixel, not the ink, must read at
+    /// 4.5:1 on the surface.
+    #[allow(clippy::too_many_arguments)] // Raster text geometry, font and colors are explicit.
+    fn legible_run(
+        &mut self,
+        font: &FontRef<'_>,
+        characters: impl IntoIterator<Item = char> + Clone,
+        x: f32,
+        y: f32,
+        size: f32,
+        rgb: [u8; 3],
+        palette: Palette,
+    ) -> f32 {
+        let ink = palette.painted(rgb, || {
+            let mut peak: f32 = 0.0;
+            lay_out(
+                font,
+                characters.clone(),
+                [x, y],
+                size,
+                self.scale,
+                |outlined| {
+                    outlined.draw(|_, _, coverage| peak = peak.max(coverage));
+                },
+            );
+            peak.min(1.0)
+        });
+        self.run(font, characters, x, y, size, ink)
+    }
+
+    /// `mode`'s glyph from its top-left corner, each cell on whole pixels.
+    fn glyph(&mut self, mode: Mode, x: f32, y: f32, rgb: [u8; 3]) {
+        let scale = self.scale;
+        let snap = |value: f32| (value * scale).round() / scale;
+        let (x, y) = (snap(x), snap(y));
+        for (column, row) in modes::glyph_cells(mode) {
+            self.aligned_rect(
+                x + column as f32 * GLYPH_CELL,
+                y + row as f32 * GLYPH_CELL,
+                GLYPH_CELL,
+                GLYPH_CELL,
+                rgb,
+                1.0,
+            );
+        }
+    }
+
+    /// The line naming a take, from `x` across `width` points of the row whose
+    /// top is `y`: the glyph and name, the promise or the stage at work, and
+    /// where the take goes against the right edge.
+    #[allow(clippy::too_many_arguments)] // Raster geometry, font and colors are explicit.
+    fn header_line(
+        &mut self,
+        font: &FontRef<'_>,
+        line: &HeaderLine,
+        x: f32,
+        y: f32,
+        width: f32,
+        palette: Palette,
+        active: [u8; 3],
+    ) {
+        let advance = font.as_scaled(LINE_SIZE).h_advance(font.glyph_id('M'));
+        let fit = LineFit::new(line, advance, width);
+        let middle = y + cap_middle(font, LINE_SIZE);
+        let muted = palette.muted();
+        self.glyph(line.mode, x, middle - GLYPH_EXTENT / 2.0, active);
+        let mut cursor = x + GLYPH_EXTENT + advance;
+        let name = shortened(line.name, fit.name);
+        cursor += self.run(font, name, cursor, y, LINE_SIZE, palette.foreground);
+        match fit.middle {
+            Middle::Nothing => {}
+            Middle::Promise => {
+                let promise = line.promise.chars();
+                self.legible_run(font, promise, cursor, y, LINE_SIZE, muted, palette);
+            }
+            Middle::Working { lights } => {
+                cursor += advance;
+                if lights {
+                    for (index, light) in line.lights.iter().enumerate() {
+                        let alpha = if *light == Light::Waiting {
+                            LIGHT_REST
+                        } else {
+                            1.0
+                        };
+                        self.aligned_rect(
+                            cursor + index as f32 * CELL_PITCH,
+                            middle - CELL_SIZE / 2.0,
+                            CELL_SIZE,
+                            CELL_SIZE,
+                            active,
+                            alpha,
+                        );
+                    }
+                    cursor += lights_width(line.lights.len());
+                }
+                let working = line.working.unwrap_or_default();
+                self.legible_run(font, working.chars(), cursor, y, LINE_SIZE, active, palette);
+            }
+        }
+        let length: usize = line
+            .privacy
+            .iter()
+            .map(|(text, _)| text.chars().count())
+            .sum();
+        let shortened = fit.privacy < length;
+        let start = x + width - fit.privacy as f32 * advance;
+        // Each span's shown characters, where it starts, and whether it is lit.
+        let spans = || {
+            let mut budget = fit.privacy.saturating_sub(usize::from(shortened));
+            let mut at = start;
+            line.privacy.iter().map(move |(text, lit)| {
+                let shown = text.chars().count().min(budget);
+                budget -= shown;
+                let span = (text.chars().take(shown), at, *lit);
+                at += shown as f32 * advance;
+                span
+            })
+        };
+        // One color per ink across the cue, fitted to the most covered pixel of
+        // every span drawn in it, so the arrow and its provider match.
+        let scale = self.scale;
+        let peak_coverage = |lit: bool| {
+            let mut peak: f32 = 0.0;
+            for (characters, at, _) in spans().filter(|span| span.2 == lit) {
+                lay_out(font, characters, [at, y], LINE_SIZE, scale, |outlined| {
+                    outlined.draw(|_, _, coverage| peak = peak.max(coverage));
+                });
+            }
+            peak.min(1.0)
+        };
+        let lit_ink = palette.painted(active, || peak_coverage(true));
+        let muted_ink = palette.painted(muted, || peak_coverage(false));
+        let mut end = start;
+        for (characters, at, lit) in spans() {
+            let ink = if lit { lit_ink } else { muted_ink };
+            end = at + self.run(font, characters, at, y, LINE_SIZE, ink);
+        }
+        if shortened && fit.privacy > 0 {
+            self.legible_run(font, ['…'], end, y, LINE_SIZE, muted, palette);
+        }
     }
 }
 
@@ -2289,11 +2842,43 @@ fn line_capacity(font: &FontRef<'_>, width: f32, size: f32) -> usize {
         .max(1.0) as usize
 }
 
-fn mix(from: [u8; 3], to: [u8; 3], amount: f32) -> [u8; 3] {
-    std::array::from_fn(|channel| {
-        (f32::from(from[channel]) + (f32::from(to[channel]) - f32::from(from[channel])) * amount)
-            .round() as u8
-    })
+/// Lay `characters` out one advance apart from `x` on the line whose top is
+/// `y`, at `scale`, handing each outlined glyph to `each`; return the logical
+/// width they take. Painting and measuring a run share this layout.
+fn lay_out(
+    font: &FontRef<'_>,
+    characters: impl IntoIterator<Item = char>,
+    [x, y]: [f32; 2],
+    size: f32,
+    scale: f32,
+    mut each: impl FnMut(OutlinedGlyph),
+) -> f32 {
+    let font_size = size * scale;
+    let scaled = font.as_scaled(font_size);
+    let advance = scaled.h_advance(font.glyph_id('M'));
+    let baseline = y * scale + scaled.ascent();
+    let start = x * scale;
+    let mut cursor = start;
+    for character in characters {
+        let glyph = font
+            .glyph_id(character)
+            .with_scale_and_position(font_size, point(cursor, baseline));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            each(outlined);
+        }
+        cursor += advance;
+    }
+    (cursor - start) / scale
+}
+
+/// How far below a line's top the middle of its capitals sits.
+fn cap_middle(font: &FontRef<'_>, size: f32) -> f32 {
+    let scaled = font.as_scaled(size);
+    // Unscaled outline bounds run from the cap top (min.y) down to the baseline.
+    let capital = font.outline(font.glyph_id('H')).map_or(0.0, |outline| {
+        (outline.bounds.min.y + outline.bounds.max.y) / 2.0
+    });
+    scaled.ascent() - capital * scaled.v_scale_factor()
 }
 
 fn wrap_line(text: &str, max_chars: usize) -> (&str, &str) {
@@ -2328,21 +2913,12 @@ fn layout_height(model: &Model, font: &FontRef<'_>, container_width: f32) -> u32
     let text_width = (container_width - 32.0).max(16.0);
     let interaction = model.interaction.as_ref().map(|(text, _)| text.as_str());
     SURFACE_HEIGHT
-        + header_height(model.header.as_ref(), font, container_width) as u32
+        + header_height(model.header.as_ref()) as u32
         + caption_height(font, &model.caption, interaction, text_width)
 }
 
-/// The header's logical height above the field: the target's row and the rows
-/// the pipeline wraps to. One row clears the field's top edge as a lone target
-/// row always has.
-fn header_height(header: Option<&Header>, font: &FontRef<'_>, container_width: f32) -> f32 {
-    let Some(header) = header else {
-        return 0.0;
-    };
-    let width = header_width(container_width);
-    let rows = text_rows(font, &header.route, width, HEADER_LABEL_SIZE, 1)
-        + text_rows(font, &header.label, width, HEADER_LABEL_SIZE, PIPELINE_ROWS);
-    rows as f32 * HEADER_ROW - 1.0
+fn header_height(header: Option<&Header>) -> f32 {
+    header.map_or(0.0, Header::height)
 }
 
 fn header_width(container_width: f32) -> f32 {
@@ -2445,6 +3021,7 @@ pub enum ScreenshotState {
     Copied,
     CopiedInstead,
     CleanupFallback,
+    KeychainPending,
     Empty,
     EmptySaved,
     Failed,
@@ -2516,6 +3093,7 @@ pub(crate) fn preview_snapshot(state: StateKind) -> StatusSnapshot {
         // An idle engine reports its configured default; a take, what it started with.
         pipeline: Some(preview_pipeline(mode, None)),
         microphone: None,
+        keychain: None,
         capture_guidance: None,
     }
 }
@@ -2537,8 +3115,8 @@ pub(crate) fn preview_outcome(completeness: Completeness, delivery: Delivery) ->
     }
 }
 
-/// A pipeline as the engine reports it: local Parakeet, or a cloud recognizer by
-/// model, then aliases and the mode's model.
+/// A pipeline as the engine reports it: local Parakeet, or a cloud recognizer at
+/// OpenAI by model; two vocabulary spellings; then the mode's model at OpenRouter.
 fn preview_pipeline(mode: Mode, cloud_stt: Option<&str>) -> PipelineDisplay {
     PipelineDisplay {
         mode,
@@ -2546,29 +3124,50 @@ fn preview_pipeline(mode: Mode, cloud_stt: Option<&str>) -> PipelineDisplay {
             .unwrap_or(cantrip_engine::models::PARAKEET_V3_INT8.dir_name)
             .to_owned(),
         stt_local: cloud_stt.is_none(),
+        stt_host: cloud_stt.map(|_| "api.openai.com".to_owned()),
         llm_model: (mode != Mode::Raw).then(|| "openai/gpt-6.1-sol".to_owned()),
+        llm_hosts: if mode == Mode::Raw {
+            Vec::new()
+        } else {
+            vec!["openrouter.ai".to_owned()]
+        },
+        spellings: 2,
     }
 }
 
-/// What each composed take started with: Elevate, except the Clean a recovered
-/// take recorded, Clean behind cloud recognition, and Raw for a plain copy.
-fn screenshot_pipeline(state: ScreenshotState) -> PipelineDisplay {
-    match state {
-        ScreenshotState::Recovery => preview_pipeline(Mode::Clean, None),
+/// What each composed take started with: `mode` when given, else Elevate,
+/// except the Clean a recovered take recorded, Clean behind cloud recognition
+/// or while cleanup waits for Keychain approval, and Raw for a plain copy.
+/// Cloud scenarios keep their cloud recognizer.
+fn screenshot_pipeline(state: ScreenshotState, mode: Option<Mode>) -> PipelineDisplay {
+    let cloud = matches!(
+        state,
         ScreenshotState::CloudRecovered
-        | ScreenshotState::CloudPartial
-        | ScreenshotState::CloudPayment
-        | ScreenshotState::CloudBudget
-        | ScreenshotState::CloudConnection => {
-            preview_pipeline(Mode::Clean, Some("gpt-4o-mini-transcribe"))
-        }
-        ScreenshotState::Copied => preview_pipeline(Mode::Raw, None),
-        _ => preview_pipeline(Mode::Elevate, None),
-    }
+            | ScreenshotState::CloudPartial
+            | ScreenshotState::CloudPayment
+            | ScreenshotState::CloudBudget
+            | ScreenshotState::CloudConnection
+    );
+    let fixture = match state {
+        ScreenshotState::Copied => Mode::Raw,
+        ScreenshotState::Recovery | ScreenshotState::KeychainPending => Mode::Clean,
+        _ if cloud => Mode::Clean,
+        _ => Mode::Elevate,
+    };
+    preview_pipeline(
+        mode.unwrap_or(fixture),
+        cloud.then_some("gpt-4o-mini-transcribe"),
+    )
 }
 
-/// `handoff` composes the same scenario for a take headed to that target.
-fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::Handoff>) -> Model {
+/// `handoff` composes the same scenario for a take headed to that target, and
+/// `mode` for a take in that mode.
+fn screenshot_model(
+    state: ScreenshotState,
+    now: Instant,
+    handoff: Option<&ipc::Handoff>,
+    mode: Option<Mode>,
+) -> Model {
     let start = now - Duration::from_secs(3);
     let mut model = Model::new(start);
     model.apply(preview_snapshot(StateKind::Idle), start);
@@ -2636,7 +3235,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
         _ => {}
     }
     recording.handoff = handoff.cloned();
-    recording.pipeline = Some(screenshot_pipeline(state));
+    recording.pipeline = Some(screenshot_pipeline(state, mode));
     model.apply(recording, start);
     model.track.presented = model.track.frame(now);
     if matches!(
@@ -2740,7 +3339,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
         _ => now - Duration::from_secs(2),
     };
     processing.handoff = handoff.cloned();
-    processing.pipeline = Some(screenshot_pipeline(state));
+    processing.pipeline = Some(screenshot_pipeline(state, mode));
     model.apply(processing, processing_at);
     if state == ScreenshotState::Settling {
         model.track.presented = model.frame(now);
@@ -2786,15 +3385,15 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
         ScreenshotState::DeliveryUncertain => (Completeness::Complete, Delivery::Uncertain),
         ScreenshotState::Deferred => (Completeness::Complete, Delivery::Deferred),
         ScreenshotState::Cancelled => (Completeness::Cancelled, Delivery::Cancelled),
-        ScreenshotState::Copied | ScreenshotState::CopiedInstead => {
-            (Completeness::Complete, Delivery::Copied)
-        }
+        ScreenshotState::Copied
+        | ScreenshotState::CopiedInstead
+        | ScreenshotState::KeychainPending => (Completeness::Complete, Delivery::Copied),
         _ if handoff.is_some() => (Completeness::Complete, Delivery::HandedOff),
         _ => (Completeness::Complete, Delivery::Pasted),
     };
     let mut outcome = preview_outcome(completeness, delivery);
     outcome.message = match state {
-        ScreenshotState::Copied => "Copied. Paste when ready.",
+        ScreenshotState::Copied | ScreenshotState::KeychainPending => "Copied. Paste when ready.",
         ScreenshotState::CopiedInstead => "Copied instead. Paste when ready.",
         ScreenshotState::SetupMissing => "Local model unavailable — run: cantrip models pull",
         ScreenshotState::StorageFailed => "Transcription failed. Audio could not be saved.",
@@ -2849,6 +3448,17 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
     if state == ScreenshotState::CleanupFallback {
         outcome.cleanup = Cleanup::Failed;
     }
+    if state == ScreenshotState::KeychainPending {
+        // The daemon's message for alias-corrected text copied while cleanup
+        // waited for Keychain approval.
+        outcome.cleanup = Cleanup::KeychainPending;
+        outcome.alias_substitutions = 1;
+        outcome.error = Some("cleanup-keychain-pending".to_owned());
+        outcome.message = format!(
+            "{} {KEYCHAIN_PENDING_REASON} Alias-corrected text was used.",
+            outcome.message
+        );
+    }
     if state == ScreenshotState::Dismissed {
         outcome.dismissed = true;
     }
@@ -2856,6 +3466,12 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
     idle.hud.reduced_motion = Some(reduced);
     idle.pending_recordings = usize::from(outcome.artifacts.audio || outcome.artifacts.text);
     idle.outcome = Some(outcome);
+    if state == ScreenshotState::KeychainPending {
+        idle.keychain = Some(KeychainAccess {
+            key_id: "openrouter".to_owned(),
+            authorization: KeychainAuthorization::NeedsAuthorization,
+        });
+    }
     idle.capabilities.local_model = state != ScreenshotState::SetupMissing;
     let result_at = now
         - if matches!(
@@ -2879,7 +3495,7 @@ fn screenshot_model(state: ScreenshotState, now: Instant, handoff: Option<&ipc::
             waveform: SCREENSHOT_WAVEFORM,
         });
         next.handoff = handoff.cloned();
-        next.pipeline = Some(screenshot_pipeline(state));
+        next.pipeline = Some(screenshot_pipeline(state, mode));
         model.apply(next, now - Duration::from_millis(180));
     }
     let mut at = if state == ScreenshotState::Interrupted {
@@ -3110,8 +3726,8 @@ mod tests {
             ScreenshotState::DeliveryFailed,
             ScreenshotState::Cancelled,
         ] {
-            let default = screenshot_model(state, now, None);
-            let routed = screenshot_model(state, now, Some(&kaylee));
+            let default = screenshot_model(state, now, None, None);
+            let routed = screenshot_model(state, now, Some(&kaylee), None);
             let target = |model: &Model| {
                 model
                     .header
@@ -3125,23 +3741,23 @@ mod tests {
                 Some("to Kaylee"),
                 "{state:?}"
             );
-            // The target's row sits above the same pipeline.
+            // The target's row sits above the same line.
             assert_eq!(
                 layout_height(&routed, &font, CONTAINER_WIDTH),
-                layout_height(&default, &font, CONTAINER_WIDTH) + HEADER_ROW as u32,
+                layout_height(&default, &font, CONTAINER_WIDTH) + ROUTE_ROW as u32,
                 "{state:?}"
             );
             assert_eq!(border(&default), [0, 255, 0], "{state:?}");
             assert_eq!(border(&routed), kaylee.color, "{state:?}");
         }
         // An expiring Kaylee result must not leave its tint or label on later idle feedback.
-        let mut model = screenshot_model(ScreenshotState::Cancelled, now, Some(&kaylee));
+        let mut model = screenshot_model(ScreenshotState::Cancelled, now, Some(&kaylee), None);
         model.interaction = Some(("Nothing is recording.".to_owned(), now + NOTICE_HOLD * 3));
         model.refresh(now + NOTICE_HOLD * 2);
         assert!(model.result.is_none());
         assert!(model.header.is_none());
         // A Kaylee failure must not tint the next default take.
-        let mut model = screenshot_model(ScreenshotState::DeliveryFailed, now, Some(&kaylee));
+        let mut model = screenshot_model(ScreenshotState::DeliveryFailed, now, Some(&kaylee), None);
         let mut next = recording(0, Some(signal(true)));
         next.operation_id = Some("next-default-take".to_owned());
         model.apply(next, now + Duration::from_secs(1));
@@ -3155,8 +3771,13 @@ mod tests {
     #[test]
     fn a_take_is_named_by_the_pipeline_it_started_with_never_the_default() {
         let now = Instant::now();
-        let label = |model: &Model| model.header.as_ref().map(|header| header.label.clone());
-        let elevate = Some(preview_pipeline(Mode::Elevate, None).label());
+        let named = |model: &Model| {
+            model
+                .header
+                .as_ref()
+                .and_then(|header| header.line.as_ref())
+                .map(|line| line.name)
+        };
         // Recording, processing and the take's own outcome name the pipeline it
         // started with, while the idle engine already reports a Raw default.
         for state in [
@@ -3166,20 +3787,25 @@ mod tests {
             ScreenshotState::DeliveryFailed,
         ] {
             assert_eq!(
-                label(&screenshot_model(state, now, None)),
-                elevate,
+                named(&screenshot_model(state, now, None, None)),
+                Some("Elevate"),
                 "{state:?}"
             );
         }
         // A recovery runs the mode its recording was made with.
         assert_eq!(
-            label(&screenshot_model(ScreenshotState::Recovery, now, None)),
-            Some(preview_pipeline(Mode::Clean, None).label())
+            named(&screenshot_model(
+                ScreenshotState::Recovery,
+                now,
+                None,
+                None
+            )),
+            Some("Clean")
         );
         // Idle and removing saved audio run no pipeline.
         for state in [ScreenshotState::Idle, ScreenshotState::RemovingRecording] {
             assert_eq!(
-                label(&screenshot_model(state, now, None)),
+                named(&screenshot_model(state, now, None, None)),
                 None,
                 "{state:?}"
             );
@@ -3191,10 +3817,158 @@ mod tests {
         model.apply(take, now);
         assert!(model.header.is_none());
         // The name leaves with the take's outcome.
-        let mut model = screenshot_model(ScreenshotState::Cancelled, now, None);
-        assert_eq!(label(&model), elevate);
+        let mut model = screenshot_model(ScreenshotState::Cancelled, now, None, None);
+        assert_eq!(named(&model), Some("Elevate"));
         model.refresh(now + NOTICE_HOLD * 2);
         assert!(model.result.is_none() && model.header.is_none());
+    }
+
+    #[test]
+    fn the_line_lights_each_stage_the_engine_reports_and_where_it_sends_the_take() {
+        let now = Instant::now();
+        let line = |model: &Model| {
+            let line = model
+                .header
+                .as_ref()
+                .and_then(|header| header.line.as_ref());
+            let line = line.expect("the take is named");
+            let lit: Vec<_> = line
+                .privacy
+                .iter()
+                .filter(|(_, lit)| *lit)
+                .map(|(text, _)| text.as_str())
+                .collect();
+            (line.lights.clone(), line.working, lit.join(""))
+        };
+        let take = |state: StateKind, stage: Option<Stage>, mode: Mode| {
+            let mut status = preview_snapshot(state);
+            status.pipeline = Some(preview_pipeline(mode, None));
+            status.stage = stage;
+            // Without presentation pacing the line follows each report at once.
+            status.hud.reduced_motion = Some(true);
+            status
+        };
+        let transcribing = Stage::Transcribing {
+            completed: 0,
+            total: 1,
+        };
+        let mut model = Model::new(now);
+        model.apply(take(StateKind::Recording, None, Mode::Elevate), now);
+        let at_rest = model
+            .header
+            .as_ref()
+            .and_then(|header| header.line.as_ref());
+        assert_eq!(
+            at_rest.map(|line| (line.promise.as_str(), line.privacy.clone())),
+            Some((
+                " · expert rewrite",
+                vec![("↗ ".to_owned(), false), ("OpenRouter".to_owned(), false)]
+            ))
+        );
+        assert_eq!(line(&model), (Vec::new(), None, String::new()));
+        use Light::{AtWork, Done, Waiting};
+        for (stage, expected) in [
+            (
+                transcribing.clone(),
+                (vec![AtWork, Waiting, Waiting], Some("transcribing…"), ""),
+            ),
+            (
+                Stage::CleaningUp,
+                (vec![Done, Done, AtWork], Some("refining…"), "↗ OpenRouter"),
+            ),
+            (
+                Stage::Delivering,
+                (vec![Done, Done, Done], Some("delivering…"), ""),
+            ),
+        ] {
+            model.apply(
+                take(StateKind::Processing, Some(stage.clone()), Mode::Elevate),
+                now,
+            );
+            let (lights, working, lit) = expected;
+            assert_eq!(line(&model), (lights, working, lit.to_owned()), "{stage:?}");
+        }
+        // A take whose refinement never ran does not show it finished.
+        let mut model = Model::new(now);
+        let mut next = take(StateKind::Processing, Some(transcribing), Mode::Clean);
+        next.operation_id = Some("short-take".to_owned());
+        model.apply(next.clone(), now);
+        next.stage = Some(Stage::Delivering);
+        model.apply(next, now);
+        assert_eq!(
+            line(&model),
+            (
+                vec![Done, Done, Waiting],
+                Some("delivering…"),
+                String::new()
+            )
+        );
+        // Once delivered, the take's line rests while its result shows.
+        let sent = screenshot_model(ScreenshotState::Sent, now, None, None);
+        let rest = sent.header.as_ref().and_then(|header| header.line.as_ref());
+        assert_eq!(
+            rest.map(|line| (line.lights.is_empty(), line.working)),
+            Some((true, None))
+        );
+        // Raw is a single stage, and nothing leaves the device.
+        let mut model = Model::new(now);
+        model.apply(
+            take(StateKind::Processing, Some(Stage::CleaningUp), Mode::Raw),
+            now,
+        );
+        let raw = model
+            .header
+            .as_ref()
+            .and_then(|header| header.line.as_ref());
+        assert_eq!(
+            raw.map(|line| line.privacy.clone()),
+            Some(vec![(format!("on {}", modes::THIS_DEVICE), false)])
+        );
+    }
+
+    #[test]
+    fn the_line_keeps_the_mode_and_where_it_goes_when_space_runs_short() {
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let advance = font.as_scaled(LINE_SIZE).h_advance(font.glyph_id('M'));
+        let pipeline = preview_pipeline(Mode::Elevate, None);
+        let resting = HeaderLine::new(&pipeline, None);
+        let working = HeaderLine::new(&pipeline, Some(TakeWork::Step(Step::Refine)));
+        let privacy = "↗ OpenRouter".chars().count();
+        // A width of the glyph, its space, then whole characters and a half.
+        let width = |characters: f32| GLYPH_EXTENT + advance * (characters + 0.5);
+        let fit = |line: &HeaderLine, width: f32| LineFit::new(line, advance, width);
+        let full = header_width(CONTAINER_WIDTH);
+        let everything = |middle| LineFit {
+            name: 7,
+            middle,
+            privacy,
+        };
+        assert_eq!(fit(&resting, full), everything(Middle::Promise));
+        assert_eq!(
+            fit(&working, full),
+            everything(Middle::Working { lights: true })
+        );
+        // Narrower, the promise and then the stage lights give way first: the
+        // space, "Elevate", a gap of two, where it goes and eleven to spare.
+        let narrow = width(1.0 + 7.0 + 2.0 + privacy as f32 + 11.0);
+        assert_eq!(fit(&resting, narrow), everything(Middle::Nothing));
+        assert_eq!(
+            fit(&working, narrow),
+            everything(Middle::Working { lights: false })
+        );
+        // Narrower still, the destination shortens but the mode stays whole.
+        assert_eq!(
+            fit(&working, width(1.0 + 7.0 + 2.0 + 5.0)),
+            LineFit {
+                name: 7,
+                middle: Middle::Nothing,
+                privacy: 5
+            }
+        );
+        // Only a surface too narrow for the name shortens it.
+        assert_eq!(fit(&working, width(1.0 + 4.0)).name, 4);
+        assert_eq!(shortened("Elevate", 4).collect::<String>(), "Ele…");
+        assert_eq!(shortened("Elevate", 7).collect::<String>(), "Elevate");
     }
 
     /// AppKit's Light and Dark palettes, resolved as the panel resolves its
@@ -3242,12 +4016,85 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn the_take_line_reads_at_4_5_to_1_as_painted() {
+        use crate::theme::contrast_ratio;
+        let now = Instant::now();
+        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
+        let advance = font.as_scaled(LINE_SIZE).h_advance(font.glyph_id('M'));
+        let width = header_width(CONTAINER_WIDTH);
+        for (palette, _) in appkit_palettes() {
+            let surface = palette.surface;
+            for (state, mode) in [
+                (ScreenshotState::Recording, Mode::Raw),
+                (ScreenshotState::Recording, Mode::Elevate),
+                (ScreenshotState::Transcribing, Mode::Clean),
+                (ScreenshotState::Cleaning, Mode::Clean),
+                (ScreenshotState::Cleaning, Mode::Elevate),
+            ] {
+                let model = screenshot_model(state, now, None, Some(mode));
+                let header = model.header.as_ref();
+                let line = header
+                    .and_then(|header| header.line.as_ref())
+                    .expect("a take line");
+                let (bytes, [left, top, _, _]) = painted(&model, palette, now);
+                // Anti-aliasing paints the full ink only where a stroke covers
+                // whole pixels: each run's most contrasting pixel must read.
+                let rows = top + 5..top + header_height(header) as u32;
+                let strongest = |from: f32, to: f32| {
+                    (from.floor() as u32..to.ceil() as u32)
+                        .flat_map(|x| rows.clone().map(move |y| (x, y)))
+                        .map(|(x, y)| rgb_at(&bytes, x, y))
+                        .max_by(|a, b| {
+                            contrast_ratio(*a, surface).total_cmp(&contrast_ratio(*b, surface))
+                        })
+                        .unwrap()
+                };
+                // Each run's place, as the line lays them out.
+                let fit = LineFit::new(line, advance, width);
+                let x = left as f32 + 10.0;
+                let name_end = x + GLYPH_EXTENT + advance + fit.name as f32 * advance;
+                let span = |text: &str| text.chars().count() as f32 * advance;
+                let middle = match fit.middle {
+                    Middle::Promise => name_end..name_end + span(&line.promise),
+                    Middle::Working { lights } => {
+                        let lights = if lights {
+                            lights_width(line.lights.len())
+                        } else {
+                            0.0
+                        };
+                        let start = name_end + advance + lights;
+                        start..start + span(line.working.unwrap_or_default())
+                    }
+                    Middle::Nothing => panic!("{state:?} {mode:?} shows no promise or stage"),
+                };
+                let destination = x + width - fit.privacy as f32 * advance..x + width;
+                // The destination is lit while the provider receives the text.
+                let lit = line.privacy.iter().any(|(_, lit)| *lit);
+                assert_eq!(
+                    lit,
+                    state == ScreenshotState::Cleaning,
+                    "{state:?} {mode:?}"
+                );
+                for (part, range) in [("middle", middle), ("destination", destination)] {
+                    let drawn = strongest(range.start, range.end);
+                    let ratio = contrast_ratio(drawn, surface);
+                    assert!(
+                        ratio >= 4.5,
+                        "{state:?} {mode:?} {part}: {drawn:?} on {surface:?} reads {ratio}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn the_default_frame_reaches_3_to_1_on_its_surface_and_the_page() {
         use crate::theme::contrast_ratio;
         let now = Instant::now();
         for (palette, page) in appkit_palettes() {
             for state in [ScreenshotState::Recording, ScreenshotState::DeliveryFailed] {
-                let model = screenshot_model(state, now, None);
+                let model = screenshot_model(state, now, None, None);
                 let (bytes, [left, top, width, body_height]) = painted(&model, palette, now);
                 // The top edge right of any attention rail, and the surface beside the captions.
                 let frame = rgb_at(&bytes, left + 10, top);
@@ -3281,7 +4128,7 @@ mod tests {
                 // Recording lights cells of the field's middle row fully; a failed
                 // handoff draws the attention rail.
                 for state in [ScreenshotState::Recording, ScreenshotState::DeliveryFailed] {
-                    let model = screenshot_model(state, now, Some(&handoff));
+                    let model = screenshot_model(state, now, Some(&handoff), None);
                     let (bytes, [left, top, width, body_height]) = painted(&model, palette, now);
                     let pixel = |x: u32, y: u32| rgb_at(&bytes, x, y);
                     // The wash fills the container beside the captions.
@@ -3296,9 +4143,7 @@ mod tests {
                         };
                         assert!(model.frame(now).columns.iter().any(lit));
                         // The middle row's most contrasting pixel inside the edge: a lit cell.
-                        let font =
-                            FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
-                        let header = header_height(model.header.as_ref(), &font, CONTAINER_WIDTH);
+                        let header = header_height(model.header.as_ref());
                         let middle = top + (header + TRACK_HEIGHT / 2.0) as u32;
                         (left + 1..left + width - 1)
                             .map(|x| pixel(x, middle))
@@ -3319,9 +4164,12 @@ mod tests {
                 // and an interaction notice's divider takes its frame color.
                 let fitted = palette.on_surface(washed);
                 let label = fitted.legible(mix(color, fitted.foreground, ROUTE_LABEL_LIFT));
-                for (drawn, minimum) in
-                    [(fitted.foreground, 4.5), (label, 4.5), (fitted.border, 3.0)]
-                {
+                for (drawn, minimum) in [
+                    (fitted.foreground, 4.5),
+                    (fitted.muted(), 4.5),
+                    (label, 4.5),
+                    (fitted.border, 3.0),
+                ] {
                     let ratio = contrast_ratio(drawn, washed);
                     assert!(
                         ratio >= minimum,
@@ -3332,14 +4180,24 @@ mod tests {
         }
     }
 
-    /// The lit field's bounds above `track_end` logical points from the top.
-    fn grid_bounds(bytes: &[u8], width: u32, scale: f32, track_end: f32) -> [u32; 4] {
+    /// The lit field's bounds between `track_start` and `track_end` logical
+    /// points from the top, below the header naming the take.
+    fn grid_bounds(
+        bytes: &[u8],
+        width: u32,
+        scale: f32,
+        track_start: f32,
+        track_end: f32,
+    ) -> [u32; 4] {
         let mut bounds = [width, u32::MAX, 0, 0];
         for (index, pixel) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let x = index as u32 % width;
             let y = index as u32 / width;
             if y as f32 >= track_end * scale {
                 break;
+            }
+            if (y as f32) < track_start * scale {
+                continue;
             }
             if pixel[0] > 0 && pixel[0] == pixel[1] && pixel[1] == pixel[2] {
                 bounds[0] = bounds[0].min(x);
@@ -3354,24 +4212,29 @@ mod tests {
     #[test]
     fn cleaning_and_success_fill_the_visualization_without_covering_border_or_caption() {
         let now = Instant::now();
-        let font = FontRef::try_from_slice(epaint_default_fonts::HACK_REGULAR).unwrap();
         for state in [
             ScreenshotState::Cleaning,
             ScreenshotState::Sent,
             ScreenshotState::ReducedMotionCleaning,
             ScreenshotState::ReducedMotionSent,
         ] {
-            let mut model = screenshot_model(state, now, None);
+            let mut model = screenshot_model(state, now, None, None);
             let unlabelled = model.caption.clone();
             for width in [80, 240, SURFACE_WIDTH] {
                 for scale in [1.0, 1.25, 2.0] {
                     model.caption = unlabelled.clone();
                     let container = CONTAINER_WIDTH.min(width as f32 - 12.0);
-                    // The field starts below the take's header, however it wraps.
-                    let header = header_height(model.header.as_ref(), &font, container);
+                    // The field's cells start below the line naming the take, whose
+                    // descenders reach into the field's top margin.
+                    let header = header_height(model.header.as_ref());
                     let (plain, physical_width) = raster_hud(&model, now, width, scale);
-                    let bounds =
-                        grid_bounds(&plain, physical_width, scale, 6.0 + header + TRACK_HEIGHT);
+                    let bounds = grid_bounds(
+                        &plain,
+                        physical_width,
+                        scale,
+                        11.0 + header,
+                        6.0 + header + TRACK_HEIGHT,
+                    );
                     let left = ((width as f32 - container) / 2.0 + 6.0) * scale;
                     let right = width as f32 * scale - left;
                     assert!(
@@ -4199,6 +5062,224 @@ mod tests {
                 assert_eq!(view.caption.title, expected);
             }
         }
+    }
+
+    fn keychain_access(authorization: KeychainAuthorization) -> Option<KeychainAccess> {
+        Some(KeychainAccess {
+            key_id: "openrouter".to_owned(),
+            authorization,
+        })
+    }
+
+    /// A take whose cleanup waited for Keychain approval, as the daemon reports it.
+    fn pending_cleanup(delivery: Delivery, substitutions: usize) -> TerminalOutcome {
+        let mut outcome = preview_outcome(Completeness::Complete, delivery);
+        outcome.cleanup = Cleanup::KeychainPending;
+        outcome.alias_substitutions = substitutions;
+        outcome.error = Some("cleanup-keychain-pending".to_owned());
+        let kept = if substitutions > 0 {
+            "Alias-corrected"
+        } else {
+            "Original"
+        };
+        outcome.message =
+            format!("Copied. Paste when ready. {KEYCHAIN_PENDING_REASON} {kept} text was used.");
+        outcome
+    }
+
+    #[test]
+    fn keychain_pending_says_why_cleanup_skipped_and_which_text_arrived() {
+        let now = Instant::now();
+        let mut status = preview_snapshot(StateKind::Idle);
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        for delivery in [
+            Delivery::Copied,
+            Delivery::Typed,
+            Delivery::Pasted,
+            Delivery::HandedOff,
+        ] {
+            for substitutions in [0, 1] {
+                let outcome = pending_cleanup(delivery, substitutions);
+                let view = present_outcome(&outcome, &status, now, false);
+                let expected = match (delivery == Delivery::Copied, substitutions > 0) {
+                    (true, true) => "Alias-corrected text copied.",
+                    (false, true) => "Alias-corrected text sent.",
+                    (true, false) => "Original text copied.",
+                    (false, false) => "Original text sent.",
+                };
+                assert_eq!(view.caption.title, expected);
+                assert_eq!(view.caption.detail, KEYCHAIN_PENDING_REASON);
+                // Text that arrived without its cleanup is never a success.
+                assert_eq!(view.kind, Kind::Attention);
+                assert!(!view.waiting_for_settle);
+                assert_eq!(view.dwell, ATTENTION_HOLD + RESULT_FADE);
+                let caption = format!(
+                    "{} {} {}",
+                    view.caption.title, view.caption.detail, view.caption.action
+                );
+                assert!(!caption.contains("Cleanup unavailable"), "{caption}");
+                assert_eq!(
+                    view.caption
+                        .action
+                        .contains("Cantrip menu → Allow Cantrip to use your OpenRouter key"),
+                    cfg!(target_os = "macos"),
+                    "{caption}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pending_take_names_the_approval_only_while_the_menu_offers_it() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(preview_snapshot(StateKind::Idle), now);
+        let needed = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        // The need settles during a take, which keeps the instrument.
+        let mut take = recording(1, Some(signal(true)));
+        take.keychain = needed.clone();
+        model.apply(take, now + Duration::from_secs(1));
+        assert_eq!(model.kind, Some(Kind::Recording));
+        let mut status = preview_snapshot(StateKind::Idle);
+        status.keychain = needed;
+        status.outcome = Some(pending_cleanup(Delivery::Copied, 1));
+        let finished = now + Duration::from_secs(2);
+        model.apply(status.clone(), finished);
+        let allow = "Cantrip menu → Allow Cantrip to use your OpenRouter key";
+        let retry = "Cantrip menu → Try Keychain access again";
+        for (authorization, route) in [
+            (KeychainAuthorization::NeedsAuthorization, Some(allow)),
+            (KeychainAuthorization::Authorizing, None),
+            (KeychainAuthorization::Unavailable, Some(retry)),
+            (KeychainAuthorization::Checking, None),
+            (KeychainAuthorization::Ready, None),
+        ] {
+            status.keychain = keychain_access(authorization);
+            model.apply(status.clone(), finished + Duration::from_secs(1));
+            assert_eq!(model.kind, Some(Kind::Attention), "{authorization:?}");
+            assert_eq!(model.caption.title, "Alias-corrected text copied.");
+            assert_eq!(model.caption.detail, KEYCHAIN_PENDING_REASON);
+            for candidate in [allow, retry] {
+                assert_eq!(
+                    model.caption.action.contains(candidate),
+                    cfg!(target_os = "macos") && route == Some(candidate),
+                    "{authorization:?}: {}",
+                    model.caption.action
+                );
+            }
+        }
+        // The take said why; once it expires, no second Keychain notice follows.
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        model.apply(status.clone(), finished + Duration::from_secs(2));
+        model.apply(status, finished + ATTENTION_HOLD + RESULT_FADE);
+        assert!(model.kind.is_none());
+    }
+
+    #[test]
+    fn delivered_text_awaiting_keychain_approval_never_settles_as_success() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(true))), now);
+        let cleaning = now + Duration::from_secs(1);
+        model.track.presented = model.frame(cleaning);
+        let mut processing = preview_snapshot(StateKind::Processing);
+        processing.stage = Some(Stage::CleaningUp);
+        model.apply(processing, cleaning);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        idle.outcome = Some(pending_cleanup(Delivery::Copied, 1));
+        let received = cleaning + FRAME_INTERVAL;
+        let mut at = received;
+        while at <= received + MAX_PRESENTATION_LAG + SETTLE {
+            model.apply(idle.clone(), at);
+            assert_eq!(model.kind, Some(Kind::Attention));
+            assert!(model.work.is_none(), "no success hand-off plays out first");
+            let frame = model.frame(at);
+            assert!(!frame.columns.iter().all(TrackColumn::fully_lit));
+            model.track.presented = frame;
+            at += FRAME_INTERVAL;
+        }
+        assert_eq!(model.caption.title, "Alias-corrected text copied.");
+    }
+
+    #[test]
+    fn keychain_approval_is_said_once_each_time_its_answer_settles() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Idle);
+        // Approval guidance stays explicit with ordinary captions disabled.
+        status.hud.labels = false;
+        // Linux, and modes without a cleanup credential, report none.
+        model.apply(status.clone(), now);
+        assert!(model.kind.is_none());
+        // Launch preflight: checking says nothing; its answer is said once.
+        status.keychain = keychain_access(KeychainAuthorization::Checking);
+        model.apply(status.clone(), now + FRAME_INTERVAL);
+        assert!(model.kind.is_none());
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        let launched = now + Duration::from_millis(100);
+        model.apply(status.clone(), launched);
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert_eq!(model.caption.title, "Keychain access not yet allowed");
+        assert_eq!(
+            model.caption.detail,
+            "Takes skip cleanup until you allow it."
+        );
+        assert_eq!(
+            model
+                .caption
+                .action
+                .contains("Cantrip menu → Allow Cantrip to use your OpenRouter key"),
+            cfg!(target_os = "macos")
+        );
+        let expired = launched + ATTENTION_HOLD + RESULT_FADE;
+        model.apply(status.clone(), expired);
+        assert!(model.kind.is_none(), "the notice never pins the HUD");
+        // A reload rechecks and reaches the same answer: not said again.
+        status.keychain = keychain_access(KeychainAuthorization::Checking);
+        model.apply(status.clone(), expired + Duration::from_secs(1));
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        model.apply(status.clone(), expired + Duration::from_secs(2));
+        assert!(model.kind.is_none());
+        // The native prompt's buttons are explained for as long as it is open.
+        status.keychain = keychain_access(KeychainAuthorization::Authorizing);
+        let asked = expired + Duration::from_secs(3);
+        model.apply(status.clone(), asked);
+        assert_eq!(model.kind, Some(Kind::Neutral));
+        assert_eq!(model.caption.title, KEYCHAIN_WAITING);
+        assert_eq!(model.caption.detail, KEYCHAIN_BUTTONS);
+        assert!(model.caption.action.is_empty());
+        model.apply(status.clone(), asked + Duration::from_secs(60));
+        assert_eq!(model.caption.title, KEYCHAIN_WAITING);
+        // A take started meanwhile owns the instrument; the wait returns after it.
+        let mut take = recording(1, Some(signal(true)));
+        take.keychain = status.keychain.clone();
+        model.apply(take, asked + Duration::from_secs(61));
+        assert_eq!(model.kind, Some(Kind::Recording));
+        model.apply(status.clone(), asked + Duration::from_secs(62));
+        assert_eq!(model.caption.title, KEYCHAIN_WAITING);
+        // A one-time Allow leaves later takes unable to read the key silently.
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        let reverted = asked + Duration::from_secs(63);
+        model.apply(status.clone(), reverted);
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert_eq!(model.caption.title, "Keychain access not yet allowed");
+        // Always Allow: Ready withdraws the notice at once and says nothing.
+        status.keychain = keychain_access(KeychainAuthorization::Ready);
+        model.apply(status.clone(), reverted + Duration::from_secs(1));
+        assert!(model.kind.is_none());
+        // A key Keychain cannot return is said with its retry.
+        status.keychain = keychain_access(KeychainAuthorization::Unavailable);
+        model.apply(status, reverted + Duration::from_secs(2));
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert_eq!(
+            model.caption.title,
+            "Keychain didn’t return your OpenRouter key"
+        );
+        assert_eq!(
+            model.caption.action.contains("Try Keychain access again"),
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]
