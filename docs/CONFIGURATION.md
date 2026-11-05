@@ -61,7 +61,7 @@ min_chars = 40            # Clean only; Elevate processes short text too
 instructions = ""         # extra Clean guidance only
 
 [postproc.clean]
-model = "openai/gpt-6.1-sol"
+model = "deepseek/deepseek-v4.1-flash-1017:nitro"
 reasoning_effort = "low"
 
 [postproc.elevate]
@@ -259,11 +259,17 @@ persisted default; [per-take overrides](USAGE.md#everyday-controls) do not chang
 
 `[postproc].mode` is the single mode setting: `raw`, `clean`, or `elevate`.
 `[postproc.clean]` and `[postproc.elevate]` each own a `model` and optional
-`reasoning_effort`. Both default to `openai/gpt-6.1-sol` with `low` reasoning.
+`reasoning_effort`. Clean defaults to `deepseek/deepseek-v4.1-flash-1017:nitro`;
+Elevate defaults to `openai/gpt-6.1-sol`. Both use `low` reasoning.
 They share one `[postproc].endpoint` and one `api_key_id`, defaulting to
 OpenRouter and the `openrouter` keyring entry. One key therefore works for both.
 Setting a model to an empty string deliberately leaves that mode alias-only;
 an empty endpoint with a selected model is a visible failure, not alias-only mode.
+
+The [model study](../eval/baselines/2026-11-04-models/run.json) records the
+default-selection evidence and remaining failures. Explicit model settings
+are not rewritten by an upgrade. Omitted fields in a partial mode table use
+that mode's defaults; an empty effort string explicitly omits reasoning control.
 
 1. Choose a local or remote OpenAI-compatible chat endpoint and models it serves.
    Cantrip does not install or launch a model service.

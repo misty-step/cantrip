@@ -255,8 +255,9 @@ above. Private audio, text, vocabulary, and per-take outputs are not published.
 | Commission | Cap | OpenRouter eval-key spend | Direct OpenAI spend | Total measured spend | Receipt |
 | --- | ---: | ---: | ---: | ---: | --- |
 | 2026-11-02 Hone-style Clean | $6.00 | $2.630828722 | $0.00 | $2.630828722 | [Study receipt](baselines/2026-11-02-hone-clean/run.json); [digits follow-up](baselines/2026-11-03-clean-digits/run.json) |
+| 2026-11-04 mode models | $6.00 new spend | $1.088574058 | $0.00 | $1.088574058 | [Model receipt](baselines/2026-11-04-models/run.json) |
 
-[MEASURED] The row includes all eval-key usage since the commission's starting
+[MEASURED] The 2026-11-02 row includes all eval-key usage since that commission's
 counter, including usage outside the builder's per-call journal. The
 [study receipt](baselines/2026-11-02-hone-clean/run.json) owns the study's
 phase breakdown, submission counts, and attribution evidence; the
@@ -277,3 +278,24 @@ usage plus its full worst-case reservation to remain at or below **$4.50**. The
 key's existing $5 limit was not changed. Local inference was withdrawn when the
 operator stopped it for memory pressure; the incomplete local cleanup control
 is not a promoted or completed comparison.
+
+### 2026-11-04 mode models
+
+[MEASURED] This separate commission starts at eval-key usage **$3.204799119**
+and ends at **$4.293373177**, a **$1.088574058** counter delta.
+The operator authorized raising the key limit to $10 through the conductor;
+the commission cap stayed $6 of new spend. No prior journal was reset.
+
+[MEASURED] The study retained 480 responses from 481 paid submissions.
+Two empty replies omit per-call costs, and one submitted frontier request
+was interrupted without a response. All three unknown-cost flags retain
+$0.113494 of reservations. Known individual charges total $1.085720058;
+the remaining $0.002854 counter delta is not attributed to a particular call.
+The counter plus unresolved reservations is conservatively $1.202068058,
+not an assertion that every reservation was charged.
+
+[MEASURED] No paid call was retried, no paid judge or local model was used,
+and the private journal is closed against new paid requests.
+The conductor narrowed scope to the defaults PR and explicitly cancelled
+the vocabulary arms before any vocabulary inference. Their precision,
+recall, and placement benefit are **not measured** by this commission.

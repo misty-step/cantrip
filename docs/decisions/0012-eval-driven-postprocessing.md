@@ -119,6 +119,36 @@ without changing judgments after unblinding. This is a relative improvement,
 not a zero-failure guarantee, and the original elevation directives remain
 unchanged.
 
+### Mode model selection (2026-11-04)
+
+[INFERRED] Use `deepseek/deepseek-v4.1-flash-1017:nitro` with `low` reasoning
+for Clean. Retain `openai/gpt-6.1-sol` with `low` reasoning for Elevate.
+The [dated aggregate receipt](../../eval/baselines/2026-11-04-models/run.json)
+owns model identities, prices, timings, blind judgments, failures, and spend.
+
+[MEASURED] The fixed Clean v5 comparison ran 33 public strict cases and 11
+private takes per model. DeepSeek had no builder-judged hard fidelity failure;
+Sol had one, and Mercury 3 and Gemini Flash Lite each had four.
+Strict exact-accepted scores remained separate: DeepSeek scored 26/33 and
+Sol 28/33. Neither semantic review nor a model's speed changes that oracle.
+
+[INFERRED] Select the fastest model with zero hard fidelity failures in the
+tested corpus. Compare private-take request-to-final p50 first, then p95 and
+cost. DeepSeek's measured mixed-take p50 was 781 ms and p95 was 6,538 ms.
+Its slower long-take tail and exact-string misses remain visible; this is not
+a zero-risk or production-tail guarantee.
+
+[MEASURED] Every tested frontier Elevate lane had fidelity failures at low or
+medium reasoning. Opus used a smaller, disclosed common subset.
+[INFERRED] No frontier candidate qualifies for zero-failure promotion, so retain
+Sol low rather than purchasing more reasoning or silently relaxing fidelity.
+The operator's prompt and fidelity addendum remain unchanged.
+
+Explicit model settings stay pinned. Missing mode fields follow that mode's
+own defaults; a partial Clean table must not inherit Elevate's model.
+Raw remains the default mode, with no new cloud opt-in.
+
+
 
 
 
