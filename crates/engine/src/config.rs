@@ -721,7 +721,7 @@ reasoning_effort = "medium"
         assert_eq!(clean.llm_hosts, ["openrouter.ai"]);
         // The selected mode is only a default; each mode names its own model.
         config.postproc.elevate.model = "provider/articulate".into();
-        config.stt.endpoint = Some("https://user:secret@API.OpenAI.com:443/v1".into());
+        config.stt.endpoint = Some("https://token@API.OpenAI.com:443/v1".into());
         config.postproc.decision_model = Some("jev-latest".into());
         let elevate = config.pipeline_display(Mode::Elevate);
         assert_eq!(elevate.mode, Mode::Elevate);
