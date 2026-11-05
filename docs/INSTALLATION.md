@@ -585,7 +585,10 @@ path, including the app's exact source and installed-binary hash. The recipe
 below reproduces that path; dummy providers prove routing and presentation,
 not recognition or model quality. The
 [cloud evaluation receipt](../eval/baselines/2026-11-03-elevate/run.json)
-separately owns real Sol-low behavior and its remaining fidelity failures.
+separately owns real Sol-low behavior and its remaining fidelity failures. The
+[mode display captures](evidence/verify-cantrip/2026-11-04-mode-display/README.md)
+record the menu, Settings and HUD presentation in Light and Dark, before and
+after.
 
 Finish an ad-hoc development package **before** booting the VM. Use a fresh
 output path after a code change, and never rebuild while a proof VM is running:
