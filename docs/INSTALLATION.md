@@ -510,12 +510,14 @@ prerequisites below exist and the production path succeeds.
    security find-identity -v -p codesigning "$HOME/Library/Keychains/login.keychain-db"
    ```
 
-   The preflight reads only public certificate metadata and uses `notarytool
-   history`; it never exports keys or prints the stored profile or its response.
-6. **Open.** When `codesign` first asks to use that certificate's **private key**, verify
-   that the requester is `/usr/bin/codesign`, enter your login Keychain
+   The preflight reads only public certificate metadata. With a supplied
+   profile it uses `notarytool history`, without printing the stored profile
+   or its response.
+6. **Operator-owned if prompted.** Native Developer ID signing has succeeded
+   with this local identity. If `codesign` asks to use its **private key**,
+   verify the requester is `/usr/bin/codesign`, enter your login Keychain
    password yourself, and choose **Always Allow**. This authorizes the signing
-   tool, not Cantrip's provider key. Do not broaden access to every application.
+   tool, not Cantrip's provider key. No agent inspects or clicks this host prompt.
 
 Apple's [Developer ID guide](https://developer.apple.com/developer-id/) and
 [notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
@@ -675,8 +677,14 @@ gets `cdhash:`. Its
 checks this **in addition to** ordinary ACL validation. Always Allow can extend
 the current client's partition, not pre-authorize every future code hash.
 Therefore a certificate-pinned ACL can still match while a changed cdhash
-requires approval. Developer ID's stable team partition is the expected remedy,
-but only the real Developer ID arm proves it on the current macOS release.
+requires approval. Developer ID provides a stable team partition. The
+[2026-11-05 Developer ID receipt](https://github.com/misty-step/cantrip/pull/267#issuecomment-6663383405)
+measures both creator and explicit Always Allow grants surviving an unseen
+update on macOS 27.0 (26A428); the
+[no-team controls](https://github.com/misty-step/cantrip/pull/267#issuecomment-6662780933)
+both lose those grants. This is not a guarantee for every OS version, changed
+team/certificate policy, locked Keychain or manually changed ACL, and does not
+prove notarization or production publication.
 
 ### macOS development and verification
 

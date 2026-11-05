@@ -121,6 +121,12 @@ The [disposable-VM experiment](../INSTALLATION.md#measure-keychain-grants-across
 checks both an item's creator and a separate explicit Always Allow grant against
 a never-before-run cdhash. Its dev-identity and ad-hoc controls distinguish a
 stable designated requirement from the separate Keychain partition check.
+The [Developer ID receipt](https://github.com/misty-step/cantrip/pull/267#issuecomment-6663383405)
+measures both grants surviving an unseen cdhash on macOS 27.0 (26A428), while
+the [no-team control receipt](https://github.com/misty-step/cantrip/pull/267#issuecomment-6662780933)
+records both failing. Notarization/profile authentication and production asset
+publication remain separate qualification, not consequences of this result.
+
 
 
 There are **no required GitHub checks for merging**, including the Landmark
