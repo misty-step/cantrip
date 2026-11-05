@@ -434,47 +434,224 @@ opening Settings do not ask. See the
 and [attended Mac trial](USAGE.md#first-dictation-macos-attended-clipboard-trial)
 for cancellation and denied-access guidance.
 
-### Production prerequisites and fail-closed packaging
+### Production signing setup on the operator's Mac
 
-Production mode is the default when neither development signing mode is selected.
-It requires all of:
+The Developer ID private key and notarization credentials stay in this Mac's
+**login Keychain**. Nothing exports a private key, imports a `.p12` into CI,
+creates a GitHub signing secret, or changes the operator's installed app.
+Production signing remains unproved until the real Apple account prerequisites
+below exist and the production path succeeds. Enrollment is the operator's job.
 
-- A clean committed source checkout; the packaged version/toolchain/metadata
-  come from that revision, and the checkout is rechecked before output.
-- A valid **Developer ID Application** signing certificate **with its private
-  key** in the build user's Keychain. `--sign-identity` must select exactly one
-  valid identity by certificate name or SHA-1.
-- Its matching **ten-character Apple Developer Team ID**, passed as `--team-id`.
-- An existing authenticated `notarytool store-credentials` Keychain profile
-  passed as `--notary-profile`, plus Apple network access and the Xcode
-  `notarytool`/`stapler` tools. Profile authentication is checked before building.
+1. Sign in to [Apple Developer Account](https://developer.apple.com/account/).
+   Open **Membership details** and copy its ten-character **Team ID**. This is
+   public identity metadata, not the Apple Account password.
+2. On this Mac, open **Xcode > Settings > Accounts**, add/select that Apple
+   Account, select the enrolled team, then **Manage Certificates > + >
+   Developer ID Application**. Use a local certificate, not a cloud-managed
+   signing service. In **Keychain Access > login > My Certificates**, expand
+   the certificate and verify that its private key is underneath it. Do not
+   choose Apple Development, Apple Distribution, or Developer ID Installer.
+   Developer ID certificate creation requires the team's Account Holder.
+3. If Xcode is unavailable, use Apple's
+   [CSR procedure](https://developer.apple.com/help/account/certificates/create-a-certificate-signing-request/)
+   on this Mac. Open Keychain Access, choose **Certificate Assistant > Request a
+   Certificate from a Certificate Authority**, enter your email and a key name,
+   leave CA Email Address empty, and choose **Saved to disk**. Then open
+   [Certificates, Identifiers & Profiles > Certificates > + > Developer ID
+   Application](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/),
+   upload only that `.certSigningRequest`, download the public `.cer`, and
+   double-click it to install into **login**. The CSR's private key never leaves
+   this Mac. Verify the certificate/private-key pair in My Certificates.
+4. At [account.apple.com](https://account.apple.com), choose **Sign-In and
+   Security > App-Specific Passwords > Generate an app-specific password**.
+   Give it a Cantrip notarization label. Then run this command yourself,
+   substituting your Apple ID and Team ID:
 
-After obtaining those real prerequisites, substitute their exact values and
-choose another new output directory:
+   ```sh
+   xcrun notarytool store-credentials cantrip-notary \
+     --apple-id YOUR_APPLE_ID --team-id YOUR_TEAM_ID \
+     --keychain "$HOME/Library/Keychains/login.keychain-db"
+   ```
+
+   Omit `--password`. `notarytool` securely prompts for the app-specific
+   password and validates it before saving. Do not paste it into chat,
+   shell arguments, a repository, GitHub secrets, or `--sync`.
+5. Run the read-only preflight, with no build or signing:
+
+   ```sh
+   python3 scripts/package-macos --preflight \
+     --team-id YOUR_TEAM_ID --notary-profile cantrip-notary
+   ```
+
+   It prints the selected Developer ID Application name, Team ID, full public
+   SHA-1, UTC expiry, Xcode tool paths, and whether the stored profile
+   authenticates. If multiple valid identities belong to the team, add
+   `--sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1`. It reads only public
+   certificate metadata and uses `notarytool history`; it never exports keys
+   or prints the stored profile or its response.
+6. When `codesign` first asks to use that certificate's **private key**, verify
+   that the requester is `/usr/bin/codesign`, enter your login Keychain
+   password yourself, and choose **Always Allow**. This authorizes the signing
+   tool, not Cantrip's provider key. Do not broaden access to every application.
+
+Apple's [Developer ID guide](https://developer.apple.com/developer-id/) and
+[notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow)
+describe the certificate, hardened runtime, submission and stapling boundary.
+The installed `xcrun notarytool store-credentials --help` also documents the
+secure prompt when `--password` is omitted.
+
+### Publish macOS assets for an already released tag
+
+First let the conductor complete the normal release qualification and Linux
+publication in [Decision 0035](decisions/0035-bounded-ci-feedback.md). On this
+Mac, fetch the released tag into a **separate worktree** and check it out
+exactly. Use a release that contains these scripts; do not copy a newer
+publisher into an old tagged tree. Replace `vX.Y.Z` with that actual release:
 
 ```sh
-python3 scripts/package-macos --target "$target" --output dist/mac-production \
-  --sign-identity 'Developer ID Application: ORGANIZATION (TEAMID)' \
-  --team-id TEAMID --notary-profile YOUR_EXISTING_PROFILE
+git fetch origin --tags
+git worktree add --detach ../cantrip-wt/publish-vX.Y.Z vX.Y.Z
+# In that new worktree:
+RUN="$HOME/.cache/tmp/cantrip-publish-vX.Y.Z"
+mkdir -p "$RUN/tmp"
+CARGO_BUILD_JOBS=4 TMPDIR="$RUN/tmp" python3 scripts/publish-macos \
+  --tag vX.Y.Z --target aarch64-apple-darwin \
+  --team-id YOUR_TEAM_ID --notary-profile cantrip-notary \
+  --output "$RUN/arm64"
 ```
 
-`ORGANIZATION`, `TEAMID`, and `YOUR_EXISTING_PROFILE` above are placeholders,
-not supplied certificates or credentials. The script signs nested libraries
-and the app with hardened runtime and secure timestamps, verifies identity and
-minimal entitlements, requires Apple notarization **Accepted** with no error
-issues, staples and validates the ticket, and requires a passing Gatekeeper
-assessment before publishing output locally. It then writes the final ZIP,
-manifest, and checksums. There is **no unsigned, unnotarized, or ad-hoc fallback**;
-missing identity/profile, rejected notarization, invalid stapling, or failed
-assessment prevents distributable output. An existing output is never replaced.
-The script does not publish a GitHub release.
+The publisher checks a clean tree, exact local tag/HEAD/workspace-version
+agreement, the tag's commit on `misty-step/cantrip`, and an existing published
+stable GitHub release. It refuses development or ad-hoc identities, existing
+output, and any colliding release assets. There is no unsigned or unnotarized
+fallback and no `--clobber`. `gh` uses the existing native GitHub login.
 
-Production signing/notarization has not been exercised here, and no signing
-identity, Apple grant, or public Mac asset is asserted. Unlike Linux releases,
-these locally produced Mac assets do not come with the published Linux
-`release.json`/GitHub attestation contract. Checksums detect corruption, not
-publisher identity. Review the manifest's architecture, source revision, dirty
-state, runtime identity, signing mode, and notarization status honestly.
+Packaging signs every nested dylib and the app using the login-Keychain
+Developer ID identity, hardened runtime, minimal audio-input entitlement and
+secure timestamps. It checks signatures, requires notarization **Accepted**
+and a clean error log, staples and validates the ticket, and requires
+`spctl --assess --type execute`. It zips the **stapled app**, then attaches:
+
+- `cantrip-vX.Y.Z-aarch64-apple-darwin.zip`.
+- `cantrip-vX.Y.Z-aarch64-apple-darwin.manifest.json`.
+- `cantrip-vX.Y.Z-aarch64-apple-darwin.SHA256SUMS`.
+
+The manifest binds the source, architecture, certificate SHA-1, runtime,
+notarization submission ID, executable and final ZIP hashes. The target-specific
+checksum file covers the ZIP and manifest. The publisher downloads all three
+uploaded assets again and compares their bytes. Linux `release.json`,
+`SHA256SUMS` and provenance are untouched. If upload is interrupted, inspect
+the existing release; the publisher refuses to replace even a partial set.
+These local Mac assets are not covered by the Linux GitHub build attestation.
+
+**Intel is not cross-buildable by this repository's supported toolchain.**
+`prepare-macos-runtime` deliberately rejects cross/Rosetta builds, and this
+Mac has only `aarch64-apple-darwin` installed. Native CI uses `macos-15-intel`
+and source-builds checksum/revision-pinned CPU ONNX Runtime 1.24.2 because
+`ort-sys` supplies no Intel prebuilt. That CI app is ad-hoc development output,
+not a distributable substitute. On a native Intel Mac with the same local
+Keychain custody requirements, the publisher accepts
+`--target x86_64-apple-darwin` and produces the corresponding distinct asset
+names. No Intel production asset is promised from this arm64 Mac.
+
+For packaging without GitHub publication, continue to use:
+
+```sh
+python3 scripts/package-macos --target aarch64-apple-darwin \
+  --sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1 \
+  --team-id YOUR_TEAM_ID --notary-profile cantrip-notary \
+  --output /path/to/new/production-output
+```
+
+### Measure Keychain grants across code updates
+
+[`verify-keychain-persistence-macos`](../scripts/verify-keychain-persistence-macos)
+uses the real Cantrip executable in one disposable `macvm`, not the operator's
+app, Keychain, clipboard or screen. Finish every host build/signing operation
+before booting the VM; this memory-constrained Mac permits one native build or
+one VM, never both. Coordinate that slot before running.
+
+The test packages A and never-run B from the same real source with a trivial
+sealed resource marker difference and checks distinct cdhashes. Certificate
+arms must retain the same designated requirement. It records each signature,
+noninteractive read outcome/timing and **only the dummy items' ACL metadata**.
+It checks both:
+
+1. A creates its own dummy item with `cantrip key set`, reads it naturally,
+   then B attempts a new noninteractive read.
+2. An additional ad-hoc Cantrip seed creates a second dummy item. A must fail
+   to read it without approval, then the app's real `key allow` opens the
+   native prompt. After **Always Allow**, a fresh A read must succeed before
+   B is installed. B has never run or been granted access to either item.
+
+The seed is necessary because an item's creator is already trusted and
+normally has no initial approval prompt. No fixture uses `security -A`,
+adds a trusted helper, or rewrites a partition list. Merely alternating two
+cdhashes that have each been granted access does not test an unseen update.
+
+For both controls, unlock the existing development-signing Keychain yourself
+and prepare both arms before starting the VM:
+
+```sh
+proof="$HOME/.cache/tmp/cantrip-keychain-controls"
+CARGO_BUILD_JOBS=4 python3 scripts/verify-keychain-persistence-macos prepare \
+  --output "$proof" --arm development --arm ad-hoc \
+  --dev-sign-identity YOUR_DEVELOPMENT_CERTIFICATE_SHA1 \
+  --keychain /path/to/your/development.keychain-db
+```
+
+Once a real Developer ID certificate exists, the exact preparation command is:
+
+```sh
+proof="$HOME/.cache/tmp/cantrip-keychain-developer-id"
+CARGO_BUILD_JOBS=4 python3 scripts/verify-keychain-persistence-macos prepare \
+  --output "$proof" --arm developer-id --team-id YOUR_TEAM_ID
+```
+
+Add `--sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1` only if needed to disambiguate.
+The Developer ID arm needs a signing identity, not notarization credentials;
+its experimental bundles are explicitly **not for distribution**.
+Then use the same attended phases, setting `arm` to `development`, `ad-hoc`,
+or `developer-id` as selected during preparation:
+
+```sh
+arm=developer-id
+python3 scripts/verify-keychain-persistence-macos start --output "$proof" --arm "$arm"
+# Inspect "$proof/$arm-A-approval.png" before choosing the actual button coordinates.
+# The password here is ONLY the disposable guest's password, never the host's.
+read -s GUEST_KEYCHAIN_PASSWORD
+export GUEST_KEYCHAIN_PASSWORD
+python3 scripts/verify-keychain-persistence-macos approve --output "$proof" \
+  --arm "$arm" --password-env GUEST_KEYCHAIN_PASSWORD --always-allow X Y
+unset GUEST_KEYCHAIN_PASSWORD
+# Inspect the new after-approval PNG. If a second prompt remains, inspect and repeat approve.
+python3 scripts/verify-keychain-persistence-macos update --output "$proof" --arm "$arm"
+# For controls, repeat start/approve/update for the other prepared arm in this SAME VM.
+python3 scripts/verify-keychain-persistence-macos cleanup --output "$proof"
+```
+
+`X Y` must come from the inspected `macvm shot`, not fixed coordinates copied
+from another run. `approve` remains pending unless A's noninteractive read
+succeeds. `update` records both preservation results without opening an
+approval dialog. Inspect its screenshot too. A recorded `false` is a measured
+failed persistence claim, not a failed experiment or permission to approve B.
+Always run `cleanup`, including after a failed phase. Keep `experiment.json`
+and reviewed PNGs outside Git and link retained evidence from the PR.
+
+Apple's [TN2206](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)
+explains that trusted-application ACLs track a designated requirement and that
+self-signed identities can keep that requirement stable. That is not the whole
+modern file-based Keychain check. Apple's published
+[`ClientIdentification::partitionIdForProcess`](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/securityd/src/clientid.cpp)
+assigns Apple-verified development/Developer ID code a `teamid:` partition,
+but other signed code, including these no-team self-signed and ad-hoc apps,
+gets `cdhash:`. Its
+[`SecurityServerAcl::validatePartition`](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/securityd/src/acls.cpp)
+checks this **in addition to** ordinary ACL validation. Always Allow can extend
+the current client's partition, not pre-authorize every future code hash.
+Therefore a certificate-pinned ACL can still match while a changed cdhash
+requires approval. Developer ID's stable team partition is the expected remedy,
+but only the real Developer ID arm proves it on the current macOS release.
 
 ### macOS development and verification
 

@@ -84,6 +84,44 @@ gh workflow run release.yml --repo misty-step/cantrip --ref master
 gh workflow run ci.yml --repo misty-step/cantrip --ref <candidate-branch>
 ```
 
+### Local macOS publication and credential custody
+
+For [#238](https://github.com/misty-step/cantrip/issues/238), the operator
+requires the Developer ID private key and notarization profile to remain in
+the login Keychain on his Mac. The hosted native matrix remains **ad-hoc
+development qualification**, never production signing. No `.p12`, Apple
+Account password, app-specific password, signing-key password, or notary profile
+is uploaded to GitHub secrets or a worker.
+
+After `release.yml` publishes its qualified tag, the operator runs
+[`scripts/publish-macos`](../../scripts/publish-macos) from a clean worktree
+at that exact released tag. The
+[installation runbook](../INSTALLATION.md#publish-macos-assets-for-an-already-released-tag)
+owns the commands and
+[Apple-account handoff](../INSTALLATION.md#production-signing-setup-on-the-operators-mac).
+The publisher requires a valid login-Keychain Developer ID Application
+identity and authenticated profile, signs/notarizes/staples/Gatekeeper-assesses
+the app, uploads target-qualified ZIP/manifest/checksums to that existing release,
+and verifies their downloaded bytes. It never replaces existing release assets
+or changes Linux's attested assets. `release.yml` records this local handoff
+in its job summary but neither waits for nor claims Mac production assets.
+
+This is an explicit exception to unattended cross-platform publication, not
+a silent CI gap. Signing in CI could automate both native architectures, but
+would require exporting the private key and delegating notarization credentials,
+contrary to the custody requirement. That alternative is rejected, not scaffolded.
+The arm64 host cannot use the repository's native-only Intel runtime/build
+contract. Intel publication needs a native Intel signing Mac under the same
+custody rules or a future operator-approved toolchain/custody decision. Do not
+turn CI's ad-hoc Intel app into an advertised release.
+
+Developer ID Keychain persistence is measured, not assumed from notarization.
+The [disposable-VM experiment](../INSTALLATION.md#measure-keychain-grants-across-code-updates)
+checks both an item's creator and a separate explicit Always Allow grant against
+a never-before-run cdhash. Its dev-identity and ad-hoc controls distinguish a
+stable designated requirement from the separate Keychain partition check.
+
+
 There are **no required GitHub checks for merging**, including the Landmark
 release PR. Remove the former `check`, `secret-scan` and `pr-title` branch
 requirements; do not replace them with `release-gate`. The checkout-free PR

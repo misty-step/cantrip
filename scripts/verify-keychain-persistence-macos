@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""Measure creator and Always Allow grants across fresh Cantrip cdhashes in ONE disposable macvm."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import plistlib
+import re
+import runpy
+import shutil
+import sys
+import time
+
+
+ROOT = Path(__file__).resolve().parent.parent
+PACKAGE = runpy.run_path(str(ROOT / "scripts" / "package-macos"))
+run = PACKAGE["run"]
+ReleaseError = PACKAGE["ReleaseError"]
+TARGET = "aarch64-apple-darwin"
+ARMS = ("development", "ad-hoc", "developer-id")
+
+GUEST = r'''
+import json, os, pathlib, platform, re, signal, subprocess, sys, time
+
+def command(args, **kwargs):
+    return subprocess.run(list(map(str, args)), capture_output=True, **kwargs)
+
+model = command(["sysctl", "-n", "hw.model"]).stdout.decode().strip()
+if not model.startswith("VirtualMac"):
+    raise SystemExit("refusing to touch any non-disposable Mac")
+phase, arm, shared = sys.argv[1:]
+root = pathlib.Path.home() / ".cache/tmp/cantrip-keychain-persistence"
+root.mkdir(parents=True, exist_ok=True)
+app = pathlib.Path("/Applications/Cantrip.app")
+binary = app / "Contents/MacOS/cantrip"
+work = root / arm
+work.mkdir(exist_ok=True)
+environment = dict(os.environ)
+for variable, name in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state"), ("XDG_RUNTIME_DIR", "run")):
+    path = work / name
+    path.mkdir(exist_ok=True, mode=0o700)
+    environment[variable] = str(path)
+creator, approved = "persistence-creator-" + arm, "persistence-approved-" + arm
+
+def stop():
+    owned = root / "owner.json"
+    if not owned.exists():
+        return
+    owner = json.loads(owned.read_text())
+    current = command(["ps", "-p", str(owner["pid"]), "-o", "lstart="]).stdout.decode().strip()
+    if current and current != owner["started"]:
+        raise RuntimeError("app PID was reused; refusing to stop it")
+    if current:
+        os.kill(owner["pid"], signal.SIGTERM)
+        deadline = time.monotonic() + 30
+        while command(["ps", "-p", str(owner["pid"]), "-o", "lstart="]).stdout.decode().strip() == current:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("owned app did not stop")
+            time.sleep(0.1)
+    owned.unlink()
+
+def install(variant):
+    stop()
+    if app.exists():
+        if not (root / "installed").exists():
+            raise RuntimeError("refusing to replace an app not installed by this experiment")
+        shutil = __import__("shutil")
+        shutil.rmtree(app)
+    source = pathlib.Path(shared) / arm / variant / "Cantrip.app"
+    subprocess.run(["ditto", str(source), str(app)], check=True, capture_output=True)
+    (root / "installed").touch()
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True, capture_output=True)
+
+def read(identifier):
+    started = time.monotonic()
+    result = command([binary, "key", "status", identifier], env=environment, timeout=15)
+    present = result.returncode == 0 and result.stdout.strip() == b"present"
+    pending = result.returncode != 0 and b"Keychain access not yet allowed" in result.stderr
+    if not (present or pending):
+        raise RuntimeError("key status returned an unexpected result (not present or authorization-required)")
+    return {"present": present, "authorization_required": pending, "elapsed_ms": round((time.monotonic() - started) * 1000, 2), "noninteractive": True}
+
+def store(identifier):
+    result = command([binary, "key", "set", identifier], input=b"cantrip-public-dummy-not-a-provider-key\n", env=environment, timeout=15)
+    if result.returncode:
+        raise RuntimeError("app's own key set failed")
+
+def acl(identifier):
+    login = pathlib.Path.home() / "Library/Keychains/login.keychain-db"
+    result = command(["security", "dump-keychain", "-a", login], timeout=30)
+    if result.returncode:
+        raise RuntimeError("read-only dummy ACL inspection failed")
+    records = re.split(r"(?m)(?=^keychain: )", result.stdout.decode(errors="replace"))
+    selected = [record for record in records if '"' + identifier + '"' in record]
+    if len(selected) != 1:
+        raise RuntimeError("could not isolate the dummy item's public ACL metadata")
+    return selected[0]
+
+def launch():
+    config = work / "config/cantrip/config.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text('keep_warm = false\ninjection = "clipboard"\n[postproc]\nmode = "clean"\nendpoint = "http://127.0.0.1:9/v1"\napi_key_id = "' + approved + '"\n[postproc.clean]\nmodel = "dummy-unused"\n[telemetry]\nenabled = false\n')
+    process = subprocess.Popen([str(binary), "app"], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    started = command(["ps", "-p", str(process.pid), "-o", "lstart="]).stdout.decode().strip()
+    if not started:
+        raise RuntimeError("owned app did not launch")
+    (root / "owner.json").write_text(json.dumps({"pid": process.pid, "started": started}))
+    deadline = time.monotonic() + 30
+    while command([binary, "ping"], env=environment).returncode:
+        if process.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError("owned app did not become ready")
+        time.sleep(0.2)
+
+if phase == "start":
+    install("A")
+    store(creator)
+    natural = read(creator)
+    if not natural["present"]:
+        raise RuntimeError("creator cannot read its newly created item")
+    creator_acl = acl(creator)
+    install("seed")
+    store(approved)
+    seed_natural = read(approved)
+    install("A")
+    before = read(approved)
+    if not before["authorization_required"]:
+        raise RuntimeError("seeded item did not require approval; fixture cannot test Always Allow")
+    launch()
+    result = command([binary, "key", "allow", approved], env=environment)
+    if result.returncode:
+        raise RuntimeError("explicit approval request failed")
+    time.sleep(1)
+    proof = {"natural_creator_read_A": natural, "natural_seed_read": seed_natural, "before_approval_A": before, "creator_acl_A": creator_acl, "approved_acl_before_A": acl(approved)}
+elif phase == "approved":
+    proof = {"after_always_allow_A": read(approved), "approved_acl_A": acl(approved)}
+elif phase == "update":
+    install("B")
+    launch()
+    creator_read, approved_read = read(creator), read(approved)
+    proof = {"creator_read_B": creator_read, "approved_read_B": approved_read, "creator_acl_B": acl(creator), "approved_acl_B": acl(approved), "creator_preserved": creator_read["present"], "always_allow_preserved": approved_read["present"]}
+else:
+    raise RuntimeError("unknown guest phase")
+print(json.dumps(proof))
+'''
+
+
+def signature(app):
+    result = run(["codesign", "--display", "--verbose=4", "--requirements", "-", app])
+    text = (result.stdout + result.stderr).decode()
+    cdhash = re.search(r"(?m)^CDHash=([0-9a-f]+)$", text)
+    team = re.search(r"(?m)^TeamIdentifier=(.+)$", text)
+    designated = re.search(r"(?m)^(?:# )?designated => (.+)$", text)
+    if not (cdhash and team and designated):
+        raise ReleaseError("could not read cdhash, TeamIdentifier and designated requirement")
+    return {"cdhash": cdhash[1], "team_identifier": team[1], "designated_requirement": designated[1], "binary_sha256": PACKAGE["RELEASE"]["sha256"](app / "Contents/MacOS/cantrip")}
+
+
+def save(output, state):
+    (output / "experiment.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def prepare(args, output):
+    PACKAGE["RUNTIME"]["require_native"](TARGET)
+    if os.path.lexists(output):
+        raise ReleaseError("--output must be a new experiment directory")
+    arms = args.arm or ["development", "ad-hoc"]
+    if len(set(arms)) != len(arms):
+        raise ReleaseError("each arm may be selected only once")
+    identities = {}
+    if "development" in arms:
+        if not args.dev_sign_identity or not re.fullmatch(r"[0-9a-fA-F]{40}", args.dev_sign_identity):
+            raise ReleaseError("development control requires --dev-sign-identity SHA1")
+        identities["development"] = args.dev_sign_identity.upper()
+    if "developer-id" in arms:
+        identities["developer-id"] = PACKAGE["developer_identity"](args.team_id, args.sign_identity)["sha1"]
+    output.mkdir(parents=True, mode=0o700)
+    if args.base_app:
+        base = args.base_app.expanduser().resolve(strict=True)
+    else:
+        build = argparse.Namespace(target=TARGET, ad_hoc=True, dev_sign_identity=None, keychain=None, sign_identity=None, team_id=None, notary_profile=None, output=output / "base", source_revision=None, source_runtime=False)
+        os.environ["CARGO_BUILD_JOBS"] = "4"
+        base = PACKAGE["package"](build) / "Cantrip.app"
+    source = json.loads((base / "Contents/Resources/build.json").read_text())
+    revision = PACKAGE["RELEASE"]["git"](ROOT, "rev-parse", "HEAD").decode().strip()
+    if source["source_revision"] != revision or source["target"] != TARGET:
+        raise ReleaseError("base app does not belong to this source revision and architecture")
+    entitlement_file = output / "entitlements.plist"
+    entitlement_file.write_bytes(plistlib.dumps({"com.apple.security.device.audio-input": True}))
+    state = {"schema_version": 1, "source_revision": revision, "base_source_tree_dirty": source["source_tree_dirty"], "bundle_difference": "only the sealed Resources/keychain-persistence-variant.txt marker and signing metadata differ; the same real Cantrip binary is packaged", "dummy_items_only": True, "vm": None, "active_arm": None, "arms": {}}
+    for arm in arms:
+        builds = {}
+        for variant in ("seed", "A", "B"):
+            app = output / arm / variant / "Cantrip.app"
+            app.parent.mkdir(parents=True)
+            run(["ditto", base, app], timeout=300)
+            (app / "Contents/Resources/keychain-persistence-variant.txt").write_text(f"{arm}-{variant}\n")
+            identity = "-" if variant == "seed" or arm == "ad-hoc" else identities[arm]
+            development = variant == "seed" or arm != "developer-id"
+            build = {
+                **source,
+                "signing": "ad-hoc-development" if identity == "-" else "local-identity-development" if development else "developer-id",
+                "signing_identity_sha1": None if identity == "-" else identity,
+                "hardened_runtime": not development,
+                "keychain_persistence_variant": f"{arm}-{variant}", "not_for_distribution": True,
+            }
+            (app / "Contents/Resources/build.json").write_text(json.dumps(build, indent=2, sort_keys=True) + "\n")
+            PACKAGE["sign_bundle"](app, sorted((app / "Contents/Frameworks").glob("*.dylib")), entitlement_file, identity, args.team_id, development=development, keychain=args.keychain if arm == "development" and variant != "seed" else PACKAGE["LOGIN_KEYCHAIN"] if not development else None)
+            builds[variant] = signature(app)
+        if len({build["cdhash"] for build in builds.values()}) != 3:
+            raise ReleaseError("experiment requires three distinct cdhashes, including never-run B")
+        if arm != "ad-hoc" and builds["A"]["designated_requirement"] != builds["B"]["designated_requirement"]:
+            raise ReleaseError("same-identity pair does not have a stable designated requirement")
+        state["arms"][arm] = {"builds": builds, "phase": "prepared"}
+    (output / "guest.py").write_text(GUEST)
+    save(output, state)
+    return state
+
+
+def guest(output, state, phase, arm):
+    shared = f"/Volumes/My Shared Files/{output.name}"
+    return json.loads(run(["macvm", "exec", state["vm"], "--", "python3", f"{shared}/guest.py", phase, arm, shared], timeout=120).stdout)
+
+
+def screenshot(output, state, name):
+    path = output / name
+    run(["macvm", "shot", state["vm"], path])
+    return path.name
+
+
+def operate(args, output):
+    state = json.loads((output / "experiment.json").read_text())
+    if args.phase == "cleanup":
+        if state["vm"]:
+            run(["macvm", "down", state["vm"]], timeout=120)
+            state["deleted_vm"] = state["vm"]
+            state["vm"] = None
+            save(output, state)
+        return state
+    if not args.arm or len(args.arm) != 1 or args.arm[0] not in state["arms"]:
+        raise ReleaseError("select exactly one prepared --arm for this phase")
+    arm = args.arm[0]
+    entry = state["arms"][arm]
+    if args.phase == "start":
+        if entry["phase"] != "prepared" or (state["active_arm"] and state["arms"][state["active_arm"]]["phase"] != "measured"):
+            raise ReleaseError("finish the active arm before starting another; each arm can run only once")
+        if not state["vm"]:
+            name = f"cantrip-persistence-{os.getpid()}"
+            state["vm"] = "macvm-" + name
+            save(output, state)
+            run(["macvm", "up", "--name", name, "--share", output], timeout=600)
+        state["active_arm"] = arm
+        entry.update(guest(output, state, "start", arm))
+        entry["phase"] = "approval-pending"
+        entry["approval_prompt_shot"] = screenshot(output, state, f"{arm}-A-approval.png")
+    elif args.phase == "approve":
+        if state["active_arm"] != arm or entry["phase"] != "approval-pending" or not args.always_allow:
+            raise ReleaseError("approve requires the active pending arm and --always-allow X Y from its inspected shot")
+        if args.password_env:
+            if not os.environ.get(args.password_env):
+                raise ReleaseError("--password-env must name an existing environment variable containing only the disposable guest's password")
+            run(["macvm", "type", state["vm"], "--env", args.password_env])
+        run(["macvm", "click", state["vm"], *args.always_allow])
+        time.sleep(1)
+        result = guest(output, state, "approved", arm)
+        entry.setdefault("always_allow_clicks", []).append(args.always_allow)
+        entry.update(result)
+        if result["after_always_allow_A"]["present"]:
+            entry["phase"] = "approved"
+        entry["after_approval_shot"] = screenshot(output, state, f"{arm}-A-after-approval-{len(entry['always_allow_clicks'])}.png")
+    elif args.phase == "update":
+        if state["active_arm"] != arm or entry["phase"] != "approved":
+            raise ReleaseError("update requires a successful noninteractive A read after Always Allow")
+        entry.update(guest(output, state, "update", arm))
+        entry["phase"] = "measured"
+        entry["after_update_shot"] = screenshot(output, state, f"{arm}-B-noninteractive.png")
+    save(output, state)
+    return state
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Prepare all bundles before booting ONE VM. Start an arm, inspect its PNG, approve at the actual Always Allow coordinates, then update. Repeat start/approve/update for every prepared arm in the same VM; always cleanup. No host app, credential item, input, clipboard or screen is touched.")
+    parser.add_argument("phase", choices=("prepare", "start", "approve", "update", "cleanup"))
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--arm", action="append", choices=ARMS)
+    parser.add_argument("--base-app", type=Path, help="reuse an already-built real Cantrip.app from this exact source HEAD")
+    parser.add_argument("--dev-sign-identity")
+    parser.add_argument("--keychain", type=lambda value: Path(value).expanduser())
+    parser.add_argument("--sign-identity")
+    parser.add_argument("--team-id")
+    parser.add_argument("--always-allow", nargs=2, type=int, metavar=("X", "Y"))
+    parser.add_argument("--password-env", help="optional environment variable for the disposable guest's password; never the host login password")
+    args = parser.parse_args()
+    output = args.output.expanduser().absolute()
+    try:
+        state = prepare(args, output) if args.phase == "prepare" else operate(args, output)
+    except (ReleaseError, OSError, ValueError, KeyError, RuntimeError) as error:
+        parser.exit(1, f"verify-keychain-persistence-macos: {error}\nIf a VM was started, run this command's cleanup phase.\n")
+    print(output / "experiment.json")
+    for name, arm in state["arms"].items():
+        print(f"{name}: {arm['phase']}" + (f", creator_preserved={arm['creator_preserved']}, always_allow_preserved={arm['always_allow_preserved']}" if arm["phase"] == "measured" else ""))
+    if state["vm"]:
+        print(f"Disposable VM: {state['vm']}; inspect PNGs before entering coordinates; cleanup when finished.")
+
+
+if __name__ == "__main__":
+    main()
