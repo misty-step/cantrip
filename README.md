@@ -214,7 +214,8 @@ inference deadline; delayed valid responses remain preferred
 Test-fixture bounds on acceptance, socket I/O, and result waits prevent hung CI;
 they are not production transcription deadlines.
 
-- **Local git hooks** (format + clippy on commit, tests + secret scan on push):
+- **Local git hooks** (format + secret scan on commit, secret scan on push;
+  clippy and tests run at the release gate):
   `.githooks/install.sh`. After installing hooks, `gitleaks` and `trufflehog`
   must be on `PATH`; the hooks fail closed when either scanner is missing.
 - **CI and publication policy:** [Decision 0035](docs/decisions/0035-bounded-ci-feedback.md)
