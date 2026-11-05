@@ -4,38 +4,47 @@
 //! A preference-style toolbar switches between Transcripts, General,
 //! Transcription, Modes and HUD. Configuration edits stay in the window until
 //! Save & Apply validates them, writes the file with its comments preserved
-//! and asks the running Cantrip to apply it, exactly as on Linux. Live state
-//! and microphone access come from the app's status reader, which is the
-//! capture owner's own snapshot; Allow asks that owner. Effects run on worker
-//! threads and the app's tick hands their results back, so the AppKit thread
-//! never waits on IPC, history or the clipboard.
+//! and asks the running Cantrip to apply it, exactly as on Linux. The cleanup
+//! provider's API key is the exception: Modes saves it to the keychain at once,
+//! under the ID the form names, and never shows a saved key. Live state and
+//! microphone access come from the app's status reader, which is the capture
+//! owner's own snapshot; Allow asks that owner. Effects run on worker threads
+//! and the app's tick hands their results back, so the AppKit thread never
+//! waits on IPC, history, the keychain or the clipboard.
 
 use super::mark;
 use super::ui::{self, Message};
 use crate::inject::{self, DeliveryAvailability};
 use crate::modes::ModeView;
+use crate::settings::credential::Credential;
 use crate::settings::model::{
     self, CopyFailure, CopyPhase, Microphones, PastTranscript, SettingsForm, TranscriptHistory,
     INJECTION_CHOICES, MOTION_CHOICES,
 };
 use anyhow::{Context, Result};
-use cantrip_engine::{config::Mode, ipc, paths};
+use block2::RcBlock;
+use cantrip_engine::{
+    config::Mode,
+    ipc::{self, KeychainAuthorization},
+    paths,
+};
 use clap::ValueEnum;
 use objc2::{
     define_class, msg_send,
     rc::Retained,
-    runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject},
-    sel, DefinedClass, MainThreadMarker, MainThreadOnly,
+    runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel},
+    sel, DefinedClass, MainThreadMarker, MainThreadOnly, Message as _,
 };
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
-    NSBorderType, NSButton, NSButtonType, NSCellImagePosition, NSColor,
-    NSControlTextEditingDelegate, NSFont, NSFontWeightRegular, NSGridView, NSImageView,
-    NSLayoutConstraintOrientation, NSMenu, NSMenuDelegate, NSPopUpButton, NSScrollView,
-    NSStackView, NSStackViewGravity, NSTableColumn, NSTableColumnResizingOptions, NSTableView,
-    NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField, NSTextFieldDelegate,
-    NSTextView, NSToolbar, NSToolbarDelegate, NSToolbarItem, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWindowToolbarStyle,
+    NSAccessibility, NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
+    NSApplicationActivationPolicy, NSBackingStoreType, NSBorderType, NSButton, NSButtonType,
+    NSCellImagePosition, NSColor, NSControl, NSControlTextEditingDelegate, NSFont,
+    NSFontWeightRegular, NSGridView, NSImageView, NSLayoutConstraintOrientation, NSMenu,
+    NSMenuDelegate, NSModalResponse, NSModalResponseCancel, NSPopUpButton, NSScrollView,
+    NSSecureTextField, NSStackView, NSStackViewGravity, NSTableColumn,
+    NSTableColumnResizingOptions, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewStyle, NSTextField, NSTextFieldDelegate, NSTextView, NSToolbar, NSToolbarDelegate,
+    NSToolbarItem, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSInteger, NSNotification, NSPoint, NSRect, NSSize, NSString,
@@ -43,6 +52,7 @@ use objc2_foundation::{
 use std::cell::{Cell, OnceCell, Ref, RefCell, RefMut};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 const WIDTH: f64 = 600.0;
 const INSET: f64 = 24.0;
@@ -58,6 +68,9 @@ const MODEL: f64 = CONTROL - EFFORT - 8.0;
 const RADIO_TITLE: f64 = 20.0;
 /// A mode's explanation under its radio button's title.
 const EXPLANATION: f64 = 440.0;
+/// A mode's choice, from its radio button to its explanation's edge; the
+/// cleanup provider's key below the modes shares it.
+const CHOICE: f64 = RADIO_TITLE + EXPLANATION;
 const ROW_HEIGHT: f64 = 44.0;
 /// Complete transcript rows visible at the window's size.
 const VISIBLE_ROWS: f64 = 5.0;
@@ -141,6 +154,75 @@ struct State {
     access_problem: Option<String>,
     load: Option<Receiver<Result<Vec<PastTranscript>>>>,
     copy: Option<Receiver<Result<(), CopyFailure>>>,
+    /// The cleanup provider's API key in the keychain, under the form's ID.
+    credential: Credential,
+    /// The key's last answer, whose controls stay in place, disabled, while
+    /// the next is awaited.
+    settled: Option<KeychainAuthorization>,
+    /// Replace was chosen: the masked field shows over the stored key.
+    replacing: bool,
+    /// A new key went to the keychain and its answer has not arrived.
+    saving: bool,
+    /// The Remove confirmation while it is shown.
+    remove_alert: Option<Retained<NSAlert>>,
+}
+
+/// What the key area shows for the credential as it stands.
+struct KeyView {
+    name: String,
+    status: &'static str,
+    /// The keychain withholds the key, or a read failed.
+    attention: bool,
+    /// The masked field and Save; Cancel too while `replacing`.
+    entry: bool,
+    replacing: bool,
+    /// A key may be stored: its approval or retry, Replace and Remove.
+    stored: bool,
+    action: Option<String>,
+    /// Nothing is running, so the controls can act.
+    enabled: bool,
+    note: Option<&'static str>,
+    problem: Option<&'static str>,
+}
+
+impl State {
+    /// The key area for the credential as it stands. While an answer is
+    /// awaited, the last answer's controls stay in place, disabled, so the
+    /// pane keeps its size.
+    fn key_view(&mut self) -> KeyView {
+        let credential = &self.credential;
+        let id = credential.id();
+        let access = credential.access();
+        let enabled = !credential.busy();
+        if enabled {
+            self.settled = Some(access);
+        }
+        let shown = if enabled { Some(access) } else { self.settled };
+        let named = !id.is_empty();
+        let entry = named && (self.replacing || shown == Some(KeychainAuthorization::NotSet));
+        let stored = named && !entry && shown.is_some();
+        let problem = credential.problem();
+        KeyView {
+            name: key_name(id),
+            status: if named {
+                credential.label()
+            } else {
+                "Not used"
+            },
+            attention: access != KeychainAuthorization::NotSet && access.action().is_some(),
+            entry,
+            replacing: entry && self.replacing,
+            stored,
+            action: shown.filter(|_| stored).and_then(action_title),
+            enabled,
+            note: if entry || !named || problem.is_some() {
+                None
+            } else {
+                access.note()
+            },
+            problem,
+        }
+    }
 }
 
 /// The repair sheet: the file's original text, editable, over the window.
@@ -148,6 +230,26 @@ struct RepairSheet {
     window: Retained<NSWindow>,
     text: Retained<NSTextView>,
     message: Message,
+}
+
+/// The cleanup provider's API key in the Modes pane, outside Details.
+struct KeyArea {
+    view: Retained<NSStackView>,
+    name: Retained<NSTextField>,
+    attention: Option<Retained<NSImageView>>,
+    status: Retained<NSTextField>,
+    /// The masked field that takes only a new key, Save and Cancel.
+    entry: Retained<NSStackView>,
+    secret: Retained<NSSecureTextField>,
+    save: Retained<NSButton>,
+    cancel: Retained<NSButton>,
+    /// Approval or a retry, Replace and Remove, for a key that may be stored.
+    actions: Retained<NSStackView>,
+    action: Retained<NSButton>,
+    replace: Retained<NSButton>,
+    remove: Retained<NSButton>,
+    note: Message,
+    problem: Message,
 }
 
 struct Views {
@@ -185,6 +287,8 @@ struct Views {
     promises: Vec<Retained<NSTextField>>,
     effects: Vec<Retained<NSTextField>>,
     summaries: Vec<Retained<NSTextField>>,
+    /// The cleanup provider's API key, between the modes and Details.
+    key: KeyArea,
     /// The disclosure that shows `details`: the raw ids and their settings.
     details_toggle: Retained<NSButton>,
     details: Retained<NSGridView>,
@@ -239,6 +343,8 @@ define_class!(
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
             self.ivars().closed.set(true);
+            // A key typed but not saved goes with the window.
+            self.drop_new_key();
         }
     }
 
@@ -270,13 +376,35 @@ define_class!(
         }
     }
 
-    // SAFETY: the signature matches NSControlTextEditingDelegate.
+    // SAFETY: the signatures match NSControlTextEditingDelegate.
     unsafe impl NSControlTextEditingDelegate for SettingsWindow {
         #[unsafe(method(controlTextDidChange:))]
-        fn control_text_did_change(&self, _notification: &NSNotification) {
+        fn control_text_did_change(&self, notification: &NSNotification) {
+            // A new key never joins the form: its field only enables Save.
+            if notification.object().is_some_and(|field| self.is_new_key(&field)) {
+                self.show_key();
+                return;
+            }
             let _ = self.collect();
             self.show_shortcut_hint();
             self.show_form_state();
+        }
+
+        /// Return in the masked field saves the key, not the form; Escape there
+        /// abandons a replacement.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn text_command(&self, control: &NSControl, _editor: &NSTextView, command: Sel) -> bool {
+            if !self.is_new_key(control) {
+                false
+            } else if command == sel!(insertNewline:) {
+                self.store_key();
+                true
+            } else if command == sel!(cancelOperation:) && self.state().replacing {
+                self.end_replacing();
+                true
+            } else {
+                false
+            }
         }
     }
 
@@ -424,6 +552,32 @@ define_class!(
             ui::show_in_form(&views.details, ui::checked(&views.details_toggle));
             self.fit(true);
         }
+
+        #[unsafe(method(saveKey:))]
+        fn save_key(&self, _sender: Option<&AnyObject>) {
+            self.store_key();
+        }
+
+        #[unsafe(method(replaceKey:))]
+        fn replace_key(&self, _sender: Option<&AnyObject>) {
+            self.begin_replacing();
+        }
+
+        #[unsafe(method(cancelKey:))]
+        fn cancel_key(&self, _sender: Option<&AnyObject>) {
+            self.end_replacing();
+        }
+
+        #[unsafe(method(removeKey:))]
+        fn remove_key(&self, _sender: Option<&AnyObject>) {
+            self.ask_remove_key();
+        }
+
+        /// Approve Keychain access, or Retry keyring access.
+        #[unsafe(method(keyAction:))]
+        fn key_action(&self, _sender: Option<&AnyObject>) {
+            self.run_key_action();
+        }
     }
 );
 
@@ -464,6 +618,11 @@ impl SettingsWindow {
             access_problem: None,
             load: None,
             copy: None,
+            credential: Credential::default(),
+            settled: None,
+            replacing: false,
+            saving: false,
+            remove_alert: None,
         };
         let this = Self::alloc(mtm).set_ivars(Ivars {
             state: RefCell::new(state),
@@ -515,17 +674,21 @@ impl SettingsWindow {
     }
 
     /// Close the window, as quitting Cantrip does. An open repair is
-    /// abandoned, leaving the file as it is.
+    /// abandoned, leaving the file as it is, and an unanswered Remove keeps
+    /// the key.
     pub(crate) fn close(&self) {
         if self.state().form.repairing() {
             self.state_mut().form.cancel_repair();
             self.end_repair_sheet();
         }
+        self.end_remove_alert();
         self.views().window.close();
     }
 
     /// Detach every AppKit callback before the window is released.
     pub(crate) fn teardown(&self) {
+        // An unanswered Remove keeps the key and lets go of this window.
+        self.end_remove_alert();
         let views = self.views();
         views.window.setDelegate(None);
         views.toolbar.setDelegate(None);
@@ -541,9 +704,11 @@ impl SettingsWindow {
                 &views.clean_model,
                 &views.elevate_model,
                 &views.pp_endpoint,
+                &views.pp_key,
             ] {
                 field.setDelegate(None);
             }
+            views.key.secret.setDelegate(None);
             views.table.setDataSource(None);
             views.table.setDelegate(None);
         }
@@ -561,6 +726,7 @@ impl SettingsWindow {
         let mut access = false;
         let mut form = false;
         let mut history = false;
+        let mut key = false;
         let line = {
             let mut state = self.state_mut();
             if state.online != live.online || state.microphone.as_ref() != live.microphone {
@@ -593,6 +759,13 @@ impl SettingsWindow {
                 state.history.copied(result);
                 history = true;
             }
+            if state.credential.poll() {
+                // A key the keychain refused leaves its field open for another.
+                if std::mem::take(&mut state.saving) && state.credential.problem().is_some() {
+                    state.replacing = true;
+                }
+                key = true;
+            }
             (state.live != live.line).then(|| {
                 state.live = live.line.to_owned();
                 (live.line.to_owned(), live.online)
@@ -609,6 +782,9 @@ impl SettingsWindow {
         }
         if history {
             self.show_history();
+        }
+        if key {
+            self.show_key();
         }
     }
 
@@ -786,8 +962,10 @@ impl SettingsWindow {
                 .collect();
             ui::fill_popup(&views.motion, &motions, motion);
         }
+        self.follow_key_id();
         self.show_modes();
         self.show_general();
+        self.show_key();
         self.show_form_state();
     }
 
@@ -817,8 +995,8 @@ impl SettingsWindow {
         let instructions = views.pp_instructions.string().to_string();
         let labels = ui::checked(&views.labels);
 
-        let mut state = self.state_mut();
-        let state = &mut *state;
+        let mut guard = self.state_mut();
+        let state = &mut *guard;
         let edit = &mut state.form.edit;
         if let Some(uid) = microphone.and_then(|index| state.microphone_uids.get(index)) {
             edit.audio_source = uid.clone();
@@ -856,6 +1034,9 @@ impl SettingsWindow {
             Ok(value) => edit.pp_min_chars = value,
             Err(problem) => problems.push(problem),
         }
+        drop(guard);
+        // The key area names and checks the key the ID now points to.
+        self.follow_key_id();
         if problems.is_empty() {
             Ok(())
         } else {
@@ -864,6 +1045,14 @@ impl SettingsWindow {
     }
 
     fn show_pane(&self, pane: Pane, animate: bool) {
+        if pane != Pane::Modes {
+            // A key typed in Modes is not carried to another pane.
+            self.drop_new_key();
+        } else if self.state().pane != Pane::Modes {
+            // The key may have changed elsewhere since Modes last showed it.
+            self.state_mut().credential.refresh();
+            self.show_key();
+        }
         self.state_mut().pane = pane;
         let views = self.views();
         let current = views.root.arrangedSubviews().firstObject();
@@ -874,6 +1063,8 @@ impl SettingsWindow {
                 current.removeFromSuperview();
             }
             views.root.insertArrangedSubview_atIndex(next, 0);
+            // Tab follows the controls of the pane now shown.
+            views.window.recalculateKeyViewLoop();
         }
         let settings = pane != Pane::Transcripts;
         views.separator.setHidden(!settings);
@@ -970,6 +1161,206 @@ impl SettingsWindow {
         views
             .access_problem
             .show(state.access_problem.as_deref(), true);
+    }
+
+    /// Point the key area at the form's API key ID. Another ID starts a check
+    /// of its own key and drops anything typed for the last one.
+    fn follow_key_id(&self) {
+        let changed = {
+            let mut state = self.state_mut();
+            let state = &mut *state;
+            let changed = state.credential.id() != state.form.edit.pp_key.trim();
+            if changed {
+                state.credential.select(&state.form.edit.pp_key);
+                state.replacing = false;
+                state.saving = false;
+            }
+            changed
+        };
+        if changed {
+            self.views().key.secret.setStringValue(&NSString::new());
+            self.show_key();
+        }
+    }
+
+    /// The cleanup provider's key: its name and state, and the controls that
+    /// can act on it now. The masked field empties whenever it hides, so a
+    /// new key never waits out of sight.
+    fn show_key(&self) {
+        let view = self.state_mut().key_view();
+        let key = &self.views().key;
+        let height = key.view.fittingSize().height;
+        ui::set_text(&key.name, &view.name);
+        ui::set_text(&key.status, view.status);
+        if let Some(icon) = &key.attention {
+            icon.setHidden(!view.attention);
+        }
+        if !view.entry {
+            key.secret.setStringValue(&NSString::new());
+        }
+        let typed = key.secret.stringValue().length() > 0;
+        key.entry.setHidden(!view.entry);
+        key.secret.setEnabled(view.enabled);
+        key.save.setEnabled(view.enabled && typed);
+        key.cancel.setHidden(!view.replacing);
+        key.actions.setHidden(!view.stored);
+        if let Some(title) = &view.action {
+            key.action.setTitle(&ui::ns(title));
+        }
+        key.action.setHidden(view.action.is_none());
+        for button in [&key.cancel, &key.action, &key.replace, &key.remove] {
+            button.setEnabled(view.enabled);
+        }
+        key.secret.setAccessibilityLabel(Some(&ui::ns(&view.name)));
+        for (button, verb) in [
+            (&key.save, "Save"),
+            (&key.replace, "Replace"),
+            (&key.remove, "Remove"),
+        ] {
+            button.setAccessibilityLabel(Some(&ui::ns(&format!("{verb} {}", view.name))));
+        }
+        key.note.show(view.note, false);
+        key.problem.show(view.problem, true);
+        // Tab reaches whichever of the key's controls show now.
+        self.views().window.recalculateKeyViewLoop();
+        // Only a new height resizes the window, so an answer that changes
+        // nothing never cuts a pane's animation short.
+        key.view.layoutSubtreeIfNeeded();
+        let resized = (key.view.fittingSize().height - height).abs() > 0.5;
+        if resized && self.state().pane == Pane::Modes {
+            self.fit(false);
+        }
+    }
+
+    /// Whether `object` is the masked field for a new key.
+    fn is_new_key(&self, object: &AnyObject) -> bool {
+        let field: &AnyObject = &self.views().key.secret;
+        std::ptr::eq(object, field)
+    }
+
+    /// Save beside the masked field, or Return in it: the key goes to the
+    /// keychain worker and the field empties at once. Whitespace around a
+    /// pasted key, which a key never has, is dropped.
+    fn store_key(&self) {
+        let view = self.state_mut().key_view();
+        let views = self.views();
+        let field = &views.key.secret;
+        let typed = field.stringValue().length() > 0;
+        if !(view.entry && view.enabled && typed) {
+            return;
+        }
+        let mut secret = ui::text_of(field);
+        trim_in_place(&mut secret);
+        // Focus leaves the field before it empties.
+        views.window.makeFirstResponder(None);
+        field.setStringValue(&NSString::new());
+        if !secret.is_empty() {
+            let mut state = self.state_mut();
+            state.credential.save(secret);
+            state.replacing = false;
+            state.saving = true;
+        }
+        self.show_key();
+    }
+
+    /// Replace: the masked field opens for a new key; the stored one stays
+    /// until that is saved.
+    fn begin_replacing(&self) {
+        let view = self.state_mut().key_view();
+        if !(view.stored && view.enabled) {
+            return;
+        }
+        self.state_mut().replacing = true;
+        self.show_key();
+        let views = self.views();
+        views.window.makeFirstResponder(Some(&views.key.secret));
+    }
+
+    /// Cancel a replacement, or Escape in its field: the typed key is dropped
+    /// and the stored key's controls return.
+    fn end_replacing(&self) {
+        let views = self.views();
+        views.window.makeFirstResponder(None);
+        self.drop_new_key();
+        self.show_key();
+        // With keyboard navigation on, focus goes back to Replace.
+        views.window.makeFirstResponder(Some(&views.key.replace));
+    }
+
+    /// Forget a key typed but not saved, and any replacement under way.
+    fn drop_new_key(&self) {
+        self.views().key.secret.setStringValue(&NSString::new());
+        self.state_mut().replacing = false;
+    }
+
+    /// Approve Keychain access to a key it withholds, or read a keyring that
+    /// failed once more.
+    fn run_key_action(&self) {
+        let view = self.state_mut().key_view();
+        if !(view.action.is_some() && view.enabled) {
+            return;
+        }
+        {
+            let mut state = self.state_mut();
+            if needs_approval(state.credential.access()) {
+                state.credential.approve();
+            } else {
+                state.credential.refresh();
+            }
+        }
+        self.show_key();
+    }
+
+    /// Ask, in a standard alert sheet, before removing the stored key. Return
+    /// never removes; Escape keeps the key.
+    fn ask_remove_key(&self) {
+        let view = self.state_mut().key_view();
+        let id = {
+            let state = self.state();
+            if !(view.stored && view.enabled) || state.remove_alert.is_some() {
+                return;
+            }
+            state.credential.id().to_owned()
+        };
+        let alert = NSAlert::new(self.mtm());
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.setMessageText(&ui::ns(&format!("Remove the {}?", view.name)));
+        alert.setInformativeText(&ui::ns(
+            "This removes the key from your Keychain. Takes will skip cleanup without it.",
+        ));
+        let remove = alert.addButtonWithTitle(&ui::ns("Remove Key"));
+        remove.setHasDestructiveAction(true);
+        remove.setKeyEquivalent(&ui::ns(""));
+        let keep = alert.addButtonWithTitle(&ui::ns("Cancel"));
+        let this = self.retain();
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            this.remove_answered(&id, response == NSAlertFirstButtonReturn);
+        });
+        self.state_mut().remove_alert = Some(alert.clone());
+        alert.beginSheetModalForWindow_completionHandler(&self.views().window, Some(&answered));
+        alert.window().makeFirstResponder(Some(&keep));
+    }
+
+    /// Remove only when confirmed, and only the key the question named.
+    fn remove_answered(&self, id: &str, confirmed: bool) {
+        {
+            let mut state = self.state_mut();
+            state.remove_alert = None;
+            if confirmed && state.credential.id() == id {
+                state.credential.remove();
+            }
+        }
+        self.show_key();
+    }
+
+    /// Withdraw the Remove confirmation, keeping the key.
+    fn end_remove_alert(&self) {
+        let alert = self.state().remove_alert.clone();
+        if let Some(alert) = alert {
+            self.views()
+                .window
+                .endSheet_returnCode(&alert.window(), NSModalResponseCancel);
+        }
     }
 
     /// The save notice, which footer actions are available, and what each mode
@@ -1221,7 +1612,8 @@ impl SettingsWindow {
         let transcription = pane(mtm, &[&transcription_form]);
 
         // Modes: each mode's name, glyph and promise, what it does to the text,
-        // and what leaves this Mac and its model; the raw ids under Details.
+        // and what leaves this Mac and its model; the cleanup provider's key;
+        // the raw ids under Details.
         let modes: Vec<Retained<NSButton>> = Mode::ALL
             .iter()
             .enumerate()
@@ -1269,6 +1661,8 @@ impl SettingsWindow {
         for lines in choices.iter().skip(1).step_by(2).take(Mode::ALL.len() - 1) {
             mode_group.setCustomSpacing_afterView(8.0, lines);
         }
+        // Outside Details, where a missing key is found at once.
+        let key = key_area(mtm, self);
         // A borderless toggle in the label color: AppKit's disclosure triangle
         // and borderless titles draw below 4.5:1 in Light.
         let details_toggle = ui::button(mtm, "Details", target, sel!(toggleDetails:));
@@ -1308,28 +1702,25 @@ impl SettingsWindow {
         // SAFETY: teardown clears this delegate before the view is released.
         unsafe { pp_endpoint.setDelegate(Some(ProtocolObject::from_ref(self))) };
         let pp_key = ui::field(mtm, "none", CONTROL);
-        let provider_note = ui::note(
-            mtm,
+        // The key area above Details follows the ID as it is typed.
+        // SAFETY: teardown clears this delegate before the view is released.
+        unsafe { pp_key.setDelegate(Some(ProtocolObject::from_ref(self))) };
+        pp_key.setToolTip(Some(&ui::ns(
             "Shared by Clean and Elevate; names a keychain item, not a key.",
-            CONTROL,
-        );
+        )));
         let pp_timeout = ui::field(mtm, "", NUMBER);
         let milliseconds = ui::label(mtm, "ms");
         let timeout_row = ui::row(mtm, &[&pp_timeout, &milliseconds], 6.0);
         let pp_passes = ui::field(mtm, "", NUMBER);
-        let passes_note = ui::note(
-            mtm,
+        pp_passes.setToolTip(Some(&ui::ns(
             "2 adds a proofread pass. Elevate always makes one pass.",
-            CONTROL,
-        );
+        )));
         let pp_min_chars = ui::field(mtm, "", NUMBER);
         let characters = ui::label(mtm, "characters");
         let min_chars_row = ui::row(mtm, &[&pp_min_chars, &characters], 6.0);
-        let min_chars_note = ui::note(
-            mtm,
+        pp_min_chars.setToolTip(Some(&ui::ns(
             "Shorter transcripts skip Clean's model; 0 never skips.",
-            CONTROL,
-        );
+        )));
         let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 50.0, false);
         let details = ui::form(
             mtm,
@@ -1339,12 +1730,9 @@ impl SettingsWindow {
                 (Some("Elevate:"), &elevate_row),
                 (Some("Endpoint:"), &pp_endpoint),
                 (Some("API key ID:"), &pp_key),
-                (None, &provider_note),
                 (Some("Timeout:"), &timeout_row),
                 (Some("Clean passes:"), &pp_passes),
-                (None, &passes_note),
                 (Some("Minimum length:"), &min_chars_row),
-                (None, &min_chars_note),
                 (Some("Clean instructions:"), &instructions_scroll),
             ],
         );
@@ -1355,10 +1743,13 @@ impl SettingsWindow {
             mtm,
             &[
                 (Some("Mode:"), &mode_group),
+                (None, &key.view),
                 (None, &details_toggle),
                 (None, &details),
             ],
         );
+        // The key sits apart from the choices above it.
+        modes_form.rowAtIndex(1).setTopPadding(6.0);
         ui::show_in_form(&details, false);
         let modes_pane = pane(mtm, &[&modes_form]);
 
@@ -1523,6 +1914,7 @@ impl SettingsWindow {
             promises,
             effects,
             summaries,
+            key,
             details_toggle,
             details,
             clean_model,
@@ -1656,6 +2048,78 @@ fn repair_sheet(mtm: MainThreadMarker, target: &AnyObject) -> RepairSheet {
     }
 }
 
+/// The key area: its name and state, a masked field that takes only a new
+/// key, and what a stored key allows. `show_key` fills it in.
+fn key_area(mtm: MainThreadMarker, owner: &SettingsWindow) -> KeyArea {
+    let target: &AnyObject = owner;
+    // Bold like the modes' names, so a missing key is found at a glance.
+    let name = ui::truncating_label(mtm, "");
+    name.setFont(Some(
+        &NSFont::boldSystemFontOfSize(NSFont::systemFontSize()),
+    ));
+    name.setAllowsExpansionToolTips(true);
+    let warning = ui::symbol("exclamationmark.triangle.fill", "Needs attention");
+    let attention = warning.map(|image| {
+        let icon = NSImageView::imageViewWithImage(&image, mtm);
+        icon.setContentTintColor(Some(&NSColor::systemOrangeColor()));
+        icon.setHidden(true);
+        icon
+    });
+    let status = ui::label(mtm, "");
+    let header = match &attention {
+        Some(icon) => {
+            let header = ui::row(mtm, &[&name, icon, &status], 8.0);
+            header.setCustomSpacing_afterView(4.0, icon);
+            header
+        }
+        None => ui::row(mtm, &[&name, &status], 8.0),
+    };
+    // A long ID truncates rather than widening the pane.
+    ui::fixed_width(&header, CHOICE);
+    let secret = NSSecureTextField::new(mtm);
+    secret.setPlaceholderString(Some(&ui::ns("Paste key")));
+    // One scrolling line, like the fields `ui::field` makes: a long key never
+    // wraps or grows the pane.
+    if let Some(cell) = secret.cell() {
+        cell.setScrollable(true);
+        cell.setUsesSingleLineMode(true);
+    }
+    ui::fixed_width(&secret, CONTROL);
+    // SAFETY: the window clears this delegate before it is released.
+    unsafe { secret.setDelegate(Some(ProtocolObject::from_ref(owner))) };
+    let save = ui::button(mtm, "Save", target, sel!(saveKey:));
+    let cancel = ui::button(mtm, "Cancel", target, sel!(cancelKey:));
+    let entry = ui::row(mtm, &[&secret, &save, &cancel], 8.0);
+    let action = ui::button(mtm, "", target, sel!(keyAction:));
+    let replace = ui::button(mtm, "Replace…", target, sel!(replaceKey:));
+    let remove = ui::button(mtm, "Remove…", target, sel!(removeKey:));
+    remove.setHasDestructiveAction(true);
+    let actions = ui::row(mtm, &[&action, &replace, &remove], 8.0);
+    let note = Message::new(mtm, CHOICE);
+    let problem = Message::new(mtm, CHOICE);
+    let view = ui::column(
+        mtm,
+        &[&header, &entry, &actions, &note.view, &problem.view],
+        6.0,
+    );
+    KeyArea {
+        view,
+        name,
+        attention,
+        status,
+        entry,
+        secret,
+        save,
+        cancel,
+        actions,
+        action,
+        replace,
+        remove,
+        note,
+        problem,
+    }
+}
+
 /// `path` with the home folder written as `~`, as Finder and Terminal show it.
 fn home_relative(path: &Path) -> String {
     match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
@@ -1672,6 +2136,47 @@ fn whole<T: std::str::FromStr>(field: &NSTextField, name: &str) -> Result<T, Str
         .map_err(|_| format!("{name} must be a whole number."))
 }
 
+/// The cleanup credential as people know it: OpenRouter's by name, any other
+/// by the ID it is stored under.
+fn key_name(id: &str) -> String {
+    if id.is_empty() {
+        "API key".to_owned()
+    } else if id.eq_ignore_ascii_case("openrouter") {
+        "OpenRouter API key".to_owned()
+    } else {
+        format!("“{id}” API key")
+    }
+}
+
+/// Whether the keychain holds a stored key back until access is approved,
+/// rather than a read failing that another try may pass.
+fn needs_approval(access: KeychainAuthorization) -> bool {
+    matches!(
+        access,
+        KeychainAuthorization::NeedsAuthorization | KeychainAuthorization::Denied
+    )
+}
+
+/// The button for a key the keyring did not return. Approval opens the macOS
+/// prompt, so its title ends in an ellipsis; a retry only reads again.
+fn action_title(access: KeychainAuthorization) -> Option<String> {
+    let action = access.action()?;
+    let title = if needs_approval(access) {
+        format!("{action}…")
+    } else {
+        action.to_owned()
+    };
+    Some(title)
+}
+
+/// `text` without the whitespace around it, trimmed where it lies so a key
+/// is not copied again.
+fn trim_in_place(text: &mut String) {
+    text.truncate(text.trim_end().len());
+    let start = text.len() - text.trim_start().len();
+    text.replace_range(..start, "");
+}
+
 /// Render `pane` of the Settings window offscreen to a PNG at `path`, with the
 /// saved history loaded and live status read once. No window is ordered on
 /// screen and the process never activates.
@@ -1684,7 +2189,15 @@ pub(crate) fn screenshot(path: &Path, pane: Pane) -> Result<()> {
         let mut state = window.state_mut();
         state.history.start_load();
         state.history.loaded(model::load_transcripts());
+        // The key's state settles on its worker, as in the app; the render
+        // waits for it as for the history, to show an answer, not a check.
+        let settle = Instant::now() + Duration::from_secs(6);
+        while state.credential.busy() && Instant::now() < settle {
+            std::thread::sleep(Duration::from_millis(10));
+            state.credential.poll();
+        }
     }
+    window.show_key();
     let status = ipc::status().ok();
     let line = status
         .as_ref()

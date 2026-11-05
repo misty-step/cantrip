@@ -39,24 +39,44 @@ pub(crate) fn get_until(
         !crate::stt::is_cancelled(cancel),
         "OS keyring lookup cancelled"
     );
-    #[cfg(target_os = "macos")]
     if READING.load(Ordering::Acquire) {
-        return Err(AuthorizationRequired.into());
+        return Err(AccessError::Busy.into());
     }
     let id = id.to_owned();
     read_until(&READING, deadline, cancel, move || read_secret(&id, false))
 }
 
-#[derive(Debug)]
-pub(crate) struct AuthorizationRequired;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessError {
+    NotSet,
+    NeedsApproval,
+    Denied,
+    Busy,
+    TimedOut,
+    Unavailable,
+}
 
-impl std::fmt::Display for AuthorizationRequired {
+impl std::fmt::Display for AccessError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("Keychain access not yet allowed")
+        formatter.write_str(match self {
+            Self::NotSet => "No API key stored",
+            Self::NeedsApproval => "Approve Keychain access",
+            Self::Denied => "Keychain access denied",
+            Self::Busy => "OS keyring is busy",
+            Self::TimedOut => "OS keyring read timed out",
+            Self::Unavailable => "OS keyring is unavailable",
+        })
     }
 }
 
-impl std::error::Error for AuthorizationRequired {}
+impl std::error::Error for AccessError {}
+
+pub fn access_error(error: &anyhow::Error) -> AccessError {
+    error
+        .downcast_ref::<AccessError>()
+        .copied()
+        .unwrap_or(AccessError::Unavailable)
+}
 
 fn read_secret(id: &str, interactive: bool) -> Result<String> {
     // keyring uses the legacy login Keychain. Per-query authentication UI flags
@@ -65,7 +85,7 @@ fn read_secret(id: &str, interactive: bool) -> Result<String> {
     let _interaction = if !interactive {
         Some(
             security_framework::os::macos::keychain::SecKeychain::disable_user_interaction()
-                .map_err(|_| anyhow::anyhow!("OS keyring interaction guard unavailable"))?,
+                .map_err(|_| anyhow::Error::new(AccessError::Unavailable))?,
         )
     } else {
         None
@@ -74,21 +94,23 @@ fn read_secret(id: &str, interactive: bool) -> Result<String> {
     let _ = interactive;
     let secret = entry(id)?.get_password().map_err(|error| {
         if matches!(error, keyring::Error::NoEntry) {
-            return anyhow::Error::new(error);
+            return anyhow::Error::new(AccessError::NotSet);
         }
         #[cfg(target_os = "macos")]
         if let keyring::Error::PlatformFailure(source) | keyring::Error::NoStorageAccess(source) =
             &error
         {
-            if source
-                .downcast_ref::<security_framework::base::Error>()
-                .is_some_and(|error| matches!(error.code(), -25293 | -25308 | -25315 | -128))
-            {
-                return anyhow::Error::new(AuthorizationRequired);
+            if let Some(error) = source.downcast_ref::<security_framework::base::Error>() {
+                if matches!(error.code(), -25293 | -25308 | -25315 | -128) {
+                    return anyhow::Error::new(if interactive || error.code() == -128 {
+                        AccessError::Denied
+                    } else {
+                        AccessError::NeedsApproval
+                    });
+                }
             }
         }
-        let _ = error;
-        anyhow::anyhow!("OS keyring credential unavailable")
+        anyhow::Error::new(AccessError::Unavailable)
     })?;
     validate_secret(id, &secret)?;
     Ok(secret)
@@ -96,7 +118,7 @@ fn read_secret(id: &str, interactive: bool) -> Result<String> {
 
 /// The explicit approval path has no deadline, but its caller can abandon it.
 /// Only the native worker may own the secret, and approval never retains it.
-pub(crate) fn authorize(id: &str, cancel: &AtomicBool) -> Result<()> {
+pub fn authorize(id: &str, cancel: &AtomicBool) -> Result<()> {
     let requested_id = id.to_owned();
     read_with_deadline(&READING, None, Some(cancel), move || {
         read_secret(&requested_id, true).map(drop)
@@ -138,7 +160,7 @@ fn read_with_deadline<T: Send + 'static>(
             Some(deadline) => deadline
                 .checked_duration_since(Instant::now())
                 .filter(|time| !time.is_zero())
-                .ok_or_else(|| anyhow::anyhow!("OS keyring lookup timed out")),
+                .ok_or_else(|| anyhow::Error::new(AccessError::TimedOut)),
             None => Ok(Duration::from_millis(25)),
         }
     };
@@ -195,20 +217,6 @@ pub fn delete(id: &str) -> Result<()> {
     entry(id)?
         .delete_credential()
         .with_context(|| format!("deleting key '{id}' from OS keyring"))
-}
-
-pub fn exists(id: &str) -> Result<bool> {
-    match get(id) {
-        Ok(_) => Ok(true),
-        Err(error)
-            if error
-                .downcast_ref::<keyring::Error>()
-                .is_some_and(|error| matches!(error, keyring::Error::NoEntry)) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(error),
-    }
 }
 
 #[cfg(test)]

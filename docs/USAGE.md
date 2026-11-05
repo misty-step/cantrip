@@ -297,6 +297,11 @@ reports. Fixing spellings takes no measurable time, so its light fills as
 refining begins. A default change while a take is active applies only to the
 next take.
 
+Before a first Clean or Elevate take, open **Settings → Modes** to save the
+cleanup provider's API key. Add, Replace, approval, and confirmed Remove are
+described in [credential setup](CONFIGURATION.md#credentials). No key value is
+shown after saving.
+
 The scriptable equivalent persists the same default and reloads a running daemon:
 
 ```sh
@@ -360,6 +365,8 @@ operation finished.
 | `capture-source-missing`, `no-audio` or an input-health notice | Follow the [capture setup guidance](decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03). |
 | `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [mode fallback contract](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03). Repair provider configuration or deliberately leave that mode's model empty for aliases only. |
 | `cleanup: keychain-pending` | Follow [macOS Keychain approval](CONFIGURATION.md#allow-macos-keychain-access-before-dictation). The take keeps alias-corrected text, or the original when no alias changed it. |
+| `cleanup: key-not-set` | Use **Open Settings → Modes** to add the cleanup provider key. |
+| `cleanup: keychain-denied`, `keyring-busy`, `keyring-timed-out`, or `keyring-unavailable` | Follow the specific approval or retry action in the outcome; see [credential states and recovery](CONFIGURATION.md#credentials). These states do not mean that the key is missing. |
 | Storage warning | Delivery and durable retention are separate. Inspect storage before relying on recovery or recording more. |
 | Disconnected/unknown HUD or failed `ping` | Use desktop diagnostics; do not infer Ready or start a competing owner. |
 

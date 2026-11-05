@@ -125,13 +125,26 @@ aliases rather than flattening them into strings.
 
 ## Credentials
 
-Store a provider key with `cantrip key set ID`, then put only its ID in
-`api_key_id`. A configured ID does not prove that the key exists or the provider
-accepts it. See [credential storage and privacy](PRIVACY.md#logs-credentials-and-telemetry)
-for the storage and secret-handling boundary.
+Open **Settings → Modes** and paste the cleanup provider's key into **API key**.
+Choose **Save** beside the key field. This writes the credential immediately;
+**Save & Apply** is for configuration, not credentials. **Replace** accepts a new
+key, and **Remove** asks for confirmation. The field never reads a saved key back.
+The credential uses `[postproc].api_key_id`, normally `openrouter`; change that
+ID under **Details** for another provider. An empty ID disables credentials for
+an unauthenticated local endpoint.
 
-Linux requires an unlocked Secret Service keyring and the daemon's user-session
-D-Bus connection. macOS uses the native login Keychain, not Linux D-Bus setup.
+The field reports **Not set**, **Saved** after a successful write, **Needs
+approval**, or **Approved** after a successful noninteractive read. These states
+do not prove that the provider accepts the key. Denied access, a busy keyring, a
+timed-out read, and an unavailable keyring are separate failures, never evidence
+that no key is stored.
+
+For other provider credentials, or without a GUI, use `cantrip key set ID`
+(hidden terminal input or stdin), `cantrip key status ID`, and `cantrip key rm ID`.
+Put only the ID in `api_key_id`. The [privacy contract](PRIVACY.md#logs-credentials-and-telemetry)
+owns storage and secret handling. Linux requires an unlocked Secret Service
+keyring and the daemon's user-session D-Bus connection. macOS uses the login
+Keychain, not Linux D-Bus setup.
 
 ### Allow macOS Keychain access before dictation
 
@@ -140,30 +153,34 @@ preflights the selected cleanup credential without opening a Keychain prompt.
 The menu and HUD show whether access needs approval. The HUD is passive, so use
 the menu action rather than clicking the HUD.
 
-1. Store the key and configure its ID before selecting Clean or Elevate.
-2. While Cantrip is idle, choose **Allow Cantrip to use your OpenRouter key**
-   in the menu, or run `cantrip key allow openrouter`. For another ID, the
-   action names that ID. Pass that same ID to the CLI.
+1. If **Not set** is shown, choose **Open Settings** and add the key in
+   **Modes**. The HUD and take outcome say **Add your OpenRouter key in
+   Settings**, not that access needs approval.
+2. If the key is stored but not readable, choose **Approve Keychain access**
+   in Settings or the Cantrip menu while idle, or run
+   `cantrip key allow openrouter`. Pass the configured ID for another provider.
 3. Answer the native Keychain prompt. Choose **Always Allow** if you trust this
-   Cantrip build and want macOS to remember its access for takes.
-   **Allow** approves only the current authorization request. Later takes still
-   need permission to read without a prompt. An updated development build may
-   ask again.
-4. Inspect `cantrip status --json`. Its `keychain.key_id` identifies the live
+   build and want macOS to remember its access for future takes. **Allow** covers
+   only the current authorization request. An updated development build may ask
+   again; storing the key from Settings makes the app itself the item creator.
+4. Inspect `cantrip status --json`. `keychain.key_id` identifies the live
    owner's configured credential. `keychain.authorization` becomes `ready`
-   when Cantrip can read without prompting. A CLI acknowledgment is not approval.
+   when that owner can read without prompting. A CLI acknowledgment is not approval.
 
-The menu and CLI authorize the running daemon, not the CLI executable. The
+The menu and CLI authorize the running daemon, not the CLI executable. Their
 action is unavailable during a take and rejects an ID that no longer matches
-the live configuration. Authorization runs asynchronously and has no deadline.
-It waits for your answer independently of take cancellation and cleanup budgets.
+the live configuration. Settings saves and authorizes in the app process.
+Explicit authorization runs asynchronously without a deadline and waits for
+your answer independently of take cancellation and cleanup budgets.
 
-Keychain reads during takes never open an approval prompt. If cleanup needs
-approval or authorization is still pending, the take continues without LLM
-cleanup. It reports `keychain-pending`, error class `cleanup-keychain-pending`,
-and "Cleanup skipped — Keychain access not yet allowed." Alias-corrected text
-is preserved, or the original transcript if no alias changed it. Raw remains
-unchanged and does not request cleanup.
+Keychain reads during takes never open an approval prompt. A take requiring
+approval reports `cleanup: keychain-pending` and **Approve Keychain access** with
+the approval action and **Always Allow** note. Missing keys instead report
+`key-not-set`; denied, busy, timed-out, and unavailable reads report
+`keychain-denied`, `keyring-busy`, `keyring-timed-out`, and `keyring-unavailable`.
+Each gives its own remediation. In all of these cases cleanup is skipped and
+alias-corrected text is preserved, or the original when no alias changed it.
+Raw remains unchanged and does not request cleanup.
 
 ### Credential waits
 

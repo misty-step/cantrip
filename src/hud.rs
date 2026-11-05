@@ -16,7 +16,8 @@ use cantrip_engine::{
     ipc::{
         self, AudioSignal, AudioWaveform, CaptureGuidance, CaptureIssue, Cleanup, Completeness,
         Delivery, KeychainAccess, KeychainAuthorization, StateKind, StatusSnapshot,
-        TerminalOutcome, AUDIO_WAVEFORM_BINS, KEYCHAIN_PENDING_REASON,
+        TerminalOutcome, AUDIO_WAVEFORM_BINS, KEYCHAIN_APPROVAL_NOTE, KEYCHAIN_PENDING_REASON,
+        KEYCHAIN_WAITING,
     },
     pipeline::Stage,
 };
@@ -89,58 +90,14 @@ fn missing_microphone_action(_default_input: Option<&str>) -> String {
     SETTINGS_ACTION.to_owned()
 }
 
-/// What the menu and the HUD say while the native Keychain prompt the
-/// operator chose is open.
-pub(crate) const KEYCHAIN_WAITING: &str = "Waiting for your Keychain decision…";
-/// What that prompt's buttons mean for takes, said beside the menu's approval
-/// item and on the HUD while the prompt waits.
-pub(crate) const KEYCHAIN_BUTTONS: &str =
-    "Always Allow lets takes use the key; Allow covers only this request.";
-
-/// The cleanup credential as the HUD and the menu name it: the conventional
-/// `openrouter` ID by its provider, any other configured ID as written.
-pub(crate) fn keychain_key(key_id: &str) -> String {
-    if key_id.eq_ignore_ascii_case("openrouter") {
-        "your OpenRouter key".to_owned()
-    } else {
-        format!("your “{key_id}” key")
-    }
-}
-
-/// The HUD and the menu when Keychain could not return the key for a reason
-/// other than approval, such as a key that was never saved.
-pub(crate) fn keychain_unavailable(key_id: &str) -> String {
-    format!("Keychain didn’t return {}", keychain_key(key_id))
-}
-
-/// The menu item that asks macOS to let Cantrip read the key, named the same
-/// by the HUD's route to it.
-#[cfg(target_os = "macos")]
-pub(crate) fn allow_keychain_item(key_id: &str) -> String {
-    format!("Allow Cantrip to use {}", keychain_key(key_id))
-}
-
-/// Where Keychain access is allowed or retried while the owner still needs
-/// it: the macOS menu item of the same name. Only macOS reports Keychain
-/// access, so Linux names no route.
-#[cfg(target_os = "macos")]
 fn keychain_route(access: &KeychainAccess) -> Option<String> {
-    match access.authorization {
-        KeychainAuthorization::NeedsAuthorization => Some(format!(
-            "Cantrip menu → {}",
-            allow_keychain_item(&access.key_id)
-        )),
-        KeychainAuthorization::Unavailable => {
-            Some(deliberately!("Try Keychain access again").to_owned())
-        }
-        KeychainAuthorization::Checking
-        | KeychainAuthorization::Authorizing
-        | KeychainAuthorization::Ready => None,
+    let action = access.authorization.action()?;
+    #[cfg(target_os = "macos")]
+    return Some(format!("Cantrip menu → {action}"));
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(format!("Settings → Modes → {action}"))
     }
-}
-#[cfg(not(target_os = "macos"))]
-fn keychain_route(_access: &KeychainAccess) -> Option<String> {
-    None
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -1230,7 +1187,8 @@ impl Model {
                         outcome.delivery,
                         Delivery::Typed | Delivery::Pasted | Delivery::Copied | Delivery::HandedOff
                     )
-                    && !matches!(outcome.cleanup, Cleanup::Failed | Cleanup::KeychainPending)
+                    && outcome.cleanup != Cleanup::Failed
+                    && outcome.cleanup.credential_state().is_none()
             });
         if self.reduced_motion || phase.is_none() && !successful {
             self.work = None;
@@ -1509,7 +1467,7 @@ fn attention_outcome(outcome: &TerminalOutcome) -> bool {
     ) || matches!(
         outcome.delivery,
         Delivery::Failed | Delivery::Uncertain | Delivery::Deferred
-    ) || outcome.cleanup == Cleanup::KeychainPending)
+    ) || outcome.cleanup.credential_state().is_some())
 }
 
 /// The owner's capture guidance in HUD words: its sentence naming the input,
@@ -1542,26 +1500,18 @@ fn kept_text(outcome: &TerminalOutcome) -> &'static str {
     }
 }
 
-/// Keychain access said once it settles needing the operator: why takes skip
-/// cleanup, and the menu item that fixes it. Checking and Ready say nothing,
-/// and the wait for an open prompt is live instead.
 fn keychain_notice(access: &KeychainAccess) -> Option<Caption> {
-    let (title, detail) = match access.authorization {
-        KeychainAuthorization::NeedsAuthorization => (
-            "Keychain access not yet allowed".to_owned(),
-            "Takes skip cleanup until you allow it.",
-        ),
-        KeychainAuthorization::Unavailable => (
-            keychain_unavailable(&access.key_id),
-            "Takes skip cleanup until it’s available.",
-        ),
+    if matches!(
+        access.authorization,
         KeychainAuthorization::Checking
-        | KeychainAuthorization::Authorizing
-        | KeychainAuthorization::Ready => return None,
-    };
+            | KeychainAuthorization::Authorizing
+            | KeychainAuthorization::Ready
+    ) {
+        return None;
+    }
     Some(Caption {
-        title,
-        detail: detail.to_owned(),
+        title: access.authorization.message(&access.key_id),
+        detail: access.authorization.note().unwrap_or_default().to_owned(),
         action: keychain_route(access).unwrap_or_default(),
     })
 }
@@ -1571,7 +1521,7 @@ fn keychain_notice(access: &KeychainAccess) -> Option<Caption> {
 fn keychain_waiting(access: &KeychainAccess) -> Option<Caption> {
     (access.authorization == KeychainAuthorization::Authorizing).then(|| Caption {
         title: KEYCHAIN_WAITING.to_owned(),
-        detail: KEYCHAIN_BUTTONS.to_owned(),
+        detail: KEYCHAIN_APPROVAL_NOTE.to_owned(),
         action: String::new(),
     })
 }
@@ -1590,7 +1540,7 @@ fn present_outcome(
     let copied = outcome.delivery == Delivery::Copied;
     // Cleanup that waited for Keychain approval needs the operator even when
     // its text arrived, so it never settles as success.
-    let keychain_pending = outcome.cleanup == Cleanup::KeychainPending
+    let keychain_pending = outcome.cleanup.credential_state().is_some()
         && outcome.completeness != Completeness::Cancelled;
     let mut caption = Caption::default();
     let mut kind = if attention {
@@ -1773,12 +1723,34 @@ fn present_outcome(
         if !caption.detail.is_empty() {
             caption.detail.push('\n');
         }
-        caption.detail.push_str(KEYCHAIN_PENDING_REASON);
-        if let Some(route) = status.keychain.as_ref().and_then(keychain_route) {
+        let state = outcome
+            .cleanup
+            .credential_state()
+            .expect("credential outcome");
+        let id = status
+            .keychain
+            .as_ref()
+            .map_or("openrouter", |access| access.key_id.as_str());
+        if state == KeychainAuthorization::NeedsAuthorization {
+            caption.detail.push_str(KEYCHAIN_PENDING_REASON);
+        } else {
+            caption.detail.push_str(&state.message(id));
+        }
+        let access = status.keychain.clone().unwrap_or_else(|| KeychainAccess {
+            key_id: id.to_owned(),
+            authorization: state,
+        });
+        if let Some(route) = keychain_route(&access) {
             if !caption.action.is_empty() {
                 caption.action.push('\n');
             }
             caption.action.push_str(&route);
+        }
+        if let Some(note) = state.note() {
+            if !caption.action.is_empty() {
+                caption.action.push('\n');
+            }
+            caption.action.push_str(note);
         }
     }
     if attention && status.capabilities.dismiss {
@@ -5121,7 +5093,7 @@ mod tests {
                 assert_eq!(
                     view.caption
                         .action
-                        .contains("Cantrip menu → Allow Cantrip to use your OpenRouter key"),
+                        .contains("Cantrip menu → Approve Keychain access"),
                     cfg!(target_os = "macos"),
                     "{caption}"
                 );
@@ -5145,8 +5117,8 @@ mod tests {
         status.outcome = Some(pending_cleanup(Delivery::Copied, 1));
         let finished = now + Duration::from_secs(2);
         model.apply(status.clone(), finished);
-        let allow = "Cantrip menu → Allow Cantrip to use your OpenRouter key";
-        let retry = "Cantrip menu → Try Keychain access again";
+        let allow = "Cantrip menu → Approve Keychain access";
+        let retry = "Cantrip menu → Retry keyring access";
         for (authorization, route) in [
             (KeychainAuthorization::NeedsAuthorization, Some(allow)),
             (KeychainAuthorization::Authorizing, None),
@@ -5220,16 +5192,13 @@ mod tests {
         let launched = now + Duration::from_millis(100);
         model.apply(status.clone(), launched);
         assert_eq!(model.kind, Some(Kind::Attention));
-        assert_eq!(model.caption.title, "Keychain access not yet allowed");
-        assert_eq!(
-            model.caption.detail,
-            "Takes skip cleanup until you allow it."
-        );
+        assert_eq!(model.caption.title, "Approve Keychain access");
+        assert_eq!(model.caption.detail, KEYCHAIN_APPROVAL_NOTE);
         assert_eq!(
             model
                 .caption
                 .action
-                .contains("Cantrip menu → Allow Cantrip to use your OpenRouter key"),
+                .contains("Cantrip menu → Approve Keychain access"),
             cfg!(target_os = "macos")
         );
         let expired = launched + ATTENTION_HOLD + RESULT_FADE;
@@ -5247,7 +5216,7 @@ mod tests {
         model.apply(status.clone(), asked);
         assert_eq!(model.kind, Some(Kind::Neutral));
         assert_eq!(model.caption.title, KEYCHAIN_WAITING);
-        assert_eq!(model.caption.detail, KEYCHAIN_BUTTONS);
+        assert_eq!(model.caption.detail, KEYCHAIN_APPROVAL_NOTE);
         assert!(model.caption.action.is_empty());
         model.apply(status.clone(), asked + Duration::from_secs(60));
         assert_eq!(model.caption.title, KEYCHAIN_WAITING);
@@ -5263,7 +5232,7 @@ mod tests {
         let reverted = asked + Duration::from_secs(63);
         model.apply(status.clone(), reverted);
         assert_eq!(model.kind, Some(Kind::Attention));
-        assert_eq!(model.caption.title, "Keychain access not yet allowed");
+        assert_eq!(model.caption.title, "Approve Keychain access");
         // Always Allow: Ready withdraws the notice at once and says nothing.
         status.keychain = keychain_access(KeychainAuthorization::Ready);
         model.apply(status.clone(), reverted + Duration::from_secs(1));
@@ -5272,12 +5241,12 @@ mod tests {
         status.keychain = keychain_access(KeychainAuthorization::Unavailable);
         model.apply(status, reverted + Duration::from_secs(2));
         assert_eq!(model.kind, Some(Kind::Attention));
+        assert_eq!(model.caption.title, "Keyring is unavailable");
         assert_eq!(
-            model.caption.title,
-            "Keychain didn’t return your OpenRouter key"
-        );
-        assert_eq!(
-            model.caption.action.contains("Try Keychain access again"),
+            model
+                .caption
+                .action
+                .contains("Cantrip menu → Retry keyring access"),
             cfg!(target_os = "macos")
         );
     }

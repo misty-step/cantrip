@@ -1,8 +1,11 @@
 //! The Linux Settings window: the shared form and transcript history in egui
 //! (eframe/glow), themed from the active desktop palette. The header polls the
 //! live dictation state every second; the audio source is a PipeWire source
-//! name and shortcuts belong to the compositor.
+//! name and shortcuts belong to the compositor. Modes adds, replaces and
+//! removes the cleanup provider's key in the OS keyring off the UI thread; a
+//! saved key is never read back into the window.
 
+use super::credential::Credential;
 use super::model::{
     self, CopyFailure, CopyPhase, PastTranscript, SettingsForm, TranscriptHistory,
     INJECTION_CHOICES, MOTION_CHOICES,
@@ -14,6 +17,7 @@ use crate::theme;
 use anyhow::{anyhow, Context, Result};
 use cantrip_engine::{config::Mode, ipc, paths};
 use eframe::egui;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -22,7 +26,8 @@ use std::time::{Duration, Instant};
 const SCREENSHOT_DELAY_FRAMES: u32 = 6;
 /// How often to refresh the live daemon state in the header.
 const DAEMON_POLL: Duration = Duration::from_secs(1);
-/// Upper bound on frames a `--screenshot` waits for the history list.
+/// Upper bound on frames a `--screenshot` waits for the history list and the
+/// key check.
 const SCREENSHOT_MAX_FRAMES: u32 = 100;
 /// Complete rows visible in the past-transcript list. Odd, so centering a
 /// focused Copy button leaves whole rows above and below it.
@@ -31,6 +36,14 @@ const HISTORY_VISIBLE_ROWS: f32 = 5.0;
 const ROW_PAD: f32 = 6.0;
 /// Gap between a row's capture details and its opening words.
 const ROW_LINE_GAP: f32 = 2.0;
+/// The masked cleanup key field. It holds a secret, so its text and undo
+/// history go as soon as it closes.
+const KEY_FIELD: &str = "cleanup-api-key";
+/// The cleanup key ID under Details. The key is checked once an ID is
+/// committed there, not for each partial name.
+const KEY_ID_FIELD: &str = "cleanup-api-key-id";
+/// How often to look for a finished keyring operation while one runs.
+const KEY_POLL: Duration = Duration::from_millis(50);
 
 /// The live dictation state as the header names it: the engine's stage, or
 /// the state itself, with a recording that has no signal yet still starting.
@@ -63,6 +76,27 @@ fn mode_glyph(ui: &mut egui::Ui, mode: Mode) {
     }
 }
 
+/// What the cleanup key's controls offer beyond its status.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyStep {
+    /// The fix for its status, Replace and Remove; the field when none is set.
+    Status,
+    /// A masked field takes the replacement key.
+    Replacing,
+    /// Remove waits for confirmation in place.
+    Removing,
+}
+
+/// The cleanup key control that keyboard focus returns to after an action.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KeyFocus {
+    Field,
+    Action,
+    Replace,
+    Remove,
+    Keep,
+}
+
 struct SettingsApp {
     form: SettingsForm,
     daemon_online: bool,
@@ -76,6 +110,14 @@ struct SettingsApp {
     copy: Option<Receiver<Result<(), CopyFailure>>>,
     /// The focused Copy button that started a request; focus returns to it.
     copy_focus: Option<egui::Id>,
+    /// The cleanup provider's key in the OS keyring, under the committed ID.
+    credential: Credential,
+    /// What is typed in the masked key field while it is open; never shown,
+    /// read back or kept once the field closes.
+    key_input: Option<String>,
+    key_step: KeyStep,
+    /// The key control keyboard focus moves to once it can take focus.
+    key_focus: Option<KeyFocus>,
     palette: theme::Palette,
     frames: u32,
     screenshot: Option<PathBuf>,
@@ -102,6 +144,10 @@ impl SettingsApp {
             history_load: None,
             copy: None,
             copy_focus: None,
+            credential: Credential::default(),
+            key_input: None,
+            key_step: KeyStep::Status,
+            key_focus: None,
             palette,
             frames: 0,
             screenshot,
@@ -480,8 +526,9 @@ impl SettingsApp {
     }
 
     /// Each mode's name, glyph and promise, what it does to the text, and what
-    /// leaves this computer and its model; then under Details the raw ids,
-    /// each mode's own model, and the provider and tuning they share.
+    /// leaves this computer and its model; then the cleanup provider's API key,
+    /// and under Details the raw ids, each mode's own model, and the provider
+    /// and tuning they share.
     fn modes_section(&mut self, ui: &mut egui::Ui) {
         let edit = &mut self.form.edit;
         let pipelines = Mode::ALL.map(|mode| edit.pipeline(mode));
@@ -502,6 +549,10 @@ impl SettingsApp {
             });
             ui.add_space(6.0);
         }
+        ui.separator();
+        self.api_key(ui);
+        ui.add_space(6.0);
+        let edit = &mut self.form.edit;
         egui::CollapsingHeader::new("Details").show(ui, |ui| {
             egui::Grid::new("postproc")
                 .num_columns(2)
@@ -538,6 +589,7 @@ impl SettingsApp {
                     ui.label(egui::RichText::new("API key id (keyring)").weak());
                     ui.add(
                         egui::TextEdit::singleline(&mut edit.pp_key)
+                            .id(egui::Id::new(KEY_ID_FIELD))
                             .hint_text("none")
                             .desired_width(f32::INFINITY),
                     );
@@ -593,6 +645,241 @@ impl SettingsApp {
                     .desired_width(f32::INFINITY),
             );
         });
+    }
+
+    /// The cleanup provider's key in the OS keyring, under the ID set in
+    /// Details: its status and how to fix it, a masked field to add or replace
+    /// it, and Remove after an inline confirmation. A saved key is never read
+    /// back.
+    fn api_key(&mut self, ui: &mut egui::Ui) {
+        use ipc::KeychainAuthorization as Access;
+        // Check an ID once it is committed, not each partial name as it is
+        // typed; nothing opened for one key carries over to another.
+        if !ui.memory(|memory| memory.has_focus(egui::Id::new(KEY_ID_FIELD)))
+            && self.credential.id() != self.form.edit.pp_key.trim()
+        {
+            self.credential.select(&self.form.edit.pp_key);
+            self.key_step = KeyStep::Status;
+            self.key_focus = None;
+        }
+        let id = self.credential.id();
+        if id.is_empty() {
+            drop(self.take_key(ui.ctx()));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("API key").weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new("Not used").weak());
+                });
+            });
+            return;
+        }
+        let title: Cow<'static, str> = if id.eq_ignore_ascii_case("openrouter") {
+            Cow::Borrowed("OpenRouter API key")
+        } else {
+            Cow::Owned(format!("“{id}” API key"))
+        };
+        // Keyring work, and an ID still being typed, hold every control.
+        let enabled = !self.credential.busy() && id == self.form.edit.pp_key.trim();
+        let access = self.credential.access();
+        if access == Access::NotSet {
+            // Its field is open already, and there is nothing to remove.
+            self.key_step = KeyStep::Status;
+        }
+        let attention = color(self.palette.attention);
+        let ink = match access {
+            Access::Ready => color(self.palette.accent),
+            Access::NotSet => ui.visuals().text_color(),
+            Access::Checking | Access::Authorizing => ui.visuals().weak_text_color(),
+            Access::NeedsAuthorization
+            | Access::Denied
+            | Access::Busy
+            | Access::TimedOut
+            | Access::Unavailable => attention,
+        };
+        let name = ui
+            .horizontal(|ui| {
+                let name = ui.label(egui::RichText::new(&*title).weak());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.colored_label(ink, self.credential.label());
+                });
+                name.id
+            })
+            .inner;
+        if self.key_step == KeyStep::Removing {
+            ui.label("Remove this key from the keyring? Takes skip cleanup without it.");
+        } else if let Some(problem) = self.credential.problem() {
+            ui.colored_label(attention, problem);
+        } else if let Some(note) = access.note() {
+            ui.label(egui::RichText::new(note).weak());
+        }
+        // Screen readers hear which key each button acts on.
+        let named = |button: &egui::Response, verb: &str| {
+            button.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    button.enabled(),
+                    format!("{verb} {title}"),
+                )
+            });
+        };
+        let entering = access == Access::NotSet || self.key_step == KeyStep::Replacing;
+        if !entering {
+            drop(self.take_key(ui.ctx()));
+        }
+        let target = self.key_focus.filter(|_| enabled);
+        let mut focus = None;
+        // Where focus goes when its target is not on screen.
+        let primary = if entering {
+            let typed = self.key_input.get_or_insert_with(String::new);
+            let field = ui
+                .add_enabled(
+                    enabled,
+                    egui::TextEdit::singleline(typed)
+                        .id(egui::Id::new(KEY_FIELD))
+                        .password(true)
+                        .hint_text("Paste key")
+                        .desired_width(f32::INFINITY),
+                )
+                .labelled_by(name);
+            let submit =
+                field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let can_save = enabled && !typed.trim().is_empty();
+            let replacing = self.key_step == KeyStep::Replacing;
+            let (save, cancel) = ui
+                .horizontal(|ui| {
+                    let save = ui.add_enabled(can_save, egui::Button::new("Save"));
+                    let cancel =
+                        replacing.then(|| ui.add_enabled(enabled, egui::Button::new("Cancel")));
+                    (save, cancel)
+                })
+                .inner;
+            named(&save, "Save");
+            if let Some(cancel) = &cancel {
+                named(cancel, "Keep");
+            }
+            if save.clicked() || (submit && can_save) {
+                if save.has_focus() || submit {
+                    self.key_focus = Some(KeyFocus::Replace);
+                }
+                self.save_key(ui.ctx());
+            } else if let Some(cancel) = cancel.filter(egui::Response::clicked) {
+                self.close_key_step(ui.ctx(), cancel.has_focus());
+            }
+            if target == Some(KeyFocus::Field) {
+                focus = Some(field.clone());
+            }
+            field
+        } else if self.key_step == KeyStep::Removing {
+            let (remove, keep) = ui
+                .horizontal(|ui| {
+                    let remove = ui.add_enabled(
+                        enabled,
+                        egui::Button::new(egui::RichText::new("Remove").color(attention)),
+                    );
+                    (remove, ui.add_enabled(enabled, egui::Button::new("Cancel")))
+                })
+                .inner;
+            named(&remove, "Remove");
+            named(&keep, "Keep");
+            if remove.clicked() {
+                if remove.has_focus() {
+                    self.key_focus = Some(KeyFocus::Field);
+                }
+                self.key_step = KeyStep::Status;
+                self.credential.remove();
+            } else if keep.clicked() {
+                self.close_key_step(ui.ctx(), keep.has_focus());
+            }
+            if target == Some(KeyFocus::Keep) {
+                focus = Some(keep.clone());
+            }
+            keep
+        } else {
+            // NotSet opens the field instead, so its action never shows here.
+            let (action, replace, remove) = ui
+                .horizontal(|ui| {
+                    let action = access
+                        .action()
+                        .map(|label| ui.add_enabled(enabled, egui::Button::new(label)));
+                    let replace = ui.add_enabled(enabled, egui::Button::new("Replace…"));
+                    let remove = ui.add_enabled(enabled, egui::Button::new("Remove…"));
+                    (action, replace, remove)
+                })
+                .inner;
+            named(&replace, "Replace");
+            named(&remove, "Remove");
+            if let Some(button) = action.as_ref().filter(|button| button.clicked()) {
+                if button.has_focus() {
+                    self.key_focus = Some(KeyFocus::Action);
+                }
+                if matches!(access, Access::NeedsAuthorization | Access::Denied) {
+                    self.credential.approve();
+                } else {
+                    self.credential.refresh();
+                }
+            } else if replace.clicked() {
+                // The field takes focus however Replace was chosen.
+                self.key_step = KeyStep::Replacing;
+                self.key_focus = Some(KeyFocus::Field);
+            } else if remove.clicked() {
+                self.key_step = KeyStep::Removing;
+                if remove.has_focus() {
+                    self.key_focus = Some(KeyFocus::Keep);
+                }
+            }
+            focus = match target {
+                Some(KeyFocus::Action) => action.clone(),
+                Some(KeyFocus::Replace) => Some(replace.clone()),
+                Some(KeyFocus::Remove) => Some(remove.clone()),
+                _ => None,
+            };
+            action.unwrap_or(replace)
+        };
+        if target.is_some() {
+            focus.unwrap_or(primary).request_focus();
+            ui.ctx().request_repaint();
+            if self.key_focus == target {
+                self.key_focus = None;
+            }
+        }
+    }
+
+    /// Take the typed key, if its field is open, along with the field's undo
+    /// history, which keeps copies of it.
+    fn take_key(&mut self, ctx: &egui::Context) -> Option<String> {
+        let key = self.key_input.take()?;
+        ctx.data_mut(|data| {
+            data.remove::<egui::text_edit::TextEditState>(egui::Id::new(KEY_FIELD));
+        });
+        Some(key)
+    }
+
+    /// Hand the typed key to the keyring worker. Its field closes at once, so
+    /// nothing typed stays here.
+    fn save_key(&mut self, ctx: &egui::Context) {
+        let Some(mut key) = self.take_key(ctx) else {
+            return;
+        };
+        // A pasted key often brings a newline or spaces; trim them in place.
+        key.truncate(key.trim_end().len());
+        let start = key.len() - key.trim_start().len();
+        key.replace_range(..start, "");
+        self.key_step = KeyStep::Status;
+        self.credential.save(key);
+    }
+
+    /// Leave Replace or Remove for the key's status, dropping a typed key.
+    /// From the keyboard, focus returns to the button that opened the step.
+    fn close_key_step(&mut self, ctx: &egui::Context, keyboard: bool) {
+        if keyboard {
+            self.key_focus = match self.key_step {
+                KeyStep::Status => self.key_focus,
+                KeyStep::Replacing => Some(KeyFocus::Replace),
+                KeyStep::Removing => Some(KeyFocus::Remove),
+            };
+        }
+        self.key_step = KeyStep::Status;
+        drop(self.take_key(ctx));
     }
 
     fn save(&mut self) {
@@ -775,6 +1062,8 @@ impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames += 1;
         self.poll_history(ctx);
+        // A finished keyring operation updates the key's status before drawing.
+        self.credential.poll();
         if let Some(result) = model::completed(self.poll_result.as_ref()) {
             match result {
                 Ok(status) => {
@@ -807,6 +1096,8 @@ impl eframe::App for SettingsApp {
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             if self.form.repairing() {
                 self.form.cancel_repair();
+            } else if self.key_step != KeyStep::Status {
+                self.close_key_step(ctx, true);
             } else {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -818,11 +1109,17 @@ impl eframe::App for SettingsApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| self.show(ui));
+        if self.credential.busy() {
+            // The keyring worker cannot wake the window, and drawing may have
+            // started one; look again shortly.
+            ctx.request_repaint_after(KEY_POLL);
+        }
 
         if self.screenshot.is_some()
             && !self.screenshot_requested
             && self.frames >= SCREENSHOT_DELAY_FRAMES
-            && (!self.history.loading() || self.frames >= SCREENSHOT_MAX_FRAMES)
+            && ((!self.history.loading() && !self.credential.busy())
+                || self.frames >= SCREENSHOT_MAX_FRAMES)
         {
             self.screenshot_requested = true;
             self.screenshot_deadline = Some(Instant::now() + Duration::from_secs(5));

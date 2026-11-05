@@ -19,13 +19,22 @@ pub enum PostprocStatus {
     /// Raw mode, no selected model, or no transcript to transform.
     Off,
     /// LLM cleanup succeeded, taking `ms`.
-    Applied { ms: u128 },
+    Applied {
+        ms: u128,
+    },
     /// Cleanup failed after `ms`; deterministic alias corrections are preserved.
-    Failed { ms: u128 },
+    Failed {
+        ms: u128,
+    },
     /// Clean mode, but the transcript was under `min_chars`.
-    SkippedShort { chars: usize },
+    SkippedShort {
+        chars: usize,
+    },
     /// Native authorization is still required; aliases remain usable.
     KeychainPending,
+    CredentialUnavailable {
+        reason: crate::keys::AccessError,
+    },
 }
 
 /// Entry point that produced a transcript history record.
@@ -432,7 +441,8 @@ impl Pipeline<'_> {
             }
             PostprocStatus::Off
             | PostprocStatus::SkippedShort { .. }
-            | PostprocStatus::KeychainPending => None,
+            | PostprocStatus::KeychainPending
+            | PostprocStatus::CredentialUnavailable { .. } => None,
         };
         let archive = match save(archive::Entry {
             take_id: context.take_id,
@@ -462,6 +472,9 @@ impl Pipeline<'_> {
                 PostprocStatus::Failed { .. } => "failed",
                 PostprocStatus::SkippedShort { .. } => "skipped_short",
                 PostprocStatus::KeychainPending => "keychain_pending",
+                PostprocStatus::CredentialUnavailable { reason } => {
+                    crate::ipc::Cleanup::from_key_error(*reason).name()
+                }
             },
             postproc_model: attempted_postproc
                 .then_some(postproc_cfg.model_config().model.as_str()),
@@ -623,12 +636,19 @@ fn cleanup(
     if stt::is_cancelled(cancel) {
         return (PostprocStatus::Off, None, None);
     }
-    if key
-        .as_ref()
-        .is_err_and(|error| error.is::<crate::keys::AuthorizationRequired>())
-    {
-        tracing::info!("[Postproc] cleanup skipped class=keychain-pending");
-        return (PostprocStatus::KeychainPending, None, None);
+    if let Err(error) = &key {
+        let reason = crate::keys::access_error(error);
+        let status = crate::ipc::Cleanup::from_key_error(reason);
+        tracing::info!("[Postproc] cleanup skipped class={}", status.name());
+        return (
+            if reason == crate::keys::AccessError::NeedsApproval {
+                PostprocStatus::KeychainPending
+            } else {
+                PostprocStatus::CredentialUnavailable { reason }
+            },
+            None,
+            None,
+        );
     }
     match key.and_then(|key| {
         postproc::refine_until(raw, cfg, vocabulary, key.as_deref(), cancel, deadline)
