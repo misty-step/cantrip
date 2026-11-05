@@ -1,11 +1,11 @@
 {
-  "base_revision": "04c0e8546295d0b2dc34aeff730374cbc6e4b8f5",
+  "base_revision": "22691be3ddb735817b2cb6f3dd020661bdba733f",
   "landmark_sha256": "d3e7400abcf72428f801aae3d9ed74412d5ced31eecc6be753a48027a6441ed9",
   "landmark_version": "0.28.7",
   "previous_tag": "v0.1.13",
   "schema_version": 1,
   "tag": "v0.1.14",
-  "technical_changelog_sha256": "b2a61696869d0cff1f75a8b380802053487131d3de881d0cb30d07db5eff968c",
+  "technical_changelog_sha256": "dc7d6184545d2197d4514c5b983797d8d2b34fc4e0e29df05ba20ee18ebe1a8f",
   "version": "0.1.14",
   "version_decision": {
     "api_evidence": {
@@ -23,8 +23,8 @@
     "api_evidence_bump": "none",
     "bump": "patch",
     "commit_bump": "minor",
-    "commit_count": 4,
-    "conventional_commit_count": 4,
+    "commit_count": 6,
+    "conventional_commit_count": 6,
     "decisive_commit": "f0a30ee feat(modes): show each mode as a name, glyph, promise and where the take goes (#262)",
     "decisive_signals": [
       "commit:f0a30ee feat(modes): show each mode as a name, glyph, promise and where the take goes (#262)",
