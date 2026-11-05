@@ -15,7 +15,8 @@ use cantrip_engine::{
     config::{Mode, PipelineDisplay},
     ipc::{
         self, AudioSignal, AudioWaveform, CaptureGuidance, CaptureIssue, Cleanup, Completeness,
-        Delivery, StateKind, StatusSnapshot, TerminalOutcome, AUDIO_WAVEFORM_BINS,
+        Delivery, KeychainAccess, KeychainAuthorization, StateKind, StatusSnapshot,
+        TerminalOutcome, AUDIO_WAVEFORM_BINS, KEYCHAIN_PENDING_REASON,
     },
     pipeline::Stage,
 };
@@ -86,6 +87,60 @@ fn missing_microphone_action(default_input: Option<&str>) -> String {
 #[cfg(not(target_os = "macos"))]
 fn missing_microphone_action(_default_input: Option<&str>) -> String {
     SETTINGS_ACTION.to_owned()
+}
+
+/// What the menu and the HUD say while the native Keychain prompt the
+/// operator chose is open.
+pub(crate) const KEYCHAIN_WAITING: &str = "Waiting for your Keychain decision…";
+/// What that prompt's buttons mean for takes, said beside the menu's approval
+/// item and on the HUD while the prompt waits.
+pub(crate) const KEYCHAIN_BUTTONS: &str =
+    "Always Allow lets takes use the key; Allow covers only this request.";
+
+/// The cleanup credential as the HUD and the menu name it: the conventional
+/// `openrouter` ID by its provider, any other configured ID as written.
+pub(crate) fn keychain_key(key_id: &str) -> String {
+    if key_id.eq_ignore_ascii_case("openrouter") {
+        "your OpenRouter key".to_owned()
+    } else {
+        format!("your “{key_id}” key")
+    }
+}
+
+/// The HUD and the menu when Keychain could not return the key for a reason
+/// other than approval, such as a key that was never saved.
+pub(crate) fn keychain_unavailable(key_id: &str) -> String {
+    format!("Keychain didn’t return {}", keychain_key(key_id))
+}
+
+/// The menu item that asks macOS to let Cantrip read the key, named the same
+/// by the HUD's route to it.
+#[cfg(target_os = "macos")]
+pub(crate) fn allow_keychain_item(key_id: &str) -> String {
+    format!("Allow Cantrip to use {}", keychain_key(key_id))
+}
+
+/// Where Keychain access is allowed or retried while the owner still needs
+/// it: the macOS menu item of the same name. Only macOS reports Keychain
+/// access, so Linux names no route.
+#[cfg(target_os = "macos")]
+fn keychain_route(access: &KeychainAccess) -> Option<String> {
+    match access.authorization {
+        KeychainAuthorization::NeedsAuthorization => Some(format!(
+            "Cantrip menu → {}",
+            allow_keychain_item(&access.key_id)
+        )),
+        KeychainAuthorization::Unavailable => {
+            Some(deliberately!("Try Keychain access again").to_owned())
+        }
+        KeychainAuthorization::Checking
+        | KeychainAuthorization::Authorizing
+        | KeychainAuthorization::Ready => None,
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn keychain_route(_access: &KeychainAccess) -> Option<String> {
+    None
 }
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -277,6 +332,9 @@ struct ResultView {
     waiting_for_settle: bool,
     /// The outcome's non-default target; the default flow and notices have none.
     route: Option<ipc::Handoff>,
+    /// Says Keychain access that needs the operator; withdrawn once that access
+    /// settles on another answer.
+    keychain: bool,
 }
 
 /// The take named above the field, rebuilt when its pipeline, target or stage
@@ -608,6 +666,9 @@ struct Model {
     take_pipeline: Option<PipelineDisplay>,
     /// The engine reported the watched take's refinement at work.
     take_refined: bool,
+    /// The owner's last settled Keychain answer, so a recheck that reaches the
+    /// same answer is not said again.
+    keychain: Option<KeychainAccess>,
 }
 
 impl Model {
@@ -639,6 +700,7 @@ impl Model {
             header_revision: 0,
             take_pipeline: None,
             take_refined: false,
+            keychain: None,
         }
     }
 
@@ -750,12 +812,13 @@ impl Model {
                     self.result = Some(result);
                 }
             }
+            // A shown attention outcome names only the actions available now:
+            // its routes follow the owner's capabilities and Keychain access.
             if !fresh
                 && attention_outcome(outcome)
-                && self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|old| old.capabilities != status.capabilities)
+                && self.snapshot.as_ref().is_some_and(|old| {
+                    old.capabilities != status.capabilities || old.keychain != status.keychain
+                })
             {
                 if let Some(result) = &mut self.result {
                     if result.event_id == Some(outcome.event_id) {
@@ -799,7 +862,46 @@ impl Model {
                 presented: false,
                 waiting_for_settle: false,
                 route: None,
+                keychain: false,
             });
+        }
+        // Keychain access is said once each time it settles on an answer that
+        // needs the operator: at launch, after a mode change or reload, or after
+        // the operator answers its prompt. A recheck reaching the same answer
+        // says nothing, and a take or a result already shown says it instead.
+        if epoch_changed {
+            self.keychain = None;
+        }
+        let checking = status
+            .keychain
+            .as_ref()
+            .is_some_and(|access| access.authorization == KeychainAuthorization::Checking);
+        if !checking && self.keychain != status.keychain {
+            self.keychain = status.keychain.clone();
+            if self.result.as_ref().is_some_and(|result| result.keychain) {
+                self.result = None;
+            }
+            if !active && self.result.is_none() {
+                if let Some(caption) = status.keychain.as_ref().and_then(keychain_notice) {
+                    let dwell = ATTENTION_HOLD
+                        + if self.reduced_motion {
+                            Duration::ZERO
+                        } else {
+                            RESULT_FADE
+                        };
+                    self.result = Some(ResultView {
+                        event_id: None,
+                        kind: Kind::Attention,
+                        caption,
+                        visibility: Visibility(now + dwell),
+                        dwell,
+                        presented: false,
+                        waiting_for_settle: false,
+                        route: None,
+                        keychain: true,
+                    });
+                }
+            }
         }
         if status.notice.is_none() {
             self.interaction = None;
@@ -1088,6 +1190,10 @@ impl Model {
                     let kind = result.kind;
                     let caption = result.caption.clone();
                     self.set_composition(Some(kind), caption, None, None, now);
+                } else if let Some(caption) = status.keychain.as_ref().and_then(keychain_waiting) {
+                    // The menu closed on its choice; until the operator answers
+                    // the native prompt, say what its buttons mean for takes.
+                    self.set_composition(Some(Kind::Neutral), caption, None, None, now);
                 } else if self.interaction.is_some() {
                     self.set_composition(Some(Kind::Neutral), Caption::default(), None, None, now);
                 } else {
@@ -1124,7 +1230,7 @@ impl Model {
                         outcome.delivery,
                         Delivery::Typed | Delivery::Pasted | Delivery::Copied | Delivery::HandedOff
                     )
-                    && outcome.cleanup != Cleanup::Failed
+                    && !matches!(outcome.cleanup, Cleanup::Failed | Cleanup::KeychainPending)
             });
         if self.reduced_motion || phase.is_none() && !successful {
             self.work = None;
@@ -1403,7 +1509,7 @@ fn attention_outcome(outcome: &TerminalOutcome) -> bool {
     ) || matches!(
         outcome.delivery,
         Delivery::Failed | Delivery::Uncertain | Delivery::Deferred
-    ))
+    ) || outcome.cleanup == Cleanup::KeychainPending)
 }
 
 /// The owner's capture guidance in HUD words: its sentence naming the input,
@@ -1422,6 +1528,54 @@ fn guidance_caption(guidance: &CaptureGuidance) -> Caption {
     }
 }
 
+/// What a take kept when cleanup did not run: the alias-corrected text, or
+/// the original when no alias changed it, copied or sent.
+fn kept_text(outcome: &TerminalOutcome) -> &'static str {
+    match (
+        outcome.delivery == Delivery::Copied,
+        outcome.alias_substitutions > 0,
+    ) {
+        (true, true) => "Alias-corrected text copied.",
+        (false, true) => "Alias-corrected text sent.",
+        (true, false) => "Original text copied.",
+        (false, false) => "Original text sent.",
+    }
+}
+
+/// Keychain access said once it settles needing the operator: why takes skip
+/// cleanup, and the menu item that fixes it. Checking and Ready say nothing,
+/// and the wait for an open prompt is live instead.
+fn keychain_notice(access: &KeychainAccess) -> Option<Caption> {
+    let (title, detail) = match access.authorization {
+        KeychainAuthorization::NeedsAuthorization => (
+            "Keychain access not yet allowed".to_owned(),
+            "Takes skip cleanup until you allow it.",
+        ),
+        KeychainAuthorization::Unavailable => (
+            keychain_unavailable(&access.key_id),
+            "Takes skip cleanup until it’s available.",
+        ),
+        KeychainAuthorization::Checking
+        | KeychainAuthorization::Authorizing
+        | KeychainAuthorization::Ready => return None,
+    };
+    Some(Caption {
+        title,
+        detail: detail.to_owned(),
+        action: keychain_route(access).unwrap_or_default(),
+    })
+}
+
+/// While the owner waits on the native prompt the operator chose from the
+/// menu, which has closed by then: what the prompt's buttons mean for takes.
+fn keychain_waiting(access: &KeychainAccess) -> Option<Caption> {
+    (access.authorization == KeychainAuthorization::Authorizing).then(|| Caption {
+        title: KEYCHAIN_WAITING.to_owned(),
+        detail: KEYCHAIN_BUTTONS.to_owned(),
+        action: String::new(),
+    })
+}
+
 fn present_outcome(
     outcome: &TerminalOutcome,
     status: &StatusSnapshot,
@@ -1434,6 +1588,10 @@ fn present_outcome(
         Delivery::Typed | Delivery::Pasted | Delivery::HandedOff
     );
     let copied = outcome.delivery == Delivery::Copied;
+    // Cleanup that waited for Keychain approval needs the operator even when
+    // its text arrived, so it never settles as success.
+    let keychain_pending = outcome.cleanup == Cleanup::KeychainPending
+        && outcome.completeness != Completeness::Cancelled;
     let mut caption = Caption::default();
     let mut kind = if attention {
         Kind::Attention
@@ -1502,13 +1660,11 @@ fn present_outcome(
         },
     }
     if outcome.cleanup == Cleanup::Failed && (delivered || copied) {
-        caption.title = match (copied, outcome.alias_substitutions > 0) {
-            (true, true) => "Alias-corrected text copied. Cleanup unavailable.",
-            (false, true) => "Alias-corrected text sent. Cleanup unavailable.",
-            (true, false) => "Original text copied. Cleanup unavailable.",
-            (false, false) => "Original text sent. Cleanup unavailable.",
-        }
-        .to_owned();
+        caption.title = format!("{} Cleanup unavailable.", kept_text(outcome));
+    }
+    if keychain_pending && outcome.completeness == Completeness::Complete && (delivered || copied) {
+        kind = Kind::Attention;
+        caption.title = kept_text(outcome).to_owned();
     }
     if matches!(
         outcome.completeness,
@@ -1611,6 +1767,20 @@ fn present_outcome(
         caption.title = guided.title;
         caption.action = guided.action;
     }
+    // The specific reason cleanup was skipped, and the menu item that allows the
+    // key while the owner still needs it; never the generic cleanup failure.
+    if keychain_pending {
+        if !caption.detail.is_empty() {
+            caption.detail.push('\n');
+        }
+        caption.detail.push_str(KEYCHAIN_PENDING_REASON);
+        if let Some(route) = status.keychain.as_ref().and_then(keychain_route) {
+            if !caption.action.is_empty() {
+                caption.action.push('\n');
+            }
+            caption.action.push_str(&route);
+        }
+    }
     if attention && status.capabilities.dismiss {
         if !caption.action.is_empty() {
             caption.action.push('\n');
@@ -1646,6 +1816,7 @@ fn present_outcome(
             && delivered
             && outcome.cleanup != Cleanup::Failed,
         route: outcome.handoff.clone(),
+        keychain: false,
     }
 }
 
@@ -2777,6 +2948,7 @@ pub enum ScreenshotState {
     Copied,
     CopiedInstead,
     CleanupFallback,
+    KeychainPending,
     Empty,
     EmptySaved,
     Failed,
@@ -2848,6 +3020,7 @@ pub(crate) fn preview_snapshot(state: StateKind) -> StatusSnapshot {
         // An idle engine reports its configured default; a take, what it started with.
         pipeline: Some(preview_pipeline(mode, None)),
         microphone: None,
+        keychain: None,
         capture_guidance: None,
     }
 }
@@ -2890,8 +3063,9 @@ fn preview_pipeline(mode: Mode, cloud_stt: Option<&str>) -> PipelineDisplay {
 }
 
 /// What each composed take started with: `mode` when given, else Elevate,
-/// except the Clean a recovered take recorded, Clean behind cloud recognition,
-/// and Raw for a plain copy. Cloud scenarios keep their cloud recognizer.
+/// except the Clean a recovered take recorded, Clean behind cloud recognition
+/// or while cleanup waits for Keychain approval, and Raw for a plain copy.
+/// Cloud scenarios keep their cloud recognizer.
 fn screenshot_pipeline(state: ScreenshotState, mode: Option<Mode>) -> PipelineDisplay {
     let cloud = matches!(
         state,
@@ -2903,7 +3077,7 @@ fn screenshot_pipeline(state: ScreenshotState, mode: Option<Mode>) -> PipelineDi
     );
     let fixture = match state {
         ScreenshotState::Copied => Mode::Raw,
-        ScreenshotState::Recovery => Mode::Clean,
+        ScreenshotState::Recovery | ScreenshotState::KeychainPending => Mode::Clean,
         _ if cloud => Mode::Clean,
         _ => Mode::Elevate,
     };
@@ -3138,15 +3312,15 @@ fn screenshot_model(
         ScreenshotState::DeliveryUncertain => (Completeness::Complete, Delivery::Uncertain),
         ScreenshotState::Deferred => (Completeness::Complete, Delivery::Deferred),
         ScreenshotState::Cancelled => (Completeness::Cancelled, Delivery::Cancelled),
-        ScreenshotState::Copied | ScreenshotState::CopiedInstead => {
-            (Completeness::Complete, Delivery::Copied)
-        }
+        ScreenshotState::Copied
+        | ScreenshotState::CopiedInstead
+        | ScreenshotState::KeychainPending => (Completeness::Complete, Delivery::Copied),
         _ if handoff.is_some() => (Completeness::Complete, Delivery::HandedOff),
         _ => (Completeness::Complete, Delivery::Pasted),
     };
     let mut outcome = preview_outcome(completeness, delivery);
     outcome.message = match state {
-        ScreenshotState::Copied => "Copied. Paste when ready.",
+        ScreenshotState::Copied | ScreenshotState::KeychainPending => "Copied. Paste when ready.",
         ScreenshotState::CopiedInstead => "Copied instead. Paste when ready.",
         ScreenshotState::SetupMissing => "Local model unavailable — run: cantrip models pull",
         ScreenshotState::StorageFailed => "Transcription failed. Audio could not be saved.",
@@ -3201,6 +3375,17 @@ fn screenshot_model(
     if state == ScreenshotState::CleanupFallback {
         outcome.cleanup = Cleanup::Failed;
     }
+    if state == ScreenshotState::KeychainPending {
+        // The daemon's message for alias-corrected text copied while cleanup
+        // waited for Keychain approval.
+        outcome.cleanup = Cleanup::KeychainPending;
+        outcome.alias_substitutions = 1;
+        outcome.error = Some("cleanup-keychain-pending".to_owned());
+        outcome.message = format!(
+            "{} {KEYCHAIN_PENDING_REASON} Alias-corrected text was used.",
+            outcome.message
+        );
+    }
     if state == ScreenshotState::Dismissed {
         outcome.dismissed = true;
     }
@@ -3208,6 +3393,12 @@ fn screenshot_model(
     idle.hud.reduced_motion = Some(reduced);
     idle.pending_recordings = usize::from(outcome.artifacts.audio || outcome.artifacts.text);
     idle.outcome = Some(outcome);
+    if state == ScreenshotState::KeychainPending {
+        idle.keychain = Some(KeychainAccess {
+            key_id: "openrouter".to_owned(),
+            authorization: KeychainAuthorization::NeedsAuthorization,
+        });
+    }
     idle.capabilities.local_model = state != ScreenshotState::SetupMissing;
     let result_at = now
         - if matches!(
@@ -4742,6 +4933,224 @@ mod tests {
                 assert_eq!(view.caption.title, expected);
             }
         }
+    }
+
+    fn keychain_access(authorization: KeychainAuthorization) -> Option<KeychainAccess> {
+        Some(KeychainAccess {
+            key_id: "openrouter".to_owned(),
+            authorization,
+        })
+    }
+
+    /// A take whose cleanup waited for Keychain approval, as the daemon reports it.
+    fn pending_cleanup(delivery: Delivery, substitutions: usize) -> TerminalOutcome {
+        let mut outcome = preview_outcome(Completeness::Complete, delivery);
+        outcome.cleanup = Cleanup::KeychainPending;
+        outcome.alias_substitutions = substitutions;
+        outcome.error = Some("cleanup-keychain-pending".to_owned());
+        let kept = if substitutions > 0 {
+            "Alias-corrected"
+        } else {
+            "Original"
+        };
+        outcome.message =
+            format!("Copied. Paste when ready. {KEYCHAIN_PENDING_REASON} {kept} text was used.");
+        outcome
+    }
+
+    #[test]
+    fn keychain_pending_says_why_cleanup_skipped_and_which_text_arrived() {
+        let now = Instant::now();
+        let mut status = preview_snapshot(StateKind::Idle);
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        for delivery in [
+            Delivery::Copied,
+            Delivery::Typed,
+            Delivery::Pasted,
+            Delivery::HandedOff,
+        ] {
+            for substitutions in [0, 1] {
+                let outcome = pending_cleanup(delivery, substitutions);
+                let view = present_outcome(&outcome, &status, now, false);
+                let expected = match (delivery == Delivery::Copied, substitutions > 0) {
+                    (true, true) => "Alias-corrected text copied.",
+                    (false, true) => "Alias-corrected text sent.",
+                    (true, false) => "Original text copied.",
+                    (false, false) => "Original text sent.",
+                };
+                assert_eq!(view.caption.title, expected);
+                assert_eq!(view.caption.detail, KEYCHAIN_PENDING_REASON);
+                // Text that arrived without its cleanup is never a success.
+                assert_eq!(view.kind, Kind::Attention);
+                assert!(!view.waiting_for_settle);
+                assert_eq!(view.dwell, ATTENTION_HOLD + RESULT_FADE);
+                let caption = format!(
+                    "{} {} {}",
+                    view.caption.title, view.caption.detail, view.caption.action
+                );
+                assert!(!caption.contains("Cleanup unavailable"), "{caption}");
+                assert_eq!(
+                    view.caption
+                        .action
+                        .contains("Cantrip menu → Allow Cantrip to use your OpenRouter key"),
+                    cfg!(target_os = "macos"),
+                    "{caption}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pending_take_names_the_approval_only_while_the_menu_offers_it() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(preview_snapshot(StateKind::Idle), now);
+        let needed = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        // The need settles during a take, which keeps the instrument.
+        let mut take = recording(1, Some(signal(true)));
+        take.keychain = needed.clone();
+        model.apply(take, now + Duration::from_secs(1));
+        assert_eq!(model.kind, Some(Kind::Recording));
+        let mut status = preview_snapshot(StateKind::Idle);
+        status.keychain = needed;
+        status.outcome = Some(pending_cleanup(Delivery::Copied, 1));
+        let finished = now + Duration::from_secs(2);
+        model.apply(status.clone(), finished);
+        let allow = "Cantrip menu → Allow Cantrip to use your OpenRouter key";
+        let retry = "Cantrip menu → Try Keychain access again";
+        for (authorization, route) in [
+            (KeychainAuthorization::NeedsAuthorization, Some(allow)),
+            (KeychainAuthorization::Authorizing, None),
+            (KeychainAuthorization::Unavailable, Some(retry)),
+            (KeychainAuthorization::Checking, None),
+            (KeychainAuthorization::Ready, None),
+        ] {
+            status.keychain = keychain_access(authorization);
+            model.apply(status.clone(), finished + Duration::from_secs(1));
+            assert_eq!(model.kind, Some(Kind::Attention), "{authorization:?}");
+            assert_eq!(model.caption.title, "Alias-corrected text copied.");
+            assert_eq!(model.caption.detail, KEYCHAIN_PENDING_REASON);
+            for candidate in [allow, retry] {
+                assert_eq!(
+                    model.caption.action.contains(candidate),
+                    cfg!(target_os = "macos") && route == Some(candidate),
+                    "{authorization:?}: {}",
+                    model.caption.action
+                );
+            }
+        }
+        // The take said why; once it expires, no second Keychain notice follows.
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        model.apply(status.clone(), finished + Duration::from_secs(2));
+        model.apply(status, finished + ATTENTION_HOLD + RESULT_FADE);
+        assert!(model.kind.is_none());
+    }
+
+    #[test]
+    fn delivered_text_awaiting_keychain_approval_never_settles_as_success() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        model.apply(recording(0, Some(signal(true))), now);
+        let cleaning = now + Duration::from_secs(1);
+        model.track.presented = model.frame(cleaning);
+        let mut processing = preview_snapshot(StateKind::Processing);
+        processing.stage = Some(Stage::CleaningUp);
+        model.apply(processing, cleaning);
+        let mut idle = preview_snapshot(StateKind::Idle);
+        idle.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        idle.outcome = Some(pending_cleanup(Delivery::Copied, 1));
+        let received = cleaning + FRAME_INTERVAL;
+        let mut at = received;
+        while at <= received + MAX_PRESENTATION_LAG + SETTLE {
+            model.apply(idle.clone(), at);
+            assert_eq!(model.kind, Some(Kind::Attention));
+            assert!(model.work.is_none(), "no success hand-off plays out first");
+            let frame = model.frame(at);
+            assert!(!frame.columns.iter().all(TrackColumn::fully_lit));
+            model.track.presented = frame;
+            at += FRAME_INTERVAL;
+        }
+        assert_eq!(model.caption.title, "Alias-corrected text copied.");
+    }
+
+    #[test]
+    fn keychain_approval_is_said_once_each_time_its_answer_settles() {
+        let now = Instant::now();
+        let mut model = Model::new(now);
+        let mut status = preview_snapshot(StateKind::Idle);
+        // Approval guidance stays explicit with ordinary captions disabled.
+        status.hud.labels = false;
+        // Linux, and modes without a cleanup credential, report none.
+        model.apply(status.clone(), now);
+        assert!(model.kind.is_none());
+        // Launch preflight: checking says nothing; its answer is said once.
+        status.keychain = keychain_access(KeychainAuthorization::Checking);
+        model.apply(status.clone(), now + FRAME_INTERVAL);
+        assert!(model.kind.is_none());
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        let launched = now + Duration::from_millis(100);
+        model.apply(status.clone(), launched);
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert_eq!(model.caption.title, "Keychain access not yet allowed");
+        assert_eq!(
+            model.caption.detail,
+            "Takes skip cleanup until you allow it."
+        );
+        assert_eq!(
+            model
+                .caption
+                .action
+                .contains("Cantrip menu → Allow Cantrip to use your OpenRouter key"),
+            cfg!(target_os = "macos")
+        );
+        let expired = launched + ATTENTION_HOLD + RESULT_FADE;
+        model.apply(status.clone(), expired);
+        assert!(model.kind.is_none(), "the notice never pins the HUD");
+        // A reload rechecks and reaches the same answer: not said again.
+        status.keychain = keychain_access(KeychainAuthorization::Checking);
+        model.apply(status.clone(), expired + Duration::from_secs(1));
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        model.apply(status.clone(), expired + Duration::from_secs(2));
+        assert!(model.kind.is_none());
+        // The native prompt's buttons are explained for as long as it is open.
+        status.keychain = keychain_access(KeychainAuthorization::Authorizing);
+        let asked = expired + Duration::from_secs(3);
+        model.apply(status.clone(), asked);
+        assert_eq!(model.kind, Some(Kind::Neutral));
+        assert_eq!(model.caption.title, KEYCHAIN_WAITING);
+        assert_eq!(model.caption.detail, KEYCHAIN_BUTTONS);
+        assert!(model.caption.action.is_empty());
+        model.apply(status.clone(), asked + Duration::from_secs(60));
+        assert_eq!(model.caption.title, KEYCHAIN_WAITING);
+        // A take started meanwhile owns the instrument; the wait returns after it.
+        let mut take = recording(1, Some(signal(true)));
+        take.keychain = status.keychain.clone();
+        model.apply(take, asked + Duration::from_secs(61));
+        assert_eq!(model.kind, Some(Kind::Recording));
+        model.apply(status.clone(), asked + Duration::from_secs(62));
+        assert_eq!(model.caption.title, KEYCHAIN_WAITING);
+        // A one-time Allow leaves later takes unable to read the key silently.
+        status.keychain = keychain_access(KeychainAuthorization::NeedsAuthorization);
+        let reverted = asked + Duration::from_secs(63);
+        model.apply(status.clone(), reverted);
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert_eq!(model.caption.title, "Keychain access not yet allowed");
+        // Always Allow: Ready withdraws the notice at once and says nothing.
+        status.keychain = keychain_access(KeychainAuthorization::Ready);
+        model.apply(status.clone(), reverted + Duration::from_secs(1));
+        assert!(model.kind.is_none());
+        // A key Keychain cannot return is said with its retry.
+        status.keychain = keychain_access(KeychainAuthorization::Unavailable);
+        model.apply(status, reverted + Duration::from_secs(2));
+        assert_eq!(model.kind, Some(Kind::Attention));
+        assert_eq!(
+            model.caption.title,
+            "Keychain didn’t return your OpenRouter key"
+        );
+        assert_eq!(
+            model.caption.action.contains("Try Keychain access again"),
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub type AudioWaveform = [[i16; 2]; AUDIO_WAVEFORM_BINS];
 pub(crate) const REQUEST_LIMIT: usize = 4_096;
 pub(crate) const REPLY_LIMIT: usize = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+pub const KEYCHAIN_PENDING_REASON: &str = "Cleanup skipped — Keychain access not yet allowed.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
@@ -56,6 +57,10 @@ pub enum Command {
     /// Ask macOS for microphone access in the capture owner's own process.
     /// Sent only for the operator's explicit choice; only their answer grants it.
     AllowMicrophone,
+    /// Authorize the current cleanup credential outside a take, without a deadline.
+    AllowKeychain {
+        id: String,
+    },
 }
 
 impl Command {
@@ -83,6 +88,7 @@ impl Command {
             Self::Ping => "ping".to_owned(),
             Self::Reload => "reload".to_owned(),
             Self::AllowMicrophone => "allow-microphone".to_owned(),
+            Self::AllowKeychain { .. } => "allow-keychain".to_owned(),
         }
     }
 }
@@ -180,6 +186,7 @@ pub enum Cleanup {
     Applied,
     Skipped,
     Failed,
+    KeychainPending,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,6 +435,22 @@ impl MicrophoneGrantee {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeychainAuthorization {
+    Checking,
+    NeedsAuthorization,
+    Authorizing,
+    Ready,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeychainAccess {
+    pub key_id: String,
+    pub authorization: KeychainAuthorization,
+}
+
 /// The capture owner's microphone access, as macOS reports it to that process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MicrophoneAccess {
@@ -520,6 +543,9 @@ pub struct StatusSnapshot {
     /// (Linux) or the owner predates this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microphone: Option<MicrophoneAccess>,
+    /// Access metadata only, never the credential. None outside macOS cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keychain: Option<KeychainAccess>,
     /// Selected take pipeline while active; configured default while idle.
     #[serde(default)]
     pub pipeline: Option<PipelineDisplay>,
@@ -911,6 +937,22 @@ mod tests {
         cleaned.error = Some("cleanup-failed".to_owned());
         assert!(cleaned.is_success());
         assert!(!cleaned.needs_attention());
+    }
+
+    #[test]
+    fn pending_keychain_keeps_delivery_success_but_requires_the_operator() {
+        let mut pending = outcome(Completeness::Complete, Delivery::Copied);
+        pending.cleanup = Cleanup::KeychainPending;
+        pending.error = Some("cleanup-keychain-pending".to_owned());
+        assert!(pending.is_success());
+        assert!(pending.needs_attention());
+        assert_eq!(
+            serde_json::to_value(pending.cleanup).unwrap(),
+            "keychain-pending"
+        );
+        pending.dismissed = true;
+        assert!(!pending.needs_attention());
+        assert_eq!(pending.delivery, Delivery::Copied);
     }
 
     #[test]

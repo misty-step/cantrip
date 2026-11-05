@@ -887,6 +887,14 @@ fn assert_bounded_transcription(
         .expect("transcription server requests");
     assert_audio_coverage(&requests, spec, frames);
     let total = requests.len() as u32;
+    if total > 1 && frames >= 16 * spec.sample_rate as usize {
+        let final_wav = hound::WavReader::new(Cursor::new(requests.last().unwrap().part("file")))
+            .expect("decoding final upload");
+        assert!(
+            final_wav.duration() >= 8 * spec.sample_rate,
+            "a split upload must not isolate a short final remainder"
+        );
+    }
     if exceeds_old_cap {
         assert!(total > 1, "oversized WAVs must use multiple requests");
     }
@@ -982,7 +990,7 @@ fn transcribe_remote_preserves_float_samples_across_chunks() {
         sample_format: hound::SampleFormat::Float,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 310 * 8_000, true, Duration::ZERO);
+    assert_bounded_transcription(spec, 304 * 8_000, true, Duration::ZERO);
 }
 
 #[test]
@@ -992,7 +1000,7 @@ fn transcribe_remote_pads_odd_sized_pcm_chunks_without_adding_samples() {
         bits_per_sample: 8,
         ..native_spec()
     };
-    assert_bounded_transcription(spec, 310 * 8_001, true, Duration::ZERO);
+    assert_bounded_transcription(spec, 304 * 8_001 + 1, true, Duration::ZERO);
 }
 
 #[derive(Clone)]

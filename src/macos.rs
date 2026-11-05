@@ -27,8 +27,8 @@ use cantrip_engine::{
     config::{Config, Mode, PipelineDisplay},
     engine::{request_shutdown, shutdown_requested},
     ipc::{
-        self, Command, Completeness, MicrophoneAccess, MicrophoneAuthorization, MicrophoneGrantee,
-        StateKind,
+        self, Cleanup, Command, Completeness, KeychainAccess, KeychainAuthorization,
+        MicrophoneAccess, MicrophoneAuthorization, MicrophoneGrantee, StateKind,
     },
     paths,
 };
@@ -516,6 +516,86 @@ fn microphone_item(
     Some((title, choice, access.grantee.disclosure()))
 }
 
+/// The menu's Keychain block for the cleanup credential the owner reports.
+#[derive(Debug, PartialEq)]
+struct KeychainBlock {
+    /// Why takes skip cleanup, marked as needing the operator.
+    attention: Option<String>,
+    /// The action that asks macOS, or the state while none can start.
+    title: String,
+    /// None while a take runs or a native lookup is outstanding.
+    choice: Option<Choice>,
+    /// A disabled line beneath the title.
+    note: Option<&'static str>,
+}
+
+/// The Keychain access the owner reports, as the menu offers it: approval
+/// starts only while idle and never beside an outstanding lookup, a key
+/// Keychain did not return can be tried again, and a ready or absent
+/// credential shows nothing. `reason_shown` is true while a take above
+/// already says why its cleanup was skipped, so that is not said twice.
+fn keychain_block(
+    access: &KeychainAccess,
+    idle: bool,
+    reason_shown: bool,
+) -> Option<KeychainBlock> {
+    let ask = || {
+        idle.then(|| {
+            Choice::Send(Command::AllowKeychain {
+                id: access.key_id.clone(),
+            })
+        })
+    };
+    Some(match access.authorization {
+        KeychainAuthorization::Ready => return None,
+        KeychainAuthorization::Checking => KeychainBlock {
+            attention: None,
+            title: format!(
+                "Checking Keychain access to {}…",
+                crate::hud::keychain_key(&access.key_id)
+            ),
+            choice: None,
+            note: None,
+        },
+        KeychainAuthorization::NeedsAuthorization => KeychainBlock {
+            attention: (!reason_shown)
+                .then(|| "Takes skip cleanup until Keychain access is allowed".to_owned()),
+            title: format!("{}…", crate::hud::allow_keychain_item(&access.key_id)),
+            choice: ask(),
+            note: Some(crate::hud::KEYCHAIN_BUTTONS),
+        },
+        KeychainAuthorization::Authorizing => KeychainBlock {
+            attention: None,
+            title: crate::hud::KEYCHAIN_WAITING.to_owned(),
+            choice: None,
+            note: Some(crate::hud::KEYCHAIN_BUTTONS),
+        },
+        KeychainAuthorization::Unavailable => KeychainBlock {
+            attention: Some(crate::hud::keychain_unavailable(&access.key_id)),
+            title: "Try Keychain Access Again…".to_owned(),
+            choice: ask(),
+            note: Some("Save a missing key from Check Setup."),
+        },
+    })
+}
+
+/// Whether the idle menu-bar mark asks for the operator: an outcome that
+/// needs them, or microphone or Keychain access not yet granted. A preflight
+/// still checking asks nothing yet.
+fn wants_operator(status: &ipc::StatusSnapshot) -> bool {
+    status.attention
+        || status
+            .microphone
+            .as_ref()
+            .is_some_and(|access| access.authorization != MicrophoneAuthorization::Authorized)
+        || status.keychain.as_ref().is_some_and(|access| {
+            !matches!(
+                access.authorization,
+                KeychainAuthorization::Ready | KeychainAuthorization::Checking
+            )
+        })
+}
+
 /// The menu's actions for capture guidance, bound as it opens: Use names the
 /// input shown then, never a default chosen later, and Open Settings opens on
 /// the pane where the microphone is chosen.
@@ -532,15 +612,25 @@ fn guidance_items(offer: &GuidanceOffer) -> Vec<(String, Choice)> {
 /// The latest outcome's line beneath the state line. While idle, an offered
 /// guidance block replaces the outcome it came with, so its sentence is not
 /// said twice; a stale offer shows no block, and the outcome keeps its line.
+/// A take whose cleanup waited for Keychain approval says why on its own line
+/// beneath, so the facts left here fit the menu's width.
 fn outcome_line(status: &ipc::StatusSnapshot, offer: Option<&GuidanceOffer>) -> Option<String> {
     let outcome = status.outcome.as_ref()?;
     let replaced = status.state == StateKind::Idle && offer.is_some();
     if outcome.dismissed || replaced {
         return None;
     }
+    let message = match outcome.message.split_once(ipc::KEYCHAIN_PENDING_REASON) {
+        Some((before, after)) if outcome.cleanup == Cleanup::KeychainPending => {
+            format!("{} {}", before.trim_end(), after.trim_start())
+                .trim()
+                .to_owned()
+        }
+        _ => outcome.message.clone(),
+    };
     Some(match &outcome.handoff {
-        Some(handoff) => format!("{} · to {}", outcome.message, handoff.label),
-        None => outcome.message.clone(),
+        Some(handoff) => format!("{message} · to {}", handoff.label),
+        None => message,
     })
 }
 
@@ -910,12 +1000,7 @@ impl Host {
         let route = status
             .and_then(|status| status.handoff.as_ref())
             .map_or(palette.accent, |handoff| handoff.color);
-        let needs_operator = status.is_some_and(|status| {
-            status.attention
-                || status.microphone.as_ref().is_some_and(|access| {
-                    access.authorization != MicrophoneAuthorization::Authorized
-                })
-        }) || self.shortcut.active().is_none();
+        let needs_operator = status.is_some_and(wants_operator) || self.shortcut.active().is_none();
         let tone = match status.map(|status| &status.state) {
             None | Some(StateKind::Unknown(_)) => Tone::Unknown,
             Some(StateKind::Recording) => Tone::Recording(route),
@@ -996,11 +1081,20 @@ impl Host {
         };
         items.line(Some(&state));
         items.line(detail);
-        items.line(
-            status
-                .and_then(|status| outcome_line(status, offer.as_ref()))
-                .as_deref(),
-        );
+        let shown = status.and_then(|status| outcome_line(status, offer.as_ref()));
+        items.line(shown.as_deref());
+        // A take that skipped cleanup says why on its own line, never cut short,
+        // and marks it while the key still awaits the operator.
+        let reason_shown = shown.is_some()
+            && outcome.is_some_and(|outcome| outcome.cleanup == Cleanup::KeychainPending);
+        let keychain = status.and_then(|status| status.keychain.as_ref());
+        if reason_shown {
+            if keychain.is_none_or(|access| access.authorization == KeychainAuthorization::Ready) {
+                items.line(Some(ipc::KEYCHAIN_PENDING_REASON));
+            } else {
+                items.attention(ipc::KEYCHAIN_PENDING_REASON);
+            }
+        }
         let microphone_pending = status.is_some_and(|status| {
             status.stage == Some(cantrip_engine::pipeline::Stage::RequestingMicrophone)
         });
@@ -1015,6 +1109,16 @@ impl Host {
             for (title, choice) in guidance_items(offer) {
                 items.fitted(&title, Some(choice));
             }
+        }
+        // Keychain approval for the cleanup credential comes before dictating,
+        // so a take never waits on the native prompt.
+        if let Some(block) = keychain.and_then(|access| keychain_block(access, idle, reason_shown))
+        {
+            if let Some(attention) = &block.attention {
+                items.attention(attention);
+            }
+            items.fitted(&block.title, block.choice);
+            items.line(block.note);
         }
         items.separator();
         if idle {
@@ -1425,5 +1529,98 @@ mod tests {
         status.state = StateKind::Recording;
         let recording = outcome_line(&status, Some(&offer));
         assert_eq!(recording.as_deref(), Some(message));
+    }
+
+    fn keychain(authorization: KeychainAuthorization, key_id: &str) -> KeychainAccess {
+        KeychainAccess {
+            key_id: key_id.to_owned(),
+            authorization,
+        }
+    }
+
+    #[test]
+    fn keychain_approval_starts_only_while_idle_and_never_beside_a_lookup() {
+        use KeychainAuthorization::*;
+        let block = |authorization, idle| {
+            keychain_block(&keychain(authorization, "openrouter"), idle, false)
+        };
+        let allow = Choice::Send(Command::AllowKeychain {
+            id: "openrouter".to_owned(),
+        });
+        assert_eq!(block(Ready, true), None);
+        for idle in [true, false] {
+            let needed = block(NeedsAuthorization, idle).expect("approval is offered");
+            assert_eq!(needed.title, "Allow Cantrip to use your OpenRouter key…");
+            assert_eq!(needed.note, Some(crate::hud::KEYCHAIN_BUTTONS));
+            assert!(needed.attention.is_some());
+            // During a take the item stays visible but starts no prompt.
+            assert_eq!(needed.choice, idle.then(|| allow.clone()));
+            let unavailable = block(Unavailable, idle).expect("retry is offered");
+            assert_eq!(unavailable.choice, idle.then(|| allow.clone()));
+            assert_eq!(
+                unavailable.attention.as_deref(),
+                Some("Keychain didn’t return your OpenRouter key")
+            );
+            // One native lookup at a time: a check or an open prompt starts nothing.
+            for authorization in [Checking, Authorizing] {
+                let state = block(authorization, idle).expect("the state is shown");
+                assert_eq!(state.choice, None, "{authorization:?}");
+                assert_eq!(state.attention, None, "{authorization:?}");
+            }
+        }
+        let waiting = block(Authorizing, true).unwrap();
+        assert_eq!(waiting.title, crate::hud::KEYCHAIN_WAITING);
+        assert_eq!(waiting.note, Some(crate::hud::KEYCHAIN_BUTTONS));
+        // Another configured ID is named as written, and the action carries it.
+        let other = keychain_block(&keychain(NeedsAuthorization, "groq"), true, false).unwrap();
+        assert_eq!(other.title, "Allow Cantrip to use your “groq” key…");
+        assert_eq!(
+            other.choice,
+            Some(Choice::Send(Command::AllowKeychain {
+                id: "groq".to_owned()
+            }))
+        );
+        // A pending take above already says why cleanup was skipped.
+        let below_reason = keychain_block(&keychain(NeedsAuthorization, "openrouter"), true, true);
+        assert_eq!(below_reason.unwrap().attention, None);
+    }
+
+    #[test]
+    fn a_pending_take_keeps_its_facts_and_says_why_on_its_own_line() {
+        let mut status = crate::hud::preview_snapshot(StateKind::Idle);
+        let mut outcome =
+            crate::hud::preview_outcome(Completeness::Complete, ipc::Delivery::Copied);
+        outcome.cleanup = Cleanup::KeychainPending;
+        outcome.message = format!(
+            "Copied. Paste when ready. {} Alias-corrected text was used.",
+            ipc::KEYCHAIN_PENDING_REASON
+        );
+        status.outcome = Some(outcome.clone());
+        let line = outcome_line(&status, None).expect("the outcome keeps its line");
+        assert_eq!(
+            line,
+            "Copied. Paste when ready. Alias-corrected text was used."
+        );
+        assert!(line.chars().count() <= LINE_LIMIT, "{line}");
+        // The typed cleanup state decides, not the words: other outcomes keep them.
+        outcome.cleanup = Cleanup::Failed;
+        status.outcome = Some(outcome.clone());
+        assert_eq!(outcome_line(&status, None), Some(outcome.message));
+    }
+
+    #[test]
+    fn the_mark_asks_for_keychain_approval_but_not_while_checking() {
+        let mut status = crate::hud::preview_snapshot(StateKind::Idle);
+        assert!(!wants_operator(&status));
+        for (authorization, asks) in [
+            (KeychainAuthorization::Checking, false),
+            (KeychainAuthorization::NeedsAuthorization, true),
+            (KeychainAuthorization::Authorizing, true),
+            (KeychainAuthorization::Unavailable, true),
+            (KeychainAuthorization::Ready, false),
+        ] {
+            status.keychain = Some(keychain(authorization, "openrouter"));
+            assert_eq!(wants_operator(&status), asks, "{authorization:?}");
+        }
     }
 }

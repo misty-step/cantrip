@@ -45,7 +45,7 @@ pub struct JobTelemetry {
     pub stt_remote: bool,
     pub chars: usize,
     pub partial: bool,
-    /// `applied`, `failed`, `off`, or `skipped_short`.
+    /// `applied`, `failed`, `off`, `skipped_short`, or `keychain_pending`.
     pub cleanup_state: &'static str,
     pub cleanup_ms: Option<u64>,
     pub cleanup_model: Option<String>,
@@ -494,7 +494,7 @@ mod tests {
                 if let Some(raw) = find_attr(span, key).and_then(|v| v.as_str()) {
                     let parsed: Value =
                         serde_json::from_str(raw).expect("input/output must be JSON");
-                    const CONTROLLED: [&str; 11] = [
+                    const CONTROLLED: [&str; 12] = [
                         "dictation",
                         "recover",
                         "transcribe",
@@ -502,6 +502,7 @@ mod tests {
                         "failed",
                         "off",
                         "skipped_short",
+                        "keychain_pending",
                         "typed-wtype",
                         "typed-ydotool",
                         "pasted",

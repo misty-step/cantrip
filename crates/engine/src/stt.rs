@@ -35,8 +35,10 @@ const REMOTE_CHUNK_SECS: f32 = PRODUCTION_REMOTE_CHUNK_SECS;
 const REMOTE_CHUNK_SECS: f32 = LOCAL_CHUNK_SECS;
 /// Search window around the target for a low-energy split point.
 const LOCAL_CHUNK_SEARCH_SECS: f32 = 3.0;
-/// Minimum residual kept as its own chunk.
+/// Minimum step when a byte cap restricts the energy search.
 const LOCAL_MIN_CHUNK_SECS: f32 = 0.5;
+/// A short trailing pause/speech fragment can decode as silence without context.
+const MIN_FINAL_CHUNK_SECS: usize = 8;
 
 /// Number of chunks whose backend call has successfully returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +481,7 @@ fn plan_chunks_with_limit(
 ) -> Vec<(usize, usize)> {
     let chunk_len = ((chunk_secs * SAMPLE_RATE) as usize).min(max_frames);
     let min_len = ((LOCAL_MIN_CHUNK_SECS * SAMPLE_RATE) as usize).min(chunk_len);
+    let min_final = (MIN_FINAL_CHUNK_SECS * SAMPLE_RATE as usize).min(chunk_len / 2);
     if samples.is_empty() {
         return Vec::new();
     }
@@ -493,8 +496,10 @@ fn plan_chunks_with_limit(
         let end = if remaining <= chunk_len {
             samples.len()
         } else {
-            let target = start + chunk_len;
-            let limit = start.saturating_add(max_frames).min(samples.len());
+            let limit = start
+                .saturating_add(max_frames)
+                .min(samples.len() - min_final);
+            let target = (start + chunk_len).min(limit);
             let split = low_energy_split(&samples[..limit], target, LOCAL_CHUNK_SEARCH_SECS);
             split.max(start + min_len).min(limit)
         };
@@ -793,10 +798,19 @@ fn transcribe_remote_attempt(
         ranges
     } else {
         let chunk_frames = remote_chunk_frames.min(max_frames);
-        (0..source.frames)
-            .step_by(chunk_frames)
-            .map(|start| (start, (start + chunk_frames).min(source.frames)))
-            .collect()
+        let min_final = (source.sample_rate as usize * MIN_FINAL_CHUNK_SECS).min(chunk_frames / 2);
+        let mut ranges = Vec::with_capacity(source.frames.div_ceil(chunk_frames));
+        let mut start = 0;
+        while start < source.frames {
+            let end = if source.frames - start <= chunk_frames {
+                source.frames
+            } else {
+                (start + chunk_frames).min(source.frames - min_final)
+            };
+            ranges.push((start, end));
+            start = end;
+        }
+        ranges
     };
     let largest_wav = if unchanged {
         source.file_len as usize
@@ -1374,6 +1388,48 @@ mod tests {
         // Contiguous coverage with no gaps.
         for window in ranges.windows(2) {
             assert_eq!(window[0].1, window[1].0);
+        }
+    }
+
+    #[test]
+    fn chunk_plans_reserve_final_context_without_exceeding_backend_limits() {
+        const RATE: usize = 16_000;
+        const FINAL_CONTEXT: usize = 8 * RATE;
+        for (target_secs, max_frames) in [
+            (LOCAL_CHUNK_SECS, 33 * RATE),
+            (PRODUCTION_REMOTE_CHUNK_SECS, 303 * RATE),
+            (PRODUCTION_REMOTE_CHUNK_SECS, 29 * RATE),
+        ] {
+            let quiet_end =
+                (target_secs as usize * RATE + 2 * RATE + 160).min(max_frames) / 480 * 480;
+            for tail in [
+                1,
+                RATE / 2,
+                60_320,
+                FINAL_CONTEXT - 1,
+                FINAL_CONTEXT,
+                FINAL_CONTEXT + 1,
+            ] {
+                let mut samples = vec![0.1_f32; quiet_end + tail];
+                samples[quiet_end - 480..quiet_end].fill(0.0);
+                let ranges = plan_chunks_with_limit(&samples, max_frames, target_secs);
+                assert_eq!(ranges.first().map(|range| range.0), Some(0));
+                assert_eq!(ranges.last().map(|range| range.1), Some(samples.len()));
+                assert!(ranges
+                    .iter()
+                    .all(|&(start, end)| end > start && end - start <= max_frames));
+                for pair in ranges.windows(2) {
+                    assert_eq!(pair[0].1, pair[1].0, "no skipped or repeated audio");
+                }
+                let &(start, end) = ranges.last().unwrap();
+                assert!(
+                    end - start >= FINAL_CONTEXT,
+                    "short final context for target {target_secs}, cap {max_frames}, tail {tail}: {ranges:?}"
+                );
+                if tail >= FINAL_CONTEXT {
+                    assert_eq!(ranges[0].1, quiet_end, "keep an already safe quiet split");
+                }
+            }
         }
     }
 

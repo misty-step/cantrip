@@ -359,6 +359,7 @@ operation finished.
 | `completeness: empty`, `failed`, or `cancelled` | No complete dictation was delivered. Read the notice and use the matching recording's available artifacts. |
 | `capture-source-missing`, `no-audio` or an input-health notice | Follow the [capture setup guidance](decisions/0031-shared-engine-native-macos.md#capture-setup-guidance-2026-11-03). |
 | `cleanup: failed` | The pre-LLM text is used rather than dropped; see the [mode fallback contract](decisions/0012-eval-driven-postprocessing.md#explicit-modes-2026-11-03). Repair provider configuration or deliberately leave that mode's model empty for aliases only. |
+| `cleanup: keychain-pending` | Follow [macOS Keychain approval](CONFIGURATION.md#allow-macos-keychain-access-before-dictation). The take keeps alias-corrected text, or the original when no alias changed it. |
 | Storage warning | Delivery and durable retention are separate. Inspect storage before relying on recovery or recording more. |
 | Disconnected/unknown HUD or failed `ping` | Use desktop diagnostics; do not infer Ready or start a competing owner. |
 
@@ -479,6 +480,7 @@ its directory to `PATH`. `cantrip COMMAND --help` describes each command's flags
 | `cantrip models pull` / `status` | Deliberately download or inspect the local model |
 | `cantrip config show` / `edit` / `init` / `path` | Serialize effective file configuration, edit, create a missing file, or locate it |
 | `cantrip key set ID` / `rm ID` / `status ID` | Manage OS-keyring credentials by id |
+| `cantrip key allow ID` | Mac: ask the running daemon to authorize its configured cleanup key, then return before the native prompt is answered. See [Keychain approval](CONFIGURATION.md#allow-macos-keychain-access-before-dictation). |
 | `cantrip doctor` | Read the configuration and environment report; not a readiness exit code |
 | `cantrip recordings [--json]` | List recording IDs, times, durations, and artifact availability without transcript text |
 | `cantrip copy ID` | Copy this exact recording's saved transcript without sending keys |
