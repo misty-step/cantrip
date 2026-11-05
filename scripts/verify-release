@@ -142,14 +142,21 @@ def inside(mode):
     credential = secrets.token_hex(24)
     stored = run(str(installed), "key", "set", "release-verification", input=credential + "\n", check=False)
     keyring_live = stored.returncode == 0
+    def key_ready():
+        reply = run(str(installed), "key", "status", "--json", "release-verification", check=False)
+        try:
+            return reply.returncode == 0 and json.loads(reply.stdout)["state"] == "ready"
+        except (ValueError, KeyError, TypeError):
+            return False
+
     if keyring_live:
-        require(run(str(installed), "key", "status", "release-verification").stdout.strip() == "present", "native keyring store did not report the test credential")
+        require(key_ready(), "native keyring store did not report the test credential")
         require(run("secret-tool", "lookup", "service", "cantrip", "username", "release-verification").stdout.rstrip("\n") == credential, "Secret Service did not retain the native credential")
 
     def preserved():
         require(all(path.is_file() and sha256(path) == digest for path, digest in protected.items()), "binary maintenance changed configuration, history, runtime data, keyring files, or startup ownership")
         if keyring_live:
-            require(run(str(installed), "key", "status", "release-verification").stdout.strip() == "present", "native keyring credential disappeared during maintenance")
+            require(key_ready(), "native keyring credential disappeared during maintenance")
             require(run("secret-tool", "lookup", "service", "cantrip", "username", "release-verification").stdout.rstrip("\n") == credential, "Secret Service credential did not survive maintenance")
 
     backups = home / "backups"

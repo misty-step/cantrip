@@ -203,8 +203,12 @@ enum KeyCommand {
     Rm {
         id: String,
     },
+    /// Report this key's state without showing its value. `--json` prints
+    /// `{"id":…,"state":…}` with a stable kebab-case state for scripts.
     Status {
         id: String,
+        #[arg(long)]
+        json: bool,
     },
     /// Ask the running Cantrip to authorize this Keychain ID (macOS).
     /// Returns before you answer the native prompt; use status --json to check readiness.
@@ -557,9 +561,13 @@ fn run_key(command: KeyCommand) -> Result<()> {
             println!("removed key '{id}'");
             Ok(())
         }
-        KeyCommand::Status { id } => {
+        KeyCommand::Status { id, json } => {
             let access = ipc::KeychainAuthorization::from_result(keys::get(&id).map(drop));
-            println!("{}", key_state_diagnosis(&id, access));
+            if json {
+                println!("{}", serde_json::json!({ "id": id, "state": access }));
+            } else {
+                println!("{}", key_state_diagnosis(&id, access));
+            }
             Ok(())
         }
         KeyCommand::Allow { id } => {

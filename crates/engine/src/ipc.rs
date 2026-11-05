@@ -958,6 +958,22 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::os::unix::fs::DirBuilderExt;
+
+    #[test]
+    fn keychain_states_serialize_as_the_stable_names_scripts_read() {
+        use KeychainAuthorization::*;
+        for (state, name) in [
+            (Ready, "ready"),
+            (NeedsAuthorization, "needs-authorization"),
+            (NotSet, "not-set"),
+            (Denied, "denied"),
+            (Busy, "busy"),
+            (TimedOut, "timed-out"),
+            (Unavailable, "unavailable"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), name);
+        }
+    }
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};

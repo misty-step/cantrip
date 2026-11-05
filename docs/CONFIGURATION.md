@@ -141,6 +141,9 @@ that no key is stored.
 
 For other provider credentials, or without a GUI, use `cantrip key set ID`
 (hidden terminal input or stdin), `cantrip key status ID`, and `cantrip key rm ID`.
+Scripts use `cantrip key status --json ID`, which prints `{"id":…,"state":…}`
+with the same kebab-case states as `cantrip status --json` (`ready`,
+`needs-authorization`, `not-set`, `denied`, `busy`, `timed-out`, `unavailable`).
 Put only the ID in `api_key_id`. The [privacy contract](PRIVACY.md#logs-credentials-and-telemetry)
 owns storage and secret handling. Linux requires an unlocked Secret Service
 keyring and the daemon's user-session D-Bus connection. macOS uses the login
