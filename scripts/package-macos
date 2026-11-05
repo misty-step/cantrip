@@ -98,14 +98,20 @@ def production_preflight(team_id, profile, requested=None):
         tools[tool] = run(["xcrun", "--find", tool]).stdout.decode().strip()
     identity = developer_identity(team_id, requested)
     if not profile:
-        raise ReleaseError("--notary-profile is required for production preflight")
+        return {
+            "identity": identity, "notary_profile_authenticated": None,
+            "notary_profile_state": "not-configured", "xcode_tools": tools,
+        }
     authenticated = run([
         "xcrun", "notarytool", "history", "--keychain-profile", profile,
         "--keychain", LOGIN_KEYCHAIN, "--output-format", "json",
     ], check=False)
     if authenticated.returncode:
         raise ReleaseError("notarytool profile did not authenticate from the login Keychain; check it with notarytool locally")
-    return {"identity": identity, "notary_profile_authenticated": True, "xcode_tools": tools}
+    return {
+        "identity": identity, "notary_profile_authenticated": True,
+        "notary_profile_state": "authenticated", "xcode_tools": tools,
+    }
 
 
 def native_prerequisites(target, args):
@@ -540,7 +546,7 @@ grants permissions, or launches the application. Existing output is never replac
     parser.add_argument("--keychain", type=lambda value: Path(value).expanduser(), help="optional keychain containing --dev-sign-identity; caller must unlock it first")
     parser.add_argument("--sign-identity", help="full public SHA-1 of the Developer ID Application identity; never a display name")
     parser.add_argument("--team-id", help=f"expected Cantrip Apple Developer Team ID ({EXPECTED_TEAM_ID})")
-    parser.add_argument("--notary-profile", help="existing authenticated notarytool Keychain profile name")
+    parser.add_argument("--notary-profile", help="existing notarytool Keychain profile; omitting it is allowed only for read-only certificate preflight, never packaging")
     args = parser.parse_args()
     try:
         if args.preflight:

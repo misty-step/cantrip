@@ -446,8 +446,12 @@ prerequisites below exist and the production path succeeds.
    agreement is accepted. The expected team is enforced by `package-macos`.
    The public Team ID is visible at
    [Apple Developer Account > Membership details](https://developer.apple.com/account/).
-2. **Open.** Install the new local Developer ID Application identity. On this
-   Mac, open **Xcode > Settings > Accounts**, add/select that Apple
+2. **Done.** The local-CSR identity is installed in this Mac's login Keychain.
+   Read-only preflight on 2026-11-05 found **Developer ID Application: Phaedrus
+   Raznikov (A56K8A636Z)** with private-key identity SHA-1
+   **CBB85B3E7D46EE9A5DD58B33FB0558E7E66F097C**, expiring
+   **2027-12-05 16:03:14 UTC**. For future certificate creation on this Mac,
+   open **Xcode > Settings > Accounts**, add/select that Apple
    Account, select the enrolled team, then **Manage Certificates > + >
    Developer ID Application**. Use a local certificate, not a cloud-managed
    signing service. In **Keychain Access > login > My Certificates**, expand
@@ -456,8 +460,8 @@ prerequisites below exist and the production path succeeds.
    Developer ID certificate creation requires the team's Account Holder.
    An existing certificate for this team expires 2031-03-03, but its private
    key is elsewhere and it is not a signing identity on this Mac. Do not revoke
-   it or import its private key. The operator is creating a new certificate
-   from a local CSR; same-team display names are not unique selectors.
+   it or import its private key. The new identity was created from a local CSR;
+   same-team display names are not unique selectors.
 3. If Xcode is unavailable, use Apple's
    [CSR procedure](https://developer.apple.com/help/account/certificates/create-a-certificate-signing-request/)
    on this Mac. Open Keychain Access, choose **Certificate Assistant > Request a
@@ -488,6 +492,11 @@ prerequisites below exist and the production path succeeds.
    python3 scripts/package-macos --preflight \
      --team-id A56K8A636Z --notary-profile cantrip-notary
    ```
+   While the profile is still pending, omit `--notary-profile` to inspect the
+   certificate and tools successfully with `notary_profile_state` recorded as
+   `not-configured`. This is not production readiness. Packaging and publication
+   still require an authenticated profile.
+
 
    It prints the selected Developer ID Application name, Team ID, full public
    SHA-1, UTC expiry, Xcode tool paths, and whether the stored profile
@@ -620,10 +629,11 @@ Once a real Developer ID certificate exists, the exact preparation command is:
 ```sh
 proof="$HOME/.cache/tmp/cantrip-keychain-developer-id"
 CARGO_BUILD_JOBS=4 python3 scripts/verify-keychain-persistence-macos prepare \
-  --output "$proof" --arm developer-id --team-id A56K8A636Z
+  --output "$proof" --arm developer-id --team-id A56K8A636Z \
+  --sign-identity CBB85B3E7D46EE9A5DD58B33FB0558E7E66F097C
 ```
 
-Add `--sign-identity YOUR_PUBLIC_CERTIFICATE_SHA1` only if needed to disambiguate.
+Use the full current private-key identity SHA-1, never its display name.
 The Developer ID arm needs a signing identity, not notarization credentials;
 its experimental bundles are explicitly **not for distribution**.
 Then use the same attended phases, setting `arm` to `development`, `ad-hoc`,

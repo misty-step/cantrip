@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Heavier gates on every push: full test suite + authoritative secret scan of
-# the working tree (trufflehog). Install with: git config core.hooksPath .githooks
+# Authoritative secret scan of the working tree (trufflehog) on every push.
+# The test suite runs at the release gate, not on every push (Decision 0035).
+# Install with: git config core.hooksPath .githooks
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-
-echo "── pre-push: cargo test"
-cargo test
 
 echo "── pre-push: secret scan (trufflehog, working tree)"
 if ! command -v trufflehog >/dev/null 2>&1; then

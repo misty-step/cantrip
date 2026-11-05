@@ -107,6 +107,11 @@ class MacProductionReleaseContracts(unittest.TestCase):
         with mock.patch.object(sys, "platform", "darwin"), mock.patch.dict(
             preflight.__globals__, {"run": native, "developer_identity": mock.Mock(return_value=identity)},
         ), mock.patch.object(shutil, "which", return_value="/public/tool/path"):
+            pending = preflight(TEAM_ID, None)
+            self.assertEqual(pending["identity"], identity)
+            self.assertEqual(pending["notary_profile_state"], "not-configured")
+            self.assertIsNone(pending["notary_profile_authenticated"])
+            self.assertFalse(any("history" in command for command in calls))
             receipt = preflight(TEAM_ID, "fixture-profile")
             self.assertEqual(receipt["identity"], identity)
             self.assertTrue(receipt["notary_profile_authenticated"])
