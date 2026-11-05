@@ -417,7 +417,7 @@ instructions = ""         # Clean-only additional style guidance
 # Default mode: `cantrip mode clean` or `cantrip mode --cycle`
 
 [postproc.clean]
-model = "openai/gpt-6.1-sol" # "" = aliases only, without an LLM
+model = "deepseek/deepseek-v4.1-flash-1017:nitro" # "" = aliases only, without an LLM
 reasoning_effort = "low"   # "" omits reasoning effort
 
 [postproc.elevate]
