@@ -1,10 +1,14 @@
-//! Cantrip's pixel C in the menu bar, as a template image AppKit draws in the
-//! menu bar's own ink. States follow the Omarchy bar mark (ADR 0029): one quiet
-//! fixed-width mark, never a count or text.
+//! Cantrip's pixel marks as template images AppKit draws in the ink of the menu
+//! or control holding them: the C in the menu bar, whose states follow the
+//! Omarchy bar mark (ADR 0029), one quiet fixed-width mark, never a count or
+//! text; each mode's glyph, cell for cell as the HUD paints it; and the radio
+//! marks of the menu's mode picker.
 
+use crate::modes::{self, GLYPH_SIZE};
 use block2::RcBlock;
+use cantrip_engine::config::Mode;
 use objc2::{rc::Retained, runtime::Bool};
-use objc2_app_kit::{NSColor, NSImage, NSRectFill, NSStatusBarButton};
+use objc2_app_kit::{NSBezierPath, NSColor, NSImage, NSRectFill, NSStatusBarButton};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::time::Duration;
 
@@ -91,6 +95,60 @@ fn draw_mark(alphas: [f64; CELLS.len()]) -> Retained<NSImage> {
         true,
         &draw,
     );
+    image.setTemplate(true);
+    image
+}
+
+/// A mode glyph's cell, as wide as the HUD's.
+const GLYPH_CELL: f64 = 2.0;
+/// The radio mark's square.
+const RADIO: f64 = 10.0;
+
+/// `mode`'s glyph as a template image.
+pub(crate) fn mode_glyph(mode: Mode) -> Retained<NSImage> {
+    let draw = RcBlock::new(move |bounds: NSRect| -> Bool {
+        let cell = bounds.size.width / GLYPH_SIZE as f64;
+        NSColor::blackColor().setFill();
+        for (column, row) in modes::glyph_cells(mode) {
+            NSRectFill(NSRect::new(
+                NSPoint::new(
+                    bounds.origin.x + column as f64 * cell,
+                    bounds.origin.y + row as f64 * cell,
+                ),
+                NSSize::new(cell, cell),
+            ));
+        }
+        Bool::YES
+    });
+    let side = GLYPH_SIZE as f64 * GLYPH_CELL;
+    // Flipped, so rows count down from the top as the glyph lists them.
+    let image = NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(side, side), true, &draw);
+    image.setTemplate(true);
+    image
+}
+
+/// A radio mark: a dot for the chosen item, a ring for the others.
+pub(crate) fn radio(chosen: bool) -> Retained<NSImage> {
+    let draw = RcBlock::new(move |bounds: NSRect| -> Bool {
+        let inset = if chosen { 2.0 } else { 2.5 };
+        let oval = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(bounds.origin.x + inset, bounds.origin.y + inset),
+            NSSize::new(
+                bounds.size.width - 2.0 * inset,
+                bounds.size.height - 2.0 * inset,
+            ),
+        ));
+        NSColor::blackColor().set();
+        if chosen {
+            oval.fill();
+        } else {
+            oval.setLineWidth(1.0);
+            oval.stroke();
+        }
+        Bool::YES
+    });
+    let image =
+        NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(RADIO, RADIO), false, &draw);
     image.setTemplate(true);
     image
 }

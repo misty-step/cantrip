@@ -436,7 +436,7 @@ impl Daemon {
             cancel: Arc::new(AtomicBool::new(false)),
             lifecycle: Arc::new(AtomicU8::new(CANCEL_OPEN)),
             hud: self.config.hud,
-            pipeline: self.config.pipeline_display(),
+            pipeline: self.config.pipeline_display(self.config.postproc.mode),
             handoff,
             started: Instant::now(),
         }
@@ -587,7 +587,7 @@ impl Daemon {
             microphone: self.microphone.clone(),
             keychain: self.keychain.clone(),
             pipeline: Some(self.state.operation().map_or_else(
-                || self.config.pipeline_display(),
+                || self.config.pipeline_display(self.config.postproc.mode),
                 |operation| operation.pipeline.clone(),
             )),
             capture_guidance: self.capture_guidance(),
@@ -1275,7 +1275,7 @@ fn start_recording(
         .as_ref()
         .map(|(name, target)| daemon.handoff_view(name, target));
     let mut operation = daemon.operation(take_id, Some(OperationKind::Dictation), handoff);
-    operation.pipeline = config.pipeline_display();
+    operation.pipeline = config.pipeline_display(config.postproc.mode);
     daemon.state = State::RequestingMicrophone {
         operation,
         config: Box::new(config),
@@ -1708,7 +1708,7 @@ fn recover_take(
         config.injection = InjectionMode::Clipboard;
     }
     let mut operation = daemon.operation(take.id, Some(OperationKind::Recovery), None);
-    operation.pipeline = config.pipeline_display();
+    operation.pipeline = config.pipeline_display(config.postproc.mode);
     let job = Job {
         operation: operation.clone(),
         config: Box::new(config),
@@ -4379,7 +4379,7 @@ mod tests {
             };
             assert_eq!(config.postproc.mode, mode);
             let selected = config.postproc.clone();
-            let display = config.pipeline_display();
+            let display = config.pipeline_display(mode);
             assert_eq!(daemon.snapshot().pipeline.as_ref(), Some(&display));
             // Reload replaces only this configured default. The active take
             // and its display continue to own the start-time config.

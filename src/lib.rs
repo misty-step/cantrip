@@ -15,6 +15,7 @@ pub mod hud;
 pub mod inject;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod modes;
 mod platform;
 pub mod settings;
 pub mod theme;

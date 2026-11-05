@@ -114,18 +114,6 @@ impl Mode {
             Self::Elevate => "Elevate",
         }
     }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Raw => "Recognizer output without aliases or LLM changes.",
-            Self::Clean => {
-                "Vocabulary aliases, then concise refinement that preserves your meaning."
-            }
-            Self::Elevate => {
-                "Vocabulary aliases, then a clearer, more articulate version of what you said."
-            }
-        }
-    }
 }
 
 impl std::str::FromStr for Mode {
@@ -293,42 +281,56 @@ impl From<PostprocInput> for PostprocConfig {
 impl PostprocConfig {
     /// Raw callers bypass post-processing before consulting a model.
     pub fn model_config(&self) -> &ModeModelConfig {
-        match self.mode {
+        self.model_for(self.mode)
+    }
+
+    /// `mode`'s own model and effort; Raw callers bypass post-processing first.
+    pub fn model_for(&self, mode: Mode) -> &ModeModelConfig {
+        match mode {
             Mode::Raw | Mode::Clean => &self.clean,
             Mode::Elevate => &self.elevate,
         }
     }
 }
 
-/// Engine-owned presentation of a configured or snapshotted take pipeline.
+/// What a configured or snapshotted take runs, for clients to present: the
+/// mode, each stage's model, and the hosts each stage sends the take to.
+/// Fields an older engine omits read as unknown, never as staying local.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct PipelineDisplay {
     pub mode: Mode,
     pub stt_model: String,
     pub stt_local: bool,
+    /// The host a cloud recognizer receives the audio at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stt_host: Option<String>,
     pub llm_model: Option<String>,
+    /// The hosts that receive the text while it is refined: the shared
+    /// endpoint's, then an opted-in decision model's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub llm_hosts: Vec<String>,
+    /// Vocabulary terms with aliases, whose spellings Clean and Elevate fix.
+    #[serde(default)]
+    pub spellings: usize,
 }
 
-impl PipelineDisplay {
-    pub fn label(&self) -> String {
-        let stt_name = if self.stt_local && self.stt_model == models::PARAKEET_V3_INT8.dir_name {
-            "Parakeet v3"
-        } else {
-            self.stt_model.rsplit('/').next().unwrap_or(&self.stt_model)
-        };
-        let location = if self.stt_local { "local" } else { "cloud" };
-        let mut label = format!("{} · STT {stt_name} ({location})", self.mode.label());
-        if self.mode != Mode::Raw {
-            match &self.llm_model {
-                Some(model) => {
-                    label.push_str(" → aliases → ");
-                    label.push_str(model.rsplit('/').next().unwrap_or(model));
-                }
-                None => label.push_str(" → aliases only"),
-            }
-        }
-        label
-    }
+/// The host an endpoint URL names, lowercased, without its scheme,
+/// credentials, port or path.
+fn endpoint_host(endpoint: &str) -> Option<String> {
+    let endpoint = endpoint.trim();
+    let rest = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let address = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, address)| address);
+    let host = match address.strip_prefix('[') {
+        Some(bracketed) => bracketed.split_once(']').map(|(host, _)| host)?,
+        None => address.split(':').next().unwrap_or_default(),
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
 }
 
 impl Default for Config {
@@ -433,15 +435,47 @@ impl Config {
         self.postproc.elevate.model.clear();
     }
 
-    pub fn pipeline_display(&self) -> PipelineDisplay {
+    /// What a take in `mode` runs with this configuration.
+    pub fn pipeline_display(&self, mode: Mode) -> PipelineDisplay {
+        let llm_model = (mode != Mode::Raw)
+            .then(|| self.postproc.model_for(mode).model.trim())
+            .filter(|model| !model.is_empty())
+            .map(str::to_owned);
+        let mut llm_hosts = Vec::new();
+        if llm_model.is_some() {
+            let decision = self
+                .postproc
+                .decision_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(|model| {
+                    crate::typesafe::resolve_endpoint(
+                        self.postproc.decision_endpoint.as_deref(),
+                        model,
+                    )
+                });
+            for host in std::iter::once(self.postproc.endpoint.as_str())
+                .chain(decision.as_deref())
+                .filter_map(endpoint_host)
+            {
+                if !llm_hosts.contains(&host) {
+                    llm_hosts.push(host);
+                }
+            }
+        }
         PipelineDisplay {
-            mode: self.postproc.mode,
+            mode,
             stt_model: self.stt.model.clone(),
             stt_local: self.stt.endpoint.is_none(),
-            llm_model: (self.postproc.mode != Mode::Raw)
-                .then(|| self.postproc.model_config().model.trim())
-                .filter(|model| !model.is_empty())
-                .map(str::to_owned),
+            stt_host: self.stt.endpoint.as_deref().and_then(endpoint_host),
+            llm_model,
+            llm_hosts,
+            spellings: self
+                .vocabulary
+                .iter()
+                .filter(|entry| !entry.aliases().is_empty())
+                .count(),
         }
     }
 
@@ -671,31 +705,54 @@ reasoning_effort = "medium"
     }
 
     #[test]
-    fn pipeline_display_uses_the_selected_model_and_local_restriction_preserves_mode() {
-        let mut config = Config::default();
-        assert_eq!(
-            config.pipeline_display().label(),
-            "Raw · STT Parakeet v3 (local)"
-        );
-        config.postproc.mode = Mode::Clean;
-        assert_eq!(
-            config.pipeline_display().label(),
-            "Clean · STT Parakeet v3 (local) → aliases → gpt-6.1-sol"
-        );
+    fn a_pipeline_names_each_modes_model_and_every_host_that_receives_the_take() {
+        let mut config: Config = toml::from_str(
+            r#"vocabulary = ["PipeWire", { term = "Cantrip", aliases = ["Gantrip"] }, { term = "HUD", aliases = [] }]"#,
+        )
+        .unwrap();
+        let raw = config.pipeline_display(Mode::Raw);
+        assert_eq!(raw.mode, Mode::Raw);
+        assert!(raw.stt_local && raw.stt_host.is_none());
+        assert_eq!((raw.llm_model, raw.llm_hosts), (None, Vec::new()));
+        // Only entries that own an alias have a spelling to fix.
+        assert_eq!(raw.spellings, 1);
+        let clean = config.pipeline_display(Mode::Clean);
+        assert_eq!(clean.llm_model.as_deref(), Some("openai/gpt-6.1-sol"));
+        assert_eq!(clean.llm_hosts, ["openrouter.ai"]);
+        // The selected mode is only a default; each mode names its own model.
         config.postproc.elevate.model = "provider/articulate".into();
-        config.postproc.mode = Mode::Elevate;
+        config.stt.endpoint = Some("https://token@API.OpenAI.com:443/v1".into());
+        config.postproc.decision_model = Some("jev-latest".into());
+        let elevate = config.pipeline_display(Mode::Elevate);
+        assert_eq!(elevate.mode, Mode::Elevate);
+        assert_eq!(elevate.llm_model.as_deref(), Some("provider/articulate"));
+        assert!(!elevate.stt_local);
+        assert_eq!(elevate.stt_host.as_deref(), Some("api.openai.com"));
+        assert_eq!(elevate.llm_hosts, ["openrouter.ai", "api.typesafe.ai"]);
+        // A decision endpoint on the same host is named once.
+        config.postproc.decision_model = Some("typesafe/jev-1.13".into());
         assert_eq!(
-            config.pipeline_display().llm_model.as_deref(),
-            Some("provider/articulate")
+            config.pipeline_display(Mode::Clean).llm_hosts,
+            ["openrouter.ai"]
         );
+        config.postproc.endpoint = "http://[::1]:11434/v1".into();
+        config.postproc.decision_model = None;
+        assert_eq!(config.pipeline_display(Mode::Clean).llm_hosts, ["::1"]);
         config.restrict_to_local();
-        assert_eq!(config.postproc.mode, Mode::Elevate);
-        assert!(config.postproc.clean.model.is_empty());
-        assert!(config.postproc.elevate.model.is_empty());
-        assert_eq!(
-            config.pipeline_display().label(),
-            "Elevate · STT Parakeet v3 (local) → aliases only"
-        );
+        let local = config.pipeline_display(Mode::Elevate);
+        assert!(local.stt_local && local.stt_host.is_none());
+        assert_eq!((local.llm_model, local.llm_hosts), (None, Vec::new()));
+    }
+
+    #[test]
+    fn an_older_engines_pipeline_reads_its_destinations_as_unknown() {
+        let older: PipelineDisplay = serde_json::from_str(
+            r#"{"mode":"clean","stt_model":"gpt-4o-mini-transcribe","stt_local":false,"llm_model":"openai/gpt-6.1-sol"}"#,
+        )
+        .unwrap();
+        assert_eq!(older.stt_host, None);
+        assert!(older.llm_hosts.is_empty());
+        assert_eq!(older.spellings, 0);
     }
 
     #[test]

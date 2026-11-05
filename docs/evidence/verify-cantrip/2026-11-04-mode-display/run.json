@@ -1,0 +1,101 @@
+{
+  "schema": 1,
+  "claim_type": "measured",
+  "date": "2026-11-05",
+  "result": "passed",
+  "scope": "Author-run packaged app in a disposable macOS 27 guest: live HUD during real takes, the menu picker and Settings → Modes in Light and Dark; local recognizer and a synthetic loopback refinement endpoint; not recognition or model quality.",
+  "app": {
+    "source_revision": "4420f4f5ff9e053280ba27958306aacfc2a5952e",
+    "source_tree_dirty": false,
+    "base": "4a4840f",
+    "target": "aarch64-apple-darwin",
+    "version": "0.1.13",
+    "signing": "ad-hoc-development",
+    "production_signed": false,
+    "notarized": false,
+    "installed_binary_sha256": "c9b8bc1c3523e561aa854d269ceea253f9e93d9ace88a8451b196e680d2c16c6",
+    "archive_sha256": "f6e2c4905ba9de524ffc761190fea9019799d7fb96fd33f77302933b83d3975b"
+  },
+  "before_app": {
+    "source_revision": "4a4840f",
+    "version": "0.1.13",
+    "signing": "ad-hoc-development",
+    "installed_binary_sha256": "64bd54486a628cce74e8b4b605d161bc29bd97d57abc423a3342c5941893e09d",
+    "archive_sha256": "104b79992c74a6ca379c968b64e77223e488850647e26a620e12c1fd76015d5c"
+  },
+  "method": {
+    "guest": "macvm, macOS 27.0 (26A428)",
+    "display_pixels": [1440, 900],
+    "scale": 1,
+    "dock_visible": true,
+    "appearance": ["light", "dark"],
+    "launch": "open -a /Applications/Cantrip.app",
+    "input": "macvm clicks and arrow keys; native microphone consent; System Settings appearance controls",
+    "takes": "cantrip start --postproc MODE; samples/jfk.wav played twice into BlackHole 2ch; cantrip stop",
+    "capture": "guest screencapture each 0.2–0.5 s beside cantrip status --json stage; crops cut to the HUD's one-point frame",
+    "app_or_hud_mocked": false,
+    "app_screenshot_command_used": false,
+    "audio_fixture": "samples/jfk.wav",
+    "audio_fixture_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+    "stt": "local Parakeet v3 (parakeet-tdt-0.6b-v3-int8) in the guest",
+    "llm_endpoint": "http://openrouter.ai:9900/v1, with openrouter.ai mapped to 127.0.0.1 and ::1 in the guest's /etc/hosts",
+    "llm_provider": "synthetic OpenAI-compatible endpoint on loopback; seven-second delay; fixed public sentence per mode; logs route, host, model and mode only",
+    "paid_requests": 0,
+    "credentials_in_guest": false,
+    "private_content_exported": false
+  },
+  "checks": {
+    "hud_rest_line_name_glyph_promise_privacy": ["raw", "clean", "elevate"],
+    "hud_stage_lights_and_working_word": {
+      "raw": ["transcribing"],
+      "clean": ["transcribing", "refining"],
+      "elevate": ["transcribing", "refining"]
+    },
+    "hud_privacy_cue": {"raw": "on this Mac", "clean": "↗ OpenRouter", "elevate": "↗ OpenRouter"},
+    "hud_privacy_cue_lit_while_refining": true,
+    "elevate_take_kept_mode_after_default_changed_to_clean": true,
+    "default_after_that_take": "clean",
+    "menu_radio_items_with_glyph_and_subtitle": true,
+    "menu_selection_follows_settings_save": "clean",
+    "settings_default_saved": ["clean", "raw"],
+    "settings_explanations_visible_without_details": true,
+    "save_controls_above_dock": {
+      "details_closed_window_height": 370,
+      "details_open_window_height": 755,
+      "details_open_saved_notice_window_height": 779,
+      "window_bottom_y": 818,
+      "before_window_height": 770
+    }
+  },
+  "provider_requests": [
+    {"route": "/v1/chat/completions", "host": "openrouter.ai:9900", "model": "openai/gpt-6.1-sol", "mode": "clean", "count": 2},
+    {"route": "/v1/chat/completions", "host": "openrouter.ai:9900", "model": "openai/gpt-6.1-sol", "mode": "elevate", "count": 3}
+  ],
+  "contrast": {
+    "method": "WCAG ratio of each element's strongest-contrast pixel against its background, on the live captures",
+    "hud_light": {"mode_name": 14.55, "promise": 4.54, "privacy_cue_at_rest": 4.67, "glyph": 4.51, "working_word": 4.51, "privacy_cue_lit": 4.47},
+    "hud_dark": {"mode_name": 12.04, "promise": 4.52, "privacy_cue_at_rest": 4.58, "glyph": 4.54, "working_word": 4.54, "privacy_cue_lit": 4.47},
+    "settings_light": {"details_toggle": 14.94, "mode_glyph": 14.94, "explanations": 14.94},
+    "settings_dark": {"details_toggle": 10.71, "mode_glyph": 10.71, "explanations": 10.71},
+    "fffa9eb_settings_light_before_fix": {"details_title": 4.0, "disclosure_triangle": 1.84}
+  },
+  "found_and_fixed": [
+    "macOS 27 status menus draw no NSMenuItem images (SF Symbol, bitmap or drawn); the glyph now rides in the title as a text attachment",
+    "Details open pushed Save & Apply under the Dock at 1440x900; recognizer row dropped, Details rows 8 pt apart, instructions 50 pt",
+    "AppKit disclosure triangle 1.84:1 and borderless Details title 4.00:1 in Light; one borderless toggle in the label color"
+  ],
+  "after_proof": {
+    "source_revision": "a0336c4",
+    "change": "on macOS the take line's promise, stage at work and destination are fitted in lightness until their most covered painted pixel reads at 4.5:1",
+    "pre_fix_offscreen_render_dark": {"pixel": [17, 130, 253], "surface": [30, 30, 30], "ratio": 4.47},
+    "test": "hud::tests::the_take_line_reads_at_4_5_to_1_as_painted, AppKit Light and Dark palettes at 1x",
+    "vm_recaptured": false
+  },
+  "not_proven": [
+    "2x rendering",
+    "menu tooltips (no hover in macvm; unit-tested text)",
+    "VoiceOver reading of attachment titles",
+    "macOS 13.3-15",
+    "a live Linux take (Linux HUD states are layer-surface fixtures under headless sway; Settings rendered with Details closed)"
+  ]
+}

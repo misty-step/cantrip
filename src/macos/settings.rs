@@ -10,8 +10,10 @@
 //! threads and the app's tick hands their results back, so the AppKit thread
 //! never waits on IPC, history or the clipboard.
 
+use super::mark;
 use super::ui::{self, Message};
 use crate::inject::{self, DeliveryAvailability};
+use crate::modes::ModeView;
 use crate::settings::model::{
     self, CopyFailure, CopyPhase, Microphones, PastTranscript, SettingsForm, TranscriptHistory,
     INJECTION_CHOICES, MOTION_CHOICES,
@@ -27,12 +29,13 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAccessibility, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType,
-    NSBorderType, NSButton, NSColor, NSControlTextEditingDelegate, NSFont, NSFontWeightRegular,
-    NSImageView, NSLayoutConstraintOrientation, NSMenu, NSMenuDelegate, NSPopUpButton,
-    NSScrollView, NSStackView, NSStackViewGravity, NSTableColumn, NSTableColumnResizingOptions,
-    NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField,
-    NSTextFieldDelegate, NSTextView, NSToolbar, NSToolbarDelegate, NSToolbarItem, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowToolbarStyle,
+    NSBorderType, NSButton, NSButtonType, NSCellImagePosition, NSColor,
+    NSControlTextEditingDelegate, NSFont, NSFontWeightRegular, NSGridView, NSImageView,
+    NSLayoutConstraintOrientation, NSMenu, NSMenuDelegate, NSPopUpButton, NSScrollView,
+    NSStackView, NSStackViewGravity, NSTableColumn, NSTableColumnResizingOptions, NSTableView,
+    NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField, NSTextFieldDelegate,
+    NSTextView, NSToolbar, NSToolbarDelegate, NSToolbarItem, NSView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSInteger, NSNotification, NSPoint, NSRect, NSSize, NSString,
@@ -53,6 +56,8 @@ const EFFORT: f64 = 110.0;
 const MODEL: f64 = CONTROL - EFFORT - 8.0;
 /// From a radio button's edge to its title.
 const RADIO_TITLE: f64 = 20.0;
+/// A mode's explanation under its radio button's title.
+const EXPLANATION: f64 = 440.0;
 const ROW_HEIGHT: f64 = 44.0;
 /// Complete transcript rows visible at the window's size.
 const VISIBLE_ROWS: f64 = 5.0;
@@ -175,8 +180,14 @@ struct Views {
     // Modes
     /// One radio button per mode, in `Mode::ALL` order.
     modes: Vec<Retained<NSButton>>,
-    /// The selected mode's pipeline, in order.
-    pipeline: Retained<NSTextField>,
+    /// Each mode's promise, what it does to the text, and what leaves this
+    /// Mac and its model, in `Mode::ALL` order.
+    promises: Vec<Retained<NSTextField>>,
+    effects: Vec<Retained<NSTextField>>,
+    summaries: Vec<Retained<NSTextField>>,
+    /// The disclosure that shows `details`: the raw ids and their settings.
+    details_toggle: Retained<NSButton>,
+    details: Retained<NSGridView>,
     clean_model: Retained<NSTextField>,
     clean_effort: Retained<NSTextField>,
     elevate_model: Retained<NSTextField>,
@@ -405,6 +416,14 @@ define_class!(
             self.show_modes();
             self.show_form_state();
         }
+
+        /// The Details disclosure.
+        #[unsafe(method(toggleDetails:))]
+        fn toggle_details(&self, _sender: &NSButton) {
+            let views = self.views();
+            ui::show_in_form(&views.details, ui::checked(&views.details_toggle));
+            self.fit(true);
+        }
     }
 );
 
@@ -521,6 +540,7 @@ impl SettingsWindow {
                 &views.stt_endpoint,
                 &views.clean_model,
                 &views.elevate_model,
+                &views.pp_endpoint,
             ] {
                 field.setDelegate(None);
             }
@@ -952,12 +972,19 @@ impl SettingsWindow {
             .show(state.access_problem.as_deref(), true);
     }
 
-    /// The save notice and which footer actions are available.
+    /// The save notice, which footer actions are available, and what each mode
+    /// would do with the values in the form.
     fn show_form_state(&self) {
         let views = self.views();
         let state = self.state();
         let form = &state.form;
-        ui::set_text(&views.pipeline, &form.edit.pipeline());
+        for (index, mode) in Mode::ALL.into_iter().enumerate() {
+            let pipeline = form.edit.pipeline(mode);
+            let view = ModeView::new(&pipeline);
+            ui::set_text(&views.promises[index], view.headline());
+            ui::set_text(&views.effects[index], &view.effect());
+            ui::set_text(&views.summaries[index], &view.summary());
+        }
         views.notice.show(
             form.notice.as_ref().map(|notice| notice.text.as_str()),
             form.notice.as_ref().is_some_and(|notice| !notice.ok),
@@ -1193,40 +1220,64 @@ impl SettingsWindow {
         );
         let transcription = pane(mtm, &[&transcription_form]);
 
-        // Modes
+        // Modes: each mode's name, glyph and promise, what it does to the text,
+        // and what leaves this Mac and its model; the raw ids under Details.
         let modes: Vec<Retained<NSButton>> = Mode::ALL
             .iter()
             .enumerate()
-            .map(|(index, mode)| ui::radio(mtm, mode.label(), index, target, sel!(selectMode:)))
-            .collect();
-        // Each description sits under its radio button's title.
-        let descriptions: Vec<Retained<NSStackView>> = Mode::ALL
-            .iter()
-            .map(|mode| {
-                let note = ui::note(mtm, mode.description(), CONTROL - RADIO_TITLE);
-                let line = ui::column(mtm, &[&note], 0.0);
-                line.setEdgeInsets(NSEdgeInsets {
-                    top: 0.0,
-                    left: RADIO_TITLE,
-                    bottom: 0.0,
-                    right: 0.0,
-                });
-                line
+            .map(|(index, mode)| {
+                let radio = ui::radio(mtm, mode.label(), index, target, sel!(selectMode:));
+                radio.setFont(Some(
+                    &NSFont::boldSystemFontOfSize(NSFont::systemFontSize()),
+                ));
+                radio
             })
             .collect();
-        // One group, so AppKit keeps the radio buttons exclusive: each description
-        // close under its title, the next choice set apart.
-        let mut choices: Vec<&NSView> = Vec::with_capacity(2 * modes.len());
-        for (radio, description) in modes.iter().zip(&descriptions) {
-            choices.push(radio);
-            choices.push(description);
+        let promises: Vec<Retained<NSTextField>> =
+            Mode::ALL.iter().map(|_| ui::label(mtm, "")).collect();
+        let effects: Vec<Retained<NSTextField>> = Mode::ALL
+            .iter()
+            .map(|_| ui::small(mtm, "", EXPLANATION))
+            .collect();
+        let summaries: Vec<Retained<NSTextField>> = Mode::ALL
+            .iter()
+            .map(|_| ui::small(mtm, "", EXPLANATION))
+            .collect();
+        let mut choices: Vec<Retained<NSStackView>> = Vec::with_capacity(2 * modes.len());
+        for (index, mode) in Mode::ALL.into_iter().enumerate() {
+            let glyph = NSImageView::imageViewWithImage(&mark::mode_glyph(mode), mtm);
+            glyph.setContentTintColor(Some(&NSColor::labelColor()));
+            choices.push(ui::row(
+                mtm,
+                &[&modes[index], &glyph, &promises[index]],
+                6.0,
+            ));
+            // What it does and what leaves sit under the radio button's title.
+            let lines = ui::column(mtm, &[&effects[index], &summaries[index]], 2.0);
+            lines.setEdgeInsets(NSEdgeInsets {
+                top: 0.0,
+                left: RADIO_TITLE,
+                bottom: 0.0,
+                right: 0.0,
+            });
+            choices.push(lines);
         }
-        let mode_group = ui::column(mtm, &choices, 2.0);
-        for description in descriptions.iter().take(descriptions.len() - 1) {
-            mode_group.setCustomSpacing_afterView(8.0, description);
+        // The window keeps the radio buttons exclusive: each explanation close
+        // under its title, the next choice set apart.
+        let views: Vec<&NSView> = choices.iter().map(|view| &***view).collect();
+        let mode_group = ui::column(mtm, &views, 3.0);
+        for lines in choices.iter().skip(1).step_by(2).take(Mode::ALL.len() - 1) {
+            mode_group.setCustomSpacing_afterView(8.0, lines);
         }
-        let pipeline = NSTextField::wrappingLabelWithString(&NSString::new(), mtm);
-        pipeline.setPreferredMaxLayoutWidth(CONTROL);
+        // A borderless toggle in the label color: AppKit's disclosure triangle
+        // and borderless titles draw below 4.5:1 in Light.
+        let details_toggle = ui::button(mtm, "Details", target, sel!(toggleDetails:));
+        details_toggle.setBordered(false);
+        details_toggle.setButtonType(NSButtonType::Toggle);
+        details_toggle.setImage(ui::symbol("chevron.right", "").as_deref());
+        details_toggle.setAlternateImage(ui::symbol("chevron.down", "").as_deref());
+        details_toggle.setImagePosition(NSCellImagePosition::ImageLeading);
+        details_toggle.setContentTintColor(Some(&NSColor::labelColor()));
         let columns = ui::row(
             mtm,
             &[
@@ -1240,11 +1291,11 @@ impl SettingsWindow {
             field.setAccessibilityLabel(Some(&ui::ns(name)));
             field
         };
-        let clean_model = model_field("none — aliases only", MODEL, "Clean model");
+        let clean_model = model_field("none — spelling fixes only", MODEL, "Clean model");
         let clean_effort = model_field("not sent", EFFORT, "Clean reasoning effort");
-        let elevate_model = model_field("none — aliases only", MODEL, "Elevate model");
+        let elevate_model = model_field("none — spelling fixes only", MODEL, "Elevate model");
         let elevate_effort = model_field("not sent", EFFORT, "Elevate reasoning effort");
-        // The pipeline names the selected mode's model as it is typed.
+        // Each mode's explanation names its model as it is typed.
         // SAFETY: teardown clears these delegates before the views are released.
         unsafe {
             clean_model.setDelegate(Some(ProtocolObject::from_ref(self)));
@@ -1253,6 +1304,9 @@ impl SettingsWindow {
         let clean_row = ui::row(mtm, &[&clean_model, &clean_effort], 8.0);
         let elevate_row = ui::row(mtm, &[&elevate_model, &elevate_effort], 8.0);
         let pp_endpoint = ui::field(mtm, "", CONTROL);
+        // Where Clean and Elevate send the text follows the endpoint as it is typed.
+        // SAFETY: teardown clears this delegate before the view is released.
+        unsafe { pp_endpoint.setDelegate(Some(ProtocolObject::from_ref(self))) };
         let pp_key = ui::field(mtm, "none", CONTROL);
         let provider_note = ui::note(
             mtm,
@@ -1276,12 +1330,10 @@ impl SettingsWindow {
             "Shorter transcripts skip Clean's model; 0 never skips.",
             CONTROL,
         );
-        let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 66.0, false);
-        let modes_form = ui::form(
+        let (instructions_scroll, pp_instructions) = text_area(mtm, CONTROL, 50.0, false);
+        let details = ui::form(
             mtm,
             &[
-                (Some("Mode:"), &mode_group),
-                (Some("Pipeline:"), &pipeline),
                 (None, &columns),
                 (Some("Clean:"), &clean_row),
                 (Some("Elevate:"), &elevate_row),
@@ -1296,6 +1348,18 @@ impl SettingsWindow {
                 (Some("Clean instructions:"), &instructions_scroll),
             ],
         );
+        // A little denser than the form above it, so Save & Apply stays above
+        // the Dock at 1440×900 with Details open.
+        details.setRowSpacing(8.0);
+        let modes_form = ui::form(
+            mtm,
+            &[
+                (Some("Mode:"), &mode_group),
+                (None, &details_toggle),
+                (None, &details),
+            ],
+        );
+        ui::show_in_form(&details, false);
         let modes_pane = pane(mtm, &[&modes_form]);
 
         // HUD
@@ -1456,7 +1520,11 @@ impl SettingsWindow {
             stt_endpoint,
             stt_key,
             modes,
-            pipeline,
+            promises,
+            effects,
+            summaries,
+            details_toggle,
+            details,
             clean_model,
             clean_effort,
             elevate_model,
