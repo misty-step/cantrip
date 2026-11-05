@@ -74,12 +74,16 @@ def install(variant):
 
 def read(identifier):
     started = time.monotonic()
-    result = command([binary, "key", "status", identifier], env=environment, timeout=15)
-    present = result.returncode == 0 and result.stdout.strip() == b"present"
-    pending = result.returncode != 0 and b"Keychain access not yet allowed" in result.stderr
-    if not (present or pending):
-        raise RuntimeError("key status returned an unexpected result (not present or authorization-required)")
-    return {"present": present, "authorization_required": pending, "elapsed_ms": round((time.monotonic() - started) * 1000, 2), "noninteractive": True}
+    result = command([binary, "key", "status", "--json", identifier], env=environment, timeout=15)
+    try:
+        state = json.loads(result.stdout)["state"] if result.returncode == 0 else None
+    except (ValueError, KeyError, TypeError):
+        state = None
+    # Only an approved read or a pending approval is an expected outcome;
+    # anything else (missing item, denied, busy, timeout) fails the run.
+    if state not in ("ready", "needs-authorization"):
+        raise RuntimeError(f"key status returned an unexpected state: {state!r}")
+    return {"present": state == "ready", "authorization_required": state == "needs-authorization", "state": state, "elapsed_ms": round((time.monotonic() - started) * 1000, 2), "noninteractive": True}
 
 def store(identifier):
     result = command([binary, "key", "set", identifier], input=b"cantrip-public-dummy-not-a-provider-key\n", env=environment, timeout=15)
