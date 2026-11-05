@@ -27,8 +27,8 @@ use cantrip_engine::{
     config::{Config, Mode, PipelineDisplay},
     engine::{request_shutdown, shutdown_requested},
     ipc::{
-        self, Cleanup, Command, Completeness, KeychainAccess, KeychainAuthorization,
-        MicrophoneAccess, MicrophoneAuthorization, MicrophoneGrantee, StateKind,
+        self, Command, Completeness, KeychainAccess, KeychainAuthorization, MicrophoneAccess,
+        MicrophoneAuthorization, MicrophoneGrantee, StateKind,
     },
     paths,
 };
@@ -1435,6 +1435,7 @@ impl AppDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cantrip_engine::ipc::Cleanup;
 
     #[test]
     fn accepted_pending_press_keeps_the_owner_disclosure_until_recording() {
