@@ -10,6 +10,8 @@ See the [steering list](docs/decisions/index.md); the platform boundary is
 [Decision 0031](docs/decisions/0031-shared-engine-native-macos.md).
 
 
+Design principles (UX/DX/AX; no layout captions) live in [mistystack design](https://github.com/misty-step/mistystack/blob/master/skills/design/SKILL.md#principles); point there, don't copy them.
+
 ## Contracts
 
 - Local STT is the default. Cloud STT and cleanup are opt-in OpenAI-compatible HTTP lanes.
