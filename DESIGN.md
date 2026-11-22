@@ -654,8 +654,10 @@ response as the decoder fixture. Until then the names above are documentation.
 
 On decode, `segment.start_ms = round(start × 1000)` and `segment.end_ms` likewise.
 The response is valid if every segment is finite, has `0 ≤ start_ms ≤ end_ms ≤
-duration_ms + 500`, starts do not decrease, and the segments are non-empty
-whenever `text` is. `end_ms` is clamped to `duration_ms`.
+duration_ms + 500`, starts do not decrease, and at least one segment has
+non-whitespace `text`. `end_ms` is clamped to `duration_ms`. If `segments` is empty, or
+every segment's `text` is empty or whitespace, the response is not valid and the chunk
+enters the fallback (steps 1–6). From here on, whitespace-only text counts as empty.
 
 **Deterministic fallback.** The chunk is split locally if a response has no valid
 segments, if the request returns 400, or if the response has no text. An empty
@@ -688,9 +690,10 @@ detected voice is dropped, however short:
    `response_format: "json"`. Its `start_ms` and `end_ms` are the first and last
    voiced frame in the slice, as offsets in the chunk on the same clock; the padding
    is only for the recognizer and does not affect order. A slice that returns empty is
-   tried once more; if it is empty again it becomes a visible marker turn,
-   `[no words recognized: MM:SS–MM:SS]`. A slice that fails after retries fails the
-   chunk.
+   tried once more. If any slice is empty again, or fails after retries, the chunk is
+   marked `failed`, whatever its RMS and its other slices' text. Its source WAV stays in
+   staging until Retry succeeds or the user confirms Discard, and partial notes show the
+   chunk as `[transcription failed: MM:SS–MM:SS]`.
 5. **Whole chunk.** When coverage fails, the whole chunk is one segment from 0 to
    `duration_ms`, using the text already returned or, without one, one plain `json`
    request. The transcript puts `[chunk-level order: MM:SS–MM:SS]` before it, because
@@ -728,7 +731,7 @@ for chunk in all chunks of both tracks:
     else for segment in chunk.segments, text trimmed, empty skipped:
         abs_start_ms = chunk_start_ms + segment.start_ms
         abs_end_ms   = chunk_start_ms + segment.end_ms
-        events += { abs_start_ms, abs_end_ms, track, text or MARKER }
+        events += { abs_start_ms, abs_end_ms, track, text }
 
 track_tiebreaker: You = 0, Others = 1
 sort events ascending by (abs_start_ms, track_tiebreaker, chunk_index, segment_id)
@@ -745,8 +748,7 @@ for event in events:
 print turn as "[MM:SS] You: …" or "[MM:SS] Others: …" from floor(abs_start_ms / 1000)
 ```
 
-An empty slice from the fallback carries its `[no words recognized: …]` text as a
-MARKER, so it is not skipped. Coalescing joins only neighbours in the sorted list, so a turn by the other
+Coalescing joins only neighbours in the sorted list, so a turn by the other
 speaker always breaks a run. Minutes continue past 59 (`[75:04]`). Order is at
 segment granularity: an interjection inside one long segment is printed after that
 segment begins, not in the middle of it.
@@ -1070,9 +1072,16 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       2 s apart, with an `Others` turn between, there are two slices and both turns are
       in the merged transcript in order. At 1.1 s apart there is one slice and both
       texts are in it. In both, the voiced samples sent equal the voiced samples
-      detected: zero silent drops. Repeat with "yes", with the "no" first and last in
-      the chunk, and with a stub that returns empty for the "no": the transcript
-      shows `[no words recognized: MM:SS–MM:SS]` there.
+      detected: zero silent drops. Repeat with "yes", and with the "no" first and last in
+      the chunk. With two slices and a stub that returns empty for the "no" both times, the
+      chunk is `failed` although the other slice has text, and its WAV is in staging.
+    - *Fallback, blank text.* A 5-second chunk of steady sound at −20 dBFS is one slice
+      with full coverage. (a) The stubbed `verbose_json` response has two segments with
+      valid times and `text` of `""` and `" "`: it is not valid, and the slice is
+      requested. (b) Both slice attempts return empty, and in a second run whitespace: the
+      chunk is `failed`, its WAV is in staging, no Markdown appears, and partial notes
+      read `[transcription failed: MM:SS–MM:SS]`. Control: text on the second attempt
+      completes the chunk.
     - *Fallback, coverage failure.* Inject a splitter that returns zero slices, and one
       that loses an interval, over a chunk with speech: the whole chunk is transcribed
       and marked `[chunk-level order: MM:SS–MM:SS]`. Make that request return empty:
