@@ -553,9 +553,11 @@ notes use the same steps, and they have no network client:
 2. Under the Meeting folder chosen now, create the `cantrip-meeting/YYYY/MM`
    directories. The chosen folder itself is never created: a missing one may be an
    unmounted volume.
-3. In that directory, unlink a leftover `.<source_id>.tmp` (never open it: after a cut-off
-   `link` it is the published file), create it again with `O_CREAT | O_EXCL`, write it and
-   `fsync` it (`F_FULLFSYNC`). One left in a folder that is no longer chosen stays there.
+3. In that directory, create a new temp file `.cantrip-<random UUID>.tmp` for this attempt
+   with `open(O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600)`, and a new UUID on `EEXIST`.
+   No existing name is unlinked first, whatever it is. Write it, `fsync` it
+   (`F_FULLFSYNC`) and close it. Record `temp_path`, `temp_dev` and `temp_ino` in
+   `meeting.json` for this attempt only, and clear them when it ends.
 4. For a completed note, record the destination path and the SHA-256 of `note.md` in
    `meeting.json`. Then publish exclusively with
    `renameatx_np(AT_FDCWD, tmp, AT_FDCWD, dst, RENAME_EXCL)`. If the volume does not
@@ -569,7 +571,11 @@ notes use the same steps, and they have no network client:
 6. `fsync` the directory, and its parents up to the Meeting folder. Only now, and only
    for a completed note, set `archived` and delete staging.
 
-A failure in steps 2 to 6 removes the temp file if it can be reached. A completed note
+An attempt unlinks only the temp file it created itself: `lstat(temp_path)` must be a
+regular file with that device and inode, also for the `unlink` in step 4 and after a
+failure in steps 2 to 6. No file is ever unlinked by name alone. Temp cleanup is
+best-effort: an error (`EACCES`, `EROFS`, `ENOENT`) is logged without a file name or
+title and neither fails a publish nor blocks completion. After a failure a completed note
 goes to `pending-archive` with its staging intact and the contextual Retry row visible;
 a partial save stays `chunks-failed`. The only other way staging is deleted is a
 confirmed Discard.
@@ -580,11 +586,21 @@ publish record:
 
 - *Already published.* If a regular file is at the recorded path and its SHA-256 is the
   recorded one and that of the staged `note.md`, an earlier attempt published it and
-  stopped before cleanup. Retry removes a leftover temp file beside it and finishes at
-  step 6 for that directory: `fsync(dir)`, and only then staging is deleted.
-- *Otherwise* it runs steps 2 to 6 from the staged `note.md`. If the recorded file was
-  published and then edited, moved or put out of reach before the Retry, this makes a
-  second complete note with the same `source_id`; that is preferred to a lost note.
+  stopped before cleanup. Retry finishes at step 6 for that directory, whichever folder is
+  chosen now: `fsync(dir)`, and its parents up to the Meeting folder it was published in.
+  It then tries to remove the recorded temp file and, whether or not that worked, sets
+  `archived` and deletes staging.
+- *Otherwise*, also when that file cannot be read or one of those directories cannot be
+  synced, it tries to remove the recorded temp file and runs steps 2 to 6 from the staged
+  `note.md`, in the Meeting folder chosen now and with a new temp file. If the recorded
+  file was published and then edited, moved or put out of reach before the Retry, this
+  makes a second complete note with the same `source_id`; that is preferred to a lost
+  note. A directory that can be written but never synced gets one more on each Retry.
+- *Recorded temp file.* One left by a killed attempt is unlinked only if it is a regular
+  file with the recorded `(temp_dev, temp_ino)` and its bytes are those of the staged
+  `note.md`. The inode alone is not enough: a published note keeps it, so an edited note
+  renamed to `temp_path` would match. Any other leftover stays: one killed before it was
+  recorded, one of a partial save, or one whose device number changed.
 
 If it fails, the meeting stays in `pending-archive`. Making the folder writable or
 choosing another Meeting folder, then Retry, is enough. Only a completed note has a
@@ -1061,6 +1077,13 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       unlinks no partial note (checked with `fs_usage`), its content is what the user
       last wrote, and a deleted one is not recreated. Rename it to `<utc>-<slug>.md`: the
       completion is `<utc>-<slug>-2.md`.
+    - *Partial renamed to a temp name.* Save partial notes, edit the note, and in separate
+      runs rename it to `.<source_id>.tmp`, to a `.cantrip-<UUID>.tmp` name that a debug
+      hook makes the next attempt draw first (`EEXIST`, so it takes another), and, after a
+      kill just past the exclusive publish, to the `temp_path` in `meeting.json`. Restore
+      the service and Retry: the partial keeps its name, inode and bytes, and
+      `<utc>-<slug>.md` is published exclusively. Repeat the third run with a completed
+      note, edited and renamed to its `temp_path`: it survives a publish-only Retry.
     - *Crash after a partial publish.* Kill the app after the exclusive publish of
       `-partial.md` and before `meeting.json` is updated. Relaunch: the state is
       `chunks-failed` with all staging intact. Restore the service and Retry:
@@ -1087,10 +1110,18 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       folder chosen instead of restoring writability: the same, in the folder chosen now.
     - *Atomic.* Kill the app before and after the publish call: the destination has no
       file or the whole file, never part of one, and staging is intact. Relaunch and
-      Retry: one complete note and no temp file. After a kill past the publish call,
-      Retry adds no file: it matches the recorded path and SHA-256 of `note.md`, calls
+      Retry: one complete note and no recorded temp file. After a kill past the publish
+      call, Retry adds no file: it matches the recorded path and SHA-256 of `note.md`, calls
       `fsync(dir)` and only then deletes staging. Discard removes staging only after
       confirmation, and no file in the Meeting folder.
+    - *Crash between `link` and `unlink`, folder switched.* On a volume without
+      `RENAME_EXCL`, kill the app between the two calls in folder A, `chmod 0500` folder A
+      and the directories in it, choose writable folder B, block the network and Retry:
+      **zero** API calls, the note in A is matched and its directories synced, `unlink`
+      fails with `EACCES` and is logged without a name, staging is deleted, and B stays
+      empty. Repeat with A unreadable, unmounted, its directory sync failing (debug hook),
+      and the note in A edited: also zero API calls, the note is published in B, and
+      staging is deleted only after B's `fsync(dir)`. No run stays `pending-archive`.
 
 Nothing in this list has been done in this slice.
 
