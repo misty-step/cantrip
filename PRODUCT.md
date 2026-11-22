@@ -126,6 +126,7 @@ re-measured with real microphone speech on a Mac before release.
 | Shortcut press to HUD visible | not measured | ≤ 100 ms |
 | Vocabulary terms spelled exactly, Raw | 21/21 (100%); 14/21 (66.7%) without `keyterms` | ≥ 95% on a real-voice corpus |
 | Vocabulary terms spelled exactly, Clean / Elevated | 20/21 (95.24%) / 19/21 (90.48%) | ≥ 95% |
+| Meaning preserved, read by eye, Clean / Elevated | 4/5 / 5/5 | 100% on a real-voice corpus |
 | Ordinary words wrongly turned into vocabulary terms | 0 of 9 Clean text probes; 1 audio clip: "cloud flare" became "Cloudflare" | 0 on a 50-sentence negative set |
 | Cost per 1,000 dictations, Raw / Clean / Elevated | $0.261 / $0.312 / $0.307 | ≤ $0.50 |
 | Meeting cost | not measured; $0.10 per hour of audio per track at the catalog rate | report per meeting |
@@ -142,6 +143,11 @@ misrecognitions were not reproduced on synthetic speech.
   accent.
 - The numbers in this slice were tuned on the same clips that measured them. The
   held-out repair probe recovered 5 of 9 vocabulary terms.
+- Clean can change meaning when the speaker corrects themselves: on one of five
+  clips it deleted the correction and kept the retracted claim. The term score did
+  not catch it. This blocks release of Clean, not of Raw.
+- Clean and Elevated returned identical text on three of five clips. If that holds
+  on real dictation, one of the two modes should go.
 - Meeting capture and its transcription are designed, not tested.
 - A bare "Scrum means Scry" rule rewrites ordinary speech: an earlier prompt
   turned "the scrum starts at ten" into "the Scry starts at ten". The final

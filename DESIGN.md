@@ -163,6 +163,17 @@ dropped "Serenity" and "Cloudflare" (clip-05, clip-02). In each case the speaker
 had retracted the name ("Wait, actually, have Persephone do it"). These are
 strict misses; the spoken names are in the script, so they count.
 
+**What the term score hides.** Read by eye against the script, Elevated is
+faithful on 5 of 5 clips and Clean on 4 of 5. On clip-02 Clean returned "So the
+Supercortex sync failed again on Cloudflare. It was the OpenRouter key": it
+deleted the correction phrase but kept the retracted claim, and still scores 3/3
+terms. Prompt v1 did not do this; v2 and v3 do. Clean's self-correction
+instruction is not ready to ship as written.
+
+**Clean and Elevated barely differ on short dictations.** Their outputs are
+identical on 3 of 5 clips (01, 03, 05). The p50 gap between them comes from one
+call per mode per clip and does not show that Elevated is faster.
+
 **Prompt iteration.** v1's Clean never collapsed self-corrections ("to Thursday?
 Actually, no, make it Friday"); v2 added one sentence. A probe of
 v2 then found it rewriting an ordinary "scrum" as "Scry" in a text sentence and
@@ -178,6 +189,10 @@ the five clips that score them.
 `Codex`→`Codecs`, `confusing`→`computing`) did not occur in MAI-Transcribe-2
 output with or without `keyterms`. Text-only probes confirm that Clean corrects
 them when they appear in a transcript.
+
+**Before release.** Fix Clean's self-correction rule (collapse the whole retracted
+clause, or leave the correction as spoken), then re-measure on clips the prompt
+was not tuned on, with a fidelity check beside the term score.
 
 **Not covered.** A human microphone, noise, accents, long takes, the meeting
 pipeline, on-device recognition, and `provider` data-collection preferences.
