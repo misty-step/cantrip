@@ -129,8 +129,12 @@ tracks on one clock; the user stops it. Cantrip produces a Markdown file with a
 title, a short summary, decisions, action items and a cleaned transcript whose
 turns are labelled `You` and `Others` and ordered by when each turn began, and
 saves it under `cantrip-meeting/YYYY/MM/` in the chosen folder. The default folder
-is a `captures/voice/` directory of a Supercortex checkout; any folder works.
-Cantrip writes files and never runs git.
+is a `captures/voice/` directory of a Supercortex checkout; any folder works, unless it is
+Cantrip's application support directory, contains it or lies inside it once symlinks are
+resolved. Settings refuses such a folder ("Choose a folder outside Cantrip's application
+support directory"), and nothing is published to one: finished notes wait in
+**pending-archive** until an allowed folder is chosen. Cantrip writes files and never runs
+git.
 
 Meetings need the OpenRouter key; without one, Start meeting says so and does not
 record. If part of a meeting cannot be transcribed, its audio is kept and the
@@ -141,9 +145,13 @@ cannot be placed in order is kept as one block and marked. A quiet part is treat
 silence; a louder part in which no turn can be found and no words are recognized counts
 as not transcribed, so its audio is kept.
 
-A file appears whole or not at all, except that an interrupted save can leave a hidden
-temporary file, or an incomplete note on a volume without exclusive rename, because
-Cantrip never overwrites or deletes a file in the Meeting folder, including its own.
+On the same local APFS or HFS+ volume as Cantrip's staging, each note appears whole, in one
+atomic step. On another volume, a network folder or a volume without exclusive rename,
+Cantrip creates the note directly: a program watching the folder can see bytes arrive before
+the write completes, and an interrupted write leaves an incomplete file. Cantrip leaves that
+file untouched, and Retry publishes the complete note under a new name. Cantrip never creates
+a temporary file in the Meeting folder, and never overwrites or deletes a file there,
+including its own.
 Every meeting has one `source_id`, fixed when recording starts, and
 every note of it carries that `source_id` with `status: partial` or `status: complete`.
 Partial notes are `<utc>-<slug>-partial.md`. If Retry then completes the meeting, the

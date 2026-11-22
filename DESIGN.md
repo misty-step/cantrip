@@ -516,7 +516,7 @@ remember where a partial note went.
 | `recording`, `processing`, `publishing` | work in progress | not shown for it |
 | `interrupted` | the app quit while recording or processing | Retry (resumes from what is staged), Discard |
 | `chunks-failed` | at least one chunk failed after its retries | Retry (failed chunks, then cleanup and summary), Save partial notes, Discard |
-| `pending-archive` | all chunks are transcribed, the cleaned transcript and summary are persisted in staging as `note.md`, and only writing the final Markdown to the Meeting folder failed or was cut off (folder missing or not writable, volume unmounted or full, app quit) | Retry (publish only), Discard |
+| `pending-archive` | all chunks are transcribed, the cleaned transcript and summary are persisted in staging as `note.md`, and only writing the final Markdown to the Meeting folder failed or was cut off (folder missing, not writable or overlapping staging, volume unmounted or full, app quit) | Retry (publish only), Discard |
 | `archived` | published and synced; staging is being deleted (finished at the next launch if cut off) | not shown |
 
 - **Retries.** Network errors, 408, 429 and 5xx: three more attempts, waiting 1 s,
@@ -546,89 +546,95 @@ remember where a partial note went.
   WAV header from the file length and offers Retry / Discard. Only a completed note
   enters `publishing`; a meeting found there at launch becomes `pending-archive`.
 
-**Publishing** is the only way a file reaches the Meeting folder, and **Cantrip never
-deletes anything there**. It makes no `unlink()`, `unlinkat()`, `rmdir()` or replacing
-`rename()` call on a path in the Meeting folder: not on success, after an error, on
-replay or on Discard. POSIX cannot unlink by inode, so between any check of what a path
+**Publishing** is the only way a file reaches the Meeting folder, and **Cantrip creates no
+temp file and deletes nothing there**. It makes no `unlink()`, `unlinkat()`, `rmdir()` or
+replacing `rename()` call on a path in the Meeting folder: not on success, after an error,
+on replay or on Discard. POSIX cannot unlink by inode, so between any check of what a path
 names and an `unlink` of that path, another process can rename the user's file onto it.
-Staging is Cantrip's own and not part of the Meeting folder, even when the chosen folder
-contains it; a folder inside staging cannot be chosen. Partial and completed notes use
+
+**The Meeting folder and staging are disjoint.** The staging root is
+`~/Library/Application Support/com.misty-step.cantrip/` (`0700`, created before the first
+check). Cleanup unlinks files under it, so neither folder may be the other, contain it or
+lie inside it. Both paths are canonicalized with `realpath`, which resolves symlinks. They
+overlap if either is the other or one of its ancestors, compared by the device and inode of
+each directory on the canonical path, not by string prefix.
+
+- *Settings* refuses an overlapping folder, keeps the previous choice and says "Choose a
+  folder outside Cantrip's application support directory".
+- *Every publish and publish-only Retry* checks again, because a symlink may have changed
+  since. On an overlap it creates no directory or note and deletes no staging. A completed
+  note waits in `pending-archive` with the same message until a disjoint folder is chosen.
+
+So the rule above holds for every allowed Meeting folder. Partial and completed notes use
 the same steps, and they have no network client:
 
 1. The rendered Markdown is synced in staging (`note.md`, or `partial.md` for partial
    notes). The steps below read only that file.
-2. Under the Meeting folder chosen now, create the `cantrip-meeting/YYYY/MM`
-   directories. The chosen folder itself is never created: a missing one may be an
-   unmounted volume. Ask the volume whether it supports exclusive rename
-   (`volumeSupportsExclusiveRenamingKey`): step 3 if it says yes, otherwise step 4. Asking
-   first means that a volume without it gets no temp file.
-3. **Exclusive rename** (APFS, HFS+ and other volumes that support it). In that directory,
-   create a new temp file `.cantrip-<random UUID>.tmp` with
-   `open(O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600)`, and a new UUID on `EEXIST`.
-   Write it, `fsync` it (`F_FULLFSYNC`), keep its `fstat` device and inode in memory, and
-   close it. Publish with `renameatx_np(AT_FDCWD, tmp, AT_FDCWD, dst, RENAME_EXCL)`, which
-   fails with `EEXIST` when `dst` exists; the new file appears whole. On `EEXIST` the same
-   temp file is renamed to the next name. If `lstat(tmp)` right before the call is no
-   longer that device and inode, Cantrip leaves that path as it is and starts step 3 again
-   with a new temp file, within the limit in step 6. If the call still returns `ENOTSUP`,
-   the temp file stays and step 4 publishes.
-4. **Direct exclusive create** (no exclusive rename: expected on SMB and FAT32). Open the
-   destination itself with `open(dst, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600)`,
-   write the whole note to that descriptor, `fsync` it (`F_FULLFSYNC`) and close it. No
-   temp file, `link`, `unlink` or rename is used.
+2. Under the canonical path of the Meeting folder chosen now, create the
+   `cantrip-meeting/YYYY/MM` directories. The chosen folder itself is never created: a
+   missing one may be an unmounted volume. The folder, and each of those directories that
+   already exists, must pass the overlap check before anything is created in it.
+3. **Exclusive move from staging** (staging and Meeting folder on one volume with exclusive
+   rename: standard APFS and HFS+). In the meeting's staging directory, create a new temp
+   file `publish-<random UUID>.tmp` with
+   `open(O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600)`, write the whole note, `fsync` it
+   (`F_FULLFSYNC`) and close it. Publish with
+   `renameatx_np(AT_FDCWD, staging_tmp, AT_FDCWD, dst, RENAME_EXCL)`, which fails with
+   `EEXIST` when `dst` exists; the new file appears whole. On `EEXIST` the same
+   `staging_tmp` is moved to the next name. The source is never in the Meeting folder, so no
+   rename there can change what is moved, and a crash before the call leaves no file there.
+   A `staging_tmp` that was not moved is deleted with its staging.
+4. **Direct exclusive create**, only when that call returns `EXDEV` (the Meeting folder is
+   on another volume, such as an external SSD) or `ENOTSUP` (no exclusive rename: expected
+   on SMB and FAT32). Open the destination itself with
+   `open(dst, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0600)`, write the whole note to that
+   descriptor, `fsync` it (`F_FULLFSYNC`) and close it. No temp file, `link`, `unlink` or
+   rename is used in the Meeting folder. Any other error but `EEXIST` is a failed publish.
 5. For a completed note, both steps first record the destination path and the SHA-256 of
    `note.md` in `meeting.json`. On `EEXIST` they take the next unused name
    (`<utc>-<slug>-2.md`, `-3.md`, …; for partial notes `<utc>-<slug>-partial-2.md`, …) and
-   record that. An existing file is never overwritten, truncated or opened for writing,
-   whoever made it. Plain `rename()`, which silently replaces, is never used there.
-6. Verify and sync. Open `dst` with `O_RDONLY | O_NOFOLLOW`: it must be a regular file with
-   the staged note's SHA-256. `fsync` it (`F_FULLFSYNC`), its directory, and the parents
-   up to the Meeting folder. Only now, and only for a completed note, set `archived` and
-   delete staging. If the file does not verify, whatever is at `dst` is left alone and
-   steps 2 to 6 run again with the next unused name. After three such restarts in one
-   attempt, counting those of step 3, or if a sync fails, the publish has failed.
+   record that. An existing file is never overwritten, truncated, moved or opened for
+   writing, whoever made it. Plain `rename()`, which silently replaces, is never used there.
+6. Verify and sync. The directory of `dst` must pass the overlap check. Open `dst` with
+   `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and call `fstat` on the descriptor at once. If the
+   open fails, or it is not a regular file (`!S_ISREG`: a FIFO, socket, symlink, directory or
+   device), close it without reading: not verified. `O_NONBLOCK` lets the open of a FIFO with
+   no writer return, and changes nothing for a regular file. A regular file must have the
+   staged note's SHA-256. `fsync` it (`F_FULLFSYNC`), its directory, and the parents up to
+   the Meeting folder. Only now, and only for a completed note, set `archived` and delete
+   staging. If the file does not verify, or a sync fails, whatever is at `dst` is left alone
+   and the publish has failed.
 
 After a failure a completed note goes to `pending-archive` with its staging intact and
 the contextual Retry row visible; a partial save stays `chunks-failed`. Errors are logged
 without a file name or title. The only other way staging is deleted is a confirmed Discard.
 
-**Accepted tradeoffs.** Cantrip leaves these behind rather than delete in a folder it does
-not own:
-
-- *Hidden temp file.* A crash or an error after step 3 creates the temp file and before
-  its rename succeeds may leave one `.cantrip-<UUID>.tmp` per attempt. It is owner-only,
-  holds all or part of the note's text, and stays after a later Retry or a Discard. Cantrip
-  never opens, reuses, renames or removes it; the user may delete it. In a git checkout
-  it can appear as an untracked file.
-- *Incomplete note.* In step 4 the file is visible while it is written. A crash or a
-  write error (such as a full volume) there may leave an incomplete file at `dst`, whose
-  frontmatter may already say `status: complete`. It fails the SHA-256 check on Retry, which
-  publishes a whole note under the next name and leaves the incomplete one; each further
-  failed attempt may leave another.
-- *Residual race in step 3.* `renameatx_np` takes a path. If another process renames a file
-  onto `tmp` after the `lstat` and before the call, that file is moved to `dst` with its
-  inode and bytes unchanged; nothing is deleted. Step 6 finds that `dst` is not the note, so
-  staging is kept and the note is published under the next name.
+**Accepted tradeoff: step 4 is not atomic.** The file is visible while it is written, so a
+process that watches the folder can see its bytes arrive before the write completes, in a
+normal write too. A crash or a write error (such as a full volume) there may leave an
+incomplete file at `dst`, whose frontmatter may already say `status: complete`. Cantrip does
+not delete it. It fails the SHA-256 check on Retry, which publishes a whole note under the
+next name and leaves the incomplete one; each further failed attempt may leave another.
 
 **Publish-only Retry.** Retry on a `pending-archive` meeting makes **zero** speech and
-language-model API calls, so it works offline and costs nothing. It first reads the
-publish record:
+language-model API calls, so it works offline and costs nothing. Unless the Meeting folder
+chosen now overlaps staging, it reads the publish record:
 
 - *Already published.* If the recorded path verifies and syncs as in step 6, an earlier
   attempt published it and stopped before cleanup. Retry sets `archived` and deletes
-  staging, whichever folder is chosen now. The parents are those up to the Meeting folder
-  it was published in. The file itself is synced again because a step 4 attempt may have
-  been killed between its last write and its `fsync`.
-- *Otherwise* (the file is missing, unreadable or different, or it or one of those
-  directories cannot be synced), Retry runs steps 2 to 6 from the staged `note.md` in the
-  Meeting folder chosen now. It does not write, rename or remove anything an earlier
-  attempt left. If the recorded file was published and then edited, moved or put out of
-  reach before the Retry, this makes a second complete note with the same `source_id`;
-  that is preferred to a lost note. A directory that can be written but never synced gets
-  one more on each Retry.
+  staging, whichever disjoint folder is chosen now. The parents are those up to the Meeting
+  folder it was published in. The file itself is synced again because a step 4 attempt may
+  have been killed between its last write and its `fsync`.
+- *Otherwise* (the file is missing, unreadable, not a regular file or different, or it or
+  one of those directories cannot be synced), Retry runs steps 2 to 6 from the staged
+  `note.md` in the Meeting folder chosen now. It does not write, rename or remove anything an
+  earlier attempt left there; a name that is taken, by a FIFO too, gets `-2.md`. If the
+  recorded file was published and then edited, moved or put out of reach before the Retry,
+  this makes a second complete note with the same `source_id`; that is preferred to a lost
+  note. A directory that can be written but never synced gets one more on each Retry.
 
 If it fails, the meeting stays in `pending-archive`. Making the folder writable or
-choosing another Meeting folder, then Retry, is enough. Only a completed note has a
+choosing another disjoint Meeting folder, then Retry, is enough. Only a completed note has a
 publish record, so a partial note is never taken for the completion.
 
 ### Timestamped transcription
@@ -1102,28 +1108,31 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       unlinks no partial note (checked with `fs_usage`), its content is what the user
       last wrote, and a deleted one is not recreated. Rename it to `<utc>-<slug>.md`: the
       completion is `<utc>-<slug>-2.md`.
-    - *No unlink in the Meeting folder.* Record every run of this archive list with
-      `fs_usage` and `eslogger`, filtered to the Cantrip process. For paths in Meeting
-      folders A and B, staging excluded: **zero** `unlink`, `unlinkat` and `rmdir`
-      calls, no rename without `RENAME_EXCL`, no `open` for writing without `O_EXCL`, and no
-      `link` or `O_TRUNC`. This covers normal publish, every error below, crash replay,
-      Discard, and renames during a Retry.
-    - *Partial renamed to a temp name.* Save partial notes, edit the note, and in separate
-      runs rename it: to `.<source_id>.tmp`; to a `.cantrip-<UUID>.tmp` name that a debug
-      hook makes the next attempt draw first (`EEXIST`, so it takes another); onto the temp
-      file a killed attempt left, right before Retry; and, at a debug pause between the
-      `close` and the `lstat` of a Retry, onto the temp file in use. Restore the service and
-      Retry. Each time the partial keeps its name, inode and bytes, and `<utc>-<slug>.md` is
-      published exclusively and whole. Repeat the last two with a completed note, edited
-      and renamed there, in a publish-only Retry: the same.
-    - *Rename during cleanup and Retry.* While Retry runs 200 times, a second process renames
-      edited partial notes onto every `.cantrip-*.tmp` path it sees, as fast as it can,
-      from before Retry until staging is gone. Every partial's inode and bytes survive. Its
-      name does too, unless it was moved to a destination in the residual race; count those.
-      Each run ends with one whole note that has `status: complete`, or in `pending-archive`
-      with staging intact. Force that race once with a debug pause between `lstat` and
-      `renameatx_np`: the partial is at `<utc>-<slug>.md` with its inode and bytes, staging was
-      not deleted before `<utc>-<slug>-2.md` was verified and synced, and zero API calls.
+    - *No temp file and no unlink in the Meeting folder.* Record every run of this archive
+      list with `fs_usage` and `eslogger`, filtered to the Cantrip process. For paths in
+      Meeting folders A and B: **zero** `unlink`, `unlinkat` and `rmdir` calls, no rename
+      without `RENAME_EXCL` and none whose source is there, no `open` for writing without
+      `O_EXCL`, no file created except `<utc>-<slug>*.md`, and no `link` or `O_TRUNC`. This
+      covers normal publish, every error below, crash replay, Discard, and renames during a
+      Retry.
+    - *Partial renamed during Retry.* While Retry runs 200 times, a second process renames
+      edited partial notes, as fast as it can, onto names in the Meeting folder:
+      `.cantrip-<UUID>.tmp`, `.<source_id>.tmp`, the name of the `publish-<UUID>.tmp` in use,
+      and free `<utc>-<slug>*.md` names, from before Retry until staging is gone. Repeat with
+      debug pauses between the `close` of the staging temp file and `renameatx_np`, and with
+      a completed note, edited and renamed there, in a publish-only Retry. Every one keeps the
+      exact name the second process gave it, its inode and its bytes, with no exception. Each
+      run ends with one whole note that has `status: complete`, published exclusively, or in
+      `pending-archive` with staging intact.
+    - *Overlapping Meeting folder.* Choose, in separate runs: the staging root, `~/`,
+      `~/Library/Application Support/`, `meetings/` in the staging root, a symlink to each,
+      and the staging root in other letter case. Settings refuses each, says "Choose a folder
+      outside Cantrip's application support directory" and keeps the previous folder. Choose an
+      allowed folder, and before Retry replace it with a symlink to each; repeat with its
+      `cantrip-meeting` replaced by a symlink to the staging root. Retry creates no directory
+      or note, deletes no staging and stays `pending-archive`. Choose a disjoint folder and
+      Retry: published, zero API calls. A sibling named `com.misty-step.cantrip-notes` is
+      accepted.
     - *Crash after a partial publish.* Kill the app after the exclusive publish of
       `-partial.md` and before `meeting.json` is updated. Relaunch: the state is
       `chunks-failed` with all staging intact. Restore the service and Retry:
@@ -1134,9 +1143,9 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       second run from a debug hook between the `fsync` and the publish: the note is
       `<utc>-<slug>-2.md` and the existing file is byte-identical. 200 runs with a second
       process creating the name at random offsets: no file it created is ever changed.
-      Repeat on a volume without `RENAME_EXCL` (direct exclusive create): the same, and no
-      temp file appears. Repeat with the volume reporting support and `renameatx_np` returning
-      `ENOTSUP` (debug hook): the note is published directly and one temp file stays.
+      Repeat with the Meeting folder on another volume, on one without `RENAME_EXCL`, and
+      with `renameatx_np` returning `EXDEV` and `ENOTSUP` (debug hook), all direct exclusive
+      create: the same, and no temp file appears in the Meeting folder.
     - *Unwritable destination, pending-archive.* Let a meeting finish transcription,
       cleanup and summary with the destination folder unwritable: no `.md` appears,
       the state is `pending-archive`, every WAV, transcript and `note.md` is in staging,
@@ -1149,18 +1158,19 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       directory `fsync`. Repeat with the folder missing and the volume unmounted: the
       folder is not recreated. Repeat with partial notes saved earlier, and with another
       folder chosen instead of restoring writability: the same, in the folder chosen now.
-    - *Atomic.* On a volume with `RENAME_EXCL`, kill the app before and after the publish
-      call: the destination has no file or the whole file, never part of one, staging is
-      intact, and at most one hidden `.cantrip-<UUID>.tmp` was left. Relaunch and Retry: one
-      complete note; the leftover keeps its inode and bytes. After a kill past the publish
-      call, Retry adds no file: it matches the recorded path and SHA-256 of `note.md`, syncs
-      the file and its directories, and only then deletes staging. Discard removes staging
-      only after confirmation, and no file in the Meeting folder.
-    - *Interrupted direct create.* On a volume without `RENAME_EXCL`, kill the app before,
-      during and after the write, and fill the volume during it. Staging is intact. Free
-      space and Retry offline: an incomplete `<utc>-<slug>.md` keeps its inode and bytes and
-      `<utc>-<slug>-2.md` is byte-identical to `note.md`; a whole one is matched, synced and
-      not published again. No temp file appears.
+    - *Atomic.* With staging and Meeting folder on one APFS volume, kill the app before and
+      after the publish call: the destination has no file or the whole file, never part of one,
+      staging is intact, and the Meeting folder has no temp file. A second process that reads
+      the destination in a loop sees no file or the whole file. Relaunch and Retry: one
+      complete note. After a kill past the publish call, Retry adds no file: it matches the
+      recorded path and SHA-256 of `note.md`, syncs the file and its directories, and only
+      then deletes staging. Discard removes staging only after confirmation, and no file in
+      the Meeting folder.
+    - *Interrupted direct create.* On another volume, and on one without `RENAME_EXCL`, kill
+      the app before, during and after the write, and fill the volume during it. Staging is
+      intact. Free space and Retry offline: an incomplete `<utc>-<slug>.md` keeps its inode and
+      bytes and `<utc>-<slug>-2.md` is byte-identical to `note.md`; a whole one is matched,
+      synced and not published again. No temp file appears in the Meeting folder.
     - *Crash after publish, folder switched.* Kill the app right after the publish call in
       folder A, `chmod 0500` folder A and the directories in it, choose writable folder B,
       block the network and Retry: **zero** API calls, the note in A is matched, it and its
@@ -1168,8 +1178,14 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       without `RENAME_EXCL`. Repeat with A at `0300`, at `0000` and unmounted, its directory
       sync failing (debug hook), and the note in A edited: also zero API calls, the note is
       published in B, staging is deleted only after B's `fsync(dir)`, and A is unchanged.
-      Kill again before the publish in A, with a temp file left there, and switch to B:
-      the note is in B and the temp file in A is unchanged. No run stays `pending-archive`.
+      Kill again before the publish in A and switch to B: the note is in B and A has no new
+      file. No run stays `pending-archive`.
+    - *FIFO at the recorded path.* Kill the app right after the publish call, move the note
+      away, `mkfifo` at the recorded `dst` with no writer, block the network and Retry. Opening
+      and checking it takes under 100 ms, nothing hangs, the note is published as
+      `<utc>-<slug>-2.md` with **zero** API calls, and the FIFO keeps its name and inode.
+      Repeat with a socket, a symlink (to the moved note, and dangling), a directory, and
+      another folder chosen; and with a FIFO put there before the first publish.
 
 Nothing in this list has been done in this slice.
 
