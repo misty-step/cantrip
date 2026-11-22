@@ -25,7 +25,7 @@ where it is and keeps shipping for Linux.
 | Settings surface | 27 stored fields, 4 tabs | 50 `AppSettings` fields, 78 Labs variants, 11 panes, 12 hotkey slots | 38 config fields across 7 structs | 7 standing popover controls, 1 contextual row, 6 settings |
 | Meeting audio | none in the repo | process tap with ScreenCaptureKit fallback, `src/meeting/macos.rs` | none | process tap, from B's pattern |
 | Hotkey | `CGEvent.tapCreate` (Accessibility + Input Monitoring) | `CGEventTapCreate` | Carbon, toggle only (press event only) | Carbon press and release |
-| Paste | snapshot, Cmd+V, restore after 500 ms | snapshot, transient pasteboard type, Cmd+V, restore after a delay (1 s in its test) | clipboard only, no paste | Accessibility insert; otherwise snapshot, Cmd+V to the captured process, restore after settle |
+| Paste | snapshot, Cmd+V, restore after 500 ms | snapshot, transient pasteboard type, Cmd+V, restore after a delay (1 s in its test) | clipboard only, no paste | Accessibility insert; otherwise snapshot, Cmd+V to the captured process, restore only after a confirmed insert |
 
 D wins on the product requirement: the owner wants Hex's native feel with almost
 no dials, and SwiftUI/AppKit plus CoreAudio/Security/Speech cover it with no
@@ -60,7 +60,7 @@ so one Mac runs one Cantrip. v1's data in Application Support is left untouched.
 | Cancel | Escape is registered as a Carbon hotkey only while recording or processing | — |
 | Hold versus tap | press ≥ 300 ms then release = hold-to-talk; shorter = toggle on, next press stops | Hex uses a 0.3 s threshold for modifier-only keys |
 | Text delivery | two tiers, [Delivery contract](#delivery-contract): Accessibility insert into the captured element, else clipboard plus `Cmd+V` posted to the captured process with `CGEvent.postToPid`. `.cghidEventTap` is not used | Hex `PasteboardClient.swift:55–94, 203–222, 308–317`; `anomalyco/hex` `src/paste.rs:143, 673`. Hex posts `Cmd+V` to `.cghidEventTap` and also has an Accessibility insert into the currently focused element (`PasteboardClient.swift:352–374`); v2 inserts into the element captured at the start |
-| Destination check | PID, bundle ID, process launch date, focused window and focused `AXUIElement` captured when the recording starts; checked again before delivery; uncertain means copy only | v1 ADR 0031 treats frontmost-app checks as insufficient for a *guarded* destination. v2 agrees and does not claim one; the residual races are listed in the contract |
+| Destination check | PID, bundle ID, process launch date, focused window and focused `AXUIElement` captured when the recording starts; frontmost PID and focused window checked again before either tier; moved focus or an uncertain target means copy only | v1 ADR 0031 treats frontmost-app checks as insufficient for a *guarded* destination. v2 agrees and does not claim one; the residual races are listed in the contract |
 | Offline speech | `SFSpeechRecognizer`, on-device only, behind a gate that fails closed ([Offline recognition](#offline-recognition-fails-closed)) | Apple: a request honors `requiresOnDeviceRecognition` only if the recognizer's `supportsOnDeviceRecognition` is true |
 | HUD | borderless non-activating `NSPanel`, status-window level, `canJoinAllSpaces`, ignores mouse; small pill, not a full-screen window | Hex `InvisibleWindow.swift:15–41`; v1 `src/hud/macos.rs:314–331`; `anomalyco/hex` `src/rune_hud/macos.rs:145–152` |
 | Meeting audio | `AudioHardwareCreateProcessTap` on a global mono tap that excludes Cantrip's own process, read through a private aggregate device; the mic is a separate HAL input; both are stamped on one host clock | `anomalyco/hex` `src/meeting/macos.rs:142–202` (falls back to ScreenCaptureKit when the tap is not authorized). v2 does not add a ScreenCaptureKit fallback; a denied permission stops the meeting with a clear message |
@@ -274,117 +274,180 @@ step, and no receipt for a posted keystroke. The contract is written around that
 
 Record, off the main thread so the HUD is not delayed:
 
-- the frontmost app's PID, bundle ID and process launch date (launch date guards
-  against PID reuse);
+- the frontmost app's PID (`captured_pid`), bundle ID and process launch date
+  (launch date guards against PID reuse);
 - with Accessibility already granted, that app's focused window and focused
-  `AXUIElement`, with a 250 ms messaging timeout. A timeout or error records "no
-  element"; it does not stop the dictation.
+  `AXUIElement`.
+
+The whole capture has 250 ms. The target is **resolved** only if every value above
+was read in that time. A timeout, an Accessibility error, no window, no focused
+element or no grant marks the target **uncertain** for this take. The dictation
+continues. An uncertain target is never upgraded: a late answer is discarded,
+nothing is captured again at delivery, and neither tier runs.
 
 Accessibility is requested at the first delivery. Until it is granted, every
 delivery is copy-only.
 
-### At delivery
+### Delivery gate, before both tiers
 
-The target is **uncertain**, and the outcome is copy-only in both tiers, if: no
-app was captured; the PID is gone, or its bundle ID or launch date differs;
-Accessibility is not granted; the Mac slept; or the user session was switched out
-since the start (`NSWorkspace` notifications). Screen lock alone has no public
-notification that v2 relies on, so it is not detected by itself.
+Both tiers pass this gate. Each tier reads the frontmost PID once more as its last
+step before it writes or posts.
 
-**Tier 1: target-bound insert (preferred).** Used when an element was captured and
-all of these hold now: the element still answers and `AXUIElementGetPid` returns
-the captured PID; `AXUIElementIsAttributeSettable` says `kAXSelectedTextAttribute`
-is settable; and the app is not on the built-in "no tier 1" list from bring-up. A
-captured element that no longer answers is an uncertain target: copy-only. No
-element, an element that is not settable, or a listed app goes to tier 2.
+1. **Target still certain.** The target is `resolved`; the PID is alive with the
+   same bundle ID and launch date; Accessibility is granted; the Mac has not slept
+   and the user session has not been switched out since the start (`NSWorkspace`
+   notifications); and the captured element still answers, with
+   `AXUIElementGetPid` returning `captured_pid`. Otherwise copy-only, HUD
+   `Copied — target uncertain` (`Copied — allow Accessibility` when only the grant is
+   missing). Screen lock alone has no public notification that v2 relies on, so it is
+   not detected by itself.
+2. **Focus has not moved.** The frontmost app's PID equals `captured_pid`, and that
+   app's focused window equals the captured window. If either differs: copy-only,
+   HUD `Copied — focus changed`. If either cannot be read: copy-only,
+   `Copied — target uncertain`.
 
-1. Read the element's `kAXSelectedTextRangeAttribute` (location `L`). If it cannot
-   be read, the outcome can be no better than `sent`.
-2. `AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute, text)`, which
+So if another app is in front when the text is ready, Cantrip writes nothing and
+posts nothing, whether or not the starting field would have accepted the text.
+
+**Which tier.** An unresolved target and a resolved target that does not support
+tier 1 are different cases:
+
+| Finding | Delivery |
+| --- | --- |
+| target `uncertain` (capture timed out, failed or was incomplete) | copy-only; never tier 1, never tier 2 |
+| target `resolved`, and `AXUIElementIsAttributeSettable` says `kAXSelectedTextAttribute` is settable | tier 1 |
+| target `resolved`, and that call reports not settable or `kAXErrorAttributeUnsupported` | tier 2 |
+| target `resolved`, and that call fails any other way (timeout, `kAXErrorCannotComplete`, no value) | copy-only |
+| app is on the built-in copy-only list from bring-up | copy-only |
+
+### Confirmation is an edit delta
+
+Both tiers use one predicate. It compares the element before and after, so text that
+was already in the field, or a caret that moved without an edit, cannot satisfy it.
+
+**Before** the write or the post, read `pre_value` (`kAXValueAttribute`) and
+`pre_selected_range` (`kAXSelectedTextRangeAttribute`) from the captured element,
+with a 250 ms messaging timeout. **After** it, read `post_value` and
+`post_selected_range` until the predicate holds or the tier's time is up. Every
+offset, slice, `count` and comparison here is in UTF-16 code units, as Accessibility
+ranges are; Swift's `String ==` and `String.count` are not used.
+
+`confirmed` requires **all** of:
+
+1. `pre_value` and `pre_selected_range` were readable, the value is a string, and the
+   range lies inside it.
+2. `post_value` was read, and
+   `post_value == pre_value[0..<pre_selected_range.location] + text + pre_value[(pre_selected_range.location + pre_selected_range.length)...]`.
+3. `post_value != pre_value`.
+4. `post_selected_range == (pre_selected_range.location + text.count, 0)`.
+
+*Truncated value.* If `kAXNumberOfCharactersAttribute` is larger than the returned
+value, `count` is that attribute, and the whole prefix, inserted span and whole
+suffix are read with `kAXStringForRangeParameterizedAttribute`. Rule 2 becomes:
+`post_value.count == pre_value.count - pre_selected_range.length + text.count`, the
+prefix and suffix equal their pre-op strings, and the inserted span equals `text`.
+Rule 3 becomes: that length changed, or the text selected before was not `text`. A
+string that comes back short or late counts as not readable. There is no sampling.
+
+Anything else is **unconfirmed**: an unreadable snapshot, a failed read-back, a value
+that did not change, an app that autocorrects or reformats the text, or the user
+typing at the same moment. Dictating "hello" over a selected "hello" is also
+unconfirmed, because nothing shows that an edit happened. The snapshot is held in
+memory for this check, then dropped; it is never logged or sent.
+
+### Tier 1: target-bound insert (preferred)
+
+1. Pass the gate. Read the pre-op snapshot.
+2. **Last check:** read the frontmost PID again, with no other work between this and
+   step 3. If it differs from `captured_pid`: copy-only, `Copied — focus changed`. If
+   it cannot be read: copy-only, `Copied — target uncertain`.
+3. `AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute, text)`, which
    replaces the current selection as a paste would.
-3. Read back for up to 300 ms. **Confirmed** means both: `kAXStringForRangeParameterizedAttribute`
-   at `L`, for the text's UTF-16 length, equals the text; and the selection is empty
-   at `L` + that length.
+4. Evaluate the predicate for up to 300 ms.
 
-The write names the element, not "whatever has focus", so switching apps cannot
-redirect it. The clipboard is not touched.
+The write names the element, not "whatever has focus", so it cannot land in another
+app. The clipboard is not touched.
 
 | Result of the write | Next |
 | --- | --- |
-| success, read-back matches | outcome `confirmed` |
-| success, read-back differs or cannot be read | outcome `sent`; tier 2 is **not** tried, since the text may have landed |
-| `kAXErrorAttributeUnsupported`, `kAXErrorNotImplemented` or `kAXErrorIllegalArgument` | nothing was written; go to tier 2 |
+| success, predicate holds | outcome `confirmed` |
+| success, predicate does not hold or cannot be evaluated | outcome `unconfirmed`; tier 2 is **not** tried, since the text may have landed |
+| `kAXErrorAttributeUnsupported` | nothing was written; go to tier 2, which passes the gate again |
+| `kAXErrorNotImplemented` or `kAXErrorIllegalArgument` | the write was refused, but not as unsupported; copy-only |
 | `kAXErrorInvalidUIElement` | target is gone; copy-only |
-| `kAXErrorCannotComplete`, timeout or any other error | may have landed; outcome `sent`; tier 2 is **not** tried |
+| `kAXErrorCannotComplete`, timeout or any other error | may have landed; outcome `unconfirmed`; tier 2 is **not** tried |
 
-**Tier 2: clipboard plus PID-targeted `Cmd+V`.** Used for apps without a writable
-`kAXSelectedTextAttribute` (expected for many browsers, Electron apps and
+### Tier 2: clipboard plus PID-targeted `Cmd+V`
+
+Eligible only when the target was resolved at the start, the gate passes at
+dispatch, **and** tier 1 reported `kAXSelectedTextAttribute` unsupported or not
+settable before anything was changed (expected for many browsers, Electron apps and
 terminals).
 
-1. Snapshot every pasteboard item and type. macOS may show its pasteboard-access
-   alert here; if access is denied there is no snapshot and step 6 does not
-   restore.
-2. If the frontmost PID is not the captured PID, or the captured and current
-   focused windows are both readable and differ, stop: copy-only.
-3. Put the text on the pasteboard as a promised item (`NSPasteboardItem` with a
-   data provider, marked `org.nspasteboard.TransientType`) and record
-   `changeCount`.
+1. Pass the gate. Snapshot every pasteboard item and type. macOS may show its
+   pasteboard-access alert here; if access is denied there is no snapshot and step 6
+   does not restore.
+2. Put the text on the pasteboard as plain data, marked
+   `org.nspasteboard.TransientType`, and record `changeCount`.
+3. Pass the gate again, then read the pre-op snapshot of the captured element.
 4. **Last check:** read the frontmost PID again, with no other work between this
-   and step 5. If it differs or cannot be read, stop: copy-only.
-5. `CGEvent.postToPid(targetPid)` with `Cmd+V` down and up. This call returns
+   and step 5. If it differs from `captured_pid` or cannot be read, stop: copy-only,
+   with the reason as in tier 1.
+5. `CGEvent.postToPid(captured_pid)` with `Cmd+V` down and up. This call returns
    nothing. It is never posted to `.cghidEventTap`, so it is not routed by
    frontmost focus.
-6. Settle and restore. Restore the snapshot only if `changeCount` is unchanged
-   **and** either the insertion is confirmed by read-back, or the promised item
-   was read and 500 ms have passed since. If neither happens within 2 s and
-   `changeCount` is unchanged, replace the promise with the same text as plain
-   data, leave it on the clipboard and say so.
+6. Evaluate the predicate for up to 2 s. **The clipboard is restored only when the
+   outcome is `confirmed`**, `changeCount` is unchanged and there is a snapshot. An
+   `unconfirmed` outcome never restores it, early or late: the dictation stays on the
+   clipboard, so the user can paste it. A process reading the pasteboard is not
+   evidence that the target inserted anything, and it triggers nothing.
 
-Confirmation in tier 2 uses the tier 1 read-back rule on the captured element if
-its text and selection were readable before step 5. Most tier 2 apps will not
-allow that, and the outcome stays `sent`.
+Most tier 2 apps will not expose a readable value and selection, so most tier 2
+outcomes stay `unconfirmed` and replace what was on the clipboard. That is the price
+of never taking away text that may not have arrived.
 
-**Copy-only.** Put the text on the pasteboard as plain data, post nothing, do not
-restore, and show the reason.
+### Copy-only
+
+Put the text on the pasteboard as plain data, post nothing, do not restore, and show
+the reason.
 
 ### Outcomes: posted is not confirmed
 
 | Outcome | What Cantrip knows | HUD |
 | --- | --- | --- |
-| `confirmed` | the text was read back from the target element | `✓ Inserted` |
-| `sent` | the AX write was made, or `Cmd+V` was posted; receipt not observed | `Sent to <app>` (tier 1) or `Sent ⌘V to <app>` (tier 2); adds `Text is on the clipboard` when not restored |
-| `copied` | nothing was written or posted to any app | `Copied — focus changed` or `Copied — <reason>` |
+| `confirmed` | the edit delta was read back from the target element | `✓ Inserted` |
+| `unconfirmed` | the AX write was made, or `Cmd+V` was posted; receipt not observed | `Sent — unconfirmed` (tier 1) or `Posted — unconfirmed` (tier 2, adding `Text is on the clipboard` while `changeCount` is unchanged) |
+| `copied` | nothing was written or posted to any app | `Copied — focus changed`, `Copied — target uncertain` or `Copied — <reason>` |
 | `failed` | not even the clipboard write worked | `Not delivered. Use Copy last dictation` |
 
-Logs carry the outcome, tier and bundle ID, never the text. A read of the promised
-pasteboard item shows that *some* process asked for it, not that the target
-inserted it, so it never upgrades `sent` to `confirmed`. `Copy last dictation` has
-the text in every row.
+Logs carry the outcome, tier and bundle ID, never the text. Nothing upgrades
+`unconfirmed` to `confirmed` except the predicate. `Copy last dictation` has the text
+in every row.
 
 ### Residual risks, stated
 
-- **After the last check.** Focus can move between step 4 and the app handling the
-  event. `postToPid` addresses the starting process, so the keystroke is not
-  redirected to the newly focused app. The starting app, now in the background,
-  may ignore it or paste.
+- **After the last check.** Focus can move in the instant between a tier's last check
+  and the app handling the write or the event. The write still names the starting
+  element and `postToPid` still addresses the starting process, so neither is
+  redirected to the newly focused app. The starting app, now in the background, may
+  insert the text or ignore it. No check on macOS closes this gap.
 - **Same app.** Tier 2 goes to whatever has focus inside that process. A window
-  change is caught when windows are readable; a change of field, tab or
-  conversation in one window is not.
+  change is caught by the gate; a change of field, tab or conversation in one window
+  is not.
 - **Reused elements.** A chat composer or editor can show a different conversation
   or document through the same `AXUIElement`. Tier 1 is bound to the element, not
   to what the app shows in it.
 - **Moved caret.** Either tier replaces the selection that exists at delivery.
 - **PID reuse** between the last check and the post, and an app that forwards keys
   elsewhere (remote desktop, virtual machine), are not detected.
-- **Clipboard timing.** If another process reads the promised item first, the
-  restore could precede the target's own read, and the target would paste the old
-  clipboard. If the user copies something during the paste, the target may paste
-  that; the restore is then skipped.
+- **Clipboard timing.** If the user copies something during the paste, the target may
+  paste that; the restore is then skipped.
 - **App support.** Whether an app honors tier 1, or acts on a PID-targeted `Cmd+V`,
-  is not documented per app. Bring-up fills a built-in list: an app that reports
-  tier 1 success but does not insert skips tier 1; an app that ignores
-  `postToPid` is copy-only. It is not a user setting, and v2.0 does not fall back
-  to a global keystroke.
+  is not documented per app. An app that does not expose a focused window and element
+  to Accessibility is always copy-only. Bring-up fills the built-in copy-only list
+  with apps that report tier 1 success but do not insert, and apps that ignore
+  `postToPid`. It is not a user setting, and v2.0 does not fall back to a global
+  keystroke.
 
 ## Meeting pipeline (designed, not tested)
 
@@ -410,38 +473,89 @@ the text in every row.
    dropout) ends the chunk and starts a new one with its own `chunk_start_ms`; a
    shorter gap is filled with silence.
 
-### Staging, failure and atomic archive
+### Staging, failure and exclusive archive
 
 Everything lives in an owner-only directory,
 `~/Library/Application Support/com.misty-step.cantrip/meetings/<uuid>/`, not in
-`$TMPDIR`, which macOS may purge: `meeting.json` (wall-clock start, one record per
-chunk with track, index, `chunk_start_ms`, `duration_ms`, state and attempts), the
-chunk WAVs, one transcript JSON per chunk, one cleaned JSON per window, and the
-summary. Each JSON is written to a temp file, synced and renamed. Failed dictation
-WAVs live beside it in `dictations/`. v1's `cantrip/` directory is not used.
+`$TMPDIR`, which macOS may purge: `meeting.json` (wall-clock start, meeting state, one
+record per chunk with track, index, `chunk_start_ms`, `duration_ms`, state and
+attempts, and every file name published), the chunk WAVs, one transcript JSON per
+chunk, one cleaned JSON per window, the summary, and the rendered `note.md`. Each
+staging file is written to a temp file, synced and renamed; plain `rename()` is used
+only inside staging. Failed dictation WAVs live beside it in `dictations/`. v1's
+`cantrip/` directory is not used.
+
+| Meeting state | Meaning | Contextual row |
+| --- | --- | --- |
+| `recording`, `processing`, `publishing` | work in progress | not shown for it |
+| `interrupted` | the app quit while recording or processing | Retry (resumes from what is staged), Discard |
+| `chunks-failed` | at least one chunk failed after its retries | Retry (failed chunks, then cleanup and summary), Save partial notes, Discard |
+| `pending-archive` | all chunks are transcribed, the cleaned transcript and summary are persisted in staging as `note.md`, and only writing the final Markdown to the destination folder failed or was cut off (folder missing or not writable, volume unmounted or full, app quit) | Retry (publish only), Discard |
+| `archived` | published and synced; staging is being deleted (finished at the next launch if cut off) | not shown |
 
 - **Retries.** Network errors, 408, 429 and 5xx: three more attempts, waiting 1 s,
   4 s and 16 s, or `Retry-After` when given. Other 4xx are not retried (a 400 on
   the timestamp request goes to the fallback below). A slow response is not a
   failure.
 - **Failed chunk.** After retries the chunk is marked `failed` and its WAV stays in
-  staging. The other chunks finish. The popover row offers Retry (failed chunks
-  only), Discard failed recording (confirmed), and Save partial notes. Nothing is
-  archived until the user chooses or all chunks succeed.
+  staging. The other chunks finish. Nothing is archived until the user chooses or
+  all chunks succeed.
 - **Partial notes.** Each failed chunk is placed at its `chunk_start_ms` on its own
   track as `[MM:SS] You: [transcription failed: MM:SS–MM:SS]`, the span being that
-  chunk's start and end; the other track's turns in the span are kept. Staging
-  stays. A later successful Retry replaces the file if it is byte-identical to what
-  Cantrip wrote (hash in `meeting.json`); if the user has edited it, the full
-  notes are saved beside it as `…-complete.md`.
-- **Atomic archive.** Write a dot-prefixed temp file in the destination directory,
-  sync it, and rename it. The first rename never overwrites an existing file; the
-  only replacement is the Retry case above, with cleanup and summary rerun. Only
-  after that rename, with every chunk transcribed, is staging deleted. The other
-  way staging is deleted is a confirmed Discard. If the folder is missing or not
-  writable, staging stays and Retry is offered.
+  chunk's start and end; the other track's turns in the span are kept. The partial
+  note is published exclusively, as below. Staging and the `chunks-failed` state
+  stay. Save partial notes is offered again only after a Retry has changed which
+  chunks are failed, or if the save itself failed; a repeat of a failed save
+  publishes the staged partial text without new API calls.
+- **Completion after partial notes.** A published note is never opened for writing,
+  hashed for replacement or renamed over. When a later Retry completes the meeting, the
+  full notes are published exclusively as a **new sibling** of the partial one:
+  `<base>-complete.md`, or `<base>-complete-2.md` and so on if that name exists. It
+  carries the same `source_id` and `supersedes: "<partial-filename>"`. The partial
+  note, and any edit the user made or is making in it, is left untouched. A second partial note is also a new file
+  (`<base>-2.md`) whose `supersedes` names the first; `supersedes` always names the
+  latest earlier note.
 - **Interrupted.** If the app quits mid-meeting, the next launch repairs the open
-  WAV header from the file length and offers Retry / Discard.
+  WAV header from the file length and offers Retry / Discard. A meeting found in
+  `publishing` at launch becomes `pending-archive`.
+
+**Publishing** is the only way a file reaches the destination folder. It is used
+for first publication, partial notes and completed notes, and it has no network
+client:
+
+1. The rendered Markdown is synced in staging (`note.md`, or `partial.md` for partial
+   notes). The steps below read only that file.
+2. Under the chosen Meeting folder, create the `cantrip-meeting/YYYY/MM` directories.
+   The chosen folder itself is never created: a missing one may be an unmounted volume.
+   A completion goes to the directory that holds its partial note; if that directory
+   cannot be reached and the user has since chosen another folder, it goes there.
+3. In that directory, create a dot-prefixed temp file with `O_CREAT | O_EXCL`, write
+   it and `fsync` it (`F_FULLFSYNC`).
+4. Record the destination path, the temp path and the text's SHA-256 in
+   `meeting.json`, then publish exclusively with
+   `renameatx_np(AT_FDCWD, tmp, AT_FDCWD, dst, RENAME_EXCL)`. If the volume does not
+   support that flag, use `link(tmp, dst)` followed by `unlink(tmp)`. Either one fails
+   with `EEXIST` when `dst` exists, and the new file appears whole. Plain `rename()`,
+   which silently replaces, is never used on a destination, and no file is written
+   in place there. If the volume supports neither, that is a publish failure.
+5. On `EEXIST`, take the next unused name (`<base>-2.md`, `<base>-3.md`, …; for a
+   completion `<base>-complete-2.md`, …) and repeat step 4. An existing file is never
+   overwritten, whoever made it.
+6. `fsync` the directory. Only now, and only for a complete meeting, set `archived`
+   and delete staging.
+
+A failure in steps 2 to 6 removes the temp file if it can be reached, and puts a
+complete meeting in `pending-archive` with its staging intact. The only other way
+staging is deleted is a confirmed Discard.
+
+**Publish-only Retry.** Retry on a `pending-archive` meeting runs steps 2 to 6 again
+from the staged `note.md`, with the folder chosen as step 2 says. It makes **zero**
+speech and language-model API calls, so it works offline and costs nothing. If it
+fails, the meeting stays in `pending-archive`. If an earlier attempt got past step 4, a
+file at the recorded path with the recorded SHA-256 is that publication: Retry removes
+the recorded temp file if it is still there and finishes at step 6. If that file is
+absent or differs, Retry publishes under the next unused name; a second copy is
+preferred to a lost note.
 
 ### Timestamped transcription
 
@@ -463,24 +577,50 @@ The response is valid if every segment is finite, has `0 ≤ start_ms ≤ end_ms
 duration_ms + 500`, starts do not decrease, and the segments are non-empty
 whenever `text` is. `end_ms` is clamped to `duration_ms`.
 
-**Deterministic fallback.** If a response has no valid segments, or the request
-returns 400, the chunk is split locally:
+**Deterministic fallback.** The chunk is split locally if a response has no valid
+segments, if the request returns 400, or if the response is empty although the
+detector below finds a voiced interval. The rule is that no detected voice is
+dropped, however short:
 
-1. 20 ms frames; a frame is speech when its RMS is above the chunk's
-   10th-percentile RMS plus 10 dB, with that threshold limited to the range −50 to
-   −35 dBFS.
-2. Speech runs less than 600 ms apart are joined; runs under 200 ms are dropped;
-   150 ms of padding is added on each side without crossing a neighbour; a run
-   over 30 s is cut at its quietest frame between 20 s and 30 s.
-3. Each utterance WAV is transcribed with `response_format: "json"`. Its
-   `start_ms` and `end_ms` are the first and last sample offsets in the chunk, on
-   the same clock. Empty results are dropped; a failed one fails the chunk.
-4. If the splitter finds no speech, the whole chunk is one segment from 0 to
-   `duration_ms`, using the text already returned or, after a 400, one plain
-   `json` request. Text is not lost.
+1. **Detect.** 20 ms frames. The silence floor is −50 dBFS RMS. A frame is voiced when
+   its RMS is above the chunk's 10th-percentile RMS plus 10 dB, with that threshold
+   limited to the range −50 to −35 dBFS. Voiced frames with no gap over 100 ms between
+   them form one **voiced interval** if together they hold at least 40 ms of voiced
+   frames. There is no longer minimum: a 180 ms "no" is an interval. A lone 20 ms
+   frame is a click.
+2. **Slice.** Every voiced interval is padded by 300 ms on each side, limited to the
+   chunk. Padded intervals that overlap, or lie 600 ms or less apart, are merged into
+   one utterance slice. **Every voiced interval is in a slice.** A slice over 30 s is
+   cut at its quietest frame between 20 s and 30 s, and again if needed; the pieces are
+   contiguous, and a rest with no voiced frame stays with the piece before it.
+3. **Check coverage.** Apply the same 100 ms and 40 ms grouping to all frames above the
+   silence floor. Every frame in such a group must be inside a slice. This catches
+   energy between the floor and the voiced threshold, and the case of zero slices over
+   audio that is not silent. If it fails, step 5 applies.
+4. **Transcribe slices.** Each utterance WAV is one request with
+   `response_format: "json"`. Its `start_ms` and `end_ms` are the first and last
+   voiced frame in the slice, as offsets in the chunk on the same clock; the padding
+   is only for the recognizer and does not affect order. A slice that returns empty is
+   tried once more; if it is empty again it becomes a visible marker turn,
+   `[no words recognized: MM:SS–MM:SS]`. A slice that fails after retries fails the
+   chunk.
+5. **Whole chunk.** When coverage fails, the whole chunk is one segment from 0 to
+   `duration_ms`, using the text already returned or, without one, one plain `json`
+   request. The transcript puts `[chunk-level order: MM:SS–MM:SS]` before it, because
+   its turns are not ordered against the other track inside that span. If that request
+   fails or returns no text, the chunk is marked `failed` and its source WAV is kept.
+   An incomplete transcript is never archived as complete, and its audio stays until
+   Retry succeeds or the user confirms Discard.
+6. **Silence.** When no frame group is above the silence floor, text already returned
+   is kept as in step 5. After a 400 one plain `json` request is made: its text is
+   kept the same way, and if it is empty the chunk is complete and empty.
 
 The same audio and settings always give the same splits. The fallback bills more:
-MAI bills whole seconds per request.
+MAI bills whole seconds per request. Its limits: speech quieter than −50 dBFS counts
+as silence, a reply by the other track inside one merged slice is printed after that
+slice begins, and whether MAI accepts clips under a second is checked at bring-up (a
+rejected slice is a failed one). A chunk of noise above the floor with no words may
+stay failed; the user can save partial notes or discard it.
 
 ### Cross-track merge
 
@@ -495,7 +635,7 @@ for chunk in all chunks of both tracks:
     else for segment in chunk.segments, text trimmed, empty skipped:
         abs_start_ms = chunk_start_ms + segment.start_ms
         abs_end_ms   = chunk_start_ms + segment.end_ms
-        events += { abs_start_ms, abs_end_ms, track, text }
+        events += { abs_start_ms, abs_end_ms, track, text or MARKER }
 
 track_tiebreaker: You = 0, Others = 1
 sort events ascending by (abs_start_ms, track_tiebreaker, chunk_index, segment_id)
@@ -503,7 +643,7 @@ sort events ascending by (abs_start_ms, track_tiebreaker, chunk_index, segment_i
 turns = []
 for event in events:
     last = final element of turns
-    if last exists, same track, neither is MARKER,
+    if last exists, same track, neither is MARKER or a whole-chunk segment,
        and event.abs_start_ms - last.abs_end_ms <= 1500:
         last.text += " " + event.text
         last.abs_end_ms = max(last.abs_end_ms, event.abs_end_ms)
@@ -512,7 +652,8 @@ for event in events:
 print turn as "[MM:SS] You: …" or "[MM:SS] Others: …" from floor(abs_start_ms / 1000)
 ```
 
-Coalescing joins only neighbours in the sorted list, so a turn by the other
+An empty slice from the fallback carries its `[no words recognized: …]` text as a
+MARKER, so it is not skipped. Coalescing joins only neighbours in the sorted list, so a turn by the other
 speaker always breaks a run. Minutes continue past 59 (`[75:04]`). Order is at
 segment granularity: an interjection inside one long segment is printed after that
 segment begins, not in the middle of it.
@@ -523,7 +664,7 @@ The merged transcript goes through its own `openai/gpt-6-luna` pass. It is separ
 from the summary call and runs first; the archived transcript is the cleaned one.
 
 - **Windows.** Whole turns in order, at most 40 turns or 6,000 characters (a
-  longer single turn is its own window), no overlap. Failed markers are never sent.
+  longer single turn is its own window), no overlap. Markers are never sent.
 - **Request.** `reasoning.effort: "none"`, `max_tokens` set to the larger of 1,024
   and the window's character count, and a JSON schema reply. Input:
   `[{id, speaker, text}]`. Reply: `[{id, text}]`. Timestamps and speaker labels are
@@ -570,9 +711,11 @@ Compatible with the voice archive layout used in Supercortex
 fields). One directory per source keeps Cantrip's files apart from the files
 other importers own.
 
-Path: `<folder>/cantrip-meeting/YYYY/MM/YYYY-MM-DD_HHMMSSZ-<id>.md`, with dates
-and times in UTC and `<id>` a UUID. If the chosen folder is Supercortex's
-`captures/voice`, the path under it is the same.
+Path: `<folder>/cantrip-meeting/YYYY/MM/<base>.md`, where `<base>` is
+`YYYY-MM-DD_HHMMSSZ-<id>`, with dates and times in UTC and `<id>` a UUID. If the
+chosen folder is Supercortex's `captures/voice`, the path under it is the same. A
+name that is taken gets `-2`, `-3` and so on; notes completed after partial notes
+are `<base>-complete.md`.
 
 ```markdown
 ---
@@ -596,10 +739,15 @@ title: "Planning call"
 [00:11] Others: …
 ```
 
+A note that follows an earlier one for the same meeting adds one frontmatter line
+after `source_id`, for example
+`supersedes: "2026-11-22_170000Z-3f2c….md"`. Both files then carry the same
+`source_id`; how the Supercortex importer treats that has not been checked.
+
 Each turn is its own paragraph, separated by a blank line so that Markdown does not
 join the lines. Cantrip writes plain files in the chosen folder. It does not run
-git. The Supercortex importer owns the rest of `captures/voice`; Cantrip never edits
-files it did not create.
+git. The Supercortex importer owns the rest of `captures/voice`; Cantrip only adds
+new files and never edits or replaces one that is there, including its own.
 
 ## UI
 
@@ -620,11 +768,23 @@ files it did not create.
 └──────────────────────────────┘
 ```
 
-The last block is the contextual row. It is absent unless a failed dictation or
-meeting chunk WAV is retained on disk. It shows the newest one and its reason; a
-meeting also shows `Save partial notes`. `Discard…` is `Discard failed recording`
-and confirms first. Retry copies a recovered dictation and does not paste it. A
-recording interrupted by a quit or crash counts as failed.
+The last block is the contextual recovery row (Retry / Save partial notes / Discard).
+It is shown whenever any staged recovery item exists, and absent otherwise. It shows
+the newest item and its reason; the next takes its place when that one is resolved.
+
+| Staged item | Row text | Actions |
+| --- | --- | --- |
+| failed dictation WAV | `⚠ Dictation 10:42 failed` | `Retry`, `Discard…` |
+| failed meeting chunk WAVs (`chunks-failed`) | `⚠ Meeting 14:00: 2 parts failed` | `Retry`, `Save partial notes` (until saved), `Discard…` |
+| meeting cut off by a quit or crash (`interrupted`) | `⚠ Meeting 14:00 interrupted` | `Retry`, `Discard…` |
+| `pending-archive` meeting | `⚠ Meeting 14:00 not saved: folder not writable` | `Retry` (publish only), `Discard…` |
+
+`Save partial notes` is absent for `pending-archive` because nothing is missing from
+those notes. `Discard…` is `Discard failed recording`, or `Discard unsaved meeting` for
+`pending-archive`, where the confirmation says that finished notes and their audio
+will be deleted. Discard never touches a file in the Meeting folder. Retry copies a
+recovered dictation and does not paste it. A dictation interrupted by a quit or crash
+counts as failed.
 
 ### Recording HUD
 
@@ -633,9 +793,11 @@ One pill, bottom center of the screen with the mouse, never takes focus.
 ```
 ( ● Listening  ▂▅▇▅▂ )   recording
 ( ⟳ Transcribing )       waiting
-( ✓ Inserted )           read back from the target; 0.8 s, then fades
-( Sent ⌘V to Slack )     posted, receipt not observed; 0.8 s, then fades
+( ✓ Inserted )           edit read back from the target; 0.8 s, then fades
+( Posted — unconfirmed ) ⌘V posted, receipt not observed; 0.8 s, then fades
+( Sent — unconfirmed )   tier 1 write made, not observed; 0.8 s, then fades
 ( ⚠ Copied — focus changed )
+( ⚠ Copied — target uncertain )
 ( ⚠ Raw (cleanup skipped) )
 ( ⚠ On-device )          offline, gate passed
 ( ⚠ Not transcribed. … ) gate refused or request failed; recording kept
@@ -661,7 +823,7 @@ key, dictation runs on-device when the gate allows it and is refused otherwise.
 | Permission | Used for | Requested when |
 | --- | --- | --- |
 | Microphone | dictation and meetings | first recording |
-| Accessibility | reading the focused element, inserting into it, posting `Cmd+V` to its app | first delivery |
+| Accessibility | reading the focused element and its text, inserting into it, posting `Cmd+V` to its app | first delivery |
 | Speech Recognition (`NSSpeechRecognitionUsageDescription`) | on-device recognition with no key or no network | first dictation that takes the offline path; never at launch or on the cloud path |
 | Pasteboard access (system alert) | snapshot before a tier 2 paste | first tier 2 paste |
 | System Audio Recording (`NSAudioCaptureUsageDescription`) | meeting system track | first meeting |
@@ -680,12 +842,15 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
   server-based recognizer.
 - The last dictation's text is kept in memory for "Copy last dictation". It is not
   written to disk, except that the system clipboard holds it during a tier 2
-  paste and after a copy. A dictation WAV is deleted after its text is held and
-  the outcome is `confirmed`, `sent` or `copied`, or on Escape. One whose
+  paste, after an unconfirmed one, and after a copy. A dictation WAV is deleted after
+  its text is held and the outcome is `confirmed`, `unconfirmed` or `copied`, or on
+  Escape. One whose
   transcription or delivery failed, was refused or was interrupted stays, owner-only, until Retry succeeds or the user confirms Discard; it does
   not expire.
+- To confirm a delivery, Cantrip reads the target field's text just before and just
+  after it. That text stays in memory for the check and is not stored, logged or sent.
 - Meeting audio and per-chunk transcripts stay in staging until the complete file
-  is archived or the user confirms Discard.
+  is archived or the user confirms Discard. That includes a `pending-archive` meeting.
 - No telemetry and no transcript text in logs.
 - Meetings record other people. The user starts each meeting explicitly; the HUD
   pill is visible for its whole length. Telling participants is the user's duty.
@@ -701,32 +866,52 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
 
 1. Signed and notarized build launches from Finder on a clean macOS 15 account;
    Gatekeeper passes.
-2. Hold-to-talk and tap-to-toggle into TextEdit, Slack and Terminal; on the tier 2
-   targets the old clipboard content, including an image, is restored.
-3. **Delivery.** Two instrumented receiver apps, A and B, log every key event and
-   pasteboard read and dump their text. A has a writable `kAXSelectedTextAttribute`
-   for tier 1 and a mode without it for tier 2. Dictate in A.
-   - *Switch during recording.* Activate B before release. Tier 1: the text is in
-     A's original field, the outcome is `confirmed`, B is unchanged, and the
-     clipboard `changeCount` is unchanged. Tier 2: A and B get no key event, the
-     text is on the clipboard, and the HUD shows `Copied — focus changed`.
-   - *Switch at dispatch.* A debug-build hook pauses tier 2 after the last check
-     (step 4) and before `postToPid` (step 5); activate B, then resume. B must get
-     no key event and no text. A may or may not insert; the outcome must be `sent`
-     unless A's read-back matched. Then 200 runs without the hook, activating B at
-     random offsets within ±50 ms of dispatch: B gets zero key events and zero
-     text in all of them. Pause tier 1 between its range read and its write in the
-     same way: the text is in A, and B is unchanged.
+2. Hold-to-talk and tap-to-toggle into TextEdit, Slack and Terminal. On a tier 2
+   receiver that exposes its value and selection, a confirmed paste restores the old
+   clipboard content, including an image; an unconfirmed one leaves the dictation.
+3. **Delivery.** Two instrumented receiver apps, A and B, log every key event, AX
+   write and pasteboard read and dump their text. A has a writable
+   `kAXSelectedTextAttribute` for tier 1 and a mode that reports it not settable for
+   tier 2. In both modes A can expose or hide its value and selection. Dictate in A.
+   - *Switch during recording.* Activate B before release, with A in tier 1 mode and
+     then in tier 2 mode. Both times: A and B get no AX write and no key event, the
+     text is on the clipboard, and the HUD shows `Copied — focus changed`. Repeat
+     with a second window of A in front: the same result.
+   - *Switch at dispatch.* A debug-build hook pauses each tier before its last check;
+     activate B, then resume: copy-only, as above. A second hook pauses after the last
+     check and before the write or the post; activate B, then resume. B must get no
+     AX write, no key event and no text. A may or may not insert; the outcome must be
+     `unconfirmed` unless the edit-delta predicate held against A's own dump. Then 200
+     tier 2 runs without the hook, activating B at random offsets within ±50 ms of
+     dispatch: B gets zero key events and zero text in all of them.
    - *Posted versus confirmed.* Compare Cantrip's logged outcome with A's own dump
-     on every run. `confirmed` with the text absent from A is a failure. Make A
-     swallow `Cmd+V`: the outcome is `sent`, never `confirmed`, and the dictation
-     stays on the clipboard. Make A return AX success without inserting: the
-     outcome is `sent`, and no `Cmd+V` follows. Make A delay its pasteboard read
-     by 1 s: A still pastes the dictation.
-   - *Uncertain.* Relaunch A mid-take, sleep the Mac mid-take, and change A's
-     window on tier 2: copy-only each time.
+     on every run. `confirmed` without that exact edit in A is a failure. Make A
+     swallow `Cmd+V`: the outcome is `unconfirmed`, and the dictation stays on the
+     clipboard. Make A read the pasteboard and then ignore the paste: the same. Make A
+     return AX success without inserting: `unconfirmed`, and no `Cmd+V` follows. Make
+     A delay its pasteboard read by 1 s: A still pastes the dictation. Make A hide its
+     value: A inserts, and the outcome is still `unconfirmed`.
+   - *Pre-existing identical text, no-op.* A's field already starts with `"hello"`,
+     caret at 0. Dictate "hello"; A ignores the write or the paste but moves its caret
+     to 5. Tier 1: `Sent — unconfirmed`, never `Inserted`, and no `Cmd+V` follows.
+     Tier 2: `Posted — unconfirmed`, never `Inserted`, and the clipboard is **not**
+     restored, at once or within 60 s, also when A reads the pasteboard. Repeat with
+     the field exactly `"hello"` and with a truncated value. Repeat with "hello"
+     selected and replaced by "hello": `unconfirmed`. Positive control: from the
+     same start A does insert, the field starts with `"hellohello"`, the caret is at
+     5, the outcome is `confirmed`, and the tier 2 clipboard is restored.
+   - *Offsets.* Insert at the start, middle and end, over a selection, and after an
+     emoji and a combining accent: `confirmed` each time, with UTF-16 counts.
+   - *Capture timeout.* A blocks its main thread for 1 s as dictation starts, so
+     capture times out; A stays in front, is in tier 2 mode, and answers normally at
+     delivery. No AX write, no `postToPid`, HUD `Copied — target uncertain`. The same
+     for a capture with no window and one with no focused element. Control: A answers
+     the capture and reports the attribute not settable: exactly one `Cmd+V` is posted.
+     A settable query that times out on a resolved target is copy-only.
+   - *Uncertain.* Relaunch A mid-take and sleep the Mac mid-take: copy-only each time,
+     in both tier modes.
    - *Apps.* Record tier and outcome for TextEdit, Notes, Mail, Safari, Chrome,
-     Slack, VS Code, Terminal, iTerm2 and Ghostty; fill the built-in list from it.
+     Slack, VS Code, Terminal, iTerm2 and Ghostty; fill the copy-only list from it.
 4. Bluetooth headset connects mid-recording; the take survives.
 5. 50 real dictations per mode with a human voice: record latency p50/p95, exact
    vocabulary accuracy, wrong substitutions, and compare with PRODUCT.md.
@@ -771,19 +956,59 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       1,500 ms joins and 1,501 ms does not; a turn by the other speaker or a failed
       marker between two turns stops the join.
     - *Fallback.* Run again with segments stripped from the response, and with a
-      400 on `verbose_json`: same order and labels.
+      400 on `verbose_json`: same order and labels. The script keeps turns on one
+      track more than 1.2 s apart, the widest gap the splitter merges.
+    - *Fallback, short and long utterances.* One `You` chunk with segments stripped has
+      an isolated 180 ms "no" followed more than 1 s later by a 400 ms utterance. At
+      2 s apart, with an `Others` turn between, there are two slices and both turns are
+      in the merged transcript in order. At 1.1 s apart there is one slice and both
+      texts are in it. In both, the voiced samples sent equal the voiced samples
+      detected: zero silent drops. Repeat with "yes", with the "no" first and last in
+      the chunk, and with a stub that returns empty for the "no": the transcript
+      shows `[no words recognized: MM:SS–MM:SS]` there.
+    - *Fallback, coverage failure.* Inject a splitter that returns zero slices, and one
+      that loses an interval, over a chunk with speech: the whole chunk is transcribed
+      and marked `[chunk-level order: MM:SS–MM:SS]`. Make that request return empty:
+      the chunk is `failed`, its WAV is in staging, and no Markdown appears.
     - *Cleanup.* Same turn count, ids, timestamps and labels before and after;
       fillers gone; vocabulary spelled as listed; by eye, no changed meaning. A
       stubbed reply that drops, adds, empties or reorders a turn is rejected, and
       the merged text is kept with the marker.
     - *Failed chunk.* Make the second `Others` chunk return 500 through all
       retries: no Markdown appears, every WAV is still in staging, and the popover
-      shows Retry / Discard. Save partial notes: that span reads
+      shows Retry / Save partial notes / Discard. Save partial notes: that span reads
       `[transcription failed: MM:SS–MM:SS]` with the chunk's real times, `You` turns
       in the span remain, and staging remains. Restore the service and Retry: the
-      file is complete, ordered and without markers, and staging is gone.
-    - *Atomic.* Kill the app during the archive write: no partial `.md` exists and
-      staging is intact. Discard removes staging only after confirmation.
+      complete notes are a new `<base>-complete.md`, ordered, without failed markers,
+      with the same `source_id` and `supersedes` naming the partial file; staging is
+      gone.
+    - *Edit-safe completion.* Repeat with the partial note unedited, edited before the
+      Retry, and held open and saved by an editor every 10 ms throughout it. In all
+      three Cantrip makes no write, rename or unlink on the partial note (checked with
+      `fs_usage`), and its content is what the editor last wrote. With
+      `<base>-complete.md` already there, the notes are `<base>-complete-2.md` and the
+      existing file is byte-identical.
+    - *Exclusive publication.* Create `<base>.md` by hand before the archive, and in a
+      second run from a debug hook between the `fsync` and the publish: the note is
+      `<base>-2.md` and the existing file is byte-identical. 200 runs with a second
+      process creating the name at random offsets: no file it created is ever changed.
+      Repeat on a volume without `RENAME_EXCL` (the `link` path) and on one with
+      neither (`pending-archive`).
+    - *Unwritable destination, pending-archive.* Let a meeting finish transcription,
+      cleanup and summary with the destination folder unwritable: no `.md` appears,
+      the state is `pending-archive`, every WAV, transcript and `note.md` is in staging,
+      and the contextual row shows Retry and Discard, also after a relaunch. Retry
+      while it is still unwritable: the same state, nothing lost. Restore writability,
+      put an unrelated file at the target name, block the network and click Retry: the
+      note is published as `<base>-2.md`, byte-identical to the staged `note.md`, the
+      unrelated file is unchanged, the request log and packet capture show **zero** STT
+      and LLM calls since the state was entered, and staging is deleted only after the
+      directory `fsync`. Repeat with the folder missing and the volume unmounted: the
+      folder is not recreated.
+    - *Atomic.* Kill the app before and after the publish call: the destination has no
+      file or the whole file, never part of one, and staging is intact. Relaunch and
+      Retry: one complete note and no temp file. Discard removes staging only after
+      confirmation, and no file in the Meeting folder.
 
 Nothing in this list has been done in this slice.
 
