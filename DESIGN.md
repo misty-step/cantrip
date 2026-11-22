@@ -437,9 +437,9 @@ WAVs live beside it in `dictations/`. v1's `cantrip/` directory is not used.
 - **Atomic archive.** Write a dot-prefixed temp file in the destination directory,
   sync it, and rename it. The first rename never overwrites an existing file; the
   only replacement is the Retry case above, with cleanup and summary rerun. Only
-  after that rename, with every chunk transcribed, is staging deleted. The other way staging is deleted is a
-  confirmed Discard. If the folder is missing or not writable, staging stays and
-  Retry is offered.
+  after that rename, with every chunk transcribed, is staging deleted. The other
+  way staging is deleted is a confirmed Discard. If the folder is missing or not
+  writable, staging stays and Retry is offered.
 - **Interrupted.** If the app quits mid-meeting, the next launch repairs the open
   WAV header from the file length and offers Retry / Discard.
 
@@ -680,9 +680,9 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
   server-based recognizer.
 - The last dictation's text is kept in memory for "Copy last dictation". It is not
   written to disk, except that the system clipboard holds it during a tier 2
-  paste and after a copy. A dictation WAV is deleted after its text is held and a
-  delivery outcome recorded, or on Escape. A failed, refused or interrupted one
-  stays, owner-only, until Retry succeeds or the user confirms Discard; it does
+  paste and after a copy. A dictation WAV is deleted after its text is held and
+  the outcome is `confirmed`, `sent` or `copied`, or on Escape. One whose
+  transcription or delivery failed, was refused or was interrupted stays, owner-only, until Retry succeeds or the user confirms Discard; it does
   not expire.
 - Meeting audio and per-chunk transcripts stay in staging until the complete file
   is archived or the user confirms Discard.

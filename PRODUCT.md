@@ -48,8 +48,9 @@ v2 changes these v1 commitments. Each is a deliberate decision here:
   memory for `Copy last dictation` and a delivery outcome (inserted, sent or
   copied) is recorded. A meeting's recordings are deleted after its Markdown file
   is in place with every chunk transcribed. A recording whose transcription
-  failed, came back empty, was refused, or was interrupted by a quit or crash
-  stays on disk with no expiry until Retry succeeds or the user confirms Discard.
+  failed, came back empty, was refused, or was interrupted by a quit or crash, or
+  whose text could not even be copied, stays on disk with no expiry until Retry
+  succeeds or the user confirms Discard.
   Discard is v2's Forget. Escape during a dictation is an explicit discard of that
   take, so v2 does not keep cancelled takes. Each recording has its own file; a
   new one never overwrites an unresolved one.
