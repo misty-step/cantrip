@@ -141,8 +141,10 @@ cannot be placed in order is kept as one block and marked. A quiet part is treat
 silence; a louder part in which no turn can be found and no words are recognized counts
 as not transcribed, so its audio is kept.
 
-A file appears whole or not at all, and Cantrip never overwrites an existing file,
-including its own. Every meeting has one `source_id`, fixed when recording starts, and
+A file appears whole or not at all, except that an interrupted save can leave a hidden
+temporary file, or an incomplete note on a volume without exclusive rename, because
+Cantrip never overwrites or deletes a file in the Meeting folder, including its own.
+Every meeting has one `source_id`, fixed when recording starts, and
 every note of it carries that `source_id` with `status: partial` or `status: complete`.
 Partial notes are `<utc>-<slug>-partial.md`. If Retry then completes the meeting, the
 full notes are a new file, `<utc>-<slug>.md`, in the current Meeting folder. Cantrip
