@@ -174,10 +174,10 @@ instruction is not ready to ship as written.
 identical on 3 of 5 clips (01, 03, 05). The p50 gap between them comes from one
 call per mode per clip and does not show that Elevated is faster.
 
-**Prompt iteration.** v1's Clean never collapsed self-corrections ("to Thursday?
-Actually, no, make it Friday"); v2 added one sentence. A probe of
-v2 then found it rewriting an ordinary "scrum" as "Scry" in a text sentence and
-in the audio control. v3
+**Prompt iteration.** Prompt v1's Clean never collapsed self-corrections ("to Thursday?
+Actually, no, make it Friday"); prompt v2 added one sentence. A probe of
+prompt v2 then found it rewriting an ordinary "scrum" as "Scry" in a text sentence and
+in the audio control. Prompt v3
 changed only the vocabulary rule and passed 9 of 9 negative text probes with no
 wrong substitution; in-sample repair 10/10 terms, held-out repair 5/9 terms
 (misses: Scribe, codecs, Kaylie, Persephany). One audio control with the words
