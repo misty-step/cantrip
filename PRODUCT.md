@@ -69,11 +69,11 @@ take.
 What Cantrip promises about the destination:
 
 1. **Copy only when focus moved or the target is uncertain.** Before either kind of
-   delivery, Cantrip checks that the app and window that had focus when dictation
-   began still have it. If focus moved while the user was speaking, the text goes to
-   the clipboard and the HUD says `Copied — focus changed`. If the starting target
-   could not be identified in time, or can no longer be checked, it is uncertain: the
-   text is only copied, and the HUD says `Copied — target uncertain`.
+   delivery, and again as its last step, Cantrip checks that the app and window that
+   had focus when dictation began still have it. If focus moved, the text goes to the
+   clipboard and the HUD says `Copied — focus changed`. If the starting target could
+   not be identified in time, or can no longer be checked, it is uncertain: the text is
+   only copied, and the HUD says `Copied — target uncertain`.
 2. **Target-bound insertion when the app supports it.** The text is written through
    Accessibility into the field that had focus when dictation began. The clipboard is
    not touched.
@@ -85,11 +85,11 @@ What Cantrip promises about the destination:
    dictation until the app quits.
 
 What it does not promise: macOS has no operation that checks focus and delivers text
-as one step. The app can lose focus in the instant after the last check; the text is
-still addressed to the starting app, which may ignore it or take it while no longer in
-front. A paste may also land in another of that app's own fields. An app can reuse
-one field for several documents or conversations, so the same field may hold a
-different conversation by the time the text arrives. Cantrip reports "Inserted"
+as one step. The app or window can lose focus in the instant after the last check; the
+text is still addressed to the starting app, which may ignore it or take it while no
+longer in front. A paste may also land in another of that app's own fields or windows.
+An app can reuse one field for several documents or conversations, so the same field may
+hold a different conversation by the time the text arrives. Cantrip reports "Inserted"
 only when the field's text before and after differs by exactly the dictation;
 otherwise it reports "Sent — unconfirmed" or "Posted — unconfirmed". After an
 unconfirmed paste the dictation stays on the clipboard in place of what was there.
@@ -136,17 +136,23 @@ record. If part of a meeting cannot be transcribed, its audio is kept and the
 popover offers Retry and Discard. The user may also save partial notes, in which
 each missing part reads `[transcription failed: MM:SS–MM:SS]`. A part whose cleanup
 failed is kept uncleaned and marked. Short interjections are kept; a part whose turns
-cannot be placed in order is kept as one block and marked.
+cannot be placed in order is kept as one block and marked. A quiet part is treated as
+silence; a louder part in which no turn can be found and no words are recognized counts
+as not transcribed, so its audio is kept.
 
 A file appears whole or not at all, and Cantrip never overwrites an existing file,
 including its own. If Retry completes a meeting that already has partial notes, the
 full notes are a new file beside them (`…-complete.md`) that names the one it
-supersedes; the partial notes, with any edits, stay as they are.
+supersedes; the partial notes, with any edits, stay as they are. "Beside them" holds
+even if another Meeting folder has been chosen since.
 
 If the notes are finished but the folder cannot be written, the meeting is
 **pending-archive**: every chunk is transcribed, the cleaned transcript and summary
 are kept in staging, and only writing the final file failed. The popover says so and
 offers Retry, which only writes that file: it makes no speech or language-model call.
+If partial notes exist and their directory is out of reach, the meeting stays
+pending-archive and the popover names that directory; Cantrip does not save the full
+notes anywhere else.
 
 ## Control surface
 

@@ -60,7 +60,7 @@ so one Mac runs one Cantrip. v1's data in Application Support is left untouched.
 | Cancel | Escape is registered as a Carbon hotkey only while recording or processing | — |
 | Hold versus tap | press ≥ 300 ms then release = hold-to-talk; shorter = toggle on, next press stops | Hex uses a 0.3 s threshold for modifier-only keys |
 | Text delivery | two tiers, [Delivery contract](#delivery-contract): Accessibility insert into the captured element, else clipboard plus `Cmd+V` posted to the captured process with `CGEvent.postToPid`. `.cghidEventTap` is not used | Hex `PasteboardClient.swift:55–94, 203–222, 308–317`; `anomalyco/hex` `src/paste.rs:143, 673`. Hex posts `Cmd+V` to `.cghidEventTap` and also has an Accessibility insert into the currently focused element (`PasteboardClient.swift:352–374`); v2 inserts into the element captured at the start |
-| Destination check | PID, bundle ID, process launch date, focused window and focused `AXUIElement` captured when the recording starts; frontmost PID and focused window checked again before either tier; moved focus or an uncertain target means copy only | v1 ADR 0031 treats frontmost-app checks as insufficient for a *guarded* destination. v2 agrees and does not claim one; the residual races are listed in the contract |
+| Destination check | PID, bundle ID, process launch date, focused window and focused `AXUIElement` captured when the recording starts; frontmost PID and focused window checked again before either tier, and both once more as each tier's last step; moved focus or an uncertain target means copy only | v1 ADR 0031 treats frontmost-app checks as insufficient for a *guarded* destination. v2 agrees and does not claim one; the residual races are listed in the contract |
 | Offline speech | `SFSpeechRecognizer`, on-device only, behind a gate that fails closed ([Offline recognition](#offline-recognition-fails-closed)) | Apple: a request honors `requiresOnDeviceRecognition` only if the recognizer's `supportsOnDeviceRecognition` is true |
 | HUD | borderless non-activating `NSPanel`, status-window level, `canJoinAllSpaces`, ignores mouse; small pill, not a full-screen window | Hex `InvisibleWindow.swift:15–41`; v1 `src/hud/macos.rs:314–331`; `anomalyco/hex` `src/rune_hud/macos.rs:145–152` |
 | Meeting audio | `AudioHardwareCreateProcessTap` on a global mono tap that excludes Cantrip's own process, read through a private aggregate device; the mic is a separate HAL input; both are stamped on one host clock | `anomalyco/hex` `src/meeting/macos.rs:142–202` (falls back to ScreenCaptureKit when the tap is not authorized). v2 does not add a ScreenCaptureKit fallback; a denied permission stops the meeting with a clear message |
@@ -290,8 +290,8 @@ delivery is copy-only.
 
 ### Delivery gate, before both tiers
 
-Both tiers pass this gate. Each tier reads the frontmost PID once more as its last
-step before it writes or posts.
+Both tiers pass this gate. Each tier then checks the frontmost PID **and** the focused
+window once more, as its last step before it writes or posts.
 
 1. **Target still certain.** The target is `resolved`; the PID is alive with the
    same bundle ID and launch date; Accessibility is granted; the Mac has not slept
@@ -306,8 +306,18 @@ step before it writes or posts.
    HUD `Copied — focus changed`. If either cannot be read: copy-only,
    `Copied — target uncertain`.
 
-So if another app is in front when the text is ready, Cantrip writes nothing and
-posts nothing, whether or not the starting field would have accepted the text.
+So if another app or another window of the same app is in front when the text is
+ready, Cantrip writes nothing and posts nothing, whether or not the starting field
+would have accepted the text.
+
+**The last check, in both tiers.** It comes after the pre-op AX snapshot, with no other
+work between it and the write or the post. Read the focused window of the captured app
+(250 ms messaging timeout, compared with `CFEqual`), then the frontmost PID. **Both**
+must equal `(captured_pid, captured_window)`. The PID alone is not enough, because a
+second window of the same app has the same PID. If either differs, stop at once: no AX
+write, no `postToPid`, copy-only, `Copied — focus changed`. If either cannot be read:
+the same, with `Copied — target uncertain`. The irreducible residual race begins
+**after** this final `(PID, window)` check.
 
 **Which tier.** An unresolved target and a resolved target that does not support
 tier 1 are different cases:
@@ -358,9 +368,9 @@ memory for this check, then dropped; it is never logged or sent.
 ### Tier 1: target-bound insert (preferred)
 
 1. Pass the gate. Read the pre-op snapshot.
-2. **Last check:** read the frontmost PID again, with no other work between this and
-   step 3. If it differs from `captured_pid`: copy-only, `Copied — focus changed`. If
-   it cannot be read: copy-only, `Copied — target uncertain`.
+2. **Last check:** frontmost PID and focused window must both equal
+   `(captured_pid, captured_window)`, as defined above. If not: copy-only, and step 3
+   does not run.
 3. `AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute, text)`, which
    replaces the current selection as a paste would.
 4. Evaluate the predicate for up to 300 ms.
@@ -390,9 +400,9 @@ terminals).
 2. Put the text on the pasteboard as plain data, marked
    `org.nspasteboard.TransientType`, and record `changeCount`.
 3. Pass the gate again, then read the pre-op snapshot of the captured element.
-4. **Last check:** read the frontmost PID again, with no other work between this
-   and step 5. If it differs from `captured_pid` or cannot be read, stop: copy-only,
-   with the reason as in tier 1.
+4. **Last check:** frontmost PID and focused window must both equal
+   `(captured_pid, captured_window)`, as defined above. If not: copy-only, and step 5
+   does not run.
 5. `CGEvent.postToPid(captured_pid)` with `Cmd+V` down and up. This call returns
    nothing. It is never posted to `.cghidEventTap`, so it is not routed by
    frontmost focus.
@@ -426,14 +436,17 @@ in every row.
 
 ### Residual risks, stated
 
-- **After the last check.** Focus can move in the instant between a tier's last check
-  and the app handling the write or the event. The write still names the starting
-  element and `postToPid` still addresses the starting process, so neither is
-  redirected to the newly focused app. The starting app, now in the background, may
-  insert the text or ignore it. No check on macOS closes this gap.
-- **Same app.** Tier 2 goes to whatever has focus inside that process. A window
-  change is caught by the gate; a change of field, tab or conversation in one window
-  is not.
+- **After the last check.** The irreducible residual race begins after a tier's final
+  `(PID, window)` check and ends when the app handles the write or the event. Its two
+  reads are not one atomic operation, so for each value the race begins when that
+  value was read. In that interval focus can move to another app or to another window
+  of the same app. The write still names the starting element and `postToPid` still
+  addresses the starting process, so neither is redirected to another app. The
+  starting app, possibly now in the background, may insert the text or ignore it. No
+  check on macOS closes this gap.
+- **Same app.** Tier 2 goes to whatever has focus inside that process. A window change
+  up to the last check is caught by it. A window change after it, or a change of field,
+  tab or conversation in one window at any time, is not.
 - **Reused elements.** A chat composer or editor can show a different conversation
   or document through the same `AXUIElement`. Tier 1 is bound to the element, not
   to what the app shows in it.
@@ -479,18 +492,18 @@ Everything lives in an owner-only directory,
 `~/Library/Application Support/com.misty-step.cantrip/meetings/<uuid>/`, not in
 `$TMPDIR`, which macOS may purge: `meeting.json` (wall-clock start, meeting state, one
 record per chunk with track, index, `chunk_start_ms`, `duration_ms`, state and
-attempts, and every file name published), the chunk WAVs, one transcript JSON per
-chunk, one cleaned JSON per window, the summary, and the rendered `note.md`. Each
-staging file is written to a temp file, synced and renamed; plain `rename()` is used
-only inside staging. Failed dictation WAVs live beside it in `dictations/`. v1's
-`cantrip/` directory is not used.
+attempts, every file name published, and `partial_dir` once partial notes are saved),
+the chunk WAVs, one transcript JSON per chunk, one cleaned JSON per window, the
+summary, and the rendered `note.md`. Each staging file is written to a temp file,
+synced and renamed; plain `rename()` is used only inside staging. Failed dictation WAVs
+live beside it in `dictations/`. v1's `cantrip/` directory is not used.
 
 | Meeting state | Meaning | Contextual row |
 | --- | --- | --- |
 | `recording`, `processing`, `publishing` | work in progress | not shown for it |
 | `interrupted` | the app quit while recording or processing | Retry (resumes from what is staged), Discard |
 | `chunks-failed` | at least one chunk failed after its retries | Retry (failed chunks, then cleanup and summary), Save partial notes, Discard |
-| `pending-archive` | all chunks are transcribed, the cleaned transcript and summary are persisted in staging as `note.md`, and only writing the final Markdown to the destination folder failed or was cut off (folder missing or not writable, volume unmounted or full, app quit) | Retry (publish only), Discard |
+| `pending-archive` | all chunks are transcribed, the cleaned transcript and summary are persisted in staging as `note.md`, and only writing the final Markdown to the destination folder failed or was cut off (folder missing or not writable, volume unmounted or full, app quit). After partial notes the destination is `partial_dir` and nothing else | Retry (publish only), Discard |
 | `archived` | published and synced; staging is being deleted (finished at the next launch if cut off) | not shown |
 
 - **Retries.** Network errors, 408, 429 and 5xx: three more attempts, waiting 1 s,
@@ -503,18 +516,29 @@ only inside staging. Failed dictation WAVs live beside it in `dictations/`. v1's
 - **Partial notes.** Each failed chunk is placed at its `chunk_start_ms` on its own
   track as `[MM:SS] You: [transcription failed: MM:SS–MM:SS]`, the span being that
   chunk's start and end; the other track's turns in the span are kept. The partial
-  note is published exclusively, as below. Staging and the `chunks-failed` state
-  stay. Save partial notes is offered again only after a Retry has changed which
-  chunks are failed, or if the save itself failed; a repeat of a failed save
-  publishes the staged partial text without new API calls.
+  note is published exclusively, as below. `partial_dir`, the canonical path (symlinks
+  resolved) of the directory it goes into, is recorded in `meeting.json` before the
+  first partial note's publish call, and cleared only if that first save published
+  nothing; after a crash in between, it stands. Staging and the `chunks-failed` state
+  stay. Save partial notes is offered again only after a Retry has changed which chunks
+  are failed, or if the save itself failed; a repeat of a failed save publishes the
+  staged partial text without new API calls.
 - **Completion after partial notes.** A published note is never opened for writing,
   hashed for replacement or renamed over. When a later Retry completes the meeting, the
-  full notes are published exclusively as a **new sibling** of the partial one:
-  `<base>-complete.md`, or `<base>-complete-2.md` and so on if that name exists. It
-  carries the same `source_id` and `supersedes: "<partial-filename>"`. The partial
-  note, and any edit the user made or is making in it, is left untouched. A second partial note is also a new file
-  (`<base>-2.md`) whose `supersedes` names the first; `supersedes` always names the
-  latest earlier note.
+  full notes are published exclusively as a **new sibling** of the partial one, in
+  `partial_dir`: `<base>-complete.md`, or `<base>-complete-2.md` and so on if that name
+  exists. It carries the same `source_id` and `supersedes: "<partial-filename>"`. The
+  partial note, and any edit the user made or is making in it, is left untouched. A
+  second partial note is also a new file (`<base>-2.md`) in `partial_dir` whose
+  `supersedes` names the first; `supersedes` always names the latest earlier note.
+- **The directory never changes.** Every later note of that meeting goes into
+  `partial_dir`, whatever Meeting folder is now chosen in Settings, so a filename-only
+  `supersedes` names a sibling. There is no other directory to fall back to. While
+  `partial_dir` is missing or not writable, a completion stays `pending-archive` with
+  staging intact, and a second partial save fails and stays `chunks-failed`; the
+  popover names that directory. This lasts until the directory is writable again or the
+  user confirms Discard. Cantrip does not recreate a partial note that the user has
+  moved, renamed or deleted; the completion is still published in `partial_dir`.
 - **Interrupted.** If the app quits mid-meeting, the next launch repairs the open
   WAV header from the file length and offers Retry / Discard. A meeting found in
   `publishing` at launch becomes `pending-archive`.
@@ -525,10 +549,11 @@ client:
 
 1. The rendered Markdown is synced in staging (`note.md`, or `partial.md` for partial
    notes). The steps below read only that file.
-2. Under the chosen Meeting folder, create the `cantrip-meeting/YYYY/MM` directories.
-   The chosen folder itself is never created: a missing one may be an unmounted volume.
-   A completion goes to the directory that holds its partial note; if that directory
-   cannot be reached and the user has since chosen another folder, it goes there.
+2. Choose the directory. With no `partial_dir`: under the chosen Meeting folder, create
+   the `cantrip-meeting/YYYY/MM` directories. The chosen folder itself is never created:
+   a missing one may be an unmounted volume. With a `partial_dir`: use exactly that
+   directory, create no directory, and do not read the Meeting folder setting. If it
+   cannot be opened or written, that is a publish failure.
 3. In that directory, create a dot-prefixed temp file with `O_CREAT | O_EXCL`, write
    it and `fsync` it (`F_FULLFSYNC`).
 4. Record the destination path, the temp path and the text's SHA-256 in
@@ -549,13 +574,15 @@ complete meeting in `pending-archive` with its staging intact. The only other wa
 staging is deleted is a confirmed Discard.
 
 **Publish-only Retry.** Retry on a `pending-archive` meeting runs steps 2 to 6 again
-from the staged `note.md`, with the folder chosen as step 2 says. It makes **zero**
+from the staged `note.md`, with the directory from step 2. It makes **zero**
 speech and language-model API calls, so it works offline and costs nothing. If it
-fails, the meeting stays in `pending-archive`. If an earlier attempt got past step 4, a
-file at the recorded path with the recorded SHA-256 is that publication: Retry removes
-the recorded temp file if it is still there and finishes at step 6. If that file is
-absent or differs, Retry publishes under the next unused name; a second copy is
-preferred to a lost note.
+fails, the meeting stays in `pending-archive`. If an earlier attempt to publish this
+`note.md` got past step 4, a file at the recorded path with the recorded SHA-256 is that
+publication: Retry removes the recorded temp file if it is still there and finishes at
+step 6, so the directory is synced before staging is deleted. If that file is absent or
+differs, Retry publishes under the next unused name in the directory from step 2; a
+second copy is preferred to a lost note. The record counts only if its SHA-256 is that
+of `note.md`: a partial note's record never stands for the completion.
 
 ### Timestamped transcription
 
@@ -578,25 +605,32 @@ duration_ms + 500`, starts do not decrease, and the segments are non-empty
 whenever `text` is. `end_ms` is clamped to `duration_ms`.
 
 **Deterministic fallback.** The chunk is split locally if a response has no valid
-segments, if the request returns 400, or if the response is empty although the
-detector below finds a voiced interval. The rule is that no detected voice is
-dropped, however short:
+segments, if the request returns 400, or if the response has no text. An empty
+response never completes a chunk by itself; only step 6 does. The rule is that no
+detected voice is dropped, however short:
 
 1. **Detect.** 20 ms frames. The silence floor is −50 dBFS RMS. A frame is voiced when
    its RMS is above the chunk's 10th-percentile RMS plus 10 dB, with that threshold
    limited to the range −50 to −35 dBFS. Voiced frames with no gap over 100 ms between
    them form one **voiced interval** if together they hold at least 40 ms of voiced
    frames. There is no longer minimum: a 180 ms "no" is an interval. A lone 20 ms
-   frame is a click.
+   frame does not form an interval, but it still counts in step 3.
 2. **Slice.** Every voiced interval is padded by 300 ms on each side, limited to the
    chunk. Padded intervals that overlap, or lie 600 ms or less apart, are merged into
    one utterance slice. **Every voiced interval is in a slice.** A slice over 30 s is
    cut at its quietest frame between 20 s and 30 s, and again if needed; the pieces are
    contiguous, and a rest with no voiced frame stays with the piece before it.
-3. **Check coverage.** Apply the same 100 ms and 40 ms grouping to all frames above the
-   silence floor. Every frame in such a group must be inside a slice. This catches
-   energy between the floor and the voiced threshold, and the case of zero slices over
-   audio that is not silent. If it fails, step 5 applies.
+3. **Check coverage.** Two tests. The 40 ms minimum decides what forms a slice; neither
+   of these tests uses it.
+   - *Frames.* Every frame above the silence floor, alone or in a run, must be inside a
+     slice. This catches short bursts, and energy between the floor and the voiced
+     threshold.
+   - *Chunk RMS.* `chunk_rms_dbfs` is the RMS of all the chunk's samples relative to
+     full scale (digital zero is −∞), with no framing, percentile or minimum run. Zero
+     slices with `chunk_rms_dbfs > -50.0` fails, whatever the frames show.
+
+   If either test fails, step 5 applies. The only exception is a chunk that meets every
+   condition of step 6.
 4. **Transcribe slices.** Each utterance WAV is one request with
    `response_format: "json"`. Its `start_ms` and `end_ms` are the first and last
    voiced frame in the slice, as offsets in the chunk on the same clock; the padding
@@ -608,19 +642,25 @@ dropped, however short:
    `duration_ms`, using the text already returned or, without one, one plain `json`
    request. The transcript puts `[chunk-level order: MM:SS–MM:SS]` before it, because
    its turns are not ordered against the other track inside that span. If that request
-   fails or returns no text, the chunk is marked `failed` and its source WAV is kept.
-   An incomplete transcript is never archived as complete, and its audio stays until
-   Retry succeeds or the user confirms Discard.
-6. **Silence.** When no frame group is above the silence floor, text already returned
-   is kept as in step 5. After a 400 one plain `json` request is made: its text is
-   kept the same way, and if it is empty the chunk is complete and empty.
+   fails or returns no text, the chunk is marked `failed` and its source WAV is kept;
+   it is never completed as silence. An incomplete transcript is never archived as
+   complete, and its audio stays until Retry succeeds or the user confirms Discard.
+6. **Silence.** A chunk may complete empty only when **all** of these hold: zero slices,
+   `chunk_rms_dbfs <= -50.0`, and no run of frames above the floor, grouped as in step
+   1, holds 40 ms. When `chunk_rms_dbfs > -50.0` this branch is never taken. Text
+   already returned is kept as in step 5. After a 400, or when any lone frame is above
+   the floor, one plain `json` request is made first: its text is kept the same way, an
+   error fails the chunk, and only an empty reply completes it empty.
 
 The same audio and settings always give the same splits. The fallback bills more:
 MAI bills whole seconds per request. Its limits: speech quieter than −50 dBFS counts
-as silence, a reply by the other track inside one merged slice is printed after that
-slice begins, and whether MAI accepts clips under a second is checked at bring-up (a
-rejected slice is a failed one). A chunk of noise above the floor with no words may
-stay failed; the user can save partial notes or discard it.
+as silence, and so do lone 20 ms frames in a chunk whose RMS is at or below −50 dBFS
+once a whole-chunk request returns nothing; a reply by the other track inside one
+merged slice is printed after that slice begins; one above-floor frame outside every
+slice, such as a click, costs its chunk the turn order; and whether MAI accepts clips
+under a second is checked at bring-up (a rejected slice is a failed one). A chunk of
+noise above the floor with no words may stay failed; the user can save partial notes
+or discard it.
 
 ### Cross-track merge
 
@@ -715,7 +755,7 @@ Path: `<folder>/cantrip-meeting/YYYY/MM/<base>.md`, where `<base>` is
 `YYYY-MM-DD_HHMMSSZ-<id>`, with dates and times in UTC and `<id>` a UUID. If the
 chosen folder is Supercortex's `captures/voice`, the path under it is the same. A
 name that is taken gets `-2`, `-3` and so on; notes completed after partial notes
-are `<base>-complete.md`.
+are `<base>-complete.md` in the same directory as the partial notes.
 
 ```markdown
 ---
@@ -778,6 +818,7 @@ the newest item and its reason; the next takes its place when that one is resolv
 | failed meeting chunk WAVs (`chunks-failed`) | `⚠ Meeting 14:00: 2 parts failed` | `Retry`, `Save partial notes` (until saved), `Discard…` |
 | meeting cut off by a quit or crash (`interrupted`) | `⚠ Meeting 14:00 interrupted` | `Retry`, `Discard…` |
 | `pending-archive` meeting | `⚠ Meeting 14:00 not saved: folder not writable` | `Retry` (publish only), `Discard…` |
+| `pending-archive` meeting with partial notes, `partial_dir` missing or not writable | `⚠ Meeting 14:00 not saved: cannot write to <partial_dir>, which holds its partial notes. Make it available, then Retry` | `Retry` (publish only), `Discard…` |
 
 `Save partial notes` is absent for `pending-archive` because nothing is missing from
 those notes. `Discard…` is `Discard failed recording`, or `Discard unsaved meeting` for
@@ -877,8 +918,16 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
      then in tier 2 mode. Both times: A and B get no AX write and no key event, the
      text is on the clipboard, and the HUD shows `Copied — focus changed`. Repeat
      with a second window of A in front: the same result.
-   - *Switch at dispatch.* A debug-build hook pauses each tier before its last check;
-     activate B, then resume: copy-only, as above. A second hook pauses after the last
+   - *Switch at dispatch.* A debug-build hook pauses each tier after its AX snapshot and
+     before its last check; activate B, then resume: copy-only, as above.
+   - *Same-app window switch at dispatch.* At that same pause, with the gate passed and
+     the snapshot read, bring A's second window to the front, so the frontmost PID is
+     still A's. Resume. In tier 1: no AX write. In tier 2: no `postToPid` and no key
+     event. In both: neither window's text changes, the text is on the clipboard, and
+     the HUD shows `Copied — focus changed`. Make A's focused window unreadable at that
+     pause instead: the same, with `Copied — target uncertain`. Control: resume without
+     switching, and the tier delivers.
+   - *Switch after the last check.* A second hook pauses after the last
      check and before the write or the post; activate B, then resume. B must get no
      AX write, no key event and no text. A may or may not insert; the outcome must be
      `unconfirmed` unless the edit-delta predicate held against A's own dump. Then 200
@@ -970,6 +1019,17 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       that loses an interval, over a chunk with speech: the whole chunk is transcribed
       and marked `[chunk-level order: MM:SS–MM:SS]`. Make that request return empty:
       the chunk is `failed`, its WAV is in staging, and no Markdown appears.
+    - *Fallback, short bursts above the floor.* A 1-second PCM WAV holds seven 20 ms
+      bursts, 160 ms onset to onset, aligned to the 20 ms frames, over digital zero, at
+      a chunk RMS of −20.27 dBFS (above the −50 dBFS floor). There are zero slices of
+      40 ms or more. The stubbed `verbose_json` response is empty, and in a second run a
+      400. The chunk must **not** complete as silence: one whole-chunk request is made.
+      If it returns text, that text is in the transcript after
+      `[chunk-level order: 00:00–00:01]`. If it returns empty or fails, the chunk is
+      `failed`, its WAV is in staging, and no Markdown appears. Repeat with one 20 ms
+      burst and the same two outcomes, and with the bursts beside a normal utterance:
+      the whole chunk is transcribed. Controls: one second of digital zero, and one of
+      noise at −60 dBFS, each with an empty response, complete empty.
     - *Cleanup.* Same turn count, ids, timestamps and labels before and after;
       fillers gone; vocabulary spelled as listed; by eye, no changed meaning. A
       stubbed reply that drops, adds, empties or reorders a turn is rejected, and
@@ -988,6 +1048,17 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       `fs_usage`), and its content is what the editor last wrote. With
       `<base>-complete.md` already there, the notes are `<base>-complete-2.md` and the
       existing file is byte-identical.
+    - *Partial in Folder A, Settings changed to Folder B.* Save partial notes with Folder
+      A chosen. Choose Folder B in Settings, make A inaccessible (mode 000, and in a
+      second run its volume unmounted), restore the service and Retry. The chunks are
+      transcribed and the notes finished, the state is `pending-archive`, staging holds
+      `note.md` and every WAV, the popover names A's directory, nothing is created in B,
+      not even `cantrip-meeting/`, and nothing is recreated at A's path. Retry again, and relaunch and Retry: the same.
+      Restore A and Retry: `<base>-complete.md` is in A's directory beside the partial
+      note, its `supersedes` is that note's file name, the partial note is
+      byte-identical, B is still empty, no STT or LLM call was made since the state was
+      entered, and staging is deleted after the directory `fsync`. Repeat with A
+      writable throughout: the completion still goes to A.
     - *Exclusive publication.* Create `<base>.md` by hand before the archive, and in a
       second run from a debug hook between the `fsync` and the publish: the note is
       `<base>-2.md` and the existing file is byte-identical. 200 runs with a second
