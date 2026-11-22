@@ -316,8 +316,10 @@ work between it and the write or the post. Read the focused window of the captur
 must equal `(captured_pid, captured_window)`. The PID alone is not enough, because a
 second window of the same app has the same PID. If either differs, stop at once: no AX
 write, no `postToPid`, copy-only, `Copied — focus changed`. If either cannot be read:
-the same, with `Copied — target uncertain`. The irreducible residual race begins
-**after** this final `(PID, window)` check.
+the same, with `Copied — target uncertain`. These are two separate reads, not one atomic
+operation: a window switch is caught if it occurs before the window read, and a
+cross-app switch if it occurs before the PID read. The irreducible residual race begins
+immediately after each respective read.
 
 **Which tier.** An unresolved target and a resolved target that does not support
 tier 1 are different cases:
@@ -436,17 +438,21 @@ in every row.
 
 ### Residual risks, stated
 
-- **After the last check.** The irreducible residual race begins after a tier's final
-  `(PID, window)` check and ends when the app handles the write or the event. Its two
-  reads are not one atomic operation, so for each value the race begins when that
-  value was read. In that interval focus can move to another app or to another window
-  of the same app. The write still names the starting element and `postToPid` still
+- **After each read of the last check.** The final gate performs two separate reads: the
+  focused window, then the frontmost PID. A window switch is caught if it occurs before
+  the window read; a cross-app switch is caught if it occurs before the PID read. Each
+  must still be in effect at that read. The irreducible residual race begins immediately
+  after each respective read: for a window switch after the window read, including
+  between the two reads, and for a cross-app switch after the PID read. In tier 1 it
+  continues until the target app handles the AX write, in tier 2 until it processes the
+  posted `Cmd+V`. The write still names the starting element and `postToPid` still
   addresses the starting process, so neither is redirected to another app. The
   starting app, possibly now in the background, may insert the text or ignore it. No
   check on macOS closes this gap.
-- **Same app.** Tier 2 goes to whatever has focus inside that process. A window change
-  up to the last check is caught by it. A window change after it, or a change of field,
-  tab or conversation in one window at any time, is not.
+- **Same app.** Tier 2 goes to whatever has focus inside that process. A switch to
+  another of its windows after the window read is not caught, even if it occurs before
+  the PID read, because the PID is the same. A change of field, tab or conversation
+  in one window is never caught.
 - **Reused elements.** A chat composer or editor can show a different conversation
   or document through the same `AXUIElement`. Tier 1 is bound to the element, not
   to what the app shows in it.
@@ -489,21 +495,27 @@ in every row.
 ### Staging, failure and exclusive archive
 
 Everything lives in an owner-only directory,
-`~/Library/Application Support/com.misty-step.cantrip/meetings/<uuid>/`, not in
-`$TMPDIR`, which macOS may purge: `meeting.json` (wall-clock start, meeting state, one
-record per chunk with track, index, `chunk_start_ms`, `duration_ms`, state and
-attempts, every file name published, and `partial_dir` once partial notes are saved),
-the chunk WAVs, one transcript JSON per chunk, one cleaned JSON per window, the
+`~/Library/Application Support/com.misty-step.cantrip/meetings/<source_id>/`, not in
+`$TMPDIR`, which macOS may purge: `meeting.json` (`source_id`, wall-clock start, meeting
+state, one record per chunk with track, index, `chunk_start_ms`, `duration_ms`, state
+and attempts, whether partial notes were saved, and the completed note's publish
+record), the chunk WAVs, one transcript JSON per chunk, one cleaned JSON per window, the
 summary, and the rendered `note.md`. Each staging file is written to a temp file,
 synced and renamed; plain `rename()` is used only inside staging. Failed dictation WAVs
 live beside it in `dictations/`. v1's `cantrip/` directory is not used.
+
+**Identity is `source_id`.** Each meeting gets one UUID at capture start. It is synced to
+`meeting.json` before the first chunk is opened and never changes. Every note of the
+meeting carries it in frontmatter, with `status: partial` or `status: complete`. File
+names and folders are not identity: no note refers to another, and Cantrip does not
+remember where a partial note went.
 
 | Meeting state | Meaning | Contextual row |
 | --- | --- | --- |
 | `recording`, `processing`, `publishing` | work in progress | not shown for it |
 | `interrupted` | the app quit while recording or processing | Retry (resumes from what is staged), Discard |
 | `chunks-failed` | at least one chunk failed after its retries | Retry (failed chunks, then cleanup and summary), Save partial notes, Discard |
-| `pending-archive` | all chunks are transcribed, the cleaned transcript and summary are persisted in staging as `note.md`, and only writing the final Markdown to the destination folder failed or was cut off (folder missing or not writable, volume unmounted or full, app quit). After partial notes the destination is `partial_dir` and nothing else | Retry (publish only), Discard |
+| `pending-archive` | all chunks are transcribed, the cleaned transcript and summary are persisted in staging as `note.md`, and only writing the final Markdown to the Meeting folder failed or was cut off (folder missing or not writable, volume unmounted or full, app quit) | Retry (publish only), Discard |
 | `archived` | published and synced; staging is being deleted (finished at the next launch if cut off) | not shown |
 
 - **Retries.** Network errors, 408, 429 and 5xx: three more attempts, waiting 1 s,
@@ -515,74 +527,68 @@ live beside it in `dictations/`. v1's `cantrip/` directory is not used.
   all chunks succeed.
 - **Partial notes.** Each failed chunk is placed at its `chunk_start_ms` on its own
   track as `[MM:SS] You: [transcription failed: MM:SS–MM:SS]`, the span being that
-  chunk's start and end; the other track's turns in the span are kept. The partial
-  note is published exclusively, as below. `partial_dir`, the canonical path (symlinks
-  resolved) of the directory it goes into, is recorded in `meeting.json` before the
-  first partial note's publish call, and cleared only if that first save published
-  nothing; after a crash in between, it stands. Staging and the `chunks-failed` state
-  stay. Save partial notes is offered again only after a Retry has changed which chunks
-  are failed, or if the save itself failed; a repeat of a failed save publishes the
-  staged partial text without new API calls.
-- **Completion after partial notes.** A published note is never opened for writing,
-  hashed for replacement or renamed over. When a later Retry completes the meeting, the
-  full notes are published exclusively as a **new sibling** of the partial one, in
-  `partial_dir`: `<base>-complete.md`, or `<base>-complete-2.md` and so on if that name
-  exists. It carries the same `source_id` and `supersedes: "<partial-filename>"`. The
-  partial note, and any edit the user made or is making in it, is left untouched. A
-  second partial note is also a new file (`<base>-2.md`) in `partial_dir` whose
-  `supersedes` names the first; `supersedes` always names the latest earlier note.
-- **The directory never changes.** Every later note of that meeting goes into
-  `partial_dir`, whatever Meeting folder is now chosen in Settings, so a filename-only
-  `supersedes` names a sibling. There is no other directory to fall back to. While
-  `partial_dir` is missing or not writable, a completion stays `pending-archive` with
-  staging intact, and a second partial save fails and stays `chunks-failed`; the
-  popover names that directory. This lasts until the directory is writable again or the
-  user confirms Discard. Cantrip does not recreate a partial note that the user has
-  moved, renamed or deleted; the completion is still published in `partial_dir`.
+  chunk's start and end; the other track's turns in the span are kept. The note is
+  published exclusively, as below, as `<utc>-<slug>-partial.md` with `status: partial`.
+  Saving it never leaves the `chunks-failed` state and keeps all staging; after
+  step 6, `meeting.json` records only that partial notes were saved, for the popover.
+  Save partial notes is offered again only after a Retry has changed which chunks
+  are failed, or if the save itself failed or was cut off; a repeat publishes the
+  staged partial text under the next unused name (`-partial-2.md`) without new API calls.
+- **Completion after partial notes.** There is no special case. When a Retry completes
+  the meeting, the full notes are published exclusively as `<utc>-<slug>.md` with the
+  same `source_id` and `status: complete`, in the Meeting folder chosen at that moment.
+  Publishing them does not look for, open or change a partial note. So the user may
+  edit, rename, move or delete a partial note or choose another Meeting folder, and a
+  crash may hit right after a partial note was published, before `meeting.json` says so:
+  the completion is the same in every case.
 - **Interrupted.** If the app quits mid-meeting, the next launch repairs the open
-  WAV header from the file length and offers Retry / Discard. A meeting found in
-  `publishing` at launch becomes `pending-archive`.
+  WAV header from the file length and offers Retry / Discard. Only a completed note
+  enters `publishing`; a meeting found there at launch becomes `pending-archive`.
 
-**Publishing** is the only way a file reaches the destination folder. It is used
-for first publication, partial notes and completed notes, and it has no network
-client:
+**Publishing** is the only way a file reaches the Meeting folder. Partial and completed
+notes use the same steps, and they have no network client:
 
 1. The rendered Markdown is synced in staging (`note.md`, or `partial.md` for partial
    notes). The steps below read only that file.
-2. Choose the directory. With no `partial_dir`: under the chosen Meeting folder, create
-   the `cantrip-meeting/YYYY/MM` directories. The chosen folder itself is never created:
-   a missing one may be an unmounted volume. With a `partial_dir`: use exactly that
-   directory, create no directory, and do not read the Meeting folder setting. If it
-   cannot be opened or written, that is a publish failure.
-3. In that directory, create a dot-prefixed temp file with `O_CREAT | O_EXCL`, write
-   it and `fsync` it (`F_FULLFSYNC`).
-4. Record the destination path, the temp path and the text's SHA-256 in
-   `meeting.json`, then publish exclusively with
+2. Under the Meeting folder chosen now, create the `cantrip-meeting/YYYY/MM`
+   directories. The chosen folder itself is never created: a missing one may be an
+   unmounted volume.
+3. In that directory, unlink a leftover `.<source_id>.tmp` (never open it: after a cut-off
+   `link` it is the published file), create it again with `O_CREAT | O_EXCL`, write it and
+   `fsync` it (`F_FULLFSYNC`). One left in a folder that is no longer chosen stays there.
+4. For a completed note, record the destination path and the SHA-256 of `note.md` in
+   `meeting.json`. Then publish exclusively with
    `renameatx_np(AT_FDCWD, tmp, AT_FDCWD, dst, RENAME_EXCL)`. If the volume does not
    support that flag, use `link(tmp, dst)` followed by `unlink(tmp)`. Either one fails
    with `EEXIST` when `dst` exists, and the new file appears whole. Plain `rename()`,
    which silently replaces, is never used on a destination, and no file is written
    in place there. If the volume supports neither, that is a publish failure.
-5. On `EEXIST`, take the next unused name (`<base>-2.md`, `<base>-3.md`, …; for a
-   completion `<base>-complete-2.md`, …) and repeat step 4. An existing file is never
+5. On `EEXIST`, take the next unused name (`<utc>-<slug>-2.md`, `-3.md`, …; for partial
+   notes `<utc>-<slug>-partial-2.md`, …) and repeat step 4. An existing file is never
    overwritten, whoever made it.
-6. `fsync` the directory. Only now, and only for a complete meeting, set `archived`
-   and delete staging.
+6. `fsync` the directory, and its parents up to the Meeting folder. Only now, and only
+   for a completed note, set `archived` and delete staging.
 
-A failure in steps 2 to 6 removes the temp file if it can be reached, and puts a
-complete meeting in `pending-archive` with its staging intact. The only other way
-staging is deleted is a confirmed Discard.
+A failure in steps 2 to 6 removes the temp file if it can be reached. A completed note
+goes to `pending-archive` with its staging intact and the contextual Retry row visible;
+a partial save stays `chunks-failed`. The only other way staging is deleted is a
+confirmed Discard.
 
-**Publish-only Retry.** Retry on a `pending-archive` meeting runs steps 2 to 6 again
-from the staged `note.md`, with the directory from step 2. It makes **zero**
-speech and language-model API calls, so it works offline and costs nothing. If it
-fails, the meeting stays in `pending-archive`. If an earlier attempt to publish this
-`note.md` got past step 4, a file at the recorded path with the recorded SHA-256 is that
-publication: Retry removes the recorded temp file if it is still there and finishes at
-step 6, so the directory is synced before staging is deleted. If that file is absent or
-differs, Retry publishes under the next unused name in the directory from step 2; a
-second copy is preferred to a lost note. The record counts only if its SHA-256 is that
-of `note.md`: a partial note's record never stands for the completion.
+**Publish-only Retry.** Retry on a `pending-archive` meeting makes **zero** speech and
+language-model API calls, so it works offline and costs nothing. It first reads the
+publish record:
+
+- *Already published.* If a regular file is at the recorded path and its SHA-256 is the
+  recorded one and that of the staged `note.md`, an earlier attempt published it and
+  stopped before cleanup. Retry removes a leftover temp file beside it and finishes at
+  step 6 for that directory: `fsync(dir)`, and only then staging is deleted.
+- *Otherwise* it runs steps 2 to 6 from the staged `note.md`. If the recorded file was
+  published and then edited, moved or put out of reach before the Retry, this makes a
+  second complete note with the same `source_id`; that is preferred to a lost note.
+
+If it fails, the meeting stays in `pending-archive`. Making the folder writable or
+choosing another Meeting folder, then Retry, is enough. Only a completed note has a
+publish record, so a partial note is never taken for the completion.
 
 ### Timestamped transcription
 
@@ -751,16 +757,19 @@ Compatible with the voice archive layout used in Supercortex
 fields). One directory per source keeps Cantrip's files apart from the files
 other importers own.
 
-Path: `<folder>/cantrip-meeting/YYYY/MM/<base>.md`, where `<base>` is
-`YYYY-MM-DD_HHMMSSZ-<id>`, with dates and times in UTC and `<id>` a UUID. If the
-chosen folder is Supercortex's `captures/voice`, the path under it is the same. A
-name that is taken gets `-2`, `-3` and so on; notes completed after partial notes
-are `<base>-complete.md` in the same directory as the partial notes.
+Path: `<folder>/cantrip-meeting/YYYY/MM/<utc>-<slug>.md` for completed notes and
+`<utc>-<slug>-partial.md` for partial ones. `<utc>` is the recording start in UTC,
+`YYYY-MM-DD_HHMMSSZ`. `<slug>` is the note's title in lower-case ASCII letters and
+digits, every other run as one `-`, at most 60 characters, or `meeting` if that is
+empty. If the chosen folder is Supercortex's `captures/voice`, the path under it is the
+same. A name that is taken gets `-2`, `-3` and so on. The name is for reading; only
+`source_id` and `status` say what a file is.
 
 ```markdown
 ---
 source: "cantrip-meeting"
 source_id: "3f2c…"
+status: complete
 recorded_at: "2026-11-22T17:00:00+00:00"
 title: "Planning call"
 ---
@@ -779,10 +788,9 @@ title: "Planning call"
 [00:11] Others: …
 ```
 
-A note that follows an earlier one for the same meeting adds one frontmatter line
-after `source_id`, for example
-`supersedes: "2026-11-22_170000Z-3f2c….md"`. Both files then carry the same
-`source_id`; how the Supercortex importer treats that has not been checked.
+`status` is `partial` when at least one chunk had failed, otherwise `complete`. Notes
+with the same `source_id` are one meeting, and a complete one stands for it. How the
+Supercortex importer treats two files with one `source_id` has not been checked.
 
 Each turn is its own paragraph, separated by a blank line so that Markdown does not
 join the lines. Cantrip writes plain files in the chosen folder. It does not run
@@ -818,7 +826,6 @@ the newest item and its reason; the next takes its place when that one is resolv
 | failed meeting chunk WAVs (`chunks-failed`) | `⚠ Meeting 14:00: 2 parts failed` | `Retry`, `Save partial notes` (until saved), `Discard…` |
 | meeting cut off by a quit or crash (`interrupted`) | `⚠ Meeting 14:00 interrupted` | `Retry`, `Discard…` |
 | `pending-archive` meeting | `⚠ Meeting 14:00 not saved: folder not writable` | `Retry` (publish only), `Discard…` |
-| `pending-archive` meeting with partial notes, `partial_dir` missing or not writable | `⚠ Meeting 14:00 not saved: cannot write to <partial_dir>, which holds its partial notes. Make it available, then Retry` | `Retry` (publish only), `Discard…` |
 
 `Save partial notes` is absent for `pending-archive` because nothing is missing from
 those notes. `Discard…` is `Discard failed recording`, or `Discard unsaved meeting` for
@@ -892,7 +899,7 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
   after it. That text stays in memory for the check and is not stored, logged or sent.
 - Meeting audio and per-chunk transcripts stay in staging until the complete file
   is archived or the user confirms Discard. That includes a `pending-archive` meeting.
-- No telemetry and no transcript text in logs.
+- No telemetry, and no transcript text or note file name (it holds the title) in logs.
 - Meetings record other people. The user starts each meeting explicitly; the HUD
   pill is visible for its whole length. Telling participants is the user's duty.
 
@@ -927,7 +934,11 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
      the HUD shows `Copied — focus changed`. Make A's focused window unreadable at that
      pause instead: the same, with `Copied — target uncertain`. Control: resume without
      switching, and the tier delivers.
-   - *Switch after the last check.* A second hook pauses after the last
+   - *Switch between the two reads.* A second hook pauses after the window read and
+     before the PID read. Activate B, then resume: copy-only, as above. Bring A's second
+     window to the front instead: the check may pass, which is the stated residual race,
+     and the outcome must be `unconfirmed` unless the predicate holds against A's dump.
+   - *Switch after the last check.* A third hook pauses after the last
      check and before the write or the post; activate B, then resume. B must get no
      AX write, no key event and no text. A may or may not insert; the outcome must be
      `unconfirmed` unless the edit-delta predicate held against A's own dump. Then 200
@@ -1039,29 +1050,26 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       shows Retry / Save partial notes / Discard. Save partial notes: that span reads
       `[transcription failed: MM:SS–MM:SS]` with the chunk's real times, `You` turns
       in the span remain, and staging remains. Restore the service and Retry: the
-      complete notes are a new `<base>-complete.md`, ordered, without failed markers,
-      with the same `source_id` and `supersedes` naming the partial file; staging is
-      gone.
-    - *Edit-safe completion.* Repeat with the partial note unedited, edited before the
-      Retry, and held open and saved by an editor every 10 ms throughout it. In all
-      three Cantrip makes no write, rename or unlink on the partial note (checked with
-      `fs_usage`), and its content is what the editor last wrote. With
-      `<base>-complete.md` already there, the notes are `<base>-complete-2.md` and the
-      existing file is byte-identical.
-    - *Partial in Folder A, Settings changed to Folder B.* Save partial notes with Folder
-      A chosen. Choose Folder B in Settings, make A inaccessible (mode 000, and in a
-      second run its volume unmounted), restore the service and Retry. The chunks are
-      transcribed and the notes finished, the state is `pending-archive`, staging holds
-      `note.md` and every WAV, the popover names A's directory, nothing is created in B,
-      not even `cantrip-meeting/`, and nothing is recreated at A's path. Retry again, and relaunch and Retry: the same.
-      Restore A and Retry: `<base>-complete.md` is in A's directory beside the partial
-      note, its `supersedes` is that note's file name, the partial note is
-      byte-identical, B is still empty, no STT or LLM call was made since the state was
-      entered, and staging is deleted after the directory `fsync`. Repeat with A
-      writable throughout: the completion still goes to A.
-    - *Exclusive publication.* Create `<base>.md` by hand before the archive, and in a
+      complete notes are a new `<utc>-<slug>.md`, ordered, without failed markers, with
+      the same `source_id` and `status: complete`; staging is gone.
+    - *Partial edited, renamed or moved.* Save partial notes: `<utc>-<slug>-partial.md` has
+      `status: partial` and the meeting's `source_id`. Then, in separate runs, edit it,
+      rename it, move it to another directory, delete it, hold it open and save it every
+      10 ms, and choose another Meeting folder. Restore the service and Retry. Each
+      time `<utc>-<slug>.md` is published with `status: complete`, the same `source_id`
+      and no other reference to the partial note; Cantrip opens, writes, renames and
+      unlinks no partial note (checked with `fs_usage`), its content is what the user
+      last wrote, and a deleted one is not recreated. Rename it to `<utc>-<slug>.md`: the
+      completion is `<utc>-<slug>-2.md`.
+    - *Crash after a partial publish.* Kill the app after the exclusive publish of
+      `-partial.md` and before `meeting.json` is updated. Relaunch: the state is
+      `chunks-failed` with all staging intact. Restore the service and Retry:
+      `<utc>-<slug>.md` has `status: complete` and the same `source_id`, the partial note
+      is byte-identical, and staging is deleted only after `fsync(dir)`. In a second run
+      Save partial notes again instead: `-partial-2.md`, the first one unchanged.
+    - *Exclusive publication.* Create `<utc>-<slug>.md` by hand before the archive, and in a
       second run from a debug hook between the `fsync` and the publish: the note is
-      `<base>-2.md` and the existing file is byte-identical. 200 runs with a second
+      `<utc>-<slug>-2.md` and the existing file is byte-identical. 200 runs with a second
       process creating the name at random offsets: no file it created is ever changed.
       Repeat on a volume without `RENAME_EXCL` (the `link` path) and on one with
       neither (`pending-archive`).
@@ -1071,14 +1079,17 @@ this is a choice). It uses the hardened runtime. The key is stored in the login 
       and the contextual row shows Retry and Discard, also after a relaunch. Retry
       while it is still unwritable: the same state, nothing lost. Restore writability,
       put an unrelated file at the target name, block the network and click Retry: the
-      note is published as `<base>-2.md`, byte-identical to the staged `note.md`, the
+      note is published as `<utc>-<slug>-2.md`, byte-identical to the staged `note.md`, the
       unrelated file is unchanged, the request log and packet capture show **zero** STT
       and LLM calls since the state was entered, and staging is deleted only after the
       directory `fsync`. Repeat with the folder missing and the volume unmounted: the
-      folder is not recreated.
+      folder is not recreated. Repeat with partial notes saved earlier, and with another
+      folder chosen instead of restoring writability: the same, in the folder chosen now.
     - *Atomic.* Kill the app before and after the publish call: the destination has no
       file or the whole file, never part of one, and staging is intact. Relaunch and
-      Retry: one complete note and no temp file. Discard removes staging only after
+      Retry: one complete note and no temp file. After a kill past the publish call,
+      Retry adds no file: it matches the recorded path and SHA-256 of `note.md`, calls
+      `fsync(dir)` and only then deletes staging. Discard removes staging only after
       confirmation, and no file in the Meeting folder.
 
 Nothing in this list has been done in this slice.

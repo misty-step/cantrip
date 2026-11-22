@@ -13,7 +13,7 @@ the measurements behind the numbers here.
 
 v1 is the Rust workspace in this repository. It is the Linux dictation app and,
 as of v0.1.15, also a Developer ID-signed, notarized arm64 macOS app; README
-still says no macOS release is published. v2 supersedes
+still says no macOS release is published. v2 replaces
 [SPEC.md](SPEC.md) and [VISION.md](VISION.md) as the statement of intent for the
 **macOS** product. Those files stay unchanged in this slice and continue to
 describe v1. v1 remains the Linux product and is not retired by this document.
@@ -85,9 +85,10 @@ What Cantrip promises about the destination:
    dictation until the app quits.
 
 What it does not promise: macOS has no operation that checks focus and delivers text
-as one step. The app or window can lose focus in the instant after the last check; the
-text is still addressed to the starting app, which may ignore it or take it while no
-longer in front. A paste may also land in another of that app's own fields or windows.
+as one step. The last check reads the window, then the app; a window switch after the
+first read or an app switch after the second is not caught. The text is still
+addressed to the starting app, which may ignore it or take it while no longer in
+front. A paste may also land in another of that app's own fields or windows.
 An app can reuse one field for several documents or conversations, so the same field may
 hold a different conversation by the time the text arrives. Cantrip reports "Inserted"
 only when the field's text before and after differs by exactly the dictation;
@@ -141,18 +142,18 @@ silence; a louder part in which no turn can be found and no words are recognized
 as not transcribed, so its audio is kept.
 
 A file appears whole or not at all, and Cantrip never overwrites an existing file,
-including its own. If Retry completes a meeting that already has partial notes, the
-full notes are a new file beside them (`…-complete.md`) that names the one it
-supersedes; the partial notes, with any edits, stay as they are. "Beside them" holds
-even if another Meeting folder has been chosen since.
+including its own. Every meeting has one `source_id`, fixed when recording starts, and
+every note of it carries that `source_id` with `status: partial` or `status: complete`.
+Partial notes are `<utc>-<slug>-partial.md`. If Retry then completes the meeting, the
+full notes are a new file, `<utc>-<slug>.md`, in the current Meeting folder. Cantrip
+does not need the partial notes for that, so the user can edit, rename, move or delete
+them, or choose another folder, and they stay as the user left them.
 
 If the notes are finished but the folder cannot be written, the meeting is
 **pending-archive**: every chunk is transcribed, the cleaned transcript and summary
 are kept in staging, and only writing the final file failed. The popover says so and
 offers Retry, which only writes that file: it makes no speech or language-model call.
-If partial notes exist and their directory is out of reach, the meeting stays
-pending-archive and the popover names that directory; Cantrip does not save the full
-notes anywhere else.
+It works once the folder is writable again or another one is chosen.
 
 ## Control surface
 
