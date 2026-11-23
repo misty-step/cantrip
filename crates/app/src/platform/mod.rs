@@ -25,6 +25,7 @@ pub enum HotkeyMode {
     /// Press and release reported: hold-to-talk and tap-to-toggle.
     PressRelease,
     /// Activation only (some Wayland portals): tap-to-toggle.
+    #[cfg_attr(target_os = "macos", allow(dead_code))] // Wayland portals only
     ActivationOnly,
 }
 
@@ -50,20 +51,12 @@ pub trait Tray: Send {
     fn set_recording(&self, recording: bool);
 }
 
-/// Which native window a UI surface is, for platform window patching.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SurfaceKind {
-    Hud,
-    Popover,
-    Settings,
-}
-
 /// Window behavior and look hooks for the egui UI.
 pub trait UiPlatform: Send + Sync {
-    /// Patch a freshly created native window: the HUD becomes non-activating,
-    /// click-through, on every workspace, above others; the popover floats.
-    /// `raw` is the platform window handle (X11 window id, NSView pointer…).
-    fn configure_window(&self, kind: SurfaceKind, raw: raw_window::Raw);
+    /// Patch the freshly created HUD window: non-activating, click-through,
+    /// on every workspace, above others. `raw` is the platform window handle
+    /// (X11 window id, NSView pointer…).
+    fn configure_hud(&self, raw: raw_window::Raw);
     /// Show / hide the HUD window without activating Cantrip.
     fn show_hud(&self, raw: raw_window::Raw, visible: bool);
     /// Bottom-centre point (logical px) of the display under the pointer, for
@@ -105,6 +98,17 @@ pub struct Platform {
     /// Session description for logs and the release matrix
     /// (e.g. "linux-x11", "linux-wayland-kde", "macos").
     pub session: String,
+}
+
+/// OS-specific event-loop setup for the UI (macOS: an accessory app that
+/// never activates itself, so showing the HUD cannot take focus).
+pub fn event_loop_tweaks(options: &mut eframe::NativeOptions) {
+    #[cfg(target_os = "macos")]
+    {
+        options.event_loop_builder = Some(Box::new(macos::event_loop_tweaks));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = options;
 }
 
 /// Build the platform for this session. `requests` receives tray/launcher

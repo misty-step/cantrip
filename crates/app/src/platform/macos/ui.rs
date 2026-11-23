@@ -9,13 +9,13 @@
 use super::ns;
 use crate::platform::macos_logic as logic;
 use crate::platform::raw_window::Raw;
-use crate::platform::{SurfaceKind, UiPlatform};
+use crate::platform::UiPlatform;
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSEvent,
-    NSFloatingWindowLevel, NSModalResponseOK, NSOpenPanel, NSScreen, NSStatusWindowLevel, NSView,
-    NSWindow, NSWindowCollectionBehavior,
+    NSModalResponseOK, NSOpenPanel, NSScreen, NSStatusWindowLevel, NSView, NSWindow,
+    NSWindowCollectionBehavior,
 };
 use objc2_foundation::{NSArray, NSURL};
 use std::path::{Path, PathBuf};
@@ -63,21 +63,20 @@ pub fn event_loop_tweaks(builder: &mut eframe::EventLoopBuilder<eframe::UserEven
 }
 
 impl UiPlatform for MacUi {
-    fn configure_window(&self, kind: SurfaceKind, raw: Raw) {
+    fn configure_hud(&self, raw: Raw) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         let Some(window) = window_of(raw, mtm) else {
             return;
         };
-        let every_space = NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        match kind {
-            SurfaceKind::Hud => {
+        {
+            {
                 window.setLevel(NSStatusWindowLevel);
                 window.setIgnoresMouseEvents(true);
                 window.setCollectionBehavior(
-                    every_space
+                    NSWindowCollectionBehavior::CanJoinAllSpaces
+                        | NSWindowCollectionBehavior::FullScreenAuxiliary
                         | NSWindowCollectionBehavior::Stationary
                         | NSWindowCollectionBehavior::IgnoresCycle,
                 );
@@ -85,18 +84,6 @@ impl UiPlatform for MacUi {
                 window.setOpaque(false);
                 window.setBackgroundColor(Some(&NSColor::clearColor()));
                 window.setHasShadow(false);
-            }
-            SurfaceKind::Popover => {
-                window.setLevel(NSFloatingWindowLevel);
-                window.setCollectionBehavior(
-                    every_space
-                        | NSWindowCollectionBehavior::Transient
-                        | NSWindowCollectionBehavior::IgnoresCycle,
-                );
-                window.setHidesOnDeactivate(false);
-            }
-            SurfaceKind::Settings => {
-                window.setCollectionBehavior(NSWindowCollectionBehavior::MoveToActiveSpace);
             }
         }
     }

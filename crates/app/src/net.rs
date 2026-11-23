@@ -1,5 +1,6 @@
-//! HTTPS transport to OpenRouter (cfg-free: rustls on Linux, native-tls on
-//! macOS, chosen in Cargo.toml). Implements `cantrip_core::ports::Transport`.
+//! HTTPS transport to OpenRouter: rustls on Linux, the system TLS stack
+//! (Security.framework via native-tls) on macOS, so the Apple build needs no C
+//! toolchain. Implements `cantrip_core::ports::Transport`.
 //!
 //! Error mapping is what the core's fail-closed rules depend on:
 //! - DNS failure, refused / unreachable connect, or a connect-phase timeout →
@@ -38,11 +39,22 @@ impl UreqTransport {
             .timeout_resolve(Some(CONNECT_TIMEOUT))
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .user_agent("cantrip/2")
+            .tls_config(tls_config())
             .build();
         UreqTransport {
             agent: ureq::Agent::new_with_config(config),
         }
     }
+}
+
+/// The TLS provider compiled in for this OS.
+fn tls_config() -> ureq::tls::TlsConfig {
+    let provider = if cfg!(target_os = "macos") {
+        ureq::tls::TlsProvider::NativeTls
+    } else {
+        ureq::tls::TlsProvider::Rustls
+    };
+    ureq::tls::TlsConfig::builder().provider(provider).build()
 }
 
 impl Transport for UreqTransport {

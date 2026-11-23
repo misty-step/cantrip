@@ -6,7 +6,7 @@
 
 use super::{hud, popover, settings, theme};
 use crate::platform::raw_window::Raw;
-use crate::platform::{SurfaceKind, UiPlatform};
+use crate::platform::UiPlatform;
 use cantrip_core::app::{Command, Control, KeyState, UiSnapshot};
 use cantrip_core::shortcut::Chord;
 use cantrip_core::speech::Mode;
@@ -167,7 +167,7 @@ pub fn fc_font(pattern: &str) -> Option<Vec<u8>> {
 }
 
 impl UiPlatform for GalleryPlatform {
-    fn configure_window(&self, _kind: SurfaceKind, _raw: Raw) {}
+    fn configure_hud(&self, _raw: Raw) {}
     fn show_hud(&self, _raw: Raw, _visible: bool) {}
     fn hud_anchor(&self) -> Option<(f32, f32)> {
         None
@@ -321,7 +321,12 @@ fn run_live(dark: bool) -> anyhow::Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     });
-    super::run(control, Arc::new(GalleryPlatform { dark }), rx)
+    super::run(
+        control,
+        Arc::new(GalleryPlatform { dark }),
+        rx,
+        Box::new(|| {}),
+    )
 }
 
 struct Gallery {

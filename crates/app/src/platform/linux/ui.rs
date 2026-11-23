@@ -6,7 +6,7 @@
 use super::dbus_util;
 use super::window::WindowPatcher;
 use crate::platform::raw_window::Raw;
-use crate::platform::{SurfaceKind, UiPlatform};
+use crate::platform::UiPlatform;
 use dbus::arg::{PropMap, RefArg, Variant};
 use dbus::blocking::Connection;
 use std::collections::HashMap;
@@ -38,8 +38,8 @@ impl Default for LinuxUi {
 }
 
 impl UiPlatform for LinuxUi {
-    fn configure_window(&self, kind: SurfaceKind, raw: Raw) {
-        self.windows.configure_window(kind, raw)
+    fn configure_hud(&self, raw: Raw) {
+        self.windows.configure_hud(raw)
     }
 
     fn show_hud(&self, raw: Raw, visible: bool) {

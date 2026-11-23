@@ -98,6 +98,7 @@ pub fn classify_support(code: i32, settable: bool) -> FieldSupport {
 // ───────────────────────────── shortcut ─────────────────────────────
 
 /// Virtual key code of `V` on the ANSI layout (kVK_ANSI_V), for ⌘V.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const KVK_ANSI_V: u16 = 9;
 
 /// The W3C `KeyboardEvent.code` name (as `keyboard_types::Code` parses it) for

@@ -14,7 +14,6 @@
 
 use super::x11::X11;
 use crate::platform::raw_window::Raw;
-use crate::platform::SurfaceKind;
 use std::sync::Arc;
 use x11rb::protocol::randr::ConnectionExt as _;
 use x11rb::protocol::shape::{self, ConnectionExt as _};
@@ -50,13 +49,13 @@ impl WindowPatcher {
         }
     }
 
-    pub fn configure_window(&self, kind: SurfaceKind, raw: Raw) {
+    pub fn configure_hud(&self, raw: Raw) {
         let (Some(x), Some(win)) = (self.x.as_ref(), Self::window(raw)) else {
             return;
         };
         let a = &x.atoms;
-        match kind {
-            SurfaceKind::Hud => {
+        {
+            {
                 let _ = x.conn.change_window_attributes(
                     win,
                     &ChangeWindowAttributesAux::new().override_redirect(1),
@@ -90,25 +89,6 @@ impl WindowPatcher {
                     0,
                     0,
                     &[],
-                );
-            }
-            SurfaceKind::Popover => {
-                self.set_types(x, win, &[a._NET_WM_WINDOW_TYPE_UTILITY]);
-                self.set_states(
-                    x,
-                    win,
-                    &[
-                        a._NET_WM_STATE_ABOVE,
-                        a._NET_WM_STATE_SKIP_TASKBAR,
-                        a._NET_WM_STATE_SKIP_PAGER,
-                    ],
-                );
-            }
-            SurfaceKind::Settings => {
-                self.set_types(
-                    x,
-                    win,
-                    &[a._NET_WM_WINDOW_TYPE_DIALOG, a._NET_WM_WINDOW_TYPE_NORMAL],
                 );
             }
         }
@@ -264,8 +244,8 @@ mod tests {
     #[test]
     fn non_x11_handles_are_ignored_without_panicking() {
         let p = WindowPatcher { x: None };
-        p.configure_window(SurfaceKind::Hud, Raw::Wayland(1));
-        p.configure_window(SurfaceKind::Hud, Raw::X11(42));
+        p.configure_hud(Raw::Wayland(1));
+        p.configure_hud(Raw::X11(42));
         p.show_hud(Raw::AppKit(1), true);
         assert_eq!(p.hud_anchor(), None);
         assert_eq!(
@@ -307,7 +287,7 @@ mod live {
             .unwrap();
         let focus_before = x.conn.get_input_focus().unwrap().reply().unwrap().focus;
         let p = WindowPatcher::new();
-        p.configure_window(SurfaceKind::Hud, Raw::X11(win as u64));
+        p.configure_hud(Raw::X11(win as u64));
         p.show_hud(Raw::X11(win as u64), true);
         std::thread::sleep(std::time::Duration::from_millis(300));
         let attrs = x.conn.get_window_attributes(win).unwrap().reply().unwrap();

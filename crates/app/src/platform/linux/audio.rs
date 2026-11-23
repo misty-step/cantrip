@@ -197,10 +197,6 @@ impl PwRecord {
         Ok(self)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// SIGINT and wait (bounded); then SIGTERM; SIGKILL only as last resort.
     pub fn stop(mut self) -> Result<PathBuf, String> {
         signal(&self.child, libc::SIGINT);
@@ -278,7 +274,8 @@ pub fn classify_failure(stderr: &str) -> MicError {
 /// Background reader of a growing WAV file's newest ~50 ms.
 pub struct LevelMeter {
     level: Arc<AtomicU32>,
-    bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// Audio bytes seen so far (shared with the reader thread).
+    _bytes: Arc<std::sync::atomic::AtomicU64>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -311,7 +308,7 @@ impl LevelMeter {
         });
         LevelMeter {
             level,
-            bytes,
+            _bytes: bytes,
             stop,
             thread: Some(thread),
         }
@@ -319,11 +316,6 @@ impl LevelMeter {
 
     pub fn level(&self) -> f32 {
         f32::from_bits(self.level.load(Ordering::Relaxed))
-    }
-
-    /// Audio bytes written so far (after the header).
-    pub fn audio_bytes(&self) -> u64 {
-        self.bytes.load(Ordering::Relaxed)
     }
 }
 

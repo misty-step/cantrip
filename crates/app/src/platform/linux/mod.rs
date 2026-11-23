@@ -33,9 +33,15 @@ use std::sync::Arc;
 pub fn platform(requests: Sender<UiRequest>) -> anyhow::Result<(Platform, Option<Box<dyn Tray>>)> {
     let session = session::Session::detect();
     let tray = tray::start(requests).map(|t| Box::new(t) as Box<dyn Tray>);
+    let clipboard = clipboard::LinuxClipboard::new();
+    let name = format!(
+        "{} (clipboard: {})",
+        session.name(),
+        clipboard.backend_name()
+    );
     let platform = Platform {
         desktop: Arc::new(desktop::LinuxDesktop::new()),
-        clipboard: Arc::new(clipboard::LinuxClipboard::new()),
+        clipboard: Arc::new(clipboard),
         recorder: Arc::new(audio::PipewireRecorder::new()),
         meeting: Arc::new(meeting_capture::PipewireMeetingCapture::new()),
         local: Arc::new(local::NoLocalRecognizer),
@@ -44,7 +50,7 @@ pub fn platform(requests: Sender<UiRequest>) -> anyhow::Result<(Platform, Option
         transport: Arc::new(crate::net::UreqTransport::new()),
         hotkeys: Box::new(hotkeys::LinuxHotkeys::new()),
         ui: Arc::new(ui::LinuxUi::new()),
-        session: session.name().to_string(),
+        session: name,
     };
     Ok((platform, tray))
 }

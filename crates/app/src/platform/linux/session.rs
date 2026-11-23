@@ -61,10 +61,6 @@ impl Session {
             Session::WaylandOther => "linux-wayland-other",
         }
     }
-
-    pub fn is_wayland(self) -> bool {
-        self != Session::X11
-    }
 }
 
 #[cfg(test)]

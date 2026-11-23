@@ -14,14 +14,10 @@
 //! main-thread AppKit objects). Desktop, clipboard, audio, speech and secret
 //! calls are safe from worker threads.
 
-// integrator removes once wired
-#![allow(dead_code)]
-
 mod audio;
 mod clipboard;
 mod desktop;
 mod hotkeys;
-mod http;
 mod speech;
 mod system;
 mod tray;
@@ -33,8 +29,6 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-// Used by main.rs when building eframe's NativeOptions (integrator wires it).
-#[allow(unused_imports)]
 pub use ui::event_loop_tweaks;
 
 /// Build the macOS platform. Call on the main thread.
@@ -57,7 +51,7 @@ pub fn platform(requests: Sender<UiRequest>) -> anyhow::Result<(Platform, Option
         local: Arc::new(speech::MacLocalRecognizer::new()),
         secrets: Arc::new(system::KeychainSecrets),
         login: Arc::new(system::MacLoginItem),
-        transport: Arc::new(http::NativeTlsTransport),
+        transport: Arc::new(crate::net::UreqTransport::new()),
         hotkeys: Box::new(hotkeys::MacHotkeys::new(mtm)?),
         ui: Arc::new(ui::MacUi::new()),
         session: "macos".to_string(),

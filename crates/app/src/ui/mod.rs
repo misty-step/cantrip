@@ -16,7 +16,7 @@ pub mod theme;
 pub mod widgets;
 
 use crate::platform::raw_window::Raw;
-use crate::platform::{SurfaceKind, UiPlatform, UiRequest};
+use crate::platform::{UiPlatform, UiRequest};
 use cantrip_core::app::{Command, Control, UiSnapshot};
 use cantrip_core::surface::Hud;
 use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
@@ -44,12 +44,17 @@ const THEME_POLL: Duration = Duration::from_secs(2);
 /// Distance of the HUD's bottom edge above the anchor (display bottom-centre).
 const HUD_BOTTOM_MARGIN: f32 = 72.0;
 
+/// Called once per UI pass on the main thread (hotkey re-registration,
+/// Escape grab, tray state — platform work that must stay on the main thread).
+pub type Tick = Box<dyn FnMut()>;
+
 /// Run the UI event loop on the main thread until Quit.
 /// `requests` carries tray / launcher / IPC activations.
 pub fn run(
     control: Arc<dyn Control>,
     platform: Arc<dyn UiPlatform>,
     requests: Receiver<UiRequest>,
+    tick: Tick,
 ) -> anyhow::Result<()> {
     let hud_viewport = ViewportBuilder::default()
         .with_title("Cantrip HUD")
@@ -66,7 +71,6 @@ pub fn run(
         .with_window_type(egui::X11WindowType::Notification)
         .with_override_redirect(true)
         .with_visible(false);
-    #[allow(unused_mut)]
     let mut options = eframe::NativeOptions {
         viewport: hud_viewport,
         renderer: eframe::Renderer::Glow,
@@ -74,17 +78,7 @@ pub fn run(
         persist_window: false,
         ..Default::default()
     };
-    // macOS: an accessory app (no Dock icon) that never activates itself, so
-    // showing the HUD cannot take focus from the app being dictated into.
-    #[cfg(target_os = "macos")]
-    {
-        options.event_loop_builder = Some(Box::new(|b| {
-            use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
-            b.with_activation_policy(ActivationPolicy::Accessory)
-                .with_activate_ignoring_other_apps(false)
-                .with_default_menu(false);
-        }));
-    }
+    crate::platform::event_loop_tweaks(&mut options);
     eframe::run_native(
         "cantrip",
         options,
@@ -95,8 +89,10 @@ pub fn run(
             let dark = platform.prefers_dark();
             theme::apply(&cc.egui_ctx, &theme::palette(dark));
             let raw = raw_of(cc.window_handle().ok().map(|h| h.as_raw()));
-            platform.configure_window(SurfaceKind::Hud, raw);
-            Ok(Box::new(Shell::new(control, platform, requests, raw, dark)))
+            platform.configure_hud(raw);
+            Ok(Box::new(Shell::new(
+                control, platform, requests, raw, dark, tick,
+            )))
         }),
     )
     .map_err(|e| anyhow::anyhow!("UI event loop failed: {e}"))
@@ -127,6 +123,7 @@ struct Shell {
     popover: Child<popover::PopoverState>,
     settings: Child<settings::SettingsState>,
     quitting: bool,
+    tick: Tick,
 }
 
 /// One child window's open/focus bookkeeping.
@@ -162,6 +159,7 @@ impl Shell {
         requests: Receiver<UiRequest>,
         raw: Raw,
         dark: bool,
+        tick: Tick,
     ) -> Self {
         Shell {
             control,
@@ -182,6 +180,7 @@ impl Shell {
                 ..Default::default()
             },
             quitting: false,
+            tick,
         }
     }
 
@@ -353,6 +352,7 @@ impl eframe::App for Shell {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        (self.tick)();
         while let Ok(req) = self.requests.try_recv() {
             match req {
                 UiRequest::ShowPopover => self.popover.open(),
