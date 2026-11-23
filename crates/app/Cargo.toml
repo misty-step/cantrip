@@ -17,7 +17,9 @@ serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
 # ui (owned by the ui module)
-eframe = "0.37"
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+raw-window-handle = "0.6"
+winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # linux platform (owned by platform/linux)
