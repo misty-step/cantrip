@@ -32,3 +32,4 @@ __pycache__/
 # Iron Forest installed binary and generated evidence
 .iron-forest/bin/
 .iron-forest/runtime/
+/crates/*/target

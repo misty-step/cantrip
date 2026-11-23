@@ -1,70 +1,19 @@
-[package]
-name = "cantrip"
-version.workspace = true
-edition = "2021"
-description = "Local-first dictation for Linux and macOS."
-license = "MIT"
-repository = "https://github.com/misty-step/cantrip"
-homepage = "https://cantrip.mistystep.io"
-readme = "README.md"
-
 [workspace]
-members = ["crates/engine"]
-default-members = [".", "crates/engine"]
+members = ["crates/core", "crates/app"]
+default-members = ["crates/core", "crates/app"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.15"
+version = "2.0.0-dev"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/misty-step/cantrip"
 
-[dependencies]
-anyhow = "1"
-cantrip-engine = { path = "crates/engine" }
-clap = { version = "4", features = ["derive"] }
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-dirs = "5"
-transcribe-rs = { version = "0.3", features = ["onnx"] }
-ureq = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-libc = "0.2"
-eframe = "0.29"
-ab_glyph = "0.2"
-epaint_default_fonts = "0.29"
-toml_edit = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-dbus = "0.9.12"
-parking_lot = "0.12"
-smithay-client-toolkit = { version = "0.21.1", default-features = false }
-wayland-client = "0.31.14"
-wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { version = "0.6", features = ["exception"] }
-block2 = "0.6"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "NSArray", "NSAttributedString", "NSBundle", "NSData", "NSDate", "NSDictionary", "NSError", "NSGeometry", "NSIndexSet", "NSNotification", "NSObjCRuntime", "NSObject", "NSOperation", "NSRange", "NSRunLoop", "NSString", "NSTimer", "NSURL"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "objc2-core-graphics", "NSAccessibility", "NSAccessibilityProtocols", "NSAlert", "NSAppearance", "NSApplication", "NSAttributedString", "NSBezierPath", "NSBitmapImageRep", "NSBox", "NSButton", "NSButtonCell", "NSCell", "NSColor", "NSColorSpace", "NSControl", "NSEvent", "NSFont", "NSFontDescriptor", "NSGraphics", "NSGraphicsContext", "NSGridView", "NSImage", "NSImageRep", "NSImageView", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSPanel", "NSParagraphStyle", "NSPasteboard", "NSPopUpButton", "NSProgressIndicator", "NSResponder", "NSRunningApplication", "NSScreen", "NSScrollView", "NSSecureTextField", "NSSegmentedControl", "NSStackView", "NSStatusBar", "NSStatusBarButton", "NSStatusItem", "NSTableCellView", "NSTableColumn", "NSTableHeaderView", "NSTableView", "NSText", "NSTextAttachment", "NSTextField", "NSTextView", "NSToolbar", "NSToolbarItem", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSView", "NSWindow", "NSWorkspace"] }
-objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
-objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware"] }
-objc2-audio-toolbox = { version = "0.3.2", default-features = false, features = ["std", "AUComponent", "AudioComponent", "AudioOutputUnit", "AudioUnitProperties", "objc2-core-audio-types"] }
-objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFString"] }
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CGColorSpace", "CGContext", "CGDataProvider", "CGImage"] }
-objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "objc2", "objc2-foundation", "SMAppService"] }
-global-hotkey = "0.8"
-crossbeam-queue = "0.3"
-
-[features]
-default = []
-cuda = ["cantrip-engine/cuda", "transcribe-rs/ort-cuda"]
-
-[dev-dependencies]
-hound = "3.5"
-base64 = "0.22.1"
 sha2 = "0.10"
+libc = "0.2"
 
 [profile.release]
 lto = "thin"
