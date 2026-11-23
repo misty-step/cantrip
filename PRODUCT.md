@@ -43,7 +43,7 @@ disagree this document wins. v2 never deletes or rewrites v1's data.
 | macOS manual paste only (ADR 0031) | Automatic two-tier delivery on both OSes, always addressed to the captured target; copy-only when focus moved, the target is uncertain or the session cannot address a paste |
 | Automatic keys need uninterrupted verified destination history (ADR 0019) | Target captured at start and verified again immediately before delivery; not uninterrupted history |
 | Every stopped take is retained until confirmed Forget (ADR 0020) | Dictation audio is deleted once its text is delivered or copied; failed, refused, interrupted or `Not delivered` audio is kept until Retry succeeds or the user confirms Discard |
-| Clipboard contents are never read or restored (AGENTS.md) | Direct insertion never touches the clipboard. An addressed paste snapshots it and restores it only when the edit is confirmed; otherwise the dictation stays on it unless something else replaces it |
+| Clipboard contents are never read or restored (AGENTS.md) | Direct insertion never touches the clipboard. An addressed paste snapshots it and restores it only when the edit is confirmed and the clipboard is unchanged since Cantrip wrote its text; otherwise the dictation stays on it unless something else replaces it |
 | Successful transcripts are kept as local history (AGENTS.md) | No history. The last dictation's text is kept in memory until quit |
 | Vocabulary aliases, Clean only, never sent to providers (AGENTS.md, ADR 0012) | One flat term list, no aliases; it biases the recognizer and guides the rewrite |
 | Clean uses DeepSeek, chosen on measured fidelity (ADR 0012) | Clean and Elevated use `openai/gpt-6-luna` |
@@ -73,13 +73,15 @@ within 100 ms. Escape cancels and discards the take. After transcription, the te
 3. **Tier 2 — addressed paste**, only for an identified field that cannot take direct insertion,
    and only where the OS can address a paste to the captured app: snapshot the clipboard, place
    the text (marked transient where supported), send a paste addressed to the captured app, and
-   restore the old clipboard **only** when the edit is confirmed. Where the session cannot address
-   a paste, the text is copied instead: `Copied — paste unsupported on this session`.
+   restore the old clipboard **only** when the edit is confirmed and the clipboard is completely
+   unchanged since Cantrip wrote its text. Where the session cannot address a paste, the text is
+   copied instead: `Copied — paste unsupported on this session`.
 4. **Honest outcome.** `✓ Inserted` (edit read back), `Sent — unconfirmed` (direct write made),
    `Posted — unconfirmed` (addressed paste sent), a `Copied — …` reason, or `Not delivered` (even
-   the copy failed). "Text is on the clipboard" is shown only while the clipboard still holds
-   Cantrip's text, never after something else replaced it. **`Copy last dictation`** holds the
-   last dictation in memory until quit; a `Not delivered` take also keeps its audio staged until
+   the copy failed). "Text is on the clipboard" is shown only while the clipboard is unchanged
+   since Cantrip wrote its text; if it changes before or while the HUD is visible, the claim drops
+   at once for "Use Copy last dictation". **`Copy last dictation`** holds the last dictation in
+   memory until quit; a `Not delivered` take also keeps its audio staged until
    Retry succeeds or the user confirms Discard.
 
 Not promised: no supported OS checks focus and delivers in one step, so a switch right after the
