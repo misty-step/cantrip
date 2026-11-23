@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Cantrip
+GenericName=Dictation
+Comment=Dictate into any app and record meetings into Markdown notes
+Exec=cantrip popover
+Icon=cantrip
+Terminal=false
+Categories=Utility;Accessibility;AudioVideo;
+Keywords=dictation;speech;voice;meeting;transcribe;
+StartupNotify=false
+SingleMainWindow=true
