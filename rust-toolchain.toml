@@ -4,3 +4,5 @@
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
+# The macOS platform module is type-checked on Linux (scripts/check).
+targets = ["aarch64-apple-darwin"]

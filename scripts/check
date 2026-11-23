@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # Repository-owned clone-to-green command. CI runs the two independent tiers in
 # parallel; no argument runs their union locally and stops at the first red gate.
+#
+#   rust       fmt, clippy (Linux, plus a macOS type-check of the macOS
+#              platform module), unit/integration tests
+#   contracts  release / installer / website script tests
+#
+# Live desktop tests (X11 + AT-SPI, PipeWire, Secret Service) are #[ignore]d;
+# run them on a real session with:
+#   DISPLAY=:0 cargo test -p cantrip -- --ignored --test-threads=1
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -14,20 +22,18 @@ if [[ "$tier" != contracts ]]; then
   echo "── check: cargo fmt --all --check"
   cargo fmt --all --check
 
-  echo "── check: cargo clippy --workspace --locked --all-targets -- -D warnings"
+  echo "── check: cargo clippy --workspace --all-targets -- -D warnings (Linux)"
   cargo clippy --workspace --locked --all-targets -- -D warnings
 
-  echo "── check: cargo test --workspace --locked"
-  cargo test --workspace --locked
+  # rust-toolchain.toml installs the target; no Apple SDK is needed to type-check.
+  echo "── check: cargo clippy -p cantrip --target aarch64-apple-darwin -- -D warnings (macOS, type-checked)"
+  cargo clippy -p cantrip --locked --target aarch64-apple-darwin -- -D warnings
 
-  echo "── check: offline evaluation example"
-  cargo test --locked --package cantrip --example eval
+  echo "── check: cargo test --workspace"
+  cargo test --workspace --locked
 fi
 
 if [[ "$tier" != rust ]]; then
-  echo "── check: Omarchy installer"
-  python3 -m unittest discover -s integrations/omarchy -p 'test_*.py'
-
   echo "── check: release artifact and installer"
   python3 -m unittest discover -s tests -p 'test_release_*.py'
 

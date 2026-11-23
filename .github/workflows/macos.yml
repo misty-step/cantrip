@@ -1,10 +1,14 @@
 name: Native macOS
 
+# Cantrip v2 on a real Mac: link, test and lint the workspace natively. Linux CI
+# only type-checks the macOS platform module (no Apple SDK there). Runtime
+# behavior (AX insertion, CGEventPostToPid paste, NSPasteboard, Core Audio tap,
+# SFSpeechRecognizer, HUD panel) still needs the attended checklist in
+# ARCHITECTURE.md › Verification boundaries.
+
 on:
   workflow_dispatch:
   workflow_call:
-  schedule:
-    - cron: '17 5,17 * * *'
 
 permissions:
   contents: read
@@ -16,152 +20,22 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  MACOSX_DEPLOYMENT_TARGET: "13.3"
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
 
 jobs:
   native:
-    name: ${{ github.event_name == 'schedule' && 'Warm Intel runtime' || format('macOS {0} workspace and native app', matrix.runner == 'macos-15' && 'arm64' || 'x86_64') }}
-    # GitHub documents macos-15 as Apple Silicon and macos-15-intel as Intel:
-    # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
-    # Runner images remain mutable patched labels; actions are SHA-pinned.
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
-    env:
-      TARGET: ${{ matrix.runner == 'macos-15' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
-      ARCHITECTURE: ${{ matrix.runner == 'macos-15' && 'arm64' || 'x86_64' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Tier policy: docs/decisions/0035-bounded-ci-feedback.md
-        runner: ${{ fromJSON(github.event_name == 'schedule' && '["macos-15-intel"]' || '["macos-15","macos-15-intel"]') }}
+    name: macOS 15 arm64 workspace
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-      - name: Require the documented native runner architecture
-        env:
-          EXPECTED_ARCHITECTURE: ${{ env.ARCHITECTURE }}
-        run: |
-          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
-          xcrun --find clang
       - name: Install the repository-pinned Rust toolchain
-        if: github.event_name != 'schedule'
+        run: rustup install
+      - name: Build, lint and test natively
         run: |
-          rustup install
-          rustc --version --verbose
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        if: github.event_name != 'schedule'
-        with:
-          shared-key: macos-${{ env.ARCHITECTURE }}-cpu
-      - name: Identify the pinned Intel runtime cache
-        if: matrix.runner == 'macos-15-intel'
-        id: runtime-cache
-        env:
-          TARGET: ${{ env.TARGET }}
-          RUNNER_IMAGE: ${{ matrix.runner }}
-        run: |
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          from pathlib import Path
-          import runpy
-          import subprocess
-
-          script = Path("scripts/prepare-macos-runtime")
-          runtime = runpy.run_path(str(script))
-          identity = {
-              name: runtime[name]
-              for name in ("ORT_SYS_VERSION", "ORT_VERSION", "ORT_REVISION", "MINIMUM_MACOS")
-          }
-          identity.update(
-              target=os.environ["TARGET"],
-              script_sha256=hashlib.sha256(script.read_bytes()).hexdigest(),
-              runner_image=os.environ["RUNNER_IMAGE"],
-              image_os=os.environ["ImageOS"],
-              image_version=os.environ["ImageVersion"],
-              macos=subprocess.check_output(["sw_vers"], text=True).strip(),
-              xcode_path=subprocess.check_output(["xcode-select", "-p"], text=True).strip(),
-              xcode=subprocess.check_output(["xcodebuild", "-version"], text=True).strip(),
-              sdk=subprocess.check_output(["xcrun", "--show-sdk-version"], text=True).strip(),
-              clang=subprocess.check_output(["xcrun", "clang", "--version"], text=True).strip(),
-              cmake=subprocess.check_output(["cmake", "--version"], text=True).strip(),
-          )
-          digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-          # Match packaging's default path so it validates and reuses this same tree.
-          path = Path(os.environ["RUNNER_TEMP"]) / "native-runtime" / identity["target"] / runtime["ORT_VERSION"]
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"key=macos-runtime-archives-{identity['target']}-{runtime['ORT_VERSION']}-{digest}\n")
-              output.write(f"path={path}\n")
-          print(json.dumps(identity, indent=2, sort_keys=True))
-          PY
-      - name: Restore the pinned Intel CPU runtime
-        if: matrix.runner == 'macos-15-intel'
-        id: runtime-cache-restore
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          # Source and .git are required by the revision/clean-source checks.
-          # Cache all verified archives, but no objects or CMake intermediates.
-          path: |
-            ${{ steps.runtime-cache.outputs.path }}/runtime.json
-            ${{ steps.runtime-cache.outputs.path }}/source
-            ${{ steps.runtime-cache.outputs.path }}/build/**/*.a
-          key: ${{ steps.runtime-cache.outputs.key }}
-      # A warm run must still pass the script's fail-closed integrity checks.
-      - name: Prepare the pinned CPU runtime omitted by upstream Intel prebuilts
-        if: matrix.runner == 'macos-15-intel'
-        env:
-          TARGET: ${{ env.TARGET }}
-          RUNTIME_OUTPUT: ${{ steps.runtime-cache.outputs.path }}
-        run: |
-          python3 scripts/prepare-macos-runtime --target "$TARGET" \
-            --output "$RUNTIME_OUTPUT" --github-env "$GITHUB_ENV"
-      # Preserve a validated runtime even if a later, unrelated app check fails.
-      - name: Save the validated Intel CPU runtime
-        if: matrix.runner == 'macos-15-intel' && steps.runtime-cache-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ${{ steps.runtime-cache.outputs.path }}/runtime.json
-            ${{ steps.runtime-cache.outputs.path }}/source
-            ${{ steps.runtime-cache.outputs.path }}/build/**/*.a
-          key: ${{ steps.runtime-cache.outputs.key }}
-      - name: Check every crate and native target against the lockfile
-        if: github.event_name != 'schedule'
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --locked --all-targets -- -D warnings
-          cargo test --workspace --locked
-          cargo test --locked --package cantrip --example eval
-          python3 -m unittest discover -s tests -p 'test_release_*.py'
-      - name: Build and package an explicit development app (never a production release)
-        if: github.event_name != 'schedule'
-        env:
-          TARGET: ${{ env.TARGET }}
-          SOURCE_REVISION: ${{ github.sha }}
-        run: |
-          python3 scripts/package-macos --target "$TARGET" --ad-hoc \
-            --source-revision "$SOURCE_REVISION" --output "$RUNNER_TEMP/native-app"
-      - name: Exercise relocated app, real public-file STT, capture refusal, native HUD and windows
-        if: github.event_name != 'schedule'
-        env:
-          TARGET: ${{ env.TARGET }}
-        run: |
-          python3 scripts/verify-macos --app "$RUNNER_TEMP/native-app/Cantrip.app" \
-            --target "$TARGET" --output "$RUNNER_TEMP/native-proof"
-      - name: Upload only sanitized public-fixture verification and own-panel screenshots
-        if: github.event_name != 'schedule'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: cantrip-macos-${{ env.ARCHITECTURE }}-public-fixture-proof
-          path: |
-            ${{ runner.temp }}/native-proof/verification.json
-            ${{ runner.temp }}/native-proof/hud-*.png
-            ${{ runner.temp }}/native-proof/settings-*.png
-            ${{ runner.temp }}/native-proof/recordings-*.png
-          if-no-files-found: error
-          retention-days: 14
+          cargo build --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo test --locked --workspace

@@ -370,10 +370,14 @@ mod live {
         assert_eq!((hints[0] & INPUT_HINT, hints[1]), (INPUT_HINT, 0));
         let anchor = p.hud_anchor().unwrap();
         eprintln!("hud anchor (bottom-centre of pointer's monitor): {anchor:?}; focus {focus_before:x} unchanged");
+        // Hiding is parking off-screen (done by the UI); the window stays
+        // mapped so the toolkit can keep creating child windows.
         p.show_hud(Raw::X11(win as u64), false);
         x.flush();
         let attrs = x.conn.get_window_attributes(win).unwrap().reply().unwrap();
-        assert_eq!(attrs.map_state, x11rb::protocol::xproto::MapState::UNMAPPED);
+        assert_eq!(attrs.map_state, x11rb::protocol::xproto::MapState::VIEWABLE);
+        let focus_after_hide = x.conn.get_input_focus().unwrap().reply().unwrap().focus;
+        assert_eq!(focus_before, focus_after_hide, "hiding never moves focus");
         let _ = x.conn.destroy_window(win);
         x.flush();
     }

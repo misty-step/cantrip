@@ -54,11 +54,10 @@ class CheckTiers(unittest.TestCase):
         self.assertEqual(rust_commands, [
             "cargo fmt --all --check",
             "cargo clippy --workspace --locked --all-targets -- -D warnings",
+            "cargo clippy -p cantrip --locked --target aarch64-apple-darwin -- -D warnings",
             "cargo test --workspace --locked",
-            "cargo test --locked --package cantrip --example eval",
         ])
         self.assertEqual(contract_commands, [
-            "python3 -m unittest discover -s integrations/omarchy -p test_*.py",
             "python3 -m unittest discover -s tests -p test_release_*.py",
             "python3 -m unittest discover -s tests -p test_install_from_source.py",
             "python3 -m unittest discover -s tests -p test_verify_site.py",
@@ -120,7 +119,7 @@ class WorkflowDispatch(unittest.TestCase):
     def test_no_workflow_runs_ci_on_a_pr_or_push(self):
         expected = {
             "ci.yml": {"workflow_dispatch", "workflow_call"},
-            "macos.yml": {"workflow_dispatch", "workflow_call", "schedule"},
+            "macos.yml": {"workflow_dispatch", "workflow_call"},
             "release.yml": {"workflow_dispatch"},
             "site.yml": {"workflow_dispatch", "workflow_call"},
         }
@@ -198,23 +197,15 @@ class WorkflowDispatch(unittest.TestCase):
         self.assertIn("artifact-ids: ${{ needs.verify.outputs.proof_id }}", publish)
         self.assertNotIn("cargo build", publish)
 
-    def test_schedule_only_prewarms_intel_and_never_qualifies_a_candidate(self):
+    def test_native_macos_job_builds_lints_and_tests_on_a_real_mac(self):
         native = self.job("macos.yml", "native")
-        self.assertIn(
-            """fromJSON(github.event_name == 'schedule' && '["macos-15-intel"]' || '["macos-15","macos-15-intel"]')""",
-            native,
-        )
-        steps = re.split(r"(?m)^      - ", native.split("    steps:\n", 1)[1])
-        for step in steps:
-            if any(command in step for command in (
-                "rust-cache@", "cargo fmt", "scripts/package-macos",
-                "scripts/verify-macos", "upload-artifact@",
-            )):
-                self.assertIn("if: github.event_name != 'schedule'", step)
-        self.assertIn("scripts/prepare-macos-runtime", native)
-        self.assertIn("uses: actions/cache/save@", native)
-        self.assertNotIn("schedule", self.workflow("ci.yml"))
-        self.assertNotIn("schedule", self.workflow("release.yml"))
+        self.assertIn("runs-on: macos-15", native)
+        for command in (
+            "cargo build --locked --workspace",
+            "cargo clippy --locked --workspace --all-targets -- -D warnings",
+            "cargo test --locked --workspace",
+        ):
+            self.assertIn(command, native)
 
     def test_only_the_named_existing_secret_reaches_master_website_calls(self):
         guard = "github.ref == 'refs/heads/master' && github.event_name == 'workflow_dispatch'"

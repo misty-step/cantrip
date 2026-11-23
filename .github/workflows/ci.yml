@@ -34,12 +34,12 @@ jobs:
           persist-credentials: false
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev libssl-dev pkg-config
-      - name: Install the repository-pinned Rust toolchain
-        run: rustup install
+      - name: Install the repository-pinned Rust toolchain and the macOS check target
+        run: rustup install && rustup target add aarch64-apple-darwin
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: linux-debug0-cpu
-      - name: Check the locked workspace and offline evaluation
+      - name: Check the locked workspace (Linux tests + macOS cross-check)
         run: ./scripts/check rust
 
   contracts:
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Check installer, release, integration and website contracts
+      - name: Check installer, release and website contracts
         run: ./scripts/check contracts
 
   check:
