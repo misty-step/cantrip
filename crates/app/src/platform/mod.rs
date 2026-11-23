@@ -16,6 +16,8 @@ use std::sync::Arc;
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(any(target_os = "macos", test))]
+pub mod macos_logic;
 
 /// How the registered shortcut reports presses on this session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
