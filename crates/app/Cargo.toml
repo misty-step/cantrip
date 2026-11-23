@@ -25,6 +25,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 ureq = { version = "3", features = ["json"] }
 dbus = "0.9"
 ksni = "0.2.2"
+x11rb = { version = "0.13", features = ["xkb", "shape", "randr", "xfixes"] }
 
 # macos platform (owned by platform/macos)
 [target.'cfg(target_os = "macos")'.dependencies]

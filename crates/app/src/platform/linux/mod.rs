@@ -10,6 +10,7 @@
 //! - focus, delivery, clipboard, shortcut, window behavior: [`desktop`],
 //!   [`clipboard`], [`hotkeys`], [`window`]
 
+pub mod atspi;
 pub mod audio;
 pub mod clipboard;
 pub mod dbus_util;
@@ -23,6 +24,7 @@ pub mod session;
 pub mod tray;
 pub mod ui;
 pub mod window;
+pub mod x11;
 
 use super::{Platform, Tray, UiRequest};
 use std::sync::mpsc::Sender;
