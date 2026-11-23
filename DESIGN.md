@@ -2,7 +2,7 @@
 
 Behavior contracts, UI and evidence for [PRODUCT.md](PRODUCT.md): what must be observably true and
 never happen, not how to build it; nothing is built yet. Sources: the Slice #42 spike (2026-11-22)
-and the [OpenRouter STT guide](https://openrouter.ai/docs/guides/overview/multimodal/stt). Principles: [mistystack design](https://github.com/misty-step/mistystack/blob/master/skills/design/SKILL.md#principles).
+and the [OpenRouter STT guide](https://openrouter.ai/docs/guides/overview/multimodal/stt). Principles: [mistystack design](https://github.com/misty-step/mistystack/blob/master/skills/design/SKILL.md).
 
 ## Architecture freedom
 
@@ -177,11 +177,13 @@ publish-only Retry, Discard); `archived` (verified, staging cleaned up).
    digest matches, flushed to stable storage with its directories. Only then, for a complete note,
    is staging cleaned up; a failed check leaves staging and the folder as they are.
 4. **Publish-only Retry** makes zero speech or LLM calls. A recorded path that passes (c) and
-   verifies is flushed and archived. One failing (c) is refused and left untouched: never read,
-   flushed or used to delete staging. Otherwise Cantrip checks the folder chosen now and its
-   resolved `cantrip-meeting/YYYY/MM` under (a) and (b): all disjoint → publish afresh from the
-   intact staged copy and verify (3) before any staging cleanup; any overlap → create, write and
-   delete nothing, stay `pending-archive`. Two complete notes with one `source_id` beat a lost one.
+   verifies (regular non-symlink file, matching digest, per 3) is flushed, then staging is deleted:
+   done. One failing (c) is refused and left untouched: never read, flushed or used to delete
+   staging. Whenever no recorded publication can be accepted (none recorded, one refused under (c),
+   or failed verification), Cantrip checks under (a) and (b) the folder chosen now and its resolved
+   `cantrip-meeting/YYYY/MM`: all disjoint → publish afresh from the intact staged copy, verify and
+   flush (3), then delete staging; any overlap → create, write and delete nothing, leave staging
+   intact, stay `pending-archive`. Two complete notes with one `source_id` beat a lost one.
 
 **Notes.** A partial note shows an unresolved part at its real start as `[MM:SS] You: [transcription
 failed: MM:SS–MM:SS]`; a later complete note never opens a partial. Parts are transcribed with
@@ -267,18 +269,20 @@ Escape during a take, or automation of other apps.
 
 Not yet run. Real machines: macOS 15+; KDE Plasma, GNOME and wlroots on Wayland; X11. Results are
 recorded per platform; anything injected through a debug hook is recorded as injected.
-1. **Release bar**, each clause a blocker on every platform and session: (1) hold-to-talk and
-   tap-to-toggle on macOS 15+ and X11; on Wayland (KDE Plasma, GNOME, wlroots) both where the
-   compositor reports press and release, or tap-to-toggle only where it reports activation only
-   (Wayland alone), recorded per desktop in the release matrix; (2) the non-activating floating HUD
-   pill takes neither focus nor pointer clicks (click pass-through), appears ≤ 100 ms after the
+1. **Release bar**, each clause a blocker on every platform and session: (1) the global shortcut at
+   its default (`⌃⌥Space` macOS, `Ctrl+Alt+Space` Linux), pressed while another app has focus, gives
+   hold-to-talk and tap-to-toggle on macOS 15+ and X11; on Wayland (KDE Plasma, GNOME, wlroots) both
+   where the compositor reports press and release, or tap-to-toggle only where it reports activation
+   only (Wayland alone), recorded per desktop in the release matrix; (2) the non-activating floating
+   HUD pill takes neither focus nor pointer clicks (click pass-through), appears ≤ 100 ms after the
    press (measured), stays visible on every workspace; (3) by name, from the tray / menu-bar icon
    or, on trayless sessions such as stock GNOME, the launcher-opened equivalent popover: Start/stop
    dictation, Start/stop meeting, Mode (Raw / Clean / Elevated), Post-Processing, Copy last
    dictation, Settings…, Quit, the recovery row (Retry / Save partial notes / Discard…) only while
    an item is staged, and the Settings pane's Shortcut recorder, Microphone, OpenRouter API key,
-   Custom Vocabulary, Meeting folder, Open at login; none icon-only, missing or extra. No prompt at
-   launch; Escape discards; a Bluetooth headset joining mid-take does not end it.
+   Custom Vocabulary, Meeting folder, Open at login, all six together in one single pane (no tabs);
+   none icon-only, missing or extra. No prompt at launch; Escape discards; a Bluetooth headset
+   joining mid-take does not end it.
 2. **Delivery**, receivers A (captured) and B logging every write, key event and paste. Cross-app: a
    switch to B before release, in processing, at dispatch or right after the final verification
    gives B zero events; before the final verification it is copy-only and A gets nothing either;
@@ -312,9 +316,10 @@ recorded per platform; anything injected through a debug hook is recorded as inj
    it; on Retry, a recorded path whose directory now resolves into staging is refused, never read,
    flushed or used to delete staging, and left untouched: a disjoint current folder gets a fresh,
    verified publication before staging is cleaned up; an overlapping current folder or resolved
-   subdirectory gets nothing written and the meeting stays `pending-archive`; an injected
-   verification or flush failure keeps the staged note and a later Retry publishes it; a FIFO or
-   symlink at the recorded path neither hangs nor is replaced; a kill around publishing keeps
-   staging (and, with atomic publication, leaves no partial file); a filesystem trace shows zero
-   deletes, renames, truncations, overwrites, write-opens of pre-existing files or temp files in the
-   Meeting folder; a crash mid-meeting offers the `interrupted` row on relaunch.
+   subdirectory gets no creates, writes or deletes (filesystem trace), staging stays intact and the
+   meeting stays `pending-archive`; an injected verification or flush failure keeps the staged note
+   and a later Retry publishes it; a FIFO or symlink at the recorded path neither hangs nor is
+   replaced; a kill around publishing keeps staging (and, with atomic publication, leaves no partial
+   file); a filesystem trace shows zero deletes, renames, truncations, overwrites, write-opens of
+   pre-existing files or temp files in the Meeting folder; a crash mid-meeting offers the
+   `interrupted` row on relaunch.
