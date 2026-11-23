@@ -81,7 +81,7 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 | Concern | macOS 15+ | Linux X11 (and XWayland apps) | Linux native Wayland |
 | --- | --- | --- | --- |
 | Global shortcut | Carbon hot key (`global-hotkey`): press + release | `XGrabKey` + XKB detectable auto-repeat: press + release | xdg-desktop-portal GlobalShortcuts: press + release where the portal sends `Deactivated`, else tap-to-toggle |
-| Escape during a take | Carbon hot key while active | `XGrabKey` while active | not grabbable via the portal (caveat) |
+| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | not grabbable via the portal (caveat) |
 | Focus capture | NSWorkspace frontmost app + AX focused window/element | `_NET_ACTIVE_WINDOW` + `_NET_WM_PID` + AT-SPI focused editable in that window's frame | AT-SPI active frame + focused editable; unidentified → `uncertain` |
 | Tier 1 insert | AX `kAXSelectedTextAttribute` set | AT-SPI EditableText `DeleteText`/`InsertText` | same as X11 |
 | Edit read-back | AX value + selected range (UTF-16 → chars) | AT-SPI Text `GetText` / caret / selection | same |
@@ -92,8 +92,32 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 | Local recognition | SFSpeechRecognizer, `requiresOnDeviceRecognition` | none guaranteed on-device → refuses | same |
 | Key storage | Keychain (generic password) | Secret Service (gnome-keyring, KWallet) | same |
 | Open at login | SMAppService main app | XDG autostart entry | same |
+| Sleep during a meeting | `NSProcessInfo` activity with `IdleSystemSleepDisabled`; `NSWorkspaceWillSleepNotification` stops the meeting | systemd-logind inhibitor locks while recording (`idle` block, `sleep` delay); `PrepareForSleep(true)` from `org.freedesktop.login1` stops the meeting, then the locks are released. No system bus or no logind: nothing held, no error | same as X11 |
 | HUD window | egui window patched to status level, ignores mouse, all Spaces, never activates (accessory app) | override-redirect, notification type, empty input shape, sticky; XShape pill when uncomposited | XWayland override-redirect window |
 | Control surface | menu-bar status item → popover | SNI tray when a watcher exists; else the launcher entry `cantrip popover` (stock GNOME) | same |
+
+## Choices DESIGN.md leaves open
+
+- **HUD note beside a delivery outcome.** When a take's text was produced by
+  the Raw fallback (`Raw (cleanup skipped)`) or on-device, and the delivery
+  is anything but a confirmed insert (copy-only, `Sent`/`Posted —
+  unconfirmed`, `Not delivered`, a Retry copy), the pill shows the outcome,
+  then the note, then the clipboard claim (`Copied — target uncertain │ Raw
+  (cleanup skipped) │ Text is on the clipboard`); the claim's sticky drop and
+  the dwell follow the outcome (at least 2 s). A confirmed insert shows the
+  note alone, as DESIGN.md draws it.
+- **Deadlines are checked after blocking calls return.** The 250 ms capture
+  worker reads the session epoch and the target inside the deadline; an edit
+  read-back that completes after its confirmation window never confirms, and a
+  clipboard restore is never started after it.
+- **Archive flush chain.** A first publication and a recorded-path Retry both
+  flush the note, then `MM`, `YYYY`, `cantrip-meeting` and the Meeting folder
+  itself; any failure keeps staging and the meeting `pending-archive`. When the
+  recorded note verifies but does not flush and the folder chosen now is the
+  one it lives in, Retry does not publish a duplicate there (it would hit the
+  same flush); a different folder chosen now gets a fresh publication.
+- **Sleep.** A meeting stopped by sleep shows "Meeting stopped: the computer
+  went to sleep", and its outcome notice is prefixed "Stopped by sleep.".
 
 ## Data
 
@@ -104,7 +128,10 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
   v1 data is never read, moved or deleted.
 - The OpenRouter key lives only in the OS secret store.
 - Test hooks (not settings): `CANTRIP_OPENROUTER_BASE` (loopback stub),
-  `CANTRIP_STAGING` and `--key-env` (`cantrip e2e` only).
+  `CANTRIP_STAGING` and `--key-env` (`cantrip e2e` only, including
+  `cantrip e2e meeting-retry`). The archive's directory flushes go through
+  `meeting::archive::ArchiveFs` so tests inject `EIO`; the compiled binary is
+  fault-injected with `scripts/e2e/fsync_fault.c` (`LD_PRELOAD`).
 
 ## Verification boundaries
 
@@ -122,6 +149,21 @@ are in the builder evidence for the PR:
   foreign copy.
 - Recovery Retry and Discard from the popover, Secret Service key storage,
   and light/dark screenshots.
+- Plain Escape cancelling a take on a stock Openbox session (`Alt+Escape`
+  bound by the window manager), in an isolated Xephyr display: HUD hidden and
+  audio deleted, zero requests.
+- `EIO` on the Meeting folder's fsync (`LD_PRELOAD`) across a first
+  publication and recorded-path Retry, from `cantrip e2e` and from the running
+  app's popover: staging kept until the fault clears, then one note, staging
+  deleted.
+- Rewrite HTTP 500 on uncertain-target and focus-changed takes: the HUD's
+  accessible text and pixels show the copy reason and `Raw (cleanup
+  skipped)`; Raw is on the clipboard.
+- Sleep: against a fake logind on a private bus, the app holds `idle`/`sleep`
+  inhibitors only while a meeting records, `PrepareForSleep(true)` stops the
+  meeting with its message and releases them; the real logind lists the same
+  locks; no system bus or no logind degrades silently. No real suspend was
+  performed.
 
 **Type-checked only, never run.** The macOS platform module passes
 `cargo check` and `cargo clippy` for `aarch64-apple-darwin` and
@@ -140,6 +182,7 @@ or permissions):
 - The Core Audio process tap and its permission denial behaviour.
 - SFSpeechRecognizer on-device refusal.
 - SMAppService.
+- `NSWorkspaceWillSleepNotification` stopping a meeting before sleep.
 - Signing and notarization (not part of this slice).
 
 **Not verified, Linux.** No real Wayland compositor (KDE Plasma, GNOME,

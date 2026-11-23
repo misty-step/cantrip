@@ -13,11 +13,31 @@ ARCHITECTURE.md › Verification boundaries.
   measures press → HUD on-screen and Escape → HUD hidden / audio deleted, and
   checks that a tap keeps listening. Run it against a running `cantrip`.
 
+- `escape_check.py DISPLAY BINARY LABEL OUTDIR [next]`: launches the app with
+  the stub, focuses a receiver, taps the shortcut, presses plain Escape and
+  reports HUD hide / staged-audio deletion times and stub requests (with
+  `next`, also what the next press sends). Run it on a stock Openbox session
+  (e.g. `Xephyr :2` + `openbox --config-file /etc/xdg/openbox/rc.xml`), whose
+  `Alt+Escape` binding broke an `AnyModifier` Escape grab.
+- `llm500_check.py DISPLAY BINARY LABEL OUTDIR none|receiver-moved`: a take
+  with rewrite HTTP 500 on an uncertain target (nothing focused) or a focus
+  change; reads the HUD's accessible text (`hud_atspi.py`) before and after a
+  foreign copy and the clipboard.
+- `fsync_fault.c`: `LD_PRELOAD` shim that fails `fsync` of one directory with
+  `EIO` while a flag file exists and logs every flush; with
+  `cantrip e2e meeting` / `cantrip e2e meeting-retry` it proves staging stays
+  until the whole Meeting-folder chain flushes.
+- `fake_logind.py LOG`: a fake `org.freedesktop.login1` on a private bus
+  (`FAKE_BUS`); logs inhibitor locks and their release, and emits
+  `PrepareForSleep(true)` on `SIGUSR1`. Point the app at it with
+  `DBUS_SYSTEM_BUS_ADDRESS`.
+
 Example runs:
 
 ```sh
 cantrip e2e dictate clip.wav --mode clean --key-env    # live, key from env
 cantrip e2e meeting you.wav others.wav --folder DIR --key-env
+CANTRIP_STAGING=ROOT cantrip e2e meeting-retry --folder DIR --key-env
 ```
 
 To feed a real-app take, create a PipeWire virtual mic and play a clip into it:
