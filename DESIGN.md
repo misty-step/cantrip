@@ -176,14 +176,19 @@ publish-only Retry, Discard); `archived` (verified, staging cleaned up).
    symlink, FIFO, socket, directory or device is never followed, read or waited on) whose content
    digest matches, flushed to stable storage with its directories. Only then, for a complete note,
    is staging cleaned up; a failed check leaves staging and the folder as they are.
-4. **Publish-only Retry** makes zero speech or LLM calls. A recorded path that passes (c) and
-   verifies (regular non-symlink file, matching digest, per 3) is flushed, then staging is deleted:
-   done. One failing (c) is refused and left untouched: never read, flushed or used to delete
-   staging. Whenever no recorded publication can be accepted (none recorded, one refused under (c),
-   or failed verification), Cantrip checks under (a) and (b) the folder chosen now and its resolved
-   `cantrip-meeting/YYYY/MM`: all disjoint → publish afresh from the intact staged copy, verify and
-   flush (3), then delete staging; any overlap → create, write and delete nothing, leave staging
-   intact, stay `pending-archive`. Two complete notes with one `source_id` beat a lost one.
+4. **Publish-only Retry** makes zero speech or LLM calls. Only a complete note enters `publishing`
+   → `pending-archive` and has staging deleted after verified publication. A partial note never
+   enters `publishing`: saving it, or recovering it after a crash or kill, never deletes staging,
+   keeps all unresolved audio staged and returns to `parts-failed`, never `pending-archive` (even
+   on a failed check or an overlap under (a) or (b)). For a complete note only, a recorded path
+   that passes (c) and verifies (regular non-symlink file, matching digest, per 3) is flushed, then
+   staging is deleted: done. One failing (c) is refused and left untouched: never read, flushed or
+   used to delete staging. Whenever no recorded publication can be accepted (none recorded, one
+   refused under (c), or failed verification), Cantrip checks under (a) and (b) the folder chosen
+   now and its resolved `cantrip-meeting/YYYY/MM`: all disjoint → publish afresh from the intact
+   staged copy, verify and flush (3), then, for a complete note only, delete staging; any overlap →
+   create, write and delete nothing, leave staging intact, stay `pending-archive`. Two complete
+   notes with one `source_id` beat a lost one.
 
 **Notes.** A partial note shows an unresolved part at its real start as `[MM:SS] You: [transcription
 failed: MM:SS–MM:SS]`; a later complete note never opens a partial. Parts are transcribed with
