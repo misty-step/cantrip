@@ -107,8 +107,10 @@ pub fn deliver(
     if on_copy_only_list(&target.app.app_id) {
         return copy_only(text, CopyReason::TargetUncertain, clipboard);
     }
+    // Tier 2 is only for an *identified* field that cannot take direct
+    // insertion (PRODUCT.md journey 1.3); no identified field → copy-only.
     let support = match &target.field {
-        None => FieldSupport::NoDirectInsert,
+        None => FieldSupport::Gone,
         Some(_) => desktop.field_support(target),
     };
     match support {

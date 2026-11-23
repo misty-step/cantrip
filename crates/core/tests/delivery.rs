@@ -232,7 +232,8 @@ fn swallowed_paste_is_unconfirmed_and_restores_nothing() {
 }
 
 #[test]
-fn unreadable_field_paste_is_unconfirmed() {
+fn no_identified_field_is_copy_only_never_a_paste() {
+    // Tier 2 is only for an identified field that cannot take direct insertion.
     let (d, c, ctx) = setup();
     let mut t = target_a();
     t.field = None;
@@ -240,8 +241,9 @@ fn unreadable_field_paste_is_unconfirmed() {
     let ctx2 = capture_with_deadline(d.clone(), CAPTURE_DEADLINE);
     let _ = ctx;
     let r = deliver("world", &ctx2, d.as_ref(), c.as_ref());
-    assert_eq!(r.outcome, Outcome::Unconfirmed { tier: 2 });
-    assert_eq!(d.pastes(), 1);
+    assert_eq!(r.outcome, Outcome::Copied(CopyReason::TargetUncertain));
+    assert_eq!(d.pastes() + d.inserts(), 0);
+    assert_eq!(c.text().as_deref(), Some("world"));
 }
 
 #[test]
