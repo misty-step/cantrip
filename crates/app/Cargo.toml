@@ -23,6 +23,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # linux platform (owned by platform/linux)
 [target.'cfg(target_os = "linux")'.dependencies]
 ureq = { version = "3", features = ["json"] }
+dbus = "0.9"
+ksni = "0.2.2"
 
 # macos platform (owned by platform/macos)
 [target.'cfg(target_os = "macos")'.dependencies]

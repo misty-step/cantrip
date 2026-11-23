@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Live PipeWire capture tests with virtual devices only (no real microphone or
+# speaker is touched): a loopback "Cantrip Test Mic" source fed by a sink, and a
+# null sink made default for the meeting's Others track. Restores the previous
+# default sink and removes everything it created.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export PULSE_SERVER="unix:$XDG_RUNTIME_DIR/pulse/native"   # pipewire-pulse
+pactl info | grep -q "on PipeWire" || { echo "pipewire-pulse not reachable" >&2; exit 1; }
+cargo test -p cantrip --no-run --quiet
+prev_sink="$(pactl get-default-sink 2>/dev/null || true)"
+sink_mod="$(pactl load-module module-null-sink sink_name=cantrip_test_sink)"
+pw-loopback -m '[ FL ]' \
+  --capture-props='media.class=Audio/Sink node.name=cantrip_test_mic_in audio.channels=1 audio.position=[MONO]' \
+  --playback-props='media.class=Audio/Source node.name=cantrip_test_mic node.description="Cantrip Test Mic" audio.channels=1 audio.position=[MONO]' \
+  >/dev/null 2>&1 &
+loop=$!
+cleanup() {
+  kill "$loop" 2>/dev/null || true
+  pactl unload-module "$sink_mod" 2>/dev/null || true
+  [ -n "$prev_sink" ] && pactl set-default-sink "$prev_sink" 2>/dev/null || true
+}
+trap cleanup EXIT
+sleep 1
+pactl set-default-sink cantrip_test_sink
+CANTRIP_TEST_MIC=cantrip_test_mic CANTRIP_TEST_MIC_FEED=cantrip_test_mic_in \
+  cargo test -p cantrip live_ -- --ignored --nocapture --test-threads=1
