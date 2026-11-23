@@ -50,7 +50,49 @@ struct Rig {
     dir: tempfile::TempDir,
 }
 
+/// Writes one second of silence per track when stopped.
+struct SilentMeetingCapture;
+struct SilentRecording(std::path::PathBuf, std::path::PathBuf, Instant);
+impl MeetingRecording for SilentRecording {
+    fn elapsed(&self) -> Duration {
+        self.2.elapsed()
+    }
+    fn stop(self: Box<Self>) -> Result<MeetingTracks, String> {
+        for p in [&self.0, &self.1] {
+            std::fs::write(p, cantrip_core::wav::encode_pcm16(&[0; 16_000], 16_000)).unwrap();
+        }
+        Ok(MeetingTracks {
+            you: self.0.clone(),
+            others: self.1.clone(),
+            you_offset_ms: 0,
+            others_offset_ms: 0,
+        })
+    }
+}
+impl MeetingCapture for SilentMeetingCapture {
+    fn start(
+        &self,
+        _: Option<&str>,
+        you: &Path,
+        others: &Path,
+    ) -> Result<Box<dyn MeetingRecording>, String> {
+        Ok(Box::new(SilentRecording(
+            you.to_path_buf(),
+            others.to_path_buf(),
+            Instant::now(),
+        )))
+    }
+}
+
 fn rig(transport: Arc<FakeTransport>, secrets: Arc<FakeSecrets>) -> Rig {
+    rig_with_capture(transport, secrets, Arc::new(NoMeetingCapture))
+}
+
+fn rig_with_capture(
+    transport: Arc<FakeTransport>,
+    secrets: Arc<FakeSecrets>,
+    capture: Arc<dyn MeetingCapture>,
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let staging = Staging::open(&dir.path().join("stage")).unwrap();
     let desktop = FakeDesktop::new(target_a());
@@ -71,7 +113,7 @@ fn rig(transport: Arc<FakeTransport>, secrets: Arc<FakeSecrets>) -> Rig {
             notify: Arc::new(|| {}),
         },
         meeting: MeetingDeps {
-            capture: Arc::new(NoMeetingCapture),
+            capture,
             secrets: secrets.clone(),
             openrouter,
             staging: staging.clone(),
@@ -315,4 +357,41 @@ fn quit_cancels_a_recording_take() {
     assert!(r.app.quit_requested());
     idle(&r);
     assert_eq!(r.desktop.inserts(), 0);
+}
+
+#[test]
+fn system_sleep_stops_an_active_meeting_with_a_message() {
+    let r = rig_with_capture(
+        clean_speech(),
+        FakeSecrets::with_key(),
+        Arc::new(SilentMeetingCapture),
+    );
+    // Nothing active: sleep is a no-op.
+    r.app.on_system_sleep();
+    assert_eq!(r.app.snapshot().hud, Hud::Hidden);
+
+    let notes = r.dir.path().join("notes");
+    std::fs::create_dir(&notes).unwrap();
+    r.app.send(Command::ChooseMeetingFolder(notes.clone()));
+    r.app.send(Command::ToggleMeeting);
+    assert!(r.app.snapshot().meeting_active);
+    r.app.on_system_sleep();
+    let s = r.app.snapshot();
+    assert!(!s.meeting_active, "sleep stopped the meeting");
+    assert_eq!(s.hud, Hud::Notice(MEETING_STOPPED_SLEEP.into()));
+    // Its audio was finalized and handed to processing (not lost): the
+    // silent meeting completes and is archived without any speech call.
+    assert!(r.app.meetings().wait_idle(Duration::from_secs(20)));
+    // The outcome notice that follows keeps the reason in view.
+    assert_eq!(
+        r.app.snapshot().hud,
+        Hud::Notice(format!(
+            "{MEETING_STOPPED_BY_SLEEP_PREFIX} Meeting notes saved"
+        ))
+    );
+    let finish = r.app.meetings().last_finish();
+    assert!(
+        matches!(&finish, Some(cantrip_core::meeting::process::Finish::Archived(p)) if p.starts_with(&notes)),
+        "{finish:?}"
+    );
 }

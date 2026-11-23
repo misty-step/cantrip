@@ -9,6 +9,7 @@
 //! - local recognition: none guaranteed on-device → fails closed ([`local`])
 //! - focus, delivery, clipboard, shortcut, window behavior: [`desktop`],
 //!   [`clipboard`], [`hotkeys`], [`window`]
+//! - sleep: systemd-logind inhibitor locks + `PrepareForSleep` ([`sleep`])
 
 pub mod atspi;
 pub mod audio;
@@ -21,6 +22,7 @@ pub mod login;
 pub mod meeting_capture;
 pub mod secrets;
 pub mod session;
+pub mod sleep;
 pub mod tray;
 pub mod ui;
 pub mod window;

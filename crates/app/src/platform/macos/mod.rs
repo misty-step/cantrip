@@ -18,6 +18,7 @@ mod audio;
 mod clipboard;
 mod desktop;
 mod hotkeys;
+pub mod sleep;
 mod speech;
 mod system;
 mod tray;

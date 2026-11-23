@@ -96,6 +96,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+/// HUD notice when sleep stopped a meeting.
+pub const MEETING_STOPPED_SLEEP: &str = "Meeting stopped: the computer went to sleep";
+/// Prefix of the outcome notice of a meeting that sleep stopped.
+pub const MEETING_STOPPED_BY_SLEEP_PREFIX: &str = "Stopped by sleep.";
+
 /// Everything [`AppCore`] is built from.
 pub struct AppDeps {
     pub dictation: DictationDeps,
@@ -119,6 +124,8 @@ struct Extras {
     shortcut_changed: Option<Chord>,
     quit: bool,
     meeting_was_processing: bool,
+    /// Sleep stopped the meeting now processing: its outcome notice says so.
+    meeting_stopped_by_sleep: bool,
 }
 
 /// The running app: owns the settings, both controllers and the shortcut
@@ -202,6 +209,21 @@ impl AppCore {
             ShortcutAction::Cancel => self.dictation.cancel(),
             ShortcutAction::None => {}
         }
+    }
+
+    /// The system is going to sleep (logind `PrepareForSleep`, macOS
+    /// `NSWorkspaceWillSleepNotification`): an active meeting stops cleanly —
+    /// its tracks are finalized and staged for processing — with a message
+    /// (DESIGN.md › Meeting pipeline: "sleep anyway … stops the meeting with
+    /// a message"). Called from the platform's sleep watcher thread; returns
+    /// once the audio is finalized, so the watcher can then let sleep go on.
+    pub fn on_system_sleep(&self) {
+        if !self.meetings.active() {
+            return;
+        }
+        self.meetings.stop();
+        self.extras().meeting_stopped_by_sleep = true;
+        self.notice(Hud::Notice(MEETING_STOPPED_SLEEP.into()));
     }
 
     /// Whether Escape should be grabbed now (a take is active).
@@ -357,6 +379,12 @@ impl AppCore {
             Some(Finish::Error(_)) => "Meeting needs Retry from the menu".to_string(),
             None => return,
         };
+        // Keep the reason the meeting ended in view after the outcome lands.
+        let text = if std::mem::take(&mut self.extras().meeting_stopped_by_sleep) {
+            format!("{MEETING_STOPPED_BY_SLEEP_PREFIX} {text}")
+        } else {
+            text
+        };
         self.notice(Hud::Notice(text));
     }
 
@@ -448,6 +476,8 @@ impl Control for AppCore {
                 if self.meetings.active() {
                     self.meetings.stop();
                 } else {
+                    // A new meeting never inherits an earlier sleep stop.
+                    self.extras().meeting_stopped_by_sleep = false;
                     let s = self.settings();
                     let folder = s.effective_meeting_folder(&self.home);
                     if let Err(msg) =

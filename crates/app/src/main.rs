@@ -124,9 +124,16 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
         let _ = req_tx.send(request.unwrap_or(UiRequest::ShowPopover));
     }
 
+    // Sleep stops an active meeting with a message (best effort per OS).
+    let sleep = {
+        let core = core.clone();
+        platform::watch_sleep(Arc::new(move || core.on_system_sleep()))
+    };
+
     let tick_core = core.clone();
     let mut escape = false;
     let mut recording = false;
+    let mut meeting = false;
     let tick = Box::new(move || {
         if let Some(next) = tick_core.take_shortcut_change() {
             match hotkeys.register(&next, key_tx.clone()) {
@@ -142,7 +149,12 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
             hotkeys.set_escape_grab(want);
             escape = want;
         }
-        let rec = tick_core.dictation().recording() || tick_core.meetings().active();
+        let in_meeting = tick_core.meetings().active();
+        if in_meeting != meeting {
+            sleep.set_meeting_active(in_meeting);
+            meeting = in_meeting;
+        }
+        let rec = tick_core.dictation().recording() || in_meeting;
         if rec != recording {
             if let Some(t) = &tray {
                 t.set_recording(rec);

@@ -37,6 +37,26 @@ pub trait Hotkeys: Send {
     fn set_escape_grab(&mut self, active: bool);
 }
 
+/// System sleep: told while a meeting records, so the OS backend can hold
+/// what prevents idle sleep; on an imminent sleep it calls the `on_sleep`
+/// given to [`watch_sleep`] (which stops the meeting with a message).
+pub trait SleepWatch: Send {
+    fn set_meeting_active(&self, active: bool);
+}
+
+/// Watch for system sleep. Best effort: a session that cannot report sleep
+/// (no logind, no system bus) gets a watcher that does nothing.
+pub fn watch_sleep(on_sleep: Arc<dyn Fn() + Send + Sync>) -> Box<dyn SleepWatch> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::sleep::watch(on_sleep)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::sleep::watch(on_sleep)
+    }
+}
+
 /// Requests from the tray / launcher / IPC to the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiRequest {
