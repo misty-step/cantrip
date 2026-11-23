@@ -3,9 +3,12 @@
 //! - **X11** (`$DISPLAY`, not a native Wayland session): passive `XGrabKey`
 //!   on the root window for the chord (with Caps/Num-Lock variants) and XKB
 //!   *detectable auto-repeat*, so a hold yields exactly one press and one
-//!   release; repeat pairs from servers without it are filtered too. Escape is
-//!   grabbed only while a take is active. Press and release are reported:
-//!   hold-to-talk and tap-to-toggle.
+//!   release; repeat pairs from servers without it are filtered too. Plain
+//!   Escape is grabbed only while a take is active, under the exact lock
+//!   masks (none, CapsLock, NumLock, both) and never `AnyModifier`, so it
+//!   cannot collide with window-manager chords such as Openbox's stock
+//!   `Alt+Escape`. Press and release are reported: hold-to-talk and
+//!   tap-to-toggle.
 //! - **Native Wayland**: xdg-desktop-portal `GlobalShortcuts` (the compositor
 //!   may ask the user to approve the chord). `Activated`/`Deactivated` map to
 //!   press/release on desktops whose portals report release (KDE Plasma,
@@ -26,6 +29,10 @@ use x11rb::protocol::xproto::{ConnectionExt as _, GrabMode, ModMask};
 use x11rb::protocol::Event;
 
 const KEYSYM_ESCAPE: u32 = 0xff1b;
+
+/// Modifier bits compared for Escape: Shift, Lock, Control, Mod1–Mod5 (not
+/// pointer-button bits).
+const ESCAPE_STATE_MASK: u16 = 0x00ff;
 
 /// X11 keysym for a `Chord::key` name.
 pub fn keysym_for(key: &str) -> Option<u32> {
@@ -121,6 +128,8 @@ struct Shared {
     chord: Option<(u8, u16)>,
     escape: Option<u8>,
     escape_active: bool,
+    /// The exact masks plain Escape is currently grabbed under.
+    escape_masks: Vec<u16>,
     down: bool,
 }
 
@@ -274,22 +283,57 @@ impl X11Keys {
         let Some(code) = s.escape else { return };
         let conn = &self.x.conn;
         if active {
-            let ok = conn
-                .grab_key(
-                    false,
-                    self.x.root,
-                    ModMask::ANY,
-                    code,
-                    GrabMode::ASYNC,
-                    GrabMode::ASYNC,
-                )
-                .ok()
-                .is_some_and(|c| c.check().is_ok());
-            s.escape_active = ok;
+            // Plain Escape only: each lock variant is its own passive grab,
+            // so one taken elsewhere (BadAccess) never costs the others.
+            let mut grabbed = Vec::new();
+            for v in lock_variants(0) {
+                let ok = conn
+                    .grab_key(
+                        false,
+                        self.x.root,
+                        ModMask::from(v),
+                        code,
+                        GrabMode::ASYNC,
+                        GrabMode::ASYNC,
+                    )
+                    .ok()
+                    .is_some_and(|c| c.check().is_ok());
+                if ok {
+                    grabbed.push(v);
+                }
+            }
+            s.escape_active = grabbed.contains(&0);
+            if !s.escape_active {
+                for v in grabbed.drain(..) {
+                    let _ = conn.ungrab_key(code, self.x.root, ModMask::from(v));
+                }
+                eprintln!(
+                    "[cantrip] escape grab unavailable: plain Escape is taken by another client"
+                );
+            }
+            s.escape_masks = grabbed;
         } else {
-            let _ = conn.ungrab_key(code, self.x.root, ModMask::ANY);
+            for v in std::mem::take(&mut s.escape_masks) {
+                let _ = conn.ungrab_key(code, self.x.root, ModMask::from(v));
+            }
             s.escape_active = false;
         }
+        self.x.flush();
+    }
+}
+
+impl Drop for X11Keys {
+    /// Release every passive grab (the event thread keeps the connection).
+    fn drop(&mut self) {
+        self.set_escape(false);
+        let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((code, m)) = s.chord.take() {
+            for v in lock_variants(m) {
+                let _ = self.x.conn.ungrab_key(code, self.x.root, ModMask::from(v));
+            }
+        }
+        s.sink = None;
+        drop(s);
         self.x.flush();
     }
 }
@@ -335,7 +379,14 @@ fn x11_loop(x: &X11, shared: &Mutex<Shared>) {
                     s.send(KeyEvent::Released(now));
                 }
             }
-            Event::KeyPress(e) if Some(e.detail) == s.escape && s.escape_active => {
+            // Only the exact grabbed masks reach us; check anyway so a stray
+            // modified Escape is never treated as cancel.
+            Event::KeyPress(e)
+                if Some(e.detail) == s.escape
+                    && s.escape_active
+                    && s.escape_masks
+                        .contains(&(u16::from(e.state) & ESCAPE_STATE_MASK)) =>
+            {
                 s.send(KeyEvent::Escape);
             }
             _ => {}
@@ -632,5 +683,85 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![KeyEvent::Escape]);
         keys.set_escape_grab(false);
+    }
+
+    /// Live: a window manager that owns `Alt+Escape` (stock Openbox's
+    /// `<keybind key="A-Escape">`) is simulated by a second client grabbing
+    /// it. Cantrip's plain-Escape grab must still succeed and report plain
+    /// Escape (also under CapsLock / NumLock), and never Alt+Escape.
+    #[test]
+    #[ignore]
+    fn live_x11_escape_grab_coexists_with_a_wm_alt_escape_binding() {
+        let wm = X11::connect().expect("DISPLAY");
+        let esc = wm.keycode_for(KEYSYM_ESCAPE).unwrap();
+        let alt = u16::from(ModMask::M1);
+        let wm_grabs: Vec<u16> = lock_variants(alt)
+            .into_iter()
+            .filter(|v| {
+                wm.conn
+                    .grab_key(
+                        false,
+                        wm.root,
+                        ModMask::from(*v),
+                        esc,
+                        GrabMode::ASYNC,
+                        GrabMode::ASYNC,
+                    )
+                    .ok()
+                    .is_some_and(|c| c.check().is_ok())
+            })
+            .collect();
+        // Either the real WM already owns it, or our stand-in now does.
+        let probe = X11::connect().unwrap();
+        let taken = probe
+            .conn
+            .grab_key(
+                false,
+                probe.root,
+                ModMask::ANY,
+                esc,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+            )
+            .ok()
+            .is_some_and(|c| c.check().is_err());
+        assert!(
+            taken,
+            "AnyModifier Escape must collide (the Pass 1 failure)"
+        );
+        drop(probe);
+
+        let mut keys = LinuxHotkeys::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        keys.register(&Chord::platform_default(), tx).unwrap();
+        keys.set_escape_grab(true);
+        let run = |args: &[&str]| {
+            assert!(std::process::Command::new("xdotool")
+                .args(args)
+                .status()
+                .unwrap()
+                .success())
+        };
+        run(&["key", "Escape"]);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![KeyEvent::Escape]);
+        // Alt+Escape stays the window manager's.
+        run(&["key", "alt+Escape"]);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(rx.try_iter().count(), 0, "Alt+Escape is not a cancel");
+        // CapsLock on: plain Escape still cancels.
+        run(&["key", "Caps_Lock"]);
+        run(&["key", "Escape"]);
+        run(&["key", "Caps_Lock"]);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![KeyEvent::Escape]);
+        keys.set_escape_grab(false);
+        run(&["key", "Escape"]);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(rx.try_iter().count(), 0, "released after the take");
+        for v in wm_grabs {
+            let _ = wm.conn.ungrab_key(esc, wm.root, ModMask::from(v));
+        }
+        wm.flush();
     }
 }
