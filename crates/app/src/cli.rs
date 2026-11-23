@@ -7,7 +7,11 @@
 //! ```text
 //! cantrip e2e dictate <wav> [--mode raw|clean|elevated] [--post on|off] [--key-env] [--linger <ms>]
 //! cantrip e2e meeting <you.wav> <others.wav> --folder <dir> [--key-env]
+//! cantrip e2e meeting-retry --folder <dir> [--key-env]
 //! ```
+//! `meeting-retry` runs the popover's Retry on every recoverable meeting in
+//! the staging root named by `CANTRIP_STAGING` (publish-only for
+//! `pending-archive`: zero speech calls) and reports each outcome.
 //! `--key-env` reads the key from `OPENROUTER_API_KEY` instead of the OS
 //! secret store (CI / sandbox hook; the key is never printed). `--linger`
 //! keeps the process (and so its X11 clipboard ownership) alive after the
@@ -35,8 +39,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("dictate") => dictate(&args[1..]),
         Some("meeting") => meeting(&args[1..]),
+        Some("meeting-retry") => meeting_retry(&args[1..]),
         _ => anyhow::bail!(
-            "usage: cantrip e2e dictate <wav> … | meeting <you.wav> <others.wav> --folder <dir>"
+            "usage: cantrip e2e dictate <wav> … | meeting <you.wav> <others.wav> --folder <dir> | meeting-retry --folder <dir>"
         ),
     }
 }
@@ -179,6 +184,46 @@ fn meeting(args: &[String]) -> anyhow::Result<()> {
         "finish": format!("{:?}", meetings.last_finish()),
         "published": meetings.last_published().map(|p| p.display().to_string()),
         "recoverable": meetings.recoverable().iter().map(|m| format!("{:?}", m.kind)).collect::<Vec<_>>(),
+        "staging_root": staging.root().display().to_string(),
+    });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+fn meeting_retry(args: &[String]) -> anyhow::Result<()> {
+    let folder =
+        PathBuf::from(flag(args, "--folder").ok_or_else(|| anyhow::anyhow!("missing --folder"))?);
+    if std::env::var_os("CANTRIP_STAGING").is_none() {
+        anyhow::bail!("meeting-retry needs CANTRIP_STAGING (the staging root to recover)");
+    }
+    let (tx, _rx) = mpsc::channel();
+    let (platform, _tray) = platform::detect(tx)?;
+    let staging = staging()?;
+    let meetings = Meetings::new(MeetingDeps {
+        capture: Arc::new(FileMeeting {
+            you: PathBuf::new(),
+            others: PathBuf::new(),
+        }),
+        secrets: secrets(args, &platform),
+        openrouter: OpenRouter::new(platform.transport.clone()),
+        staging: staging.clone(),
+        notify: Arc::new(|| {}),
+    });
+    let mut runs = Vec::new();
+    for item in meetings.recoverable() {
+        meetings.retry(&item.id, folder.clone());
+        let finished = meetings.wait_idle(Duration::from_secs(600));
+        runs.push(json!({
+            "kind_before": format!("{:?}", item.kind),
+            "finished": finished,
+            "finish": format!("{:?}", meetings.last_finish()),
+            "published": meetings.last_published().map(|p| p.display().to_string()),
+        }));
+    }
+    let out = json!({
+        "session": platform.session,
+        "retries": runs,
+        "recoverable_after": meetings.recoverable().iter().map(|m| format!("{:?}", m.kind)).collect::<Vec<_>>(),
         "staging_root": staging.root().display().to_string(),
     });
     println!("{}", serde_json::to_string_pretty(&out)?);

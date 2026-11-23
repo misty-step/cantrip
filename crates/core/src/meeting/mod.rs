@@ -26,7 +26,7 @@ use crate::ports::{MeetingCapture, MeetingRecording, SecretError, SecretStore};
 use crate::speech::OpenRouter;
 use crate::staging::{unique_suffix, Staging};
 use crate::surface::RecoveryKind;
-use archive::Fault;
+use archive::{ArchiveFs, Fault, RealFs};
 use process::{Ctx, Finish};
 pub use process::{MeetingSpeech, RetryPolicy};
 use std::collections::BTreeSet;
@@ -78,6 +78,7 @@ struct Inner {
     policy: RetryPolicy,
     sleep: Sleep,
     fault: Mutex<Option<Fault>>,
+    fs: Arc<dyn ArchiveFs>,
     st: Mutex<St>,
     idle: Condvar,
 }
@@ -113,6 +114,7 @@ impl Meetings {
                 policy: RetryPolicy::default(),
                 sleep: Arc::new(std::thread::sleep),
                 fault: Mutex::new(None),
+                fs: Arc::new(RealFs),
                 st: Mutex::new(St::default()),
                 idle: Condvar::new(),
             }),
@@ -129,6 +131,15 @@ impl Meetings {
                 sleep,
                 ..inner
             }),
+        }
+    }
+
+    /// Replace the directory-flush boundary (tests inject `EIO`).
+    pub fn with_archive_fs(self, fs: Arc<dyn ArchiveFs>) -> Self {
+        let inner = Arc::try_unwrap(self.inner)
+            .unwrap_or_else(|_| panic!("with_archive_fs must be called before use"));
+        Meetings {
+            inner: Arc::new(Inner { fs, ..inner }),
         }
     }
 
@@ -390,6 +401,7 @@ impl Inner {
             policy: &self.policy,
             sleep: self.sleep.as_ref(),
             fault: &fault,
+            fs: self.fs.as_ref(),
         };
         f(&ctx)
     }

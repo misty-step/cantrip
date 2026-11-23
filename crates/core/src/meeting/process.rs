@@ -3,7 +3,7 @@
 //! Save partial notes. Every step reads and writes only staging until the
 //! archive step, which follows invariants 1–4.
 
-use super::archive::{self, Blocked, Create, Fault};
+use super::archive::{self, ArchiveFs, Blocked, Create, Fault};
 use super::note::{self, Cleaned, Summary};
 use super::parts::{self, Part, PartResult, Track};
 use super::store::{MeetingMeta, MeetingState, MeetingStore};
@@ -115,6 +115,8 @@ pub struct Ctx<'a> {
     pub sleep: &'a (dyn Fn(Duration) + Send + Sync),
     /// One-shot injected verification/flush fault (tests and debug hooks).
     pub fault: &'a dyn Fn() -> Option<Fault>,
+    /// Directory flushes (real fsync; tests inject `EIO`).
+    pub fs: &'a dyn ArchiveFs,
 }
 
 /// How a step ended.
@@ -382,7 +384,7 @@ impl Ctx<'_> {
             match archive::create_exclusive(&path, note_text.as_bytes()) {
                 Ok(Create::Taken) => continue,
                 Ok(Create::Created) => {
-                    archive::verify_and_flush(&path, &want, &chain, (self.fault)())?;
+                    archive::verify_and_flush(&path, &want, &chain, (self.fault)(), self.fs)?;
                     return Ok(path);
                 }
                 Err(e) => return Err(Blocked::Unwritable(e.kind().to_string())),
@@ -403,14 +405,17 @@ impl Ctx<'_> {
                 Ok(()) => Finish::Archived(path),
                 Err(e) => Finish::Error(e.kind().to_string()),
             },
-            Err(b) => {
-                meta.state = MeetingState::PendingArchive;
-                if let Err(e) = self.store.save(meta) {
-                    return Finish::Error(e.kind().to_string());
-                }
-                Finish::PendingArchive(b)
-            }
+            Err(b) => self.stay_pending(meta, b),
         }
+    }
+
+    /// Keep staging intact and leave the complete note `pending-archive`.
+    fn stay_pending(&self, meta: &mut MeetingMeta, b: Blocked) -> Finish {
+        meta.state = MeetingState::PendingArchive;
+        if let Err(e) = self.store.save(meta) {
+            return Finish::Error(e.kind().to_string());
+        }
+        Finish::PendingArchive(b)
     }
 
     /// Full processing (stop, Retry of interrupted / parts-failed).
@@ -460,15 +465,27 @@ impl Ctx<'_> {
             return Finish::Error(e.kind().to_string());
         }
         if let Some(recorded) = meta.publish_path.clone() {
-            // (c) first: a recorded path resolving into staging is refused and
-            // never read, flushed or used to delete staging.
-            if let Ok(dirs) = archive::recorded_dir_disjoint(&recorded, self.staging_root) {
+            // (c) first: a recorded path whose chain resolves into staging is
+            // refused and never read, flushed or used to delete staging.
+            if let Ok(chain) = archive::recorded_chain(&recorded, self.staging_root) {
                 let want = archive::digest(note_text.as_bytes());
-                if archive::verify_and_flush(&recorded, &want, &dirs, (self.fault)()).is_ok() {
-                    return match self.store.delete(id) {
-                        Ok(()) => Finish::Archived(recorded),
-                        Err(e) => Finish::Error(e.kind().to_string()),
-                    };
+                // The same full chain a first publication flushes: the note,
+                // MM, YYYY, cantrip-meeting and the Meeting folder itself.
+                match archive::verify_and_flush(&recorded, &want, &chain, (self.fault)(), self.fs) {
+                    Ok(()) => {
+                        return match self.store.delete(id) {
+                            Ok(()) => Finish::Archived(recorded),
+                            Err(e) => Finish::Error(e.kind().to_string()),
+                        };
+                    }
+                    // The recorded note is whole but not yet durable, and the
+                    // folder chosen now is the one it lives in: a fresh copy
+                    // there would only add a duplicate that cannot flush
+                    // either. Fail closed: keep staging, stay pending.
+                    Err(b @ Blocked::FlushFailed(_)) if archive::same_dir(&chain[0], folder) => {
+                        return self.stay_pending(&mut meta, b);
+                    }
+                    Err(_) => {}
                 }
             }
         }

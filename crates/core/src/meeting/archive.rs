@@ -31,8 +31,28 @@ pub enum Blocked {
     Overlap,
     /// The folder is missing, not a directory or not writable.
     Unwritable(String),
-    /// A note was written but did not verify (or flush); it is left alone.
+    /// A note was written but did not verify; it is left alone.
     VerifyFailed(String),
+    /// A note verified (regular file, matching digest) but it or one of its
+    /// directories up to and including the Meeting folder did not flush to
+    /// stable storage; it is left alone and staging is kept.
+    FlushFailed(String),
+}
+
+/// The directory-flush boundary of publication. The real implementation
+/// fsyncs; tests inject `EIO` on a chosen directory (e.g. the Meeting folder)
+/// to prove that staging is never deleted before the whole chain is durable.
+pub trait ArchiveFs: Send + Sync {
+    fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+}
+
+/// `fsync(2)` on the directory.
+pub struct RealFs;
+
+impl ArchiveFs for RealFs {
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        File::open(dir)?.sync_all()
+    }
 }
 
 /// Test-only fault injection for verification and flush.
@@ -102,7 +122,7 @@ fn check_disjoint(staging: &Path, dir: &Path) -> Result<(), Blocked> {
 /// Resolve (creating only what is missing below the chosen folder) the
 /// directory `<folder>/cantrip-meeting/<yyyy>/<mm>`, enforcing invariant 1 at
 /// every level before creating or writing inside it. Returns the directories
-/// from the folder down (for flushing).
+/// from the folder down (all of them are flushed before staging is deleted).
 pub fn prepare_dir(
     folder: &Path,
     staging: &Path,
@@ -187,12 +207,15 @@ pub fn digest(bytes: &[u8]) -> String {
 
 /// Verify a published note: a regular file (never following a symlink, never
 /// blocking on a FIFO/socket/device) whose content digest matches, then flush
-/// it and the given directories to stable storage.
+/// it and every directory of its chain (given from the Meeting folder down;
+/// flushed deepest first) to stable storage. Any flush error is
+/// [`Blocked::FlushFailed`]: the caller keeps staging.
 pub fn verify_and_flush(
     path: &Path,
     want_digest: &str,
     dirs: &[PathBuf],
     fault: Option<Fault>,
+    afs: &dyn ArchiveFs,
 ) -> Result<(), Blocked> {
     let fail = |m: &str| Err(Blocked::VerifyFailed(m.to_string()));
     match fs::symlink_metadata(path) {
@@ -219,25 +242,46 @@ pub fn verify_and_flush(
     if fault == Some(Fault::Verify) || digest(&bytes) != want_digest {
         return fail("digest mismatch");
     }
+    let flush_failed = |m: &str| Err(Blocked::FlushFailed(m.to_string()));
     if fault == Some(Fault::Flush) || f.sync_all().is_err() {
-        return fail("flush failed");
+        return flush_failed("flush failed");
     }
-    for d in dirs {
-        if let Err(e) = File::open(d).and_then(|h| h.sync_all()) {
-            return fail(&e.kind().to_string());
+    for d in dirs.iter().rev() {
+        if let Err(e) = afs.sync_dir(d) {
+            return flush_failed(&e.kind().to_string());
         }
     }
     Ok(())
 }
 
-/// Invariant (c): the directory a recorded publish path resolves to must be
-/// disjoint from staging. Returns the resolved directory chain to flush.
-pub fn recorded_dir_disjoint(path: &Path, staging: &Path) -> Result<Vec<PathBuf>, Blocked> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| Blocked::Unwritable("no parent".into()))?;
-    check_disjoint(staging, dir)?;
-    Ok(vec![dir.to_path_buf()])
+/// Invariant (c) for a recorded publish path
+/// `<folder>/cantrip-meeting/<yyyy>/<mm>/<note>`: every directory of its
+/// chain, from the Meeting folder down to the note's own directory, must be
+/// disjoint from staging. Returns that whole chain (Meeting folder first), so
+/// a recorded-path Retry flushes exactly what a first publication flushes. A
+/// path not in that layout cannot be accepted.
+pub fn recorded_chain(path: &Path, staging: &Path) -> Result<Vec<PathBuf>, Blocked> {
+    let layout = || Blocked::Unwritable("unexpected layout".into());
+    let mm = path.parent().ok_or_else(layout)?;
+    let yyyy = mm.parent().ok_or_else(layout)?;
+    let sub = yyyy.parent().ok_or_else(layout)?;
+    let folder = sub.parent().ok_or_else(layout)?;
+    if sub.file_name() != Some(std::ffi::OsStr::new(MEETING_SUBDIR)) {
+        return Err(layout());
+    }
+    let chain: Vec<PathBuf> = [folder, sub, yyyy, mm]
+        .iter()
+        .map(|p| p.to_path_buf())
+        .collect();
+    for d in &chain {
+        check_disjoint(staging, d)?;
+    }
+    Ok(chain)
+}
+
+/// True when `a` and `b` are the same directory by filesystem identity.
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    matches!((identity(a), identity(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 #[cfg(test)]

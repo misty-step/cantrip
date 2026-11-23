@@ -14,7 +14,7 @@ use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ───────────────────────────── fakes ─────────────────────────────
@@ -709,6 +709,163 @@ fn injected_verify_or_flush_failure_keeps_staging_and_retry_publishes_with_zero_
     }
 }
 
+/// Directory flush boundary that fails with `EIO` for one directory (by
+/// filesystem identity) while armed, and records every directory it flushes.
+#[derive(Default)]
+struct FaultyFs {
+    fail: Mutex<Option<PathBuf>>,
+    synced: Mutex<Vec<PathBuf>>,
+}
+
+impl archive::ArchiveFs for FaultyFs {
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        self.synced.lock().unwrap().push(dir.to_path_buf());
+        if let Some(bad) = self.fail.lock().unwrap().as_ref() {
+            if archive::same_dir(bad, dir) {
+                return Err(std::io::Error::from_raw_os_error(libc::EIO));
+            }
+        }
+        archive::RealFs.sync_dir(dir)
+    }
+}
+
+impl FaultyFs {
+    fn take_synced(&self) -> Vec<PathBuf> {
+        std::mem::take(&mut *self.synced.lock().unwrap())
+    }
+}
+
+#[test]
+fn eio_on_meeting_folder_fsync_keeps_staging_on_publish_and_recorded_retry_until_it_clears() {
+    let h = H::new(tone(1500), silence(1500));
+    let fs_fault = Arc::new(FaultyFs::default());
+    *fs_fault.fail.lock().unwrap() = Some(h.folder.clone());
+    let m = h.meetings().with_archive_fs(fs_fault.clone());
+
+    // First publication: note written and verified, Meeting folder fsync EIO.
+    let id = h.run(&m, &h.folder.clone());
+    assert!(
+        matches!(
+            m.last_finish(),
+            Some(Finish::PendingArchive(archive::Blocked::FlushFailed(_)))
+        ),
+        "{:?}",
+        m.last_finish()
+    );
+    assert_eq!(h.state(&id), MeetingState::PendingArchive);
+    let rec = h.store().load(&id).unwrap().publish_path.unwrap();
+    assert!(rec.exists());
+    assert!(h.store().note(&id).is_some(), "staged note kept");
+    assert!(h.store().you_wav(&id).exists(), "staged audio kept");
+    let mm = rec.parent().unwrap().to_path_buf();
+    let synced = fs_fault.take_synced();
+    assert_eq!(
+        synced.last(),
+        Some(&h.folder),
+        "Meeting folder flushed last"
+    );
+    assert!(synced.contains(&mm));
+
+    // Recorded-path Retry with the fault still active: the whole chain is
+    // flushed again, the folder fails, staging stays, no duplicate note.
+    let calls = h.speech.calls();
+    let stage_before = snapshot(&h.store().meeting_dir(&id));
+    m.retry(&id, h.folder.clone());
+    assert!(m.wait_idle(Duration::from_secs(10)));
+    assert!(
+        matches!(
+            m.last_finish(),
+            Some(Finish::PendingArchive(archive::Blocked::FlushFailed(_)))
+        ),
+        "{:?}",
+        m.last_finish()
+    );
+    assert_eq!(h.state(&id), MeetingState::PendingArchive);
+    assert!(h.store().exists(&id));
+    let stage_after = snapshot(&h.store().meeting_dir(&id));
+    for k in ["note.md", "you.wav", "others.wav", "parts.json"] {
+        assert_eq!(
+            stage_after.get(Path::new(k)),
+            stage_before.get(Path::new(k)),
+            "{k}"
+        );
+    }
+    assert_eq!(notes_under(&h.folder), vec![rec.clone()], "no duplicate");
+    let yyyy = mm.parent().unwrap().to_path_buf();
+    let sub = yyyy.parent().unwrap().to_path_buf();
+    assert_eq!(
+        fs_fault.take_synced(),
+        vec![mm.clone(), yyyy.clone(), sub.clone(), h.folder.clone()],
+        "recorded-path Retry flushes MM → YYYY → cantrip-meeting → Meeting folder"
+    );
+
+    // Fault clears: Retry verifies and flushes the recorded note's whole
+    // chain, then (only then) deletes staging. Zero speech calls throughout.
+    *fs_fault.fail.lock().unwrap() = None;
+    m.retry(&id, h.folder.clone());
+    assert!(m.wait_idle(Duration::from_secs(10)));
+    assert_eq!(m.last_finish(), Some(Finish::Archived(rec.clone())));
+    assert_eq!(
+        fs_fault.take_synced(),
+        vec![mm, yyyy, sub, h.folder.clone()]
+    );
+    assert!(!h.store().exists(&id));
+    assert_eq!(notes_under(&h.folder), vec![rec]);
+    assert_eq!(
+        h.speech.calls(),
+        calls,
+        "publish-only Retry makes zero calls"
+    );
+}
+
+#[test]
+fn eio_on_old_meeting_folder_fsync_with_a_new_folder_chosen_publishes_afresh_there() {
+    let h = H::new(tone(1500), silence(1500));
+    let fs_fault = Arc::new(FaultyFs::default());
+    *fs_fault.fail.lock().unwrap() = Some(h.folder.clone());
+    let m = h.meetings().with_archive_fs(fs_fault.clone());
+    let id = h.run(&m, &h.folder.clone());
+    assert_eq!(h.state(&id), MeetingState::PendingArchive);
+    let folder2 = h.root.join("notes2");
+    fs::create_dir(&folder2).unwrap();
+    m.retry(&id, folder2.clone());
+    assert!(m.wait_idle(Duration::from_secs(10)));
+    let Some(Finish::Archived(fresh)) = m.last_finish() else {
+        panic!("{:?}", m.last_finish())
+    };
+    assert!(fresh.starts_with(&folder2));
+    assert!(!h.store().exists(&id));
+}
+
+#[test]
+fn recorded_chain_covers_every_directory_up_to_the_meeting_folder() {
+    let t = tempfile::tempdir().unwrap();
+    let staging = t.path().join("staging");
+    fs::create_dir(&staging).unwrap();
+    let folder = t.path().join("notes");
+    let mm = folder.join("cantrip-meeting/2026/11");
+    fs::create_dir_all(&mm).unwrap();
+    let note = mm.join("n.md");
+    assert_eq!(
+        archive::recorded_chain(&note, &staging).unwrap(),
+        vec![
+            folder.clone(),
+            folder.join("cantrip-meeting"),
+            folder.join("cantrip-meeting/2026"),
+            mm.clone()
+        ]
+    );
+    // Not the publication layout: cannot be accepted.
+    assert!(archive::recorded_chain(&folder.join("n.md"), &staging).is_err());
+    // Any level resolving into staging is refused under (c).
+    let inside = staging.join("x/cantrip-meeting/2026/11");
+    fs::create_dir_all(&inside).unwrap();
+    assert_eq!(
+        archive::recorded_chain(&inside.join("n.md"), &staging),
+        Err(archive::Blocked::Overlap)
+    );
+}
+
 #[test]
 fn publish_only_retry_to_unwritable_folder_makes_zero_calls_then_publishes() {
     let h = H::new(tone(1500), silence(1500));
@@ -790,7 +947,7 @@ fn fifo_at_recorded_path_neither_hangs_nor_is_replaced() {
     assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
 
     let t = Instant::now();
-    let r = archive::verify_and_flush(&rec, "x", &[], None);
+    let r = archive::verify_and_flush(&rec, "x", &[], None, &archive::RealFs);
     assert!(r.is_err());
     assert!(
         t.elapsed() < Duration::from_millis(100),
