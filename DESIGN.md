@@ -1,74 +1,72 @@
 # Cantrip v2 — Design
 
-Behavior contracts, UI and evidence for [PRODUCT.md](PRODUCT.md) on **macOS 15+ and Linux
-(Wayland and X11)**: what must be observably true and what must never happen, not how to build
-it. Measurements are from the Slice #42 spike (2026-11-22); OpenRouter facts from its
-[speech-to-text guide](https://openrouter.ai/docs/guides/overview/multimodal/stt), read the same
-day. Nothing here has been built or run on either OS. Shared principles:
-[mistystack design](https://github.com/misty-step/mistystack/blob/master/skills/design/SKILL.md#principles).
+Behavior contracts, UI and evidence for [PRODUCT.md](PRODUCT.md): what must be observably true and
+never happen, not how to build it; nothing is built yet. Sources: the Slice #42 spike (2026-11-22)
+and the [OpenRouter STT guide](https://openrouter.ai/docs/guides/overview/multimodal/stt). Principles: [mistystack design](https://github.com/misty-step/mistystack/blob/master/skills/design/SKILL.md#principles).
 
 ## Architecture freedom
 
-Language, UI toolkit, the split between a shared core and native per-OS clients, OS bindings,
-process and threading model, packaging tools and repository layout are intentionally left to
-the implementing `recompile` agent. Evolving v1's workspace, a unified core with native macOS
-and Linux clients, one cross-platform app, or another crisp shape are all acceptable. v1's
-decision records (`docs/decisions/`) are history, not constraints. The conditions: every contract in PRODUCT.md and this document is honored on both macOS and
-Linux, and each is verified on a real machine of each OS ([checklist](#verification-checklist)).
-Where this document names a platform fact (for example, that Wayland may hide window focus),
-it is a constraint to design around, not a choice of API.
+Language, UI toolkit, shared core vs native clients, OS bindings, process model, packaging and repo
+layout are left to the implementing `recompile` agent, as are internal mechanics: audio formats,
+segmentation heuristics, staging layout and schemas, retry schedules, the order of internal checks,
+and how a file reaches the Meeting folder. v1's `docs/decisions/` are history, not constraints. This
+document fixes only what a user, a receiving app or the Meeting folder can observe, on every
+supported platform, verified on real machines. Named platform facts are constraints, not API choices.
+
+## Release bar
+
+Supported platforms: **macOS 15+** and **Linux** on Wayland (KDE Plasma, GNOME, wlroots
+compositors) and on X11; no Windows port in v2.0. On every one, in every session, Cantrip provides:
+
+1. **Shortcut dictation.** The global shortcut (default `⌃⌥Space` on macOS, `Ctrl+Alt+Space` on
+   Linux) gives hold-to-talk and tap-to-toggle on macOS, on X11 and on Wayland compositors that
+   report press and release; tap-to-toggle on Wayland compositors that report only activation. The
+   release matrix records the verified behavior per desktop.
+2. **Floating HUD.** A non-activating pill that never takes focus or clicks, appears within 100 ms
+   of the press and is visible on every workspace.
+3. **Full control surface.** The 7 standing controls, 1 contextual recovery row and 6-control
+   Settings pane of PRODUCT.md's Control surface, from the tray or menu-bar icon, or on trayless
+   sessions (e.g. stock GNOME) in an equivalent floating popover opened from Cantrip's app-launcher
+   entry. Never icon-only, never a missing control.
+
+Missing any of the three on any platform or session blocks the release; no known gap, icon-only
+fallback or new setting ships. Where an OS cannot support another promise, Cantrip takes the safer
+outcome (copy instead of paste, refuse instead of guess) and says so.
+
+Stated identically in [PRODUCT.md › Release bar](PRODUCT.md#release-bar); tested by checklist item 1.
 
 ## Platform requirements
 
-| Concern | Required on both OSes | Known platform constraint |
+| Concern | Required everywhere | Known platform constraint |
 | --- | --- | --- |
-| Global shortcut | One user-chosen chord, press **and** release observed. Default `Control+Option+Space` (macOS), `Ctrl+Alt+Space` (Linux). No modifier-only or Fn keys in v2.0 | Some Wayland desktops need user consent or report no release; there only tap-to-toggle works, and the HUD says so |
-| Hold vs tap | Held ≥ 300 ms then released = hold-to-talk; shorter = toggle on, next press stops | — |
-| Cancel | Escape cancels while recording or processing; the take is discarded, never delivered | Escape is captured only while a take is active |
-| HUD | Visible ≤ 100 ms after the press; never takes focus or clicks | Without a non-focusing overlay, state shows on the tray icon, still without stealing focus |
+| Shortcut | One user-chosen chord; default `⌃⌥Space` (macOS), `Ctrl+Alt+Space` (Linux); no modifier-only or Fn keys in v2.0. With release reported, held ≥ 300 ms = hold-to-talk, shorter = toggle. Escape cancels a take | Some Wayland desktops need consent; some report activation only (tap-to-toggle); Escape is captured only during a take |
 | Microphone | Chosen device stays bound through route changes (e.g. Bluetooth); system default input never changed | — |
-| Focus capture | App, window and, where exposed, the focused field, identified at the start | Many Wayland desktops hide the focused window: target uncertain, copy-only |
-| Clipboard | Snapshot and restore every item type; Cantrip's text marked transient where supported | Reading may trigger an OS prompt; Linux clipboards may need Cantrip running to serve them |
-| Secrets | Key only in the OS secret store (login keychain on macOS, the desktop secret service on Linux) | A failed secret-store read is an error, not "no key" |
-| Storage | Owner-only, per-user data directory that survives reboot; never a purgeable temp directory | — |
+| Focus, delivery | App, window and, where exposed, field captured at start; every automatic write or paste addressed to it | Many Wayland desktops hide the focused window (copy-only); most Linux sessions cannot address a paste |
+| Clipboard, secrets, storage | Snapshot and restore every clipboard item type, Cantrip's text transient where supported; key only in the OS secret store; owner-only, reboot-durable per-user staging, never a purgeable temp directory | Clipboard reads may prompt; Linux clipboards may need Cantrip running; a failed secret-store read is an error, not "no key" |
 
 ## Speech and rewrite pipeline
 
-One HTTPS base (`https://openrouter.ai/api/v1`), one key, at most two calls per dictation:
-transcription, then a rewrite only when Post-Processing is on and the mode is not Raw.
+One HTTPS base (`https://openrouter.ai/api/v1`), one key, at most two calls per dictation. Every
+request, transcription and rewrite, dictation and meeting, carries `provider.data_collection: "deny"`.
 
 1. **Transcription.** `microsoft/mai-transcribe-2`, `language: "en"`, vocabulary as `keyterms`
-   (JSON array) or `keyterms[]` (multipart). `prompt` is a no-op on MAI-Transcribe-2; `keyterms`
-   raised term accuracy from 14/21 to 21/21.
-2. **Rewrite.** `openai/gpt-6-luna`, `reasoning.effort: "none"`, `max_tokens: 400`,
-   `provider.data_collection: "deny"`, system prompt per mode, transcript after `Source:`.
-3. **Rewrite failure** (error, empty reply, `finish_reason != "stop"`, or 4 s timeout): deliver
-   Raw, HUD `Raw (cleanup skipped)`.
-4. **Transcription failure.** Transcription waits for a response or a real network error, with
-   no total deadline. An HTTP error or empty transcript keeps the audio staged for Retry /
-   Discard and never starts local recognition.
-5. A **cancelled** take is never delivered, even if a response arrives later.
+   (JSON) or `keyterms[]` (multipart); `prompt` is a no-op. No total deadline; an HTTP error or
+   empty transcript keeps the audio staged and never starts local recognition.
+2. **Rewrite**, only with Post-Processing on and a mode other than Raw: `openai/gpt-6-luna`,
+   `reasoning.effort: "none"`, `max_tokens: 400`, system prompt per mode, transcript after
+   `Source:`. Error, empty reply, `finish_reason != "stop"` or 4 s → Raw, `Raw (cleanup skipped)`.
+   A **cancelled** take is never delivered, even if a response arrives later.
 
-### Local recognition fails closed
-
-Reached only for a finished dictation with no key configured or no connection; never for
-meetings. One gate guards every start, and nothing else may start recognition.
-
-1. Any OS speech permission is requested here only (never at launch, in Settings or on the
-   cloud path), with the audio already on disk.
-2. Continue only if recognition is authorized, an English recognizer is installed, and it is
-   **guaranteed** to run on this machine: a recognizer that can send audio to its vendor runs
-   only in a mode that guarantees on-device processing, re-checked just before the start, never
-   retried with that guarantee relaxed. No model is downloaded implicitly.
-3. Success: deliver as Raw with the vocabulary as hints; HUD `On-device`. Any failed check or
-   error **fails closed**: no audio leaves the machine, it stays staged with Retry / Discard, and
-   the HUD names the fix (`Not transcribed. Allow speech recognition for Cantrip, or add an
-   OpenRouter key`; `Not transcribed. No on-device English speech here. Add an OpenRouter key`).
+**Local recognition fails closed.** Only for a finished dictation with no key or no connection,
+never meetings; its OS permission is requested only then. It runs only if authorized, installed and
+**guaranteed** on-device (re-checked at start, never relaxed); nothing downloads implicitly. Success:
+Raw, HUD `On-device`. Otherwise no audio leaves the machine, it stays staged, and the HUD names the
+fix (`Not transcribed. Allow speech recognition for Cantrip, or add an OpenRouter key`;
+`Not transcribed. No on-device English speech here. Add an OpenRouter key`).
 
 ### Prompt contract
 
-Prompt v4 changes only v3's self-correction rules (v3 is the measured version). It is unmeasured
-and must pass the fidelity check before Clean ships.
+v4 changes only v3's (measured) self-correction rules and must pass the fidelity check before Clean ships.
 
 ```text
 [Clean]
@@ -93,289 +91,229 @@ Custom Vocabulary (canonical spellings): <terms, comma separated>.
 A speech recognizer sometimes writes these as similar-sounding words (for example Scrum for Scry, Codecs for Codex, Misty Stack for Mistystack, computing for confusing). Replace a word only when it is wrong in its sentence and the vocabulary entry fits: "open Scrum and search" becomes "open Scry and search", but "the scrum ran long" and "audio codecs" are ordinary uses and stay exactly as dictated. When unsure, keep the dictated word. Do not insert an entry the speaker did not say.
 ```
 
-With a user's own vocabulary only the term list changes; the example pairs stay.
-
-### Slice #42 spike results
-
-5 clips of 7.3–10.0 s, mono 16 kHz MP3 from neural TTS voices, sequential real OpenRouter calls
-from a Linux cloud sandbox, prompt v3. Latency is request start to response read.
-
-| | Raw | Clean | Elevated |
-| --- | --- | --- | --- |
-| Exact domain terms | 21/21 (100%) | 20/21 (95.24%) | 19/21 (90.48%) |
-| Latency p50 / mean / max | 352 / 694 / 2052 ms | 1479 / 1737 / 2964 ms | 1187 / 1560 / 3002 ms |
-| Cost per 1,000 dictations | $0.2611 | $0.3123 | $0.3073 |
-
-- Rewrite alone: p50 1035 ms (Clean), 846 ms (Elevated); Luna effort `none` 927 ms vs `low` 2725
-  ms. `prompt` changed nothing, and an unknown field also returns 200. Spend $0.012978 of $0.04.
-- **The term score hides a fidelity miss.** On clip-02 Clean returned "…failed again on
-  Cloudflare. It was the OpenRouter key", keeping the retracted claim; prompt v4 targets this.
-  Clean and Elevated were identical on 3 of 5 clips. Vocabulary rule v3 passed 9/9 negative text
-  probes; held-out repair 5/9; `keyterms` still turned an ordinary "cloud flare" into "Cloudflare".
-- Not covered: human voice, noise, accents, long takes, meetings, local recognition, whether
-  `provider.data_collection` is honored. Before release, also run v1's fidelity corpus; if Luna
-  loses, revisit the model in a new decision.
-
 ## Delivery contract
 
-No supported OS checks focus and delivers text in one step, or confirms receipt of a
-synthesized keystroke. The contract is built around that.
+**Safety rule.** No supported OS offers an atomic check-and-deliver primitive or confirms receipt of
+a synthesized keystroke. So every automatic delivery is addressed to the captured target, and
+immediately before dispatch (the **final verification**) Cantrip verifies that the captured app and
+its captured window still have focus; a second window of the same app fails. No other app ever
+receives a write, key event or paste from Cantrip; nothing is sent to whatever holds focus. Internal
+read order is the implementer's choice.
 
-**At start**, off the path that shows the HUD, capture the target within 250 ms: the focused app
-(with an identity that survives process-ID reuse), its focused window, and the focused field where
-the OS exposes it. All read in time → **resolved**; otherwise **uncertain** for this take, never
-upgraded by a late answer or a re-capture at delivery.
+**Capture** within 250 ms of the press, off the HUD path: focused app (identity surviving process-ID
+reuse), window and, where exposed, field. All in time → **resolved**; else **uncertain** for this
+take, never upgraded later. **Gate**, before either tier and at the final verification: resolved;
+same app instance; delivery permission granted (else `Copied — allow <permission>`); no sleep or
+session switch since the start; field still answers; captured app and window still focused. Moved →
+`Copied — focus changed`; unverifiable → `Copied — target uncertain`. Uncertain targets, apps on the
+built-in copy-only list (not a setting) and failed support queries get copy-only; a field taking
+direct insertion gets tier 1; one reporting it unsupported gets tier 2 only if the session can
+address a paste to the captured app, else `Copied — paste unsupported on this session`.
 
-**Gate, before either tier.** Resolved target; same running app instance; any permission delivery
-needs is granted (else `Copied — allow <permission>`); no sleep or session switch since the start;
-the captured field still answers; the frontmost app **and** its focused window equal the captured
-ones. Moved → `Copied — focus changed`; unreadable → `Copied — target uncertain`. **Last check, in
-both tiers**, with no other work before the write or paste: read the focused window, then the
-frontmost app; both must still match, with the same copy-only outcomes (the app alone is not
-enough: a second window of the same app passes it).
+**Confirmation is an edit delta**, read before and after (until it holds, or 300 ms in tier 1, 2 s
+in tier 2): both snapshots readable, `post == pre[..sel.start] + text + pre[sel.end..]`,
+`post != pre`, caret right after the text, nothing selected; emoji and combining marks count right;
+truncated values compare by prefix, span and suffix. Anything else (no change, autocorrect,
+concurrent typing, "hello" over a selected "hello") is **unconfirmed**.
 
-| Finding | Delivery |
-| --- | --- |
-| target uncertain, or app on the built-in copy-only list (filled at bring-up; not a setting) | copy-only |
-| resolved, field supports direct insertion | tier 1 |
-| resolved, field reports insertion unsupported | tier 2 |
-| resolved, support query fails otherwise (timeout, error) | copy-only |
-
-**Confirmation is an edit delta.** Read the field's value and selection before; read them after
-until the predicate holds or time is up (tier 1 300 ms, tier 2 2 s). `confirmed` needs all of:
-both snapshots readable with the selection inside the value; `post == pre[..sel.start] + text +
-pre[sel.end..]`; `post != pre`; caret right after the inserted text with nothing selected. Offsets
-use the OS's own text-range units (emoji and combining marks count right); a truncated value is
-compared via prefix, inserted span and suffix, never sampled. Anything else is **unconfirmed**:
-unreadable snapshot, no change, autocorrect, concurrent typing, or "hello" over a selected "hello".
-Snapshots stay in memory for the check only.
-
-**Tier 1 — direct insertion (preferred).** Gate, snapshot, last check, then replace the captured
-field's selection with the text: it names the field, cannot land in another app, and never touches
-the clipboard. Success + predicate → `confirmed`. Success without it, or an ambiguous error →
-`unconfirmed`, and tier 2 is **not** tried (the text may have landed). "Unsupported" before any
-change → tier 2. Target gone or write refused → copy-only.
-
-**Tier 2 — guarded paste.** (1) Gate; snapshot every clipboard item and type (none if access is
-denied). (2) Place the text as plain text, marked transient where supported; note the clipboard's
-change marker. (3) Gate again, field snapshot, last check. (4) Send one paste chord, addressed to
-the captured app where the OS allows, else to the focused input the last check just verified.
-(5) Restore the old clipboard **only** on `confirmed`, with the change marker unchanged and a
-snapshot held; never on `unconfirmed`, early or late, so the dictation stays on the clipboard.
-Another process reading the clipboard proves nothing. **Copy-only** puts the text on the
-clipboard, sends nothing, restores nothing and says why.
+**Tier 1 — direct insertion (preferred)** replaces the captured field's selection; it names the
+field, cannot land elsewhere and never touches the clipboard. Success + predicate → `confirmed`;
+success without it or an ambiguous error → `unconfirmed`, and tier 2 is **not** tried; a refusal
+before any change goes to tier 2 if addressable, else copy-only. **Tier 2 — addressed paste**,
+never routed by keyboard focus: snapshot every clipboard item (none if access is denied); place the
+text, transient where supported; gate and final verification; send one paste addressed to the
+captured app, or nothing (copy-only) if it cannot be addressed. Restore the old clipboard **only**
+on `confirmed`, with a snapshot held and the clipboard still holding Cantrip's text. **Copy-only**
+puts the text on the clipboard, sends nothing and says why.
 
 | Outcome | What Cantrip knows | HUD |
 | --- | --- | --- |
 | `confirmed` | the edit delta was read back from the field | `✓ Inserted` |
-| `unconfirmed` | write made or paste sent; receipt not observed | `Sent — unconfirmed` (tier 1), `Posted — unconfirmed` (tier 2) |
-| `copied` | nothing was written or sent to any app | `Copied — focus changed` / `— target uncertain` / `— allow <permission>` |
-| `failed` | even the clipboard write failed | `Not delivered. Use Copy last dictation` |
+| `unconfirmed` | direct write made or addressed paste sent; receipt not observed | `Sent — unconfirmed` (tier 1), `Posted — unconfirmed` (tier 2) |
+| `copied` | nothing was written or sent to any app | `Copied — focus changed` / `— target uncertain` / `— paste unsupported on this session` / `— allow <permission>` |
+| `failed` | even the clipboard write failed | `Not delivered. Use Copy last dictation`; audio stays staged, Retry / Discard offered |
 
-Logs carry outcome, tier and app identifier, never text. Only the predicate yields `confirmed`.
+**Clipboard claim.** `Posted — unconfirmed` and `Copied — …` add "Text is on the clipboard" only if
+the clipboard still holds Cantrip's text when the HUD shows; otherwise "Use Copy last dictation".
 
-**Residual risks.** (1) A switch after the last check's window read (other window) or app read
-(other app) is not caught: tier 1 still writes the captured field, an addressed paste still goes
-to the captured app (which may take it in the background), and an unaddressable paste goes to
-whatever has focus when it lands, milliseconds later. (2) Inside one app, a changed field, tab or
-conversation, or a reused field showing another conversation, is never caught. (3) Either tier
-replaces the selection present at delivery. (4) Key-forwarding apps (remote desktop, VMs) are not
-detected. (5) A user copy during a paste may be pasted instead; restore is then skipped.
-(6) Per-app support is undocumented on every OS. No keystroke ever goes to an uncertain target.
+**Residual risks.** (1) A **cross-app switch** right after the final verification can still let the
+text reach the captured app, never the newly focused app. (2) A **same-app window switch** right
+after it: tier 1 still writes only the captured field; tier 2's paste may land in any of the
+captured app's windows. Before the final verification, either switch is copy-only. (3) A changed
+field or conversation inside one app is not caught; delivery replaces the current selection. (4)
+Key-forwarding apps (remote desktop, VMs) are not detected. (5) A copy during a tier-2 paste may be
+pasted instead; restore is then skipped, with no clipboard claim. (6) Per-app support is unknown.
 
 ## Meeting pipeline (designed, not tested)
 
-**Capture on one clock.** Two mono 16 kHz tracks: `You` (selected microphone) and `Others`
-(system audio output minus Cantrip's own sounds: the sound server's output monitor on Linux,
-system audio capture on macOS). Both are stamped by one monotonic clock that ignores wall-clock
-changes and start at the same instant on it; wall time is used only for `recorded_at`. Idle sleep
-is prevented; if the machine sleeps anyway, the meeting stops there. A denied system-audio
-permission stops the meeting with a clear message, with no silent fallback. Chunks are ≤ 5 min
-(under the 25 MB upload limit), cut at the quietest 20 ms in the last 15 s; each records its own
-measured start and duration on the shared clock (never `index × 5 min`), so drift cannot
-accumulate past one chunk. A gap over 100 ms starts a new chunk; a shorter one is filled.
+**Capture.** `You` (microphone) and `Others` (system output, minus Cantrip's sounds) share one
+monotonic clock (wall time only for `recorded_at`). Drift never accumulates: a sound on both tracks
+gets the same timestamp within 100 ms at the start and after 60 min, note timestamps are within 1 s
+of speech, and a capture gap is never silently closed up. Idle sleep is prevented; sleep anyway, or
+denied system-audio access, stops the meeting with a message. Audio goes in parts under the
+provider's 25 MB upload limit, avoiding mid-word cuts where practical.
 
-**Staging.** Everything unfinished lives in Cantrip's owner-only, reboot-durable data directory:
-a state record (`source_id` UUID flushed before the first chunk, start time, state, per-chunk
-records, partial-saved flag, and the complete note's publish record: path + SHA-256), audio,
-transcripts, cleaned windows, summary and rendered note. Staging writes are crash-safe (whole or
-absent). Network errors, 408, 429 and 5xx get three more tries (1 s, 4 s, 16 s, or
-`Retry-After`); other 4xx do not; a slow response is not a failure.
+**Staging** (audio, transcripts, cleanup, summary, rendered note, publish destinations) is
+crash-safe: after a crash, kill or power loss each item is whole or absent, and `source_id` (fixed at
+start) is durable before any audio is kept. Network errors, 408, 429 and 5xx are retried a bounded
+number of times with increasing backoff, honoring `Retry-After`; other 4xx are not; slow is not
+failed. **Unresolved parts block completion:** a part whose transcription still fails, or returns
+no words although Cantrip detects speech in it, keeps the meeting `parts-failed`; no complete note is
+published and that part's original audio stays staged, even when every other part succeeded. A part
+completes empty only with no speech. Retry resumes from staging without redoing finished parts.
 
-| State | Meaning | Contextual row |
-| --- | --- | --- |
-| `recording`, `processing`, `publishing` | in progress (`publishing` found at launch → `pending-archive`) | — |
-| `interrupted` | quit or crash while recording or processing; audio repaired at next launch | Retry (resume), Discard |
-| `chunks-failed` | a chunk failed after its retries | Retry, Save partial notes, Discard |
-| `pending-archive` | all chunks transcribed, note rendered in staging; only publishing failed | Retry (publish only, zero API calls), Discard |
-| `archived` | published, verified, flushed; staging deleted (finished at next launch if cut off) | — |
+States: `recording` / `processing` / `publishing` (`publishing` found at launch → `pending-archive`);
+`interrupted` (Retry, Discard); `parts-failed` (Retry, Save partial notes, Discard); `pending-archive`
+(only publishing failed: publish-only Retry, Discard); `archived` (verified, staging cleaned up).
 
-**Publication invariants** (partial and complete notes alike; no network involved):
+**Publication invariants**, for partial and complete notes alike, with no network involved:
 
-1. **Disjoint.** Meeting folder and staging may not be, contain or lie inside each other, judged
-   on fully resolved paths by filesystem identity, not string prefix (symlinks and
-   case-insensitive volumes included). Settings refuses an overlap ("Choose a folder outside
-   Cantrip's private data folder") and keeps the old choice; every publish re-checks, and on
-   overlap creates and deletes nothing and stays `pending-archive`.
-2. The chosen folder itself is never created (it may be an unmounted volume); only
-   `cantrip-meeting/YYYY/MM` beneath it.
-3. **Exclusive, no-replace.** If staging and the folder share a volume with a no-replace move,
-   the flushed note moves in one atomic step that fails if the name exists, so it appears whole.
-   Otherwise the destination is created exclusively and written directly (not atomic, see below).
-4. **Append-only.** Never overwrite, truncate, rename, delete or open-for-write an existing file
-   in the Meeting folder (on success, error, replay or Discard), and never put a temp file there.
-   A taken name moves on to `-2.md`, `-3.md` (`-partial-2.md` for partial notes).
-5. **Verify before cleanup.** The destination must be a regular file (a FIFO, socket, symlink,
-   directory or device is never read and never blocks), match the staged SHA-256 and be flushed
-   to stable storage with its directories. Only then, and only for a complete note, is staging
-   deleted; otherwise the publish failed and whatever is there is left alone.
-6. **Publish-only Retry** makes zero speech or LLM calls. If the recorded path verifies, flush and
-   archive; else publish afresh into the folder chosen now. Two complete notes with one
-   `source_id` beat a lost one.
+1. **Disjoint after symlink resolution.** Staging may not be, contain or lie inside (a) the Meeting
+   folder chosen in Settings, (b) each publication subdirectory (`cantrip-meeting`, `YYYY`, `MM`)
+   as it resolves before Cantrip creates a directory or writes a file in it, or (c) on publish-only
+   Retry, the directory a recorded publish path resolves to; judged by filesystem identity, not
+   string prefix. Settings refuses an overlap ("Choose a folder outside Cantrip's private data
+   folder"); an overlap at publish creates, writes and deletes nothing and leaves the meeting
+   `pending-archive`, staging intact. The chosen folder itself is never created.
+2. **Exclusive, append-only.** A note appears only under a name that did not exist (`-2.md`,
+   `-3.md`, `-partial-2.md`), whole and at once where the filesystem supports exclusive atomic
+   publication. Nothing in or beneath the Meeting folder is ever overwritten, truncated, renamed,
+   deleted or opened for write, and no temporary file is put there. Without atomic publication a
+   crash can leave an incomplete file: left alone, it fails verification; Retry uses the next name.
+3. **Staged copy kept until verified.** Publication never consumes the staged note: a complete,
+   recoverable copy stays in staging until the published file is verified a regular file (a
+   symlink, FIFO, socket, directory or device is never followed, read or waited on) whose content
+   digest matches, flushed to stable storage with its directories. Only then, for a complete note,
+   is staging cleaned up; a failed check leaves staging and the folder as they are.
+4. **Publish-only Retry** makes zero speech or LLM calls. If the recorded path passes (c) and
+   verifies, flush and archive; else publish afresh from the staged copy into the folder chosen
+   now, under (a) and (b). Two complete notes with one `source_id` beat a lost one.
 
-Accepted tradeoff: a direct create is visible while written, and a crash or full volume can leave
-an incomplete file (perhaps already `status: complete`). Cantrip never deletes it; it fails
-verification and Retry publishes a whole note under the next name.
+**Notes.** A partial note shows an unresolved part at its real start as `[MM:SS] You: [transcription
+failed: MM:SS–MM:SS]`; completing later publishes a new note without opening any partial. Parts are
+transcribed with `keyterms` and segment timestamps; labels come from tracks. The transcript is
+deterministic (same staging, byte-identical note) and chronological by turn start (`You` first on a
+tie), never joining turns across speakers or markers. Without usable timestamps a part is still
+ordered deterministically, no detected speech is dropped (a 180 ms "no" survives), and coarse
+placement reads `[approximate order: MM:SS–MM:SS]`. `gpt-6-luna` cleans every turn faithfully before
+the summary (speaker, timestamp, facts, self-corrections kept; no turn added, dropped or merged); a
+failure retries once, then stays uncleaned under `[cleanup failed: MM:SS–MM:SS]`. The summary gives
+title, summary, decisions and actions, else "Summary failed".
 
-**Partial notes.** A failed chunk appears at its real start on its own track as `[MM:SS] You:
-[transcription failed: MM:SS–MM:SS]`; the other track stays. Saving keeps `chunks-failed` and all
-staging. Completion later publishes a new `<utc>-<slug>.md` (same `source_id`, `status: complete`)
-without looking for, opening or changing any partial note.
-
-**Timestamped transcription.** Per chunk, one MAI-Transcribe-2 request with `keyterms`,
-`response_format: "verbose_json"`, `timestamp_granularities: ["segment"]`. Bring-up first checks
-the real response schema on one chunk and commits the redacted response as a fixture. Segments
-must be finite, ordered, inside the chunk and contain text. Otherwise (no valid segments, a 400,
-no text) a **deterministic local fallback** splits the chunk into utterance slices: same audio,
-same split; no detected voice is dropped, however short (a 180 ms "no" survives); speech that
-cannot be ordered is sent whole and marked `[chunk-level order: MM:SS–MM:SS]`; a chunk completes
-empty only when truly silent (RMS ≤ −50 dBFS, no voiced run of 40 ms) and a plain request also
-returns nothing; anything else unresolved marks it `failed` and keeps its audio.
-
-**Merge and cleanup.** Labels come from tracks, so no diarization. The merge is a pure function:
-absolute start = chunk start + segment start; sort by (start, `You` before `Others`, chunk,
-segment); join consecutive same-track turns ≤ 1,500 ms apart, never across the other speaker, a
-failure marker or a whole-chunk block; floor-second timestamps, minutes past 59; same staging,
-same bytes. `gpt-6-luna` then cleans windows of ≤ 40 turns or 6,000 characters as JSON
-`[{id, speaker, text}]` → `[{id, text}]`; timestamps and labels are re-attached by `id`, never
-generated. A window is accepted only if `finish_reason` is `stop`, ids match in order, no text is
-empty, and no turn grows past 1.3 × + 5 words or (≥ 10 words) shrinks below 0.4 ×; else one retry,
-then the merged text stays under `[cleanup failed: MM:SS–MM:SS]`. Meeting cleanup keeps
-self-corrections as spoken. One summary call returns `title`, `summary`, `decisions[]`,
-`actions[]`; on failure the note says "Summary failed". Cost ($0.10 per audio hour per track,
-catalog) is unmeasured.
-
-**File format.** `<folder>/cantrip-meeting/YYYY/MM/<utc>-<slug>.md` (`-partial.md` for partial),
-`<utc>` = `YYYY-MM-DD_HHMMSSZ` at start, `<slug>` = title as lower-case ASCII letters and digits,
-other runs as `-`, ≤ 60 chars, else `meeting`. Matches Supercortex's `captures/voice` layout;
-Cantrip only adds files. Frontmatter: `source: "cantrip-meeting"`, `source_id`,
-`status: complete | partial`, `recorded_at` (ISO 8601 UTC), `title`. Body, in order:
-`# <title>`, `## Summary`, `## Decisions`, `## Actions` (`- [ ] …`), `## Transcript`, where every
-turn is its own blank-line-separated paragraph: `[00:04] You: …`, then `[00:11] Others: …`.
+**File format.** `<folder>/cantrip-meeting/YYYY/MM/<utc>-<slug>.md` (`-partial.md` for partial);
+`<utc>` = `YYYY-MM-DD_HHMMSSZ` at start; `<slug>` = title in lower-case ASCII alphanumerics, other
+runs `-`, ≤ 60 chars, else `meeting`. Frontmatter: `source: "cantrip-meeting"`, `source_id`, `status`,
+`recorded_at` (ISO 8601 UTC), `title`. Body: `# <title>`, `## Summary`, `## Decisions`, `## Actions`
+(`- [ ] …`), `## Transcript` (one paragraph per turn, `[00:04] You: …`).
 
 ## Visual design
 
-Calm, restrained and native on each OS: Cantrip looks like part of the desktop, not a brand. It
-follows the system light/dark theme with equal care in both: text contrast ≥ 4.5:1, indicators and
-focus rings ≥ 3:1. Type is the platform's system sans-serif; timers, shortcuts and timestamps use
-a tabular monospace. No Inter or imported display fonts, no violet or neon glows, no gradients, no
-pill-badge soup, no decorative borders or cards. Colour only carries meaning: red = recording,
-amber = needs attention, green check = confirmed. Motion ≤ 150 ms, none under reduced-motion.
-Every control is keyboard-reachable and labelled for screen readers.
-
-**Popover** (tray / menu-bar item, ~280 px, native menu styling) and **Settings** (one pane,
-~480 px, no tabs or sidebar):
+Calm and native, light and dark with equal care: text contrast ≥ 4.5:1, indicators and focus rings
+≥ 3:1; system sans-serif, tabular monospace for timers, shortcuts and timestamps; no display fonts,
+glows, gradients, pill-badge soup, decorative borders or cards. Colour means state only: red =
+recording, amber = attention, green check = confirmed. Motion ≤ 150 ms, none under reduced-motion.
+Every control is keyboard-reachable and screen-reader labelled. **Popover** (~280 px, native menu
+styling) and **Settings** (one pane, ~480 px); shortcuts read `⌃⌥Space` (macOS), `Ctrl+Alt+Space` (Linux):
 
 ```
-┌──────────────────────────────┐   Shortcut        [ ⌃⌥Space ]  Record
-│  Cantrip            ● Idle   │   Microphone      [ System default   ▾ ]
-│  Start dictation    ⌃⌥Space  │   OpenRouter key  saved ✓  Replace…  Remove
-│  Start meeting               │   Vocabulary      Scry, Codex, …  [ + ] [ − ]
-│  Mode   [ Raw | Clean | Elev]│   Meeting folder  …/captures/voice  Choose…
-│  Post-Processing        [on] │   ☐ Open at login
-│  Copy last dictation         │
-│  Settings…            Quit   │   A key never set shows "Add key".
-├──────────────────────────────┤
-│  ⚠ Dictation 10:42 failed    │
-│  Retry      Discard…         │
-└──────────────────────────────┘
+┌──────────────────────────────────────────┐  Shortcut        [ ⌃⌥Space ]  Record         (macOS)
+│  Cantrip                        ● Idle   │                  [ Ctrl+Alt+Space ]  Record  (Linux)
+│  Start dictation               ⌃⌥Space   │  Microphone      [ System default   ▾ ]
+│    Linux:                Ctrl+Alt+Space  │  OpenRouter key  saved ✓  Replace…  Remove
+│  Start meeting                           │  Vocabulary      Scry, Codex, …  [ + ] [ − ]
+│  Mode   [ Raw | Clean | Elevated ]       │  Meeting folder  …/captures/voice  Choose…
+│  Post-Processing                   [on]  │  ☐ Open at login
+│  Copy last dictation                     │  A key never set shows "Add key".
+│  Settings…                        Quit   │
+├──────────────────────────────────────────┤
+│  ⚠ 10:42 not delivered  Retry  Discard…  │
+└──────────────────────────────────────────┘
 ```
 
-Below the rule is the contextual row, absent when nothing is staged: `⚠ Dictation 10:42 failed`
-or `⚠ Meeting 14:00 interrupted` (Retry, Discard…); `⚠ Meeting 14:00: 2 parts failed` (adds Save
-partial notes); `⚠ Meeting 14:00 not saved: folder not writable` (Retry, Discard…, warning that
-finished notes and audio will be deleted). During a meeting its control reads `Stop meeting 12:04`.
+The contextual row, absent when nothing is staged: `⚠ Dictation 10:42 failed` / `… not delivered` /
+`⚠ Meeting 14:00 interrupted` (Retry, Discard…); `⚠ Meeting 14:00: 2 parts failed` (adds Save partial
+notes); `⚠ Meeting 14:00 not saved: folder not writable` (Discard… warns notes and audio go).
 
-**Recording HUD pill.** One pill, bottom-centre of the display with the pointer, ~32 px tall,
-system material background, never focusable or clickable. Appears ≤ 100 ms after the press;
-Escape hides it at once.
+**Recording HUD pill.** Bottom-centre of the pointer's display, every workspace, ~32 px, system
+material, never focusable or clickable; ≤ 100 ms after the press; Escape hides it at once.
 
 ```
-( ● Listening  ▂▅▇▅▂ )          recording; live level meter
-( ⟳ Transcribing )              waiting for recognizer or rewrite
-( ✓ Inserted )  ( Sent — unconfirmed )               0.8 s, then fade
-( Posted — unconfirmed )        1.5 s, adds "Text is on the clipboard"
+( ● Listening  ▂▅▇▅▂ )  recording     ( ⟳ Transcribing )  waiting for recognizer or rewrite
+( ✓ Inserted )  ( Sent — unconfirmed )  0.8 s, fade    ( Posted — unconfirmed )  1.5 s, clipboard claim
 ( ⚠ Copied — focus changed )  ( ⚠ Copied — target uncertain )  ( ⚠ Raw (cleanup skipped) )  2 s
-( ⚠ On-device )                 beside the outcome
-( ⚠ Not transcribed. … )        6 s; recording kept, Retry in popover
-( ⚠ Microphone blocked. Open Settings )
-( ● 12:04 Meeting )             whole meeting; tabular timer
+( ⚠ Copied — paste unsupported on this session )               2 s
+( ⚠ Not delivered. Use Copy last dictation )   6 s; audio kept, Retry in popover
+( ⚠ Not transcribed. … )        6 s; recording kept, Retry in popover    ( ⚠ On-device )
+( ⚠ Microphone blocked. Open Settings )      ( ● 12:04 Meeting )  whole meeting, tabular timer
 ```
 
 ## Permissions, privacy and distribution
 
-Permissions are requested just in time, never at launch: microphone at the first recording;
-accessibility / input-control access at the first delivery (copy-only until granted); global
-shortcut or input-injection consent where a Wayland desktop requires it, at first use; clipboard
-access where the OS prompts, at the first tier-2 paste; system audio at the first meeting; local
-speech recognition at the first no-key/no-network dictation. No screen recording, no keystroke
-monitoring beyond the shortcut and Escape during a take, no automation of other apps.
+Just in time, never at launch: microphone at the first recording; accessibility / input control at
+the first delivery (copy-only until granted); Wayland shortcut or input consent at first use;
+clipboard access at the first tier-2 paste; system audio at the first meeting; speech recognition at
+the first no-key dictation. No screen recording, keystroke monitoring beyond the shortcut and
+Escape during a take, or automation of other apps.
 
-- **No telemetry.** Logs never hold transcript text, audio, clipboard or field contents, or note
-  file names (they contain titles); only outcomes, durations, counts, model names, error classes.
-- Audio goes only to OpenRouter, only for the take being processed (including a user's Retry).
-- The last dictation's text lives in memory (and on the clipboard after a copy or unconfirmed
-  paste). Succeeded dictation audio is deleted once its text is held and an outcome recorded;
-  Escape deletes the take. Failed, refused or interrupted audio stays, owner-only, with no expiry,
-  until Retry succeeds or Discard is confirmed. Meeting audio stays until the complete note is
-  archived or Discard is confirmed.
-- Meetings record other people. The user starts each one and the HUD shows it throughout;
-  telling participants is the user's duty.
-- Installable on each OS without building from source; the macOS build is signed and notarized so
-  Gatekeeper passes. Manual updates in v2.0. v2 replaces v1 and leaves v1's data untouched. Code
-  adapted from either Hex repository keeps its MIT notice in `THIRD_PARTY_NOTICES`.
+- **No telemetry.** Logs hold only outcomes, tier, app identifier, durations, counts, model names
+  and error classes; never transcript text, audio, clipboard or field contents, or note file names.
+- **Upstream providers.** Audio and text go only to OpenRouter, only for the take being processed.
+  OpenRouter routes them to upstream model providers, such as Azure for `microsoft/mai-transcribe-2`
+  and OpenAI, Amazon Bedrock or Azure for `openai/gpt-6-luna`. Cantrip sends
+  `provider.data_collection: "deny"` on both transcription and rewrite requests as a routing
+  preference; it is not proof of any upstream provider's retention, and is unverified.
+- **Retention.** The last dictation's text stays in memory until quit (and on the clipboard after a
+  copy or unconfirmed paste, until replaced). Delivered or copied dictation audio is deleted; Escape
+  deletes the take. Failed, refused, interrupted or `Not delivered` audio stays, owner-only, until
+  Retry succeeds or Discard is confirmed; meeting audio until the complete note is archived or
+  Discard is confirmed. Meetings record others; telling them is the user's duty.
+- Installable without building from source; macOS builds signed and notarized; manual updates;
+  v1's data untouched. Reused third-party open-source code (e.g. from either Hex repository) keeps
+  the license notices its license requires.
 
 ## Verification checklist
 
-Real machines: macOS 15+, GNOME on Wayland, KDE Plasma on Wayland, and an X11 session. Record each
-result per platform; anything injected through a debug hook is recorded as injected. Not yet run.
+Not yet run. Real machines: macOS 15+; KDE Plasma, GNOME and wlroots on Wayland; X11. Results are
+recorded per platform; anything injected through a debug hook is recorded as injected.
 
-1. **Surface.** No prompt at launch; exactly 7 popover controls, the recovery row only while items
-   are staged, exactly 6 settings. Hold-to-talk and tap-to-toggle work; HUD ≤ 100 ms, measured;
-   Escape discards. A Bluetooth headset connecting mid-take does not move or end the take.
-2. **Delivery**, with instrumented receivers A and B logging every write, key event and clipboard
-   read: a switch to B or A's second window before release, at dispatch, or between the two
-   last-check reads is copy-only and reaches nothing; after the last check B still gets nothing;
-   `confirmed` only when A's own dump shows the exact edit; a swallowed paste is `unconfirmed` and
-   keeps the dictation on the clipboard; a confirmed paste restores the old clipboard, image
-   included; identical pre-existing text never yields `Inserted`; emoji and combining-accent
-   offsets confirm; a capture timeout is copy-only; 200 randomized switches give zero events at B.
-   Then a per-app matrix (editors, browsers, chat, terminals) records tier and outcome per OS.
-3. **Quality.** 50 real dictations per mode per OS (latency p50/p95, term accuracy, meaning by
-   eye); a 50-sentence negative set has zero wrong substitutions; Clean v4 keeps only the final
-   statement on every self-correction clip. Rewrite error, truncation and 4 s timeout give
-   `Raw (cleanup skipped)`; a transcription error or empty transcript keeps the recording staged.
-4. **Fail closed**, per OS: online, no key, local recognition denied / unsupported / missing. A
-   packet capture shows zero outbound requests from Cantrip or system speech services acting for
-   it; the fix is shown; audio is staged. Control: with a key, the OpenRouter request appears.
-5. **Meetings** (20 min, plus a scripted 8 min with headphones): every section present; turns in
-   script order with right labels and timestamps within 1 s; a click lands within 100 ms on both
-   tracks at start and after 60 min; merging the same staging twice is byte-identical; fallback
-   (segments stripped, a 400) keeps order; a 180 ms "no" survives.
-6. **Archive.** A failed chunk offers Retry / Save partial notes / Discard; editing, renaming,
-   moving or deleting partial notes never affects completion; an existing name gives `-2.md` and
-   the original stays byte-identical; an unwritable or overlapping folder gives `pending-archive`,
-   and offline Retry then publishes with zero API calls; a FIFO or symlink at the recorded path
-   neither hangs nor is replaced; a kill around publishing leaves no partial file on atomic volumes
-   and staging intact; a filesystem trace shows zero deletes, renames, truncations or temp files in
-   the Meeting folder; a crash mid-meeting offers the `interrupted` row on relaunch.
+1. **Release bar**, each a blocker everywhere: (1) hold-to-talk and tap-to-toggle where press and
+   release are reported, tap-to-toggle where only activation is, recorded per desktop in the
+   release matrix; (2) the non-activating floating HUD pill appears ≤ 100 ms after the press
+   (measured), never takes focus, shows on every workspace; (3) the 7 standing controls, recovery
+   row (only while items are staged) and 6-control Settings pane open from the tray / menu-bar icon,
+   or the launcher-opened popover on trayless sessions such as stock GNOME. No prompt at launch;
+   Escape discards; a Bluetooth headset joining mid-take does not end it.
+2. **Delivery**, receivers A (captured) and B logging every write, key event and paste. Cross-app:
+   a switch to B before release, in processing, at dispatch or right after the final verification
+   gives B zero events; before the final verification it is copy-only and A gets nothing either;
+   right after, only A's field (tier 1) or A (tier 2) may get the text. Same-app, separately: a
+   switch to A's second window before the final verification is copy-only; right after, tier 1
+   changes only the captured field, tier 2 lands only inside A. 200 randomized switch timings per
+   tier: zero events at B. No addressed paste on the session: `Copied — paste unsupported on this
+   session`, zero key events. `confirmed` only when A's dump shows the exact edit; a swallowed paste
+   is `unconfirmed`, restores nothing; another app changing the clipboard drops "Text is on the
+   clipboard"; a confirmed paste restores the old clipboard, image included; identical text is never
+   `Inserted`; emoji and combining accents confirm; capture timeout is copy-only; an injected
+   clipboard-write failure gives `Not delivered`, audio staged. Then a per-app matrix per platform.
+3. **Quality.** 50 real dictations per mode per OS (latency p50/p95, terms, meaning by eye); zero
+   wrong substitutions on a 50-sentence negative set; Clean v4 keeps only the final statement on
+   every self-correction clip and passes v1's fidelity corpus; rewrite error, truncation and 4 s
+   timeout give `Raw (cleanup skipped)`; a transcription error or empty transcript keeps it staged.
+4. **Fail closed**, per OS: online, no key, local recognition denied / unsupported / missing; a
+   packet capture shows zero outbound requests from Cantrip or speech services acting for it; fix
+   shown, audio staged. With a key, both request kinds carry `provider.data_collection: "deny"`.
+5. **Meetings** (20 min, plus a scripted 8 min with headphones): every section; script order, right
+   labels, timestamps within 1 s; a click within 100 ms on both tracks at start and after 60 min;
+   rebuilding from the same staging is byte-identical; stripped timestamps or a 400 keep order; a
+   180 ms "no" survives; a part that fails or returns no words despite speech blocks the complete
+   note and keeps its audio while all other parts succeed; failed cleanup leaves a marked span.
+6. **Archive.** Unresolved part: Retry / Save partial notes / Discard; changing partials never
+   affects completion; a taken name gives `-2.md`, original byte-identical; an unwritable or
+   overlapping folder gives `pending-archive`, offline Retry publishes with zero API calls; a
+   symlink at `cantrip-meeting`, `YYYY` or `MM` into staging gets nothing created or written
+   through it; a recorded publish path whose directory now resolves into staging is refused on
+   Retry; an injected verification or flush failure keeps the staged note and a later Retry
+   publishes it; a FIFO or symlink at the recorded path neither hangs nor is replaced; a kill around
+   publishing keeps staging (and, with atomic publication, leaves no partial file); a filesystem
+   trace shows zero deletes, renames, truncations, overwrites or temp files in the Meeting folder;
+   a crash mid-meeting offers the `interrupted` row on relaunch.
