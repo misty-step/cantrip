@@ -106,15 +106,43 @@ impl WindowPatcher {
             let _ = x
                 .conn
                 .configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
-        } else {
-            let _ = x.conn.unmap_window(win);
         }
+        // Hidden = parked off-screen by the UI, never unmapped (see trait).
         x.flush();
     }
 
-    /// Bottom-centre (logical px) of the monitor under the pointer, inside the
-    /// EWMH work area when the WM publishes one. The UI subtracts its own size
-    /// and margin.
+    /// Clip the HUD to its pill shape when no compositing manager runs (no
+    /// compositor → no per-pixel transparency, so the transparent corners
+    /// would show as black squares). With a compositor this is a no-op.
+    pub fn shape_hud(&self, raw: Raw, width: u32, height: u32) {
+        let (Some(x), Some(win)) = (self.x.as_ref(), Self::window(raw)) else {
+            return;
+        };
+        let composited = x
+            .conn
+            .get_selection_owner(x.atoms._NET_WM_CM_S0)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .is_some_and(|r| r.owner != x11rb::NONE);
+        if composited || width == 0 || height == 0 {
+            return;
+        }
+        let rects = pill_rows(width, height);
+        let _ = x.conn.shape_rectangles(
+            shape::SO::SET,
+            shape::SK::BOUNDING,
+            ClipOrdering::YX_BANDED,
+            win,
+            0,
+            0,
+            &rects,
+        );
+        x.flush();
+    }
+
+    /// Bottom-centre (physical px) of the monitor under the pointer, inside the
+    /// EWMH work area when the WM publishes one. The UI converts with its own
+    /// scale factor and subtracts its size and margin.
     pub fn hud_anchor(&self) -> Option<(f32, f32)> {
         let x = self.x.as_ref()?;
         let p = x.conn.query_pointer(x.root).ok()?.reply().ok()?;
@@ -146,11 +174,7 @@ impl WindowPatcher {
                 }
             }
         }
-        let scale = x.scale();
-        Some((
-            (rect.0 + rect.2 / 2) as f32 / scale,
-            (rect.1 + rect.3) as f32 / scale,
-        ))
+        Some(((rect.0 + rect.2 / 2) as f32, (rect.1 + rect.3) as f32))
     }
 
     fn set_types(&self, x: &X11, win: Window, types: &[Atom]) {
@@ -237,8 +261,42 @@ impl WindowPatcher {
     }
 }
 
+/// Horizontal bands covering a full pill (radius = height / 2), one band per
+/// run of rows with the same inset, top to bottom.
+fn pill_rows(width: u32, height: u32) -> Vec<x11rb::protocol::xproto::Rectangle> {
+    let r = height as f32 / 2.0;
+    let mut out: Vec<x11rb::protocol::xproto::Rectangle> = Vec::new();
+    for y in 0..height {
+        let dy = (y as f32 + 0.5 - r).abs();
+        let inset = (r - (r * r - dy * dy).max(0.0).sqrt()).round() as u32;
+        let w = width.saturating_sub(2 * inset);
+        match out.last_mut() {
+            Some(last) if last.x as u32 == inset && last.width as u32 == w => last.height += 1,
+            _ => out.push(x11rb::protocol::xproto::Rectangle {
+                x: inset as i16,
+                y: y as i16,
+                width: w as u16,
+                height: 1,
+            }),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pill_rows_cover_the_middle_fully_and_round_the_ends() {
+        let rows = super::pill_rows(200, 40);
+        assert_eq!(rows.iter().map(|r| r.height as u32).sum::<u32>(), 40);
+        let mid = rows
+            .iter()
+            .find(|r| r.y <= 20 && r.y as u32 + r.height as u32 > 20)
+            .unwrap();
+        assert_eq!((mid.x, mid.width), (0, 200));
+        assert!(rows[0].x > 10, "top row is inset by the curve");
+    }
+
     use super::*;
 
     #[test]

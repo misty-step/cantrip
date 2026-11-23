@@ -42,6 +42,10 @@ impl UiPlatform for LinuxUi {
         self.windows.configure_hud(raw)
     }
 
+    fn shape_hud(&self, raw: Raw, width: u32, height: u32) {
+        self.windows.shape_hud(raw, width, height)
+    }
+
     fn show_hud(&self, raw: Raw, visible: bool) {
         self.windows.show_hud(raw, visible)
     }
@@ -92,8 +96,11 @@ pub fn font_bytes(pattern: &str) -> Option<Vec<u8>> {
 
 /// The session's dark preference, by the first source that answers.
 pub fn prefers_dark() -> bool {
-    if let Some(v) = portal_color_scheme() {
-        return v == 1;
+    // 1 = prefer dark, 2 = prefer light; 0 = no preference → ask further.
+    match portal_color_scheme() {
+        Some(1) => return true,
+        Some(2) => return false,
+        _ => {}
     }
     if let Some(dark) = gsettings_dark() {
         return dark;

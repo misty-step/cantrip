@@ -135,7 +135,7 @@ pub struct AppCore {
     secrets: Arc<dyn SecretStore>,
     login: Arc<dyn LoginItem>,
     tracker: Mutex<PressTracker>,
-    extras: Mutex<Extras>,
+    extras: Arc<Mutex<Extras>>,
     notify: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -158,7 +158,7 @@ impl AppCore {
             secrets: deps.secrets,
             login: deps.login,
             tracker: Mutex::new(PressTracker::new()),
-            extras: Mutex::new(Extras::default()),
+            extras: Arc::new(Mutex::new(Extras::default())),
             notify,
         })
     }
@@ -225,15 +225,9 @@ impl AppCore {
     }
 
     /// Read the key state (may touch the secret store) and device list.
-    /// Call off the UI thread at launch and after key changes.
+    /// Blocking: call off the UI thread (see [`AppCore::refresh_async`]).
     pub fn refresh(&self) {
-        let key = match self.secrets.get_key() {
-            Ok(Some(k)) if !k.trim().is_empty() => KeyState::Saved,
-            Ok(_) => KeyState::NotSet,
-            Err(SecretError::Unavailable(m)) => {
-                KeyState::Error(format!("The system keyring could not be read ({m})"))
-            }
-        };
+        let key = read_key_state(self.secrets.as_ref());
         let mics = self.recorder.devices();
         {
             let mut x = self.extras();
@@ -241,6 +235,27 @@ impl AppCore {
             x.microphones = mics;
         }
         (self.notify)();
+    }
+
+    /// Run a secret-store change on a worker thread (a keyring may block on
+    /// an unlock prompt), then publish the new key state.
+    fn key_change_async(
+        &self,
+        change: impl FnOnce(&dyn SecretStore) -> Result<(), String> + Send + 'static,
+    ) {
+        let secrets = self.secrets.clone();
+        let extras = self.extras.clone();
+        let notify = self.notify.clone();
+        std::thread::spawn(move || {
+            let result = change(secrets.as_ref());
+            let key = read_key_state(secrets.as_ref());
+            {
+                let mut x = extras.lock().unwrap();
+                x.key_error = result.err();
+                x.key = Some(key);
+            }
+            notify();
+        });
     }
 
     fn take_config(&self) -> TakeConfig {
@@ -471,28 +486,22 @@ impl Control for AppCore {
             Command::SetMicrophone(m) => self.update_settings(|s| s.microphone = m),
             Command::SaveKey(key) => {
                 let key = key.trim().to_string();
-                let result = if key.is_empty() {
-                    Err("Enter a key".to_string())
+                if key.is_empty() {
+                    self.extras().key_error = Some("Enter a key".into());
+                    (self.notify)();
                 } else {
-                    self.secrets
-                        .set_key(&key)
-                        .map_err(|SecretError::Unavailable(m)| {
+                    self.key_change_async(move |s| {
+                        s.set_key(&key).map_err(|SecretError::Unavailable(m)| {
                             format!("The system keyring refused the key ({m})")
                         })
-                };
-                self.extras().key_error = result.err();
-                self.refresh();
-            }
-            Command::RemoveKey => {
-                let result = self
-                    .secrets
-                    .delete_key()
-                    .map_err(|SecretError::Unavailable(m)| {
-                        format!("The system keyring could not remove the key ({m})")
                     });
-                self.extras().key_error = result.err();
-                self.refresh();
+                }
             }
+            Command::RemoveKey => self.key_change_async(|s| {
+                s.delete_key().map_err(|SecretError::Unavailable(m)| {
+                    format!("The system keyring could not remove the key ({m})")
+                })
+            }),
             Command::AddTerm(t) => self.update_settings(|s| {
                 vocabulary::add_term(&mut s.vocabulary, &t);
             }),
@@ -547,6 +556,16 @@ impl UiSnapshot {
     fn with_recovery(mut self, row: Option<RecoveryRow>) -> UiSnapshot {
         self.recovery = row;
         self
+    }
+}
+
+fn read_key_state(secrets: &dyn SecretStore) -> KeyState {
+    match secrets.get_key() {
+        Ok(Some(k)) if !k.trim().is_empty() => KeyState::Saved,
+        Ok(_) => KeyState::NotSet,
+        Err(SecretError::Unavailable(m)) => {
+            KeyState::Error(format!("The system keyring could not be read ({m})"))
+        }
     }
 }
 

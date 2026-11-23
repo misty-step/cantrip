@@ -57,10 +57,18 @@ pub trait UiPlatform: Send + Sync {
     /// on every workspace, above others. `raw` is the platform window handle
     /// (X11 window id, NSView pointer…).
     fn configure_hud(&self, raw: raw_window::Raw);
-    /// Show / hide the HUD window without activating Cantrip.
+    /// The HUD is about to show (`true`, after it was moved on-screen: raise
+    /// it without activating Cantrip) or was just parked off-screen
+    /// (`false`). The window itself is never unmapped/ordered out, because
+    /// the UI toolkit cannot create the popover or Settings windows while its
+    /// root window is invisible.
     fn show_hud(&self, raw: raw_window::Raw, visible: bool);
-    /// Bottom-centre point (logical px) of the display under the pointer, for
-    /// the HUD, and the work-area top-right for the popover, if known.
+    /// The HUD was resized to `width`×`height` physical pixels: clip it to
+    /// its pill shape where the session cannot composite transparency.
+    fn shape_hud(&self, _raw: raw_window::Raw, _width: u32, _height: u32) {}
+    /// Bottom-centre of the work area of the display under the pointer, in
+    /// *physical* pixels of the global desktop, if known. The UI converts with
+    /// its window's own scale factor.
     fn hud_anchor(&self) -> Option<(f32, f32)>;
     /// The system appearance right now.
     fn prefers_dark(&self) -> bool;

@@ -135,6 +135,15 @@ impl<'c> Session<'c> {
         if &*alias != "/" {
             return Ok(alias);
         }
+        // No default alias (common outside a full desktop login): use the
+        // login keyring when it exists, before asking to create one.
+        let (login,): (Path<'static>,) = self
+            .service()
+            .method_call(IFACE_SERVICE, "ReadAlias", ("login",))
+            .map_err(|e| unavailable("collection lookup", e))?;
+        if &*login != "/" {
+            return Ok(login);
+        }
         let mut props: PropMap = HashMap::new();
         props.insert(
             "org.freedesktop.Secret.Collection.Label".into(),

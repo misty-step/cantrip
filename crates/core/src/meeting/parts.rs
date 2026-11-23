@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 pub const MAX_PART_MS: u64 = 5 * 60 * 1000;
 /// Look this far back from the limit for the quietest place to cut.
 pub const CUT_WINDOW_MS: u64 = 20 * 1000;
+/// A silence at least this long separates two turns of one track.
+pub const TURN_GAP_MS: u64 = 700;
+/// A turn's part starts this long before its first voiced frame.
+pub const LEAD_IN_MS: u64 = 250;
 const FRAME_MS: u64 = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -117,9 +121,77 @@ pub fn split_points_with(
     out
 }
 
+/// [`split_points`], then cut each range again inside every silence of at
+/// least [`TURN_GAP_MS`], [`LEAD_IN_MS`] before the next speech. Each voiced
+/// part is then one turn whose start is known on Cantrip's own clock, whatever
+/// timestamps the provider returns. Ranges stay contiguous and cover the track.
+pub fn split_utterances(samples: &[i16], rate: u32) -> Vec<(usize, usize)> {
+    let per_ms = rate as usize / 1000;
+    let frame = (FRAME_MS as usize * per_ms).max(1);
+    let gap_frames = (TURN_GAP_MS as usize).div_ceil(FRAME_MS as usize);
+    let lead = LEAD_IN_MS as usize * per_ms;
+    let mut out = Vec::new();
+    for (start, end) in split_points(samples, rate) {
+        let mut cut_from = start;
+        let mut quiet_run = 0usize;
+        let mut pos = start;
+        while pos < end {
+            let f_end = (pos + frame).min(end);
+            let voiced = wav::rms(&samples[pos..f_end]) >= wav::VOICE_RMS;
+            if voiced {
+                if quiet_run >= gap_frames {
+                    let gap_start = pos - quiet_run * frame;
+                    let cut = pos.saturating_sub(lead).max(gap_start);
+                    if cut > cut_from {
+                        out.push((cut_from, cut));
+                        cut_from = cut;
+                    }
+                }
+                quiet_run = 0;
+            } else {
+                quiet_run += 1;
+            }
+            pos = f_end;
+        }
+        out.push((cut_from, end));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turns_separated_by_silence_become_parts_starting_just_before_speech() {
+        let rate = 16_000;
+        let tone = |ms: usize| -> Vec<i16> {
+            (0..ms * 16)
+                .map(|i| ((i as f32 * 0.07).sin() * 6000.0) as i16)
+                .collect()
+        };
+        let mut s = vec![0i16; 16_000]; // 1 s silence
+        s.extend(tone(1500)); // turn 1 at 1.0 s
+        s.extend(vec![0i16; 2 * 16_000]); // 2 s silence
+        s.extend(tone(180)); // a 180 ms "no" at 4.5 s
+        s.extend(vec![0i16; 300 * 16]); // 300 ms: too short to split
+        s.extend(tone(500));
+        let parts = split_utterances(&s, rate);
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert_eq!(parts[0].0, 0);
+        assert_eq!(parts.last().unwrap().1, s.len());
+        for w in parts.windows(2) {
+            assert_eq!(w[0].1, w[1].0);
+        }
+        // Each later part starts ≤ 250 ms (+ one frame) before its speech.
+        let ms = |i: usize| i as f64 / 16.0;
+        assert!((ms(parts[1].0) - 750.0).abs() <= 30.0, "{}", ms(parts[1].0));
+        assert!(
+            (ms(parts[2].0) - 4250.0).abs() <= 30.0,
+            "{}",
+            ms(parts[2].0)
+        );
+    }
 
     #[test]
     fn short_track_is_one_part() {

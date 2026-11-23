@@ -5,6 +5,11 @@
 use super::parts::{Part, PartResult, Track};
 use std::collections::BTreeMap;
 
+/// A part without usable segment timestamps is placed by its own start. Parts
+/// are cut at turn boundaries, so that is exact for a short part; only a part
+/// longer than this (an unbroken monologue) is marked approximate.
+pub const APPROXIMATE_OVER_MS: u64 = 30_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TurnBody {
     /// Recognized words. `approximate` marks a part returned without usable
@@ -77,7 +82,7 @@ pub fn build_turns(
                             end_ms: part.end_ms(),
                             body: TurnBody::Text {
                                 text: text.trim().to_string(),
-                                approximate: true,
+                                approximate: part.duration_ms > APPROXIMATE_OVER_MS,
                             },
                         },
                     ));
@@ -169,10 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn no_timestamps_gives_one_approximate_turn_per_part_and_failed_markers() {
+    fn no_timestamps_marks_only_long_parts_approximate_and_failed_markers() {
         let parts = vec![
-            part("you-000", Track::You, 0, 0, 10_000),
-            part("others-000", Track::Others, 0, 0, 10_000),
+            part("you-000", Track::You, 0, 0, 45_000),
+            part("others-000", Track::Others, 0, 0, 45_000),
+            part("you-001", Track::You, 1, 50_000, 4_000),
         ];
         let mut r = BTreeMap::new();
         r.insert(
@@ -183,13 +189,20 @@ mod tests {
             },
         );
         r.insert(
+            "you-001".into(),
+            PartResult::Resolved {
+                text: "yes".into(),
+                segments: vec![],
+            },
+        );
+        r.insert(
             "others-000".into(),
             PartResult::Unresolved {
                 reason: "http".into(),
             },
         );
         let turns = build_turns(&parts, &r, true);
-        assert_eq!(turns.len(), 2);
+        assert_eq!(turns.len(), 3);
         assert_eq!(
             turns[0].body,
             TurnBody::Text {
@@ -198,6 +211,13 @@ mod tests {
             }
         );
         assert_eq!(turns[1].body, TurnBody::Failed);
-        assert_eq!(build_turns(&parts, &r, false).len(), 1);
+        assert_eq!(
+            turns[2].body,
+            TurnBody::Text {
+                text: "yes".into(),
+                approximate: false
+            }
+        );
+        assert_eq!(build_turns(&parts, &r, false).len(), 2);
     }
 }

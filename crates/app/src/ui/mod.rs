@@ -3,10 +3,11 @@
 //! frame reads one snapshot and turns input into commands.
 //!
 //! Window model: the root viewport *is* the HUD pill (transparent, undecorated,
-//! click-through, never focused, hidden while `Hud::Hidden`). The popover and
-//! the Settings window are immediate child viewports opened by tray / launcher
-//! requests. While the root is hidden eframe runs only `App::logic`; opening a
-//! child asks for a painted pass with `RequestPaintWhileHidden`.
+//! click-through, never focused, parked off-screen while `Hud::Hidden`). The
+//! popover and the Settings window are immediate child viewports opened by
+//! tray / launcher requests. Before the root's first paint eframe runs only
+//! `App::logic`; opening a child asks for a painted pass with
+//! `RequestPaintWhileHidden`.
 
 pub mod gallery;
 pub mod hud;
@@ -43,6 +44,10 @@ const LIVE_POLL: Duration = Duration::from_millis(50);
 const THEME_POLL: Duration = Duration::from_secs(2);
 /// Distance of the HUD's bottom edge above the anchor (display bottom-centre).
 const HUD_BOTTOM_MARGIN: f32 = 72.0;
+/// Where the hidden HUD waits: off every display, still mapped, so eframe can
+/// keep creating the popover and Settings windows (it cannot while its root
+/// window is invisible). Click-through and never focusable either way.
+const HUD_PARKED: Pos2 = Pos2::new(-4000.0, -4000.0);
 
 /// Called once per UI pass on the main thread (hotkey re-registration,
 /// Escape grab, tray state — platform work that must stay on the main thread).
@@ -70,6 +75,8 @@ pub fn run(
         .with_has_shadow(false)
         .with_window_type(egui::X11WindowType::Notification)
         .with_override_redirect(true)
+        // "Hidden" is parked off-screen (see `sync_hud`).
+        .with_position(HUD_PARKED)
         .with_visible(false);
     let mut options = eframe::NativeOptions {
         viewport: hud_viewport,
@@ -197,11 +204,14 @@ impl Shell {
         }
     }
 
-    /// Show, resize, move or hide the HUD window to match `hud`.
+    /// Show, resize, move or park the HUD window to match `hud`.
     fn sync_hud(&mut self, ctx: &egui::Context, hud: &Hud) {
         if *hud == Hud::Hidden {
             if self.hud_shown != Hud::Hidden {
-                ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Visible(false));
+                ctx.send_viewport_cmd_to(
+                    ViewportId::ROOT,
+                    ViewportCommand::OuterPosition(HUD_PARKED),
+                );
                 self.platform.show_hud(self.raw, false);
                 self.hud_shown = Hud::Hidden;
             }
@@ -212,7 +222,18 @@ impl Shell {
         if was_hidden || size != self.hud_size {
             self.hud_size = size;
             ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(size));
-            let (ax, ay) = self.platform.hud_anchor().unwrap_or_else(|| {
+            let ppp = ctx.native_pixels_per_point().unwrap_or(1.0);
+            self.platform.shape_hud(
+                self.raw,
+                (size.x * ppp).round() as u32,
+                (size.y * ppp).round() as u32,
+            );
+            let scale = ctx.native_pixels_per_point().unwrap_or(1.0).max(0.1);
+            let anchor = self
+                .platform
+                .hud_anchor()
+                .map(|(x, y)| (x / scale, y / scale));
+            let (ax, ay) = anchor.unwrap_or_else(|| {
                 let m = ctx
                     .input(|i| i.viewport().monitor_size)
                     .unwrap_or(Vec2::new(1280.0, 800.0));

@@ -10,7 +10,7 @@ pub const SAMPLE_RATE: u32 = 16_000;
 /// Frame length for energy analysis.
 const FRAME_MS: u32 = 30;
 /// RMS above this (≈ -36 dBFS) counts as voiced.
-const VOICE_RMS: f32 = 0.016;
+pub const VOICE_RMS: f32 = 0.016;
 /// Consecutive voiced time needed to count as speech.
 const MIN_VOICED_MS: u32 = 90;
 

@@ -272,6 +272,7 @@ fn key_state_is_saved_never_shown_and_store_errors_are_errors() {
     r.app.refresh();
     assert_eq!(r.app.snapshot().key, KeyState::NotSet);
     r.app.send(Command::SaveKey("  sk-or-new  ".into()));
+    std::thread::sleep(Duration::from_millis(100)); // saved off the UI thread
     let s = r.app.snapshot();
     assert_eq!(s.key, KeyState::Saved);
     assert!(
@@ -279,6 +280,7 @@ fn key_state_is_saved_never_shown_and_store_errors_are_errors() {
         "the key never reaches the UI"
     );
     r.app.send(Command::RemoveKey);
+    std::thread::sleep(Duration::from_millis(100));
     assert_eq!(r.app.snapshot().key, KeyState::NotSet);
 
     let broken = rig(clean_speech(), FakeSecrets::broken());

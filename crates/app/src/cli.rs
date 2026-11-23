@@ -5,11 +5,13 @@
 //! real ones.
 //!
 //! ```text
-//! cantrip e2e dictate <wav> [--mode raw|clean|elevated] [--post on|off] [--key-env]
+//! cantrip e2e dictate <wav> [--mode raw|clean|elevated] [--post on|off] [--key-env] [--linger <ms>]
 //! cantrip e2e meeting <you.wav> <others.wav> --folder <dir> [--key-env]
 //! ```
 //! `--key-env` reads the key from `OPENROUTER_API_KEY` instead of the OS
-//! secret store (CI / sandbox hook; the key is never printed).
+//! secret store (CI / sandbox hook; the key is never printed). `--linger`
+//! keeps the process (and so its X11 clipboard ownership) alive after the
+//! outcome and reports the HUD's clipboard claim again at the end.
 //! `CANTRIP_STAGING` overrides the staging root (default: a fresh directory
 //! under the user's data dir).
 
@@ -98,6 +100,19 @@ fn dictate(args: &[String]) -> anyhow::Result<()> {
     let finished = dictation.wait_idle(Duration::from_secs(120));
     let hud = dictation.hud();
     let report = dictation.last_report();
+    let linger: u64 = flag(args, "--linger")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut claims = Vec::new();
+    let until = Instant::now() + Duration::from_millis(linger);
+    while Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+        let claim = dictation.hud().claim();
+        if claims.last() != Some(&claim) {
+            claims.push(claim);
+            eprintln!("[e2e] claim now: {claim:?}");
+        }
+    }
     let staged: Vec<_> = staging
         .recoverable_dictations()
         .into_iter()
@@ -113,6 +128,7 @@ fn dictate(args: &[String]) -> anyhow::Result<()> {
         "wall_ms": started.elapsed().as_millis() as u64,
         "hud": hud.text(),
         "hud_claim": hud.claim(),
+        "hud_claim_changes_during_linger": claims,
         "outcome": report.as_ref().map(|r| r.outcome.clone()),
         "transcribe_ms": report.as_ref().and_then(|r| r.transcribe_ms),
         "rewrite_ms": report.as_ref().and_then(|r| r.rewrite_ms),

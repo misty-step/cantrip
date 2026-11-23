@@ -98,9 +98,8 @@ impl UiPlatform for MacUi {
         if visible {
             // Never makeKey / activate: the dictated-into app keeps focus.
             window.orderFrontRegardless();
-        } else {
-            window.orderOut(None);
         }
+        // Hidden = parked off-screen by the UI; never ordered out (see trait).
     }
 
     fn hud_anchor(&self) -> Option<(f32, f32)> {
@@ -121,11 +120,14 @@ impl UiPlatform for MacUi {
             })
             .unwrap_or(primary);
         let v = screen.visibleFrame();
-        Some(logic::hud_anchor_from_visible_frame(
+        let (x, y) = logic::hud_anchor_from_visible_frame(
             primary_h,
             (v.origin.x, v.origin.y, v.size.width, v.size.height),
             HUD_MARGIN,
-        ))
+        );
+        // Points → physical pixels (the trait's unit).
+        let scale = screen.backingScaleFactor() as f32;
+        Some((x * scale, y * scale))
     }
 
     fn prefers_dark(&self) -> bool {

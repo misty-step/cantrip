@@ -180,6 +180,33 @@ impl Atspi {
             .find(|a| self.pid_of(&a.bus) == Some(pid))
     }
 
+    fn name(&self, o: &Obj) -> Option<String> {
+        use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
+        let p = self
+            .conn
+            .with_proxy(o.bus.as_str(), o.path.as_str(), self.timeout);
+        p.get::<String>(ACCESSIBLE, "Name").ok()
+    }
+
+    /// The frame of `app` for the X11 window titled `title`: the active one
+    /// when the toolkit reports it, else the *only* frame with that title.
+    /// While Cantrip's shortcut grab is held the toolkit clears STATE_ACTIVE
+    /// (keyboard focus moved to the grab), but keeps its focused widget, so the
+    /// title is what still ties the X11 window to its accessible frame.
+    /// Several frames with that title → `None` (never guess a field).
+    pub fn frame_for_window(&self, app: &Obj, title: Option<&str>) -> Option<Obj> {
+        if let Some(f) = self.active_frame(app) {
+            return Some(f);
+        }
+        let title = title?;
+        let mut matches = self
+            .children(app)
+            .into_iter()
+            .filter(|f| self.name(f).as_deref() == Some(title));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
     /// The frame of `app` reporting STATE_ACTIVE.
     pub fn active_frame(&self, app: &Obj) -> Option<Obj> {
         self.children(app)

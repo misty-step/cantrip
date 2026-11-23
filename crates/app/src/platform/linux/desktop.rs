@@ -143,9 +143,10 @@ impl Desktop for LinuxDesktop {
         let deadline = Instant::now() + CAPTURE_BUDGET;
         if !self.wayland {
             let (app, win) = self.x11_focus()?;
+            let title = self.x.as_ref().and_then(|x| x.window_title(win));
             let field = self.atspi(CAPTURE_CALL_TIMEOUT).and_then(|a| {
                 let root = a.app_for_pid(app.pid)?;
-                let frame = a.active_frame(&root)?;
+                let frame = a.frame_for_window(&root, title.as_deref())?;
                 a.focused_text(&frame, deadline)
             });
             return Some(Target {

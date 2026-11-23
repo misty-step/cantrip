@@ -477,22 +477,20 @@ fn silent_part_completes_empty_without_a_call() {
 }
 
 #[test]
-fn no_timestamps_gives_approximate_order_and_a_180ms_no_survives() {
+fn no_timestamps_still_place_a_180ms_no_at_its_own_start() {
     let mut you = silence(1000);
     you.extend(tone(180));
     you.extend(silence(1000));
     let h = H::new(you, silence(2000));
-    h.speech.set("you-000", vec![said("No.", &[])]);
+    // The leading second of silence is its own (silent, never sent) part.
+    h.speech.set("you-001", vec![said("No.", &[])]);
     let m = h.meetings();
     h.run(&m, &h.folder.clone());
     let Some(Finish::Archived(p)) = m.last_finish() else {
         panic!()
     };
     let note = fs::read_to_string(p).unwrap();
-    assert!(
-        note.contains("[00:00] You: [approximate order: 00:00–00:03] No.."),
-        "{note}"
-    );
+    assert!(note.contains("[00:00] You: No.."), "{note}");
 }
 
 #[test]

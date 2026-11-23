@@ -181,7 +181,10 @@ impl Ctx<'_> {
             if samples.is_empty() {
                 continue;
             }
-            for (index, (a, b)) in parts::split_points(&samples, rate).into_iter().enumerate() {
+            for (index, (a, b)) in parts::split_utterances(&samples, rate)
+                .into_iter()
+                .enumerate()
+            {
                 let name = format!("{}-{index:03}", track.file_prefix());
                 let slice = &samples[a..b];
                 durable_replace(

@@ -24,7 +24,8 @@ x11rb::atom_manager! {
         WM_HINTS,
         WM_CLASS,
         AT_SPI_BUS,
-        RESOURCE_MANAGER,
+        _NET_WM_NAME,
+        _NET_WM_CM_S0,
         _NET_ACTIVE_WINDOW,
         _NET_WM_PID,
         _NET_WM_STATE,
@@ -82,6 +83,12 @@ impl X11 {
     }
 
     /// Raw 8-bit property bytes.
+    /// The window's UTF-8 title (`_NET_WM_NAME`), if set.
+    pub fn window_title(&self, win: Window) -> Option<String> {
+        let bytes = self.prop_bytes(win, self.atoms._NET_WM_NAME)?;
+        String::from_utf8(bytes).ok().filter(|t| !t.is_empty())
+    }
+
     pub fn prop_bytes(&self, win: Window, prop: Atom) -> Option<Vec<u8>> {
         let r = self
             .conn
@@ -111,19 +118,6 @@ impl X11 {
         let parts: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
         let pick = parts.get(1).or_else(|| parts.first())?;
         Some(String::from_utf8_lossy(pick).into_owned())
-    }
-
-    /// Xft.dpi / 96 from RESOURCE_MANAGER, else 1.0.
-    pub fn scale(&self) -> f32 {
-        let Some(rm) = self.prop_bytes(self.root, self.atoms.RESOURCE_MANAGER) else {
-            return 1.0;
-        };
-        String::from_utf8_lossy(&rm)
-            .lines()
-            .find_map(|l| l.strip_prefix("Xft.dpi:"))
-            .and_then(|v| v.trim().parse::<f32>().ok())
-            .map(|dpi| (dpi / 96.0).max(0.5))
-            .unwrap_or(1.0)
     }
 
     /// First keycode producing `keysym` in the core keyboard mapping.

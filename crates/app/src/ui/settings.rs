@@ -232,7 +232,7 @@ fn key(
                 egui::TextEdit::singleline(&mut st.key_buf)
                     .password(true)
                     .hint_text("sk-or-…")
-                    .desired_width(200.0),
+                    .desired_width(182.0),
             );
             edit.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::TextInput, true, "OpenRouter key")
