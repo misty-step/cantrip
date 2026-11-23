@@ -1,283 +1,224 @@
 # Cantrip v2 — Product
 
-Cantrip v2 is a macOS menu-bar app with two jobs: dictate text into whatever app
-has focus, and record meetings into Markdown notes. One shortcut, three modes,
-one vocabulary list, one API key. Settings that do not serve those two jobs do
-not exist.
+Cantrip v2 is a desktop tray app for **macOS and Linux** with two jobs: dictate text into whatever
+app has focus, and record meetings into Markdown notes. One shortcut, three modes, one vocabulary
+list, one API key. Settings that do not serve those two jobs do not exist.
 
-Status: product intent for new macOS work (Slice #42, 2026-11-22). Nothing in
-this document is built yet. [DESIGN.md](DESIGN.md) holds the architecture and
-the measurements behind the numbers here.
+Status: product intent, updated 2026-11-23 from Slice #42; nothing is built yet. Contracts, UI and
+measurements: [DESIGN.md](DESIGN.md). Architecture is left open ([DESIGN.md › Architecture freedom](DESIGN.md#architecture-freedom)).
+
+## Release bar
+
+Supported platforms: **macOS 15+** and **Linux** on Wayland (KDE Plasma, GNOME, wlroots
+compositors) and on X11; no Windows port in v2.0. On every one, in every session, Cantrip provides:
+
+1. **Shortcut dictation.** The global shortcut (default `⌃⌥Space` on macOS, `Ctrl+Alt+Space` on
+   Linux) gives hold-to-talk and tap-to-toggle on macOS, on X11 and on Wayland compositors that
+   report press and release; tap-to-toggle on Wayland compositors that report only activation. The
+   release matrix records the verified behavior per desktop.
+2. **Floating HUD.** A non-activating pill that never takes focus or clicks, appears within 100 ms
+   of the press and is visible on every workspace.
+3. **Full control surface.** The 7 standing controls, 1 contextual recovery row and 6-control
+   Settings pane of PRODUCT.md's Control surface, from the tray or menu-bar icon, or on trayless
+   sessions (e.g. stock GNOME) in an equivalent floating popover opened from Cantrip's app-launcher
+   entry. Never icon-only, never a missing control.
+
+Missing any of the three on any platform or session blocks the release; no known gap, icon-only
+fallback or new setting ships. Where an OS cannot support another promise, Cantrip takes the safer
+outcome (copy instead of paste, refuse instead of guess) and says so.
+
+This bar is identical in [DESIGN.md › Release bar](DESIGN.md#release-bar), tested by its [checklist](DESIGN.md#verification-checklist).
 
 ## Supersession
 
-v1 is the Rust workspace in this repository. It is the Linux dictation app and,
-as of v0.1.15, also a Developer ID-signed, notarized arm64 macOS app; README
-still says no macOS release is published. v2 replaces
-[SPEC.md](SPEC.md) and [VISION.md](VISION.md) as the statement of intent for the
-**macOS** product. Those files stay unchanged in this slice and continue to
-describe v1. v1 remains the Linux product and is not retired by this document.
-
-v2 changes these v1 commitments. Each is a deliberate decision here:
+v1 is this repository's Rust workspace: the Linux app and, since v0.1.15, a signed, notarized
+macOS app. v2 supersedes [SPEC.md](SPEC.md) and [VISION.md](VISION.md) as present-tense intent on
+**both macOS and Linux**; they and `docs/decisions/` stay, unchanged, as v1 history, and where they
+disagree this document wins. v2 never deletes or rewrites v1's data.
 
 | v1 commitment | v2 |
 | --- | --- |
-| Local speech recognition by default (VISION.md, AGENTS.md) | OpenRouter cloud by default; on-device Apple Speech when there is no key or no network, and only when on-device recognition is supported and authorized. Otherwise Cantrip refuses to recognize and keeps the recording |
-| macOS manual paste only (ADR 0031, which allows reversal by "an explicit product decision") | Automatic delivery in two tiers, with copy-only when focus moved or the target is uncertain (see below) |
-| Automatic keys require uninterrupted verified destination history (ADR 0019) | Target captured at the start and checked again at delivery; not uninterrupted history (see below) |
-| Every stopped take is retained; only confirmed Forget deletes audio (ADR 0020) | Audio of a succeeded dictation is deleted automatically; failed audio is kept until Retry succeeds or the user discards it (see below) |
-| A cloud failure completes on local Parakeet (ADR 0020) | A cloud error keeps the recording for Retry. On-device recognition runs only with no key or no network |
-| Clipboard contents are never read or restored (AGENTS.md) | Target-bound insertion does not touch the clipboard. A `Cmd+V` paste snapshots it and restores it only when the insertion is confirmed; otherwise the dictation stays on the clipboard |
-| No Swift toolchain (ADR 0034) | Native Swift/SwiftUI app |
+| Local speech recognition by default (VISION.md, AGENTS.md) | OpenRouter cloud by default. Local recognition only with no key or no network, and only where it is supported, installed and authorized on this machine and guaranteed to stay on it. Otherwise Cantrip refuses and keeps the recording |
+| A cloud failure completes on local recognition (ADR 0020) | A cloud error keeps the recording for Retry; it never falls back to local recognition |
+| macOS manual paste only (ADR 0031) | Automatic two-tier delivery on both OSes, always addressed to the captured target; copy-only when focus moved, the target is uncertain or the session cannot address a paste |
+| Automatic keys need uninterrupted verified destination history (ADR 0019) | Target captured at start and verified again immediately before delivery; not uninterrupted history |
+| Every stopped take is retained until confirmed Forget (ADR 0020) | Dictation audio is deleted once its text is delivered or copied; failed, refused, interrupted or `Not delivered` audio is kept until Retry succeeds or the user confirms Discard |
+| Clipboard contents are never read or restored (AGENTS.md) | Direct insertion never touches the clipboard. An addressed paste snapshots it and restores it only when the edit is confirmed and the clipboard is unchanged since Cantrip wrote its text; otherwise the dictation stays on it unless something else replaces it |
+| Successful transcripts are kept as local history (AGENTS.md) | No history. The last dictation's text is kept in memory until quit |
+| Vocabulary aliases, Clean only, never sent to providers (AGENTS.md, ADR 0012) | One flat term list, no aliases; it biases the recognizer and guides the rewrite |
 | Clean uses DeepSeek, chosen on measured fidelity (ADR 0012) | Clean and Elevated use `openai/gpt-6-luna` |
+| v1 architecture: one shared engine (ADR 0031), per-OS presentation stack (ADR 0034), std-thread process model (AGENTS.md) | Not binding. Architecture is the implementer's choice |
 
-### Delivery, retention and deletion against ADRs 0019, 0020 and 0031
-
-- **ADR 0031 (manual paste only).** v2 reverses it for macOS. ADR 0031 is right
-  that a frontmost-app snapshot cannot prove an uninterrupted destination, and v2
-  does not claim that it does. The promise is the smaller one in journey 1.
-- **ADR 0019 (verified-destination delivery).** v2 drops the requirement for
-  uninterrupted destination history and the archive of every take. It keeps three
-  rules: an unknown or changed target gets no keystroke and no insertion, only a
-  copy; a handoff that may have completed is never retried through the other tier;
-  and posting is not receipt. Cantrip says "Inserted" only after it reads the field
-  before and after and sees exactly its own edit. Without that it says "Sent —
-  unconfirmed", or "Posted — unconfirmed" for a paste, which is all it knows.
-- **ADR 0020 (retain until confirmed Forget).** v2 reverses it for succeeded
-  audio. A dictation's recording is deleted automatically once its text is in
-  memory for `Copy last dictation` and a delivery outcome (inserted, unconfirmed or
-  copied) is recorded. A meeting's recordings are deleted after its Markdown file
-  is in place with every chunk transcribed; a finished meeting whose file could not
-  be written keeps them. A recording whose transcription
-  failed, came back empty, was refused, or was interrupted by a quit or crash, or
-  whose text could not even be copied, stays on disk with no expiry until Retry
-  succeeds or the user confirms Discard.
-  Discard is v2's Forget. Escape during a dictation is an explicit discard of that
-  take, so v2 does not keep cancelled takes. Each recording has its own file; a
-  new one never overwrites an unresolved one.
+Three v1 safety rules survive. An unknown or changed target gets only a copy, and no keystroke
+ever goes blindly to whatever holds focus. A handoff that may have completed is never retried
+through the other tier. Posting is not receipt: "Inserted" needs the field read back showing exactly
+Cantrip's own edit.
 
 ## User journeys
 
 ### 1. Dictate into the focused app
 
-Press the one global shortcut. Hold it to talk and release to finish, or tap it
-to start and tap again to finish; the app tells the two apart by press length,
-with no setting. A HUD pill appears the moment recording starts. When
-transcription finishes, the text is delivered. Escape cancels and discards the
-take.
+Press the one global shortcut. **Hold** it (≥ ~300 ms) to talk and release to stop, or **tap** it
+to start and tap again to stop; press length tells them apart, with no setting (activation-only
+Wayland sessions: every press is a tap, see [Release bar](#release-bar)). The HUD pill appears
+within 100 ms. Escape cancels and discards the take. After transcription, the text is delivered:
 
-What Cantrip promises about the destination:
+1. **Capture, then verify.** The focused app, window and, where the OS exposes it, field are
+   recorded when recording begins. Immediately before delivering, Cantrip verifies that the
+   captured app and window still have focus. Moved: text is copied, HUD `Copied — focus changed`.
+   Not identified in time, or no longer checkable: text is copied, HUD `Copied — target uncertain`.
+2. **Never a blind keystroke.** Every automatic write or paste is addressed to the captured
+   target; nothing is ever sent to whatever holds focus. **Tier 1 — direct insertion** writes the
+   text into the captured field itself, without touching the clipboard.
+3. **Tier 2 — addressed paste**, only for an identified field that cannot take direct insertion,
+   and only where the OS can address a paste to the captured app: snapshot the clipboard, place
+   the text (marked transient where supported), send a paste addressed to the captured app, and
+   restore the old clipboard **only** when the edit is confirmed and the clipboard is completely
+   unchanged since Cantrip wrote its text. Where the session cannot address a paste, the text is
+   copied instead: `Copied — paste unsupported on this session`.
+4. **Honest outcome.** `✓ Inserted` (edit read back), `Sent — unconfirmed` (direct write made),
+   `Posted — unconfirmed` (addressed paste sent), a `Copied — …` reason, or `Not delivered` (even
+   the copy failed). "Text is on the clipboard" is shown only while the clipboard is unchanged
+   since Cantrip wrote its text; if it changes before or while the HUD is visible, the claim drops
+   at once for "Use Copy last dictation". **`Copy last dictation`** holds the last dictation in
+   memory until quit; a `Not delivered` take also keeps its audio staged until
+   Retry succeeds or the user confirms Discard.
 
-1. **Copy only when focus moved or the target is uncertain.** Before either kind of
-   delivery, and again as its last step, Cantrip checks that the app and window that
-   had focus when dictation began still have it. If focus moved, the text goes to the
-   clipboard and the HUD says `Copied — focus changed`. If the starting target could
-   not be identified in time, or can no longer be checked, it is uncertain: the text is
-   only copied, and the HUD says `Copied — target uncertain`.
-2. **Target-bound insertion when the app supports it.** The text is written through
-   Accessibility into the field that had focus when dictation began. The clipboard is
-   not touched.
-3. **Focus-checked paste otherwise** (expected for many browsers, Electron apps
-   and terminals). Used only when the starting field was identified and reports that
-   it does not support insertion. Cantrip posts `Cmd+V` to the starting app's process
-   only.
-4. **`Copy last dictation` is always available** for the last transcribed
-   dictation until the app quits.
+Not promised: no supported OS checks focus and delivers in one step, so a switch right after the
+final verification can still deliver to the captured app (its captured field, or for a paste
+possibly another of its own windows), never to the newly focused app. Inside one app, a field can
+show another conversation by the time text arrives. See
+[DESIGN.md › Delivery contract](DESIGN.md#delivery-contract).
 
-What it does not promise: macOS has no operation that checks focus and delivers text
-as one step. The last check reads the window, then the app; a window switch after the
-first read or an app switch after the second is not caught. The text is still
-addressed to the starting app, which may ignore it or take it while no longer in
-front. A paste may also land in another of that app's own fields or windows.
-An app can reuse one field for several documents or conversations, so the same field may
-hold a different conversation by the time the text arrives. Cantrip reports "Inserted"
-only when the field's text before and after differs by exactly the dictation;
-otherwise it reports "Sent — unconfirmed" or "Posted — unconfirmed". After an
-unconfirmed paste the dictation stays on the clipboard in place of what was there.
-
-With no key or no network, dictation uses Apple's on-device recognizer. It never
-uses Apple's server recognizer, even when the Mac is online: if on-device
-recognition is not supported, its language model is not installed, or Speech
-Recognition permission is denied, Cantrip refuses, says what to change, and keeps
-the recording for Retry or Discard.
+**No key or no network.** Local speech recognition is used only when supported, installed and
+authorized here and guaranteed not to send audio off the machine; no implicit model download, no
+vendor server recognizer. Otherwise Cantrip refuses, names the fix, and keeps the recording.
 
 ### 2. Keep a Custom Vocabulary
 
-The vocabulary is one list of terms (names, product names, jargon). The same
-list biases speech recognition and guides Clean and Elevated rewriting. Seed
-terms for Misty Step: Scry, Codex, Persephone, Serenity, Supercortex, Mistystack,
-OpenRouter, Cloudflare, T3 Code, Kaylee, Phaedrus, Mercadia, Cantrip, Overmind.
-Terms are added and removed in Settings. There are no aliases, rules or regexes
-in v2.0.
+One flat list of terms (names, products, jargon), edited in Settings. It biases speech recognition
+and guides Clean and Elevated. Misty Step seed terms: Scry, Codex, Persephone, Serenity,
+Supercortex, Mistystack, OpenRouter, Cloudflare, T3 Code, Kaylee, Phaedrus, Mercadia, Cantrip,
+Overmind. No aliases, rules or regexes in v2.0.
 
 ### 3. Choose a mode
 
 | Mode | Output |
 | --- | --- |
 | Raw | What the recognizer returned, with its punctuation. No language model. |
-| Clean | Fixes punctuation, fragments, fillers, stutters, self-corrections and misheard vocabulary; keeps the speaker's words and tone. |
+| Clean | Fixes punctuation, fragments, fillers, stutters and misheard vocabulary; on a self-correction, deletes the whole retracted claim with the correction phrase and keeps only the final statement. Keeps the speaker's words, tone and every other fact. |
 | Elevated | Crisp prose for messages, specs or email, in the speaker's person, without generic AI phrasing. |
 
-A Post-Processing switch sits next to the modes. Off means every dictation is
-delivered as Raw immediately and no text goes to the language model. On uses the
-selected mode.
+A **Post-Processing** switch sits next to the modes. Off: every dictation is Raw and no text goes
+to a language model. On: the selected mode applies (Raw never calls one). A rewrite that fails, is
+empty, is cut off or takes over 4 s gives Raw, HUD `Raw (cleanup skipped)`. If transcription fails
+or returns nothing, the recording is kept for Retry or Discard.
 
 ### 4. Record a meeting
 
-Start meeting captures the microphone and the system's audio output as separate
-tracks on one clock; the user stops it. Cantrip produces a Markdown file with a
-title, a short summary, decisions, action items and a cleaned transcript whose
-turns are labelled `You` and `Others` and ordered by when each turn began, and
-saves it under `cantrip-meeting/YYYY/MM/` in the chosen folder. The default folder
-is a `captures/voice/` directory of a Supercortex checkout; any folder works, unless it is
-Cantrip's application support directory, contains it or lies inside it once symlinks are
-resolved. Settings refuses such a folder ("Choose a folder outside Cantrip's application
-support directory"), and nothing is published to one: finished notes wait in
-**pending-archive** until an allowed folder is chosen. Cantrip writes files and never runs
-git.
+Start meeting captures two tracks on one clock: `You` (microphone) and `Others` (the system's audio
+output). The user stops it. Cantrip writes one Markdown file — title, summary, decisions, action
+items and a cleaned, timestamped transcript ordered by when each turn began — under
+`cantrip-meeting/YYYY/MM/` in the chosen Meeting folder (default: the `captures/voice/` directory
+of a Supercortex checkout). Any folder works unless it, or a folder Cantrip publishes into beneath
+it, resolves into Cantrip's private staging area. Cantrip writes files and never runs git. Meetings
+need the OpenRouter key; without one, Start meeting says so and does not record. The HUD shows a
+red dot and elapsed time for the whole meeting.
 
-Meetings need the OpenRouter key; without one, Start meeting says so and does not
-record. If part of a meeting cannot be transcribed, its audio is kept and the
-popover offers Retry and Discard. The user may also save partial notes, in which
-each missing part reads `[transcription failed: MM:SS–MM:SS]`. A part whose cleanup
-failed is kept uncleaned and marked. Short interjections are kept; a part whose turns
-cannot be placed in order is kept as one block and marked. A quiet part is treated as
-silence; a louder part in which no turn can be found and no words are recognized counts
-as not transcribed, so its audio is kept.
+**Recovery, never loss.** A part is unresolved when its transcription fails or returns no words
+although it contains speech. Any unresolved part keeps the note from being complete and keeps that
+part's original audio staged, even when every other part succeeded; the popover offers Retry, Save
+partial notes (gaps read `[transcription failed: MM:SS–MM:SS]`) and a confirmed Discard. Finished
+notes whose folder cannot be written are **pending-archive**: Retry only writes the file (zero
+speech or language-model calls). A part whose cleanup failed is kept uncleaned and marked.
 
-On the same local APFS or HFS+ volume as Cantrip's staging, each note appears whole, in one
-atomic step. On another volume, a network folder or a volume without exclusive rename,
-Cantrip creates the note directly: a program watching the folder can see bytes arrive before
-the write completes, and an interrupted write leaves an incomplete file. Cantrip leaves that
-file untouched, and Retry publishes the complete note under a new name. Cantrip never creates
-a temporary file in the Meeting folder, and never overwrites or deletes a file there,
-including its own.
-Every meeting has one `source_id`, fixed when recording starts, and
-every note of it carries that `source_id` with `status: partial` or `status: complete`.
-Partial notes are `<utc>-<slug>-partial.md`. If Retry then completes the meeting, the
-full notes are a new file, `<utc>-<slug>.md`, in the current Meeting folder. Cantrip
-does not need the partial notes for that, so the user can edit, rename, move or delete
-them, or choose another folder, and they stay as the user left them.
+**The Meeting folder is append-only for Cantrip.** It never overwrites, truncates, renames or
+deletes a file there, even its own, and never leaves a temporary file there; a taken name gets
+`-2.md`, `-3.md`. The finished note stays whole in staging until the published file is confirmed a
+regular file with identical content, flushed to disk; only then is staging cleaned up. Without
+atomic exclusive publication (many network shares), an interrupted write can leave an incomplete
+file; Cantrip leaves it alone and Retry publishes the staged note under a new name.
 
-If the notes are finished but the folder cannot be written, the meeting is
-**pending-archive**: every chunk is transcribed, the cleaned transcript and summary
-are kept in staging, and only writing the final file failed. The popover says so and
-offers Retry, which only writes that file: it makes no speech or language-model call.
-It works once the folder is writable again or another one is chosen.
+Each note carries the meeting's `source_id` (fixed at start) and `status: partial | complete`.
+Partial notes are `<utc>-<slug>-partial.md`; completing later publishes a new `<utc>-<slug>.md`
+without needing, opening or changing a partial file, so the user may edit, move or delete it.
 
 ## Control surface
 
-This is the whole list. A control that is not listed is excluded.
+The whole list; a control not listed is excluded. Reached from the tray or menu-bar icon, or from
+the app launcher on trayless sessions ([Release bar](#release-bar)).
 
-**Menu-bar popover**
+**Popover — 7 standing controls:** (1) Start/stop dictation, (2) Start/stop meeting, (3) Mode: Raw /
+Clean / Elevated, (4) Post-Processing on/off, (5) Copy last dictation, (6) Settings…, (7) Quit.
 
-1. Start/stop dictation.
-2. Start/stop meeting.
-3. Mode: Raw / Clean / Elevated.
-4. Post-Processing on/off.
-5. Copy last dictation.
-6. Open Settings.
-7. Quit.
+**Contextual recovery row** — shown only while a staged recovery item exists (a failed, interrupted
+or `Not delivered` dictation, a meeting with unresolved parts, an interrupted meeting, or a
+`pending-archive` meeting): (8) `Retry` / `Save partial notes` / `Discard…` for the newest item; the
+next takes its place when it is resolved. Retry copies a recovered dictation and does not paste it;
+for unresolved parts it transcribes them and finishes the notes; for `pending-archive` it only
+publishes. `Save partial notes` appears only for unresolved parts. Discard asks first and never
+touches the Meeting folder.
 
-**Menu-bar popover, contextual row** (shown whenever any staged recovery item exists:
-a failed dictation WAV, failed meeting chunk WAVs, or a `pending-archive` meeting;
-absent otherwise; a recording cut off by a quit or crash is shown too)
+**Settings — one pane, 6 controls:** (1) Shortcut recorder, (2) Microphone (system default, or one
+device), (3) OpenRouter API key (kept in the OS secret store; never shown after saving), (4) Custom
+Vocabulary (add and remove terms), (5) Meeting folder, (6) Open at login. OS permissions are
+requested just in time, when a feature first needs them, never at launch, and have no settings.
 
-8. `Retry` / `Save partial notes` / `Discard`, for the newest staged item; the next
-   one takes its place when it is resolved. Retry copies a recovered dictation to the
-   clipboard and does not paste it; for a meeting with failed chunks it transcribes
-   those chunks and finishes the notes; for a `pending-archive` meeting it only
-   publishes the finished notes, with no API calls. `Save partial notes` is offered
-   only for a meeting with failed chunks. Discard asks for confirmation and never
-   removes a file from the meeting folder.
-
-**Settings (one pane)**
-
-1. Shortcut recorder.
-2. Microphone (System default, or one device).
-3. OpenRouter API key (stored in the login Keychain; never shown after saving).
-4. Custom Vocabulary (add and remove terms).
-5. Meeting folder.
-6. Open at login.
-
-Seven standing popover controls, one contextual row and six settings. System
-permissions are requested when first needed and have no settings of their own.
-Speech Recognition is requested only when a dictation first takes the on-device
-path, so a user with a key who is online is never asked for it.
+**Privacy.** Audio and text go only to OpenRouter, which routes them to upstream providers (e.g.
+Azure for `microsoft/mai-transcribe-2`; OpenAI, Amazon Bedrock or Azure for `openai/gpt-6-luna`).
+Cantrip sends `provider.data_collection: "deny"` on transcription and rewrite requests alike: a
+routing preference, not proof of upstream retention
+([DESIGN.md › Privacy](DESIGN.md#permissions-privacy-and-distribution)).
 
 ## Anti-goals
 
-- No model picker, provider picker, temperature, or prompt editor.
-- No per-app modes, word-replacement rules, regexes, or transformation scripts.
-- No sound themes, volume ducking, HUD position, colour or size options.
-- No dictation history browser, search, statistics, or retention settings.
-- No secondary shortcuts, command palettes, voice commands, or labs.
-- No streaming or live-typing mode.
-- No accounts, telemetry, or in-app purchase.
-- No Linux or Windows port. v1 stays the Linux product.
-
-For scale: the archived Swift Hex has 27 stored settings across four tabs. The
-active Hex has 50 settings fields, 78 Labs features and 11 window panes. These
-counts are from the source read for this slice.
+- No model picker, provider picker, temperature, prompt editor, per-app modes, word-replacement
+  rules, regexes, or transformation scripts.
+- No sound themes, volume ducking, HUD position, colour or size options; no dictation history
+  browser, search, statistics, or retention settings.
+- No secondary shortcuts, command palettes, voice commands, labs, or streaming / live-typing mode.
+- No accounts, telemetry, or in-app purchase. No Windows port in v2.0.
 
 ## Targets
 
-The measured latencies are API wall-clock times; they exclude capture, network
-distance from a Mac, and paste. Measured values come from the Slice #42 spike (5 synthetic clips of 7.3–10.0 s,
-one sequential run from a Linux cloud sandbox, 2026-11-22). Sample size is small
-and speech is synthetic, so targets for Raw, Clean and Elevated must be
-re-measured with real microphone speech on a Mac before release.
+Measured: Slice #42 spike, 5 synthetic clips of 7.3–10.0 s, one sequential run from a Linux cloud
+sandbox (2026-11-22), API wall-clock only. Every target is re-measured with real microphone speech
+**on both macOS and Linux** before release.
 
-| Measure | Measured in the spike | Target |
+| Measure | Measured in the spike | Target (each OS) |
 | --- | --- | --- |
-| Raw: transcription call, p50 / max | 352 ms / 2052 ms | p50 ≤ 600 ms, p95 ≤ 2.5 s over ≥ 50 real dictations |
-| Clean: transcription plus rewrite, p50 / max | 1479 ms / 2964 ms | p50 ≤ 1.6 s, p95 ≤ 3.5 s |
-| Elevated: transcription plus rewrite, p50 / max | 1187 ms / 3002 ms | p50 ≤ 1.6 s, p95 ≤ 3.5 s |
+| Raw: transcription, p50 / max | 352 ms / 2052 ms | p50 ≤ 600 ms, p95 ≤ 2.5 s over ≥ 50 real dictations |
+| Clean: transcription + rewrite, p50 / max | 1479 ms / 2964 ms | p50 ≤ 1.6 s, p95 ≤ 3.5 s |
+| Elevated: transcription + rewrite, p50 / max | 1187 ms / 3002 ms | p50 ≤ 1.6 s, p95 ≤ 3.5 s |
 | Shortcut press to HUD visible | not measured | ≤ 100 ms |
-| Vocabulary terms spelled exactly, Raw | 21/21 (100%); 14/21 (66.7%) without `keyterms` | ≥ 95% on a real-voice corpus |
-| Vocabulary terms spelled exactly, Clean / Elevated | 20/21 (95.24%) / 19/21 (90.48%) | ≥ 95% |
+| Vocabulary spelled exactly, Raw | 21/21 (100%); 14/21 (66.7%) without `keyterms` | ≥ 95% on a real-voice corpus |
+| Vocabulary spelled exactly, Clean / Elevated | 20/21 (95.24%) / 19/21 (90.48%) | ≥ 95% |
 | Meaning preserved, read by eye, Clean / Elevated | 4/5 / 5/5 | 100% on a real-voice corpus |
-| Ordinary words wrongly turned into vocabulary terms | 0 of 9 Clean text probes; 1 audio clip: "cloud flare" became "Cloudflare" | 0 on a 50-sentence negative set |
+| Ordinary words wrongly turned into terms | 0 of 9 Clean text probes; 1 audio clip ("cloud flare" → "Cloudflare") | 0 on a 50-sentence negative set |
 | Cost per 1,000 dictations, Raw / Clean / Elevated | $0.261 / $0.312 / $0.307 | ≤ $0.50 |
-| Meeting cost | not measured; $0.10 per hour of audio per track at the catalog rate | report per meeting |
+| Meeting cost | not measured; $0.10 per audio hour per track (catalog) | report per meeting |
 
-The three Clean and Elevated misses are names the speaker retracted ("Serenity",
-"Cloudflare") and were correctly dropped with the retraction, so the strict score
-understates them. In the clips, MAI-Transcribe-2 heard `Scry`, `Codex` and
-`confusing` correctly even without `keyterms`; the owner's reported
-misrecognitions were not reproduced on synthetic speech.
+The three Clean/Elevated term misses are retracted names, correctly dropped. The owner's reported
+misrecognitions (`Scry`, `Codex`, `confusing`) did not reproduce on synthetic speech.
 
 ## Open risks
 
-- The spike used neural text-to-speech, not a human microphone, room noise or an
-  accent.
-- The numbers in this slice were tuned on the same clips that measured them. The
-  held-out repair probe recovered 5 of 9 vocabulary terms.
-- Clean can change meaning when the speaker corrects themselves: on one of five
-  clips it deleted the correction and kept the retracted claim. The term score did
-  not catch it. This blocks release of Clean, not of Raw.
-- Clean and Elevated returned identical text on three of five clips. If that holds
-  on real dictation, one of the two modes should go.
-- Meeting capture and its transcription are designed, not tested. OpenRouter
-  documents segment timestamps for MAI-Transcribe-2, but no probe recorded in
-  DESIGN.md requested them. Turn order rests on them or on the slower local split;
-  where neither works, up to five minutes of one track is kept as one block.
-- The microphone track has no echo cancellation. Without headphones, the other
-  side's voices can reach the microphone and appear under `You` as well.
-- Which apps accept Accessibility insertion, and which act on a `Cmd+V` posted to
-  their process, is not known until it is tested on a Mac. An app that does
-  neither, or that does not expose its focused window and field to Accessibility,
-  gets copy-only delivery.
-- Most apps that need a paste are expected not to let Cantrip confirm it, so a paste
-  will usually leave the dictation on the clipboard in place of what was there.
-- On-device recognition, its permission prompt and its refusal path are designed,
-  not tested.
-- Reading the clipboard to snapshot it can make macOS show its pasteboard-access
-  alert.
-- A bare "Scrum means Scry" rule rewrites ordinary speech: an earlier prompt
-  turned "the scrum starts at ten" into "the Scry starts at ten". The final
-  prompt keeps ordinary uses in every text probe, but a larger negative set must
-  confirm it.
-- Raw is what the recognizer returns. One clip came back without the "um" and
-  "uh" in its script, and the spike cannot tell whether the voice or the model
-  dropped them.
+- Speech was neural text-to-speech (no human microphone, noise or accent), and prompts were tuned
+  on the clips that scored them; held-out repair recovered 5 of 9 terms.
+- Clean kept a retracted claim on 1 of 5 clips; the new prompt wording is unmeasured and blocks
+  release of Clean (not Raw) until a fidelity check on unseen clips passes. Clean and Elevated
+  matched on 3 of 5 clips; if that holds on real dictation, one mode should go.
+- Meeting capture, timestamps and turn order are designed, not tested; no probe has requested
+  segment timestamps. Without headphones, other voices can also appear under `You`.
+- Per-app support for direct insertion or an addressed paste is unknown until tested on each OS.
+  Most paste targets cannot confirm the edit, so a paste usually leaves the dictation on the
+  clipboard. Snapshotting the clipboard can trigger an OS clipboard-access prompt.
+- **Linux.** Wayland desktops differ: some hide the focused window (copy-only), some need consent
+  for global shortcuts or input, some report activation but not release (tap-to-toggle only), most
+  cannot address a paste to one app (fields that need one get copy-only), and stock GNOME has no
+  tray and no standard non-activating overlay. The release bar still holds on each; meeting it
+  there is unproven work and may add no setting.
+- Local recognition is designed, not tested; most Linux distributions ship no local recognizer,
+  so the no-key path will usually refuse there.
+- A bare "Scrum means Scry" rule rewrites ordinary speech; a larger negative set must confirm the
+  final vocabulary prompt.
