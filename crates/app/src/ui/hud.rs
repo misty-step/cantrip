@@ -20,6 +20,8 @@ struct Parts {
     main: String,
     /// Mono prefix (meeting timer).
     timer: Option<String>,
+    /// How the text was produced (`Raw (cleanup skipped)`), beside the outcome.
+    note: Option<&'static str>,
     claim: Option<&'static str>,
     meter: bool,
 }
@@ -30,6 +32,7 @@ fn parts(hud: &Hud) -> Parts {
         Hud::Meeting { elapsed_secs } => Parts {
             main: "Meeting".into(),
             timer: Some(mm_ss(*elapsed_secs)),
+            note: None,
             claim,
             meter: false,
         },
@@ -39,6 +42,7 @@ fn parts(hud: &Hud) -> Parts {
             Parts {
                 main,
                 timer: None,
+                note: hud.note(),
                 claim,
                 meter: matches!(hud, Hud::Listening),
             }
@@ -72,6 +76,14 @@ pub fn pill_size(ctx: &egui::Context, hud: &Hud) -> Vec2 {
             .x;
         if p.meter {
             w += 10.0 + METER_W;
+        }
+        if let Some(n) = p.note {
+            w += 10.0
+                + 1.0
+                + 10.0
+                + f.layout_no_wrap(n.to_string(), main_font(), egui::Color32::WHITE)
+                    .size()
+                    .x;
         }
         if let Some(c) = p.claim {
             w += 10.0
@@ -136,6 +148,15 @@ pub fn paint_pill(ui: &Ui, p: &Palette, origin: Pos2, hud: &Hud, level: f32) -> 
         }
         x += METER_W;
     }
+    if let Some(n) = parts.note {
+        x += 10.0;
+        painter.vline(x, (cy - 8.0)..=(cy + 8.0), Stroke::new(1.0, p.hud_border));
+        x += 11.0;
+        let g = painter.layout_no_wrap(n.to_string(), main_font(), p.hud_text);
+        let w = g.size().x;
+        painter.galley(Pos2::new(x, cy - g.size().y / 2.0), g, p.hud_text);
+        x += w;
+    }
     if let Some(c) = parts.claim {
         x += 10.0;
         painter.vline(x, (cy - 8.0)..=(cy + 8.0), Stroke::new(1.0, p.hud_border));
@@ -151,10 +172,12 @@ pub fn paint_pill(ui: &Ui, p: &Palette, origin: Pos2, hud: &Hud, level: f32) -> 
     rect
 }
 
-/// Accessible description of the HUD (full text + claim).
+/// Accessible description of the HUD (full text + note + claim).
 pub fn describe(hud: &Hud) -> String {
-    match hud.claim() {
-        Some(c) => format!("{}. {c}", hud.text()),
-        None => hud.text(),
+    let mut s = hud.text();
+    for extra in [hud.note(), hud.claim()].into_iter().flatten() {
+        s.push_str(". ");
+        s.push_str(extra);
     }
+    s
 }

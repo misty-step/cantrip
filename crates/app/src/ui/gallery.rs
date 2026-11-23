@@ -10,7 +10,7 @@ use crate::platform::UiPlatform;
 use cantrip_core::app::{Command, Control, KeyState, UiSnapshot};
 use cantrip_core::shortcut::Chord;
 use cantrip_core::speech::Mode;
-use cantrip_core::surface::{CopyReason, Hud, RecoveryKind, RecoveryRow};
+use cantrip_core::surface::{CopyReason, Hud, HudNote, RecoveryKind, RecoveryRow};
 use cantrip_core::vocabulary;
 use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportCommand};
 use std::path::{Path, PathBuf};
@@ -139,6 +139,17 @@ pub fn hud_states() -> Vec<(Hud, f32)> {
             0.0,
         ),
         (Hud::RawCleanupSkipped, 0.0),
+        (
+            HudNote::RawCleanupSkipped.with(Hud::Copied {
+                reason: CopyReason::TargetUncertain,
+                on_clipboard: true,
+            }),
+            0.0,
+        ),
+        (
+            HudNote::RawCleanupSkipped.with(Hud::PostedUnconfirmed { on_clipboard: true }),
+            0.0,
+        ),
         (Hud::OnDevice, 0.0),
         (
             Hud::NotTranscribed(cantrip_core::offline::FIX_NO_ON_DEVICE.to_string()),

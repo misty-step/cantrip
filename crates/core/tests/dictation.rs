@@ -5,7 +5,7 @@ use cantrip_core::dictation::*;
 use cantrip_core::ports::*;
 use cantrip_core::speech::{Mode, OpenRouter};
 use cantrip_core::staging::{DictationState, Staging};
-use cantrip_core::surface::Hud;
+use cantrip_core::surface::{CopyReason, Hud, HudNote};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -160,6 +160,120 @@ fn rewrite_failures_deliver_raw_with_cleanup_skipped() {
         assert_eq!(r.d.hud(), Hud::RawCleanupSkipped);
         assert_eq!(dictation_dirs(&r), 0);
     }
+}
+
+/// Raw fallback on a copy-only or unconfirmed take: the HUD shows the
+/// delivery outcome *and* `Raw (cleanup skipped)`, Raw is what is delivered,
+/// and the clipboard claim still drops on a foreign copy.
+#[test]
+fn raw_fallback_on_copy_only_takes_shows_both_outcome_and_cleanup_skipped() {
+    type Rewrite = Box<dyn Fn() -> Result<HttpReply, TransportError> + Send + Sync>;
+    let rewrites = || -> Vec<Rewrite> {
+        vec![
+            Box::new(|| status(500)),
+            Box::new(|| ok(&chat_json("", "stop"))),
+            Box::new(|| ok(&chat_json("Cut of", "length"))),
+            Box::new(|| Err(TransportError::Failed("reset".into()))),
+        ]
+    };
+    // Uncertain target (nothing identifiable captured at start).
+    for rw in rewrites() {
+        let r = rig(speech("raw words", rw));
+        *r.desktop.capture.lock().unwrap() = None;
+        take(&r, cfg(Mode::Clean, true));
+        let hud = r.d.hud();
+        assert_eq!(hud.text(), "Copied — target uncertain");
+        assert_eq!(hud.note(), Some("Raw (cleanup skipped)"));
+        assert_eq!(hud.claim(), Some("Text is on the clipboard"));
+        assert_eq!(
+            hud,
+            Hud::Noted {
+                outcome: Box::new(Hud::Copied {
+                    reason: CopyReason::TargetUncertain,
+                    on_clipboard: true
+                }),
+                note: HudNote::RawCleanupSkipped
+            }
+        );
+        assert_eq!(r.clip.text().as_deref(), Some("raw words"), "Raw copied");
+        assert!(r.desktop.events().is_empty(), "copy-only: zero key events");
+        assert_eq!(dictation_dirs(&r), 0);
+        // Sticky claim drop still works under the combined state.
+        r.clip.external_copy("raw words", false);
+        let hud = r.d.hud();
+        assert_eq!(hud.claim(), Some("Use Copy last dictation"));
+        assert_eq!(hud.note(), Some("Raw (cleanup skipped)"));
+        assert_eq!(r.d.hud().claim(), Some("Use Copy last dictation"));
+    }
+    // Focus changed between start and delivery.
+    for rw in rewrites() {
+        let r = rig(speech("raw words", rw));
+        *r.desktop.focus.lock().unwrap() = Some(focus_b());
+        take(&r, cfg(Mode::Elevated, true));
+        let hud = r.d.hud();
+        assert_eq!(hud.text(), "Copied — focus changed");
+        assert_eq!(hud.note(), Some("Raw (cleanup skipped)"));
+        assert_eq!(r.clip.text().as_deref(), Some("raw words"));
+    }
+    // Even the copy failed: Not delivered, still noted.
+    let r = rig(speech("raw words", || status(500)));
+    *r.desktop.capture.lock().unwrap() = None;
+    *r.clip.fail_writes.lock().unwrap() = true;
+    take(&r, cfg(Mode::Clean, true));
+    assert_eq!(
+        r.d.hud(),
+        HudNote::RawCleanupSkipped.with(Hud::NotDelivered)
+    );
+    assert_eq!(r.staging.recoverable_dictations().len(), 1);
+}
+
+#[test]
+fn rewrite_timeout_on_an_uncertain_target_shows_both_after_four_seconds() {
+    let r = rig(speech("raw words", || {
+        std::thread::sleep(Duration::from_secs(6));
+        ok(&chat_json("late", "stop"))
+    }));
+    *r.desktop.capture.lock().unwrap() = None;
+    take(&r, cfg(Mode::Clean, true));
+    let hud = r.d.hud();
+    assert_eq!(hud.text(), "Copied — target uncertain");
+    assert_eq!(hud.note(), Some("Raw (cleanup skipped)"));
+    assert_eq!(r.clip.text().as_deref(), Some("raw words"));
+}
+
+#[test]
+fn successful_rewrite_on_a_copy_only_take_has_no_note() {
+    let r = rig(speech("raw words", || ok(&chat_json("Raw words.", "stop"))));
+    *r.desktop.capture.lock().unwrap() = None;
+    take(&r, cfg(Mode::Clean, true));
+    let hud = r.d.hud();
+    assert_eq!(hud.text(), "Copied — target uncertain");
+    assert_eq!(hud.note(), None);
+    assert_eq!(r.clip.text().as_deref(), Some("Raw words."));
+}
+
+#[test]
+fn retry_with_raw_fallback_says_so_beside_the_recovered_copy() {
+    let flaky = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let f2 = flaky.clone();
+    let t = FakeTransport::new(move |url, _| {
+        if url.ends_with("/audio/transcriptions") {
+            if f2.swap(false, Ordering::SeqCst) {
+                return status(503);
+            }
+            return ok(&transcript_json("recovered words"));
+        }
+        status(500)
+    });
+    let r = rig(t);
+    take(&r, cfg(Mode::Clean, true));
+    let id = r.staging.recoverable_dictations()[0].id.clone();
+    r.d.retry(&id, cfg(Mode::Clean, true));
+    assert!(r.d.wait_idle(Duration::from_secs(10)));
+    assert_eq!(r.clip.text().as_deref(), Some("recovered words"));
+    let hud = r.d.hud();
+    assert_eq!(hud.text(), RETRY_COPIED);
+    assert_eq!(hud.note(), Some("Raw (cleanup skipped)"));
 }
 
 #[test]

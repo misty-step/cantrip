@@ -234,6 +234,56 @@ pub enum Hud {
     Meeting {
         elapsed_secs: u64,
     },
+    /// A delivery outcome that is not a confirmed insert (copy-only,
+    /// unconfirmed, not delivered, a recovered copy) *and* how the text was
+    /// produced (`Raw (cleanup skipped)` / `On-device`): both are shown, the
+    /// outcome first, so neither hides the other. The clipboard claim, its
+    /// sticky drop and the dwell follow the outcome.
+    Noted {
+        outcome: Box<Hud>,
+        note: HudNote,
+    },
+}
+
+/// How a take's text was produced, when the user must know it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudNote {
+    /// Post-Processing fell back to Raw (error, empty, truncated, 4 s).
+    RawCleanupSkipped,
+    /// Recognized on-device (no key / no connection).
+    OnDevice,
+}
+
+impl HudNote {
+    pub fn text(self) -> &'static str {
+        match self {
+            HudNote::RawCleanupSkipped => "Raw (cleanup skipped)",
+            HudNote::OnDevice => "On-device",
+        }
+    }
+
+    /// The stand-alone pill for this note.
+    pub fn hud(self) -> Hud {
+        match self {
+            HudNote::RawCleanupSkipped => Hud::RawCleanupSkipped,
+            HudNote::OnDevice => Hud::OnDevice,
+        }
+    }
+
+    /// Combine a delivery outcome with this note. A confirmed insert shows
+    /// the note alone (DESIGN.md's `Raw (cleanup skipped)` / `On-device`
+    /// pill); every other outcome keeps its own text and claim and adds the
+    /// note beside it.
+    pub fn with(self, outcome: Hud) -> Hud {
+        match outcome {
+            Hud::Inserted => self.hud(),
+            Hud::Hidden => Hud::Hidden,
+            outcome => Hud::Noted {
+                outcome: Box::new(outcome),
+                note: self,
+            },
+        }
+    }
 }
 
 impl Hud {
@@ -254,6 +304,16 @@ impl Hud {
             Hud::MicrophoneBlocked => "Microphone blocked. Open Settings".into(),
             Hud::Notice(s) => s.clone(),
             Hud::Meeting { elapsed_secs } => format!("{} Meeting", mm_ss(*elapsed_secs)),
+            Hud::Noted { outcome, .. } => outcome.text(),
+        }
+    }
+
+    /// The production note shown beside the outcome (`Raw (cleanup
+    /// skipped)`, `On-device`), if any.
+    pub fn note(&self) -> Option<&'static str> {
+        match self {
+            Hud::Noted { note, .. } => Some(note.text()),
+            _ => None,
         }
     }
 
@@ -267,6 +327,7 @@ impl Hud {
                     CLAIM_USE_COPY_LAST
                 })
             }
+            Hud::Noted { outcome, .. } => outcome.claim(),
             _ => None,
         }
     }
@@ -277,6 +338,7 @@ impl Hud {
             Hud::PostedUnconfirmed { on_clipboard } | Hud::Copied { on_clipboard, .. } => {
                 *on_clipboard = false
             }
+            Hud::Noted { outcome, .. } => outcome.drop_claim(),
             _ => {}
         }
     }
@@ -301,6 +363,8 @@ impl Hud {
             }
             Hud::NotTranscribed(_) | Hud::NotDelivered | Hud::MicrophoneBlocked => Some(6000),
             Hud::Hidden | Hud::Listening | Hud::Transcribing | Hud::Meeting { .. } => None,
+            // At least the note's own 2 s, else the outcome's longer dwell.
+            Hud::Noted { outcome, .. } => outcome.dwell_ms().map(|d| d.max(2000)),
         }
     }
 }
@@ -396,6 +460,42 @@ mod tests {
         );
         assert_eq!(Hud::Meeting { elapsed_secs: 724 }.text(), "12:04 Meeting");
         assert_eq!(Hud::RawCleanupSkipped.text(), "Raw (cleanup skipped)");
+    }
+
+    #[test]
+    fn raw_fallback_is_shown_beside_copy_only_and_unconfirmed_outcomes() {
+        let copied = Hud::Copied {
+            reason: CopyReason::TargetUncertain,
+            on_clipboard: true,
+        };
+        let mut h = HudNote::RawCleanupSkipped.with(copied);
+        assert_eq!(h.text(), "Copied — target uncertain");
+        assert_eq!(h.note(), Some("Raw (cleanup skipped)"));
+        assert_eq!(h.claim(), Some(CLAIM_ON_CLIPBOARD));
+        assert_eq!(h.tone(), Tone::Attention);
+        assert_eq!(h.dwell_ms(), Some(2000));
+        h.drop_claim();
+        assert_eq!(h.claim(), Some(CLAIM_USE_COPY_LAST), "sticky drop kept");
+        assert_eq!(h.note(), Some("Raw (cleanup skipped)"));
+
+        let posted = HudNote::RawCleanupSkipped.with(Hud::PostedUnconfirmed { on_clipboard: true });
+        assert_eq!(posted.text(), "Posted — unconfirmed");
+        assert_eq!(posted.claim(), Some(CLAIM_ON_CLIPBOARD));
+        assert_eq!(posted.note(), Some("Raw (cleanup skipped)"));
+        assert_eq!(posted.dwell_ms(), Some(2000));
+
+        let nd = HudNote::RawCleanupSkipped.with(Hud::NotDelivered);
+        assert_eq!(nd.text(), "Not delivered. Use Copy last dictation");
+        assert_eq!(nd.dwell_ms(), Some(6000));
+        assert_eq!(nd.note(), Some("Raw (cleanup skipped)"));
+
+        // A confirmed insert shows the note alone, as DESIGN.md draws it.
+        assert_eq!(
+            HudNote::RawCleanupSkipped.with(Hud::Inserted),
+            Hud::RawCleanupSkipped
+        );
+        assert_eq!(HudNote::OnDevice.with(Hud::Inserted), Hud::OnDevice);
+        assert_eq!(Hud::Inserted.note(), None);
     }
 
     #[test]

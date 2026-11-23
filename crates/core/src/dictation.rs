@@ -15,7 +15,7 @@ use crate::ports::{
 };
 use crate::speech::{Mode, OpenRouter, SpeechError, REWRITE_TIMEOUT};
 use crate::staging::{DictationState, Staging};
-use crate::surface::Hud;
+use crate::surface::{Hud, HudNote};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -110,7 +110,7 @@ pub struct Dictation {
 struct Produced {
     text: String,
     /// `Raw (cleanup skipped)` or `On-device`.
-    note: Option<Hud>,
+    note: Option<HudNote>,
     transcribe_ms: Option<u64>,
     rewrite_ms: Option<u64>,
 }
@@ -132,7 +132,7 @@ fn produce(deps: &DictationDeps, wav: &Path, cfg: &TakeConfig) -> Result<Produce
     let local = |deps: &DictationDeps| {
         offline::recognize_locally(deps.local.as_ref(), wav).map(|text| Produced {
             text,
-            note: Some(Hud::OnDevice),
+            note: Some(HudNote::OnDevice),
             transcribe_ms: None,
             rewrite_ms: None,
         })
@@ -183,7 +183,7 @@ fn produce(deps: &DictationDeps, wav: &Path, cfg: &TakeConfig) -> Result<Produce
         },
         Err(_) => Produced {
             text: transcript.text,
-            note: Some(Hud::RawCleanupSkipped),
+            note: Some(HudNote::RawCleanupSkipped),
             transcribe_ms,
             rewrite_ms,
         },
@@ -413,20 +413,25 @@ impl Dictation {
         std::thread::spawn(move || {
             let wav = deps.staging.dictation_audio(&id);
             let hud = match produce(&deps, &wav, &cfg) {
-                Ok(p) => match deps.clipboard.write_text(&p.text, true) {
-                    Ok(_) => {
-                        let _ = deps.staging.delete_dictation(&id);
-                        lock(&inner).last_text = Some(p.text);
-                        Hud::Notice(RETRY_COPIED.into())
+                Ok(p) => {
+                    let outcome = match deps.clipboard.write_text(&p.text, true) {
+                        Ok(_) => {
+                            let _ = deps.staging.delete_dictation(&id);
+                            Hud::Notice(RETRY_COPIED.into())
+                        }
+                        Err(_) => {
+                            let _ = deps
+                                .staging
+                                .set_dictation_state(&id, DictationState::NotDelivered);
+                            Hud::NotDelivered
+                        }
+                    };
+                    lock(&inner).last_text = Some(p.text);
+                    match p.note {
+                        Some(note) => note.with(outcome),
+                        None => outcome,
                     }
-                    Err(_) => {
-                        let _ = deps
-                            .staging
-                            .set_dictation_state(&id, DictationState::NotDelivered);
-                        lock(&inner).last_text = Some(p.text);
-                        Hud::NotDelivered
-                    }
-                },
+                }
                 Err(fix) => {
                     let _ = deps.staging.set_dictation_state(
                         &id,
@@ -560,9 +565,11 @@ fn process(deps: DictationDeps, inner: Arc<Mutex<Inner>>, rec: Box<dyn Recording
             let _ = staging.delete_dictation(&take.item_id);
         }
     }
-    let hud = match (&delivered.hud, &p.note) {
-        (Hud::Copied { .. } | Hud::NotDelivered, _) | (_, None) => delivered.hud.clone(),
-        (_, Some(note)) => note.clone(),
+    // The note (Raw fallback, on-device) is never hidden by a copy-only or
+    // unconfirmed outcome, and never hides it: both are shown.
+    let hud = match p.note {
+        Some(note) => note.with(delivered.hud.clone()),
+        None => delivered.hud.clone(),
     };
     let claim = if hud.claim().is_some() {
         ClaimWatch::new(delivered.clip.clone())
