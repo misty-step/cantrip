@@ -164,8 +164,9 @@ publish-only Retry, Discard); `archived` (verified, staging cleaned up).
    it resolves before Cantrip creates a directory or writes a file in it, or (c) on publish-only
    Retry, the directory a recorded publish path resolves to; judged by filesystem identity, not
    string prefix. Settings refuses an overlap ("Choose a folder outside Cantrip's private data
-   folder"); an overlap under (a) or (b) creates, writes and deletes nothing and leaves the meeting
-   `pending-archive`, staging intact; (c) is handled by 4. The chosen folder is never created.
+   folder"); an overlap under (a) or (b) creates, writes and deletes nothing, keeps staging intact
+   and leaves a complete note in `pending-archive` or a partial note in `parts-failed`; (c) is
+   handled by 4. The chosen folder is never created.
 2. **Exclusive, append-only.** A note appears only under a new name (`-2.md`, `-3.md`,
    `-partial-2.md`), whole and at once where the filesystem supports exclusive atomic publication.
    No pre-existing file in or beneath the Meeting folder is ever overwritten, truncated, renamed,
@@ -187,8 +188,9 @@ publish-only Retry, Discard); `archived` (verified, staging cleaned up).
    refused under (c), or failed verification), Cantrip checks under (a) and (b) the folder chosen
    now and its resolved `cantrip-meeting/YYYY/MM`: all disjoint → publish afresh from the intact
    staged copy, verify and flush (3), then, for a complete note only, delete staging; any overlap →
-   create, write and delete nothing, leave staging intact, stay `pending-archive`. Two complete
-   notes with one `source_id` beat a lost one.
+   create, write and delete nothing, keep staging intact, and leave a complete note in
+   `pending-archive` or a partial note in `parts-failed` (never moving a partial note into
+   `pending-archive`). Two complete notes with one `source_id` beat a lost one.
 
 **Notes.** A partial note shows an unresolved part at its real start as `[MM:SS] You: [transcription
 failed: MM:SS–MM:SS]`; a later complete note never opens a partial. Parts are transcribed with
@@ -316,15 +318,17 @@ recorded per platform; anything injected through a debug hook is recorded as inj
    note and keeps its audio while all other parts succeed; failed cleanup leaves a marked span.
 6. **Archive.** Unresolved part: Retry / Save partial notes / Discard; changing partials never
    affects completion; a taken name gives `-2.md`, original byte-identical; an unwritable or
-   overlapping folder gives `pending-archive`, offline Retry publishes with zero API calls; a
-   symlink at `cantrip-meeting`, `YYYY` or `MM` into staging gets nothing created or written through
-   it; on Retry, a recorded path whose directory now resolves into staging is refused, never read,
-   flushed or used to delete staging, and left untouched: a disjoint current folder gets a fresh,
-   verified publication before staging is cleaned up; an overlapping current folder or resolved
-   subdirectory gets no creates, writes or deletes (filesystem trace), staging stays intact and the
-   meeting stays `pending-archive`; an injected verification or flush failure keeps the staged note
-   and a later Retry publishes it; a FIFO or symlink at the recorded path neither hangs nor is
-   replaced; a kill around publishing keeps staging (and, with atomic publication, leaves no partial
-   file); a filesystem trace shows zero deletes, renames, truncations, overwrites, write-opens of
+   overlapping folder gives a complete note `pending-archive`, offline Retry publishes with zero API
+   calls; a symlink at `cantrip-meeting`, `YYYY` or `MM` into staging gets nothing created or
+   written through it; on Retry, a recorded path whose directory now resolves into staging is
+   refused, never read, flushed or used to delete staging, and left untouched: a disjoint current
+   folder gets a fresh, verified publication before staging is cleaned up; an overlapping current
+   folder or resolved subdirectory gets no creates, writes or deletes (filesystem trace), staging
+   stays intact and a complete note stays `pending-archive` (the same overlap during a partial-note
+   save likewise creates, writes and deletes nothing, keeps staging intact and remains
+   `parts-failed`); an injected verification or flush failure keeps the staged note and a later
+   Retry publishes it; a FIFO or symlink at the recorded path neither hangs nor is replaced; a kill
+   around publishing keeps staging (and, with atomic publication, leaves no partial file); a
+   filesystem trace shows zero deletes, renames, truncations, overwrites, write-opens of
    pre-existing files or temp files in the Meeting folder; a crash mid-meeting offers the
    `interrupted` row on relaunch.
