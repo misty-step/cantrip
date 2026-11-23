@@ -530,7 +530,8 @@ fn process(deps: DictationDeps, inner: Arc<Mutex<Inner>>, rec: Box<dyn Recording
         .and_then(|rx| rx.recv_timeout(Duration::from_secs(1)).ok())
         .unwrap_or(CaptureContext {
             captured: Captured::Uncertain,
-            epoch: deps.desktop.session_epoch(),
+            // Unused: an uncertain take never reaches the gate.
+            epoch: 0,
         });
     let produced = produce(&deps, &wav, &take.cfg);
     // A cancelled take is never delivered, even if a response arrived.

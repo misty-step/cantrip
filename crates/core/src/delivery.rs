@@ -51,19 +51,31 @@ pub struct CaptureContext {
 }
 
 /// Capture on a worker thread; a result later than `deadline` is ignored and
-/// the take is `Uncertain`.
+/// the take is `Uncertain`. The session epoch is read *inside* the worker,
+/// before the target, so a slow epoch query (logind over D-Bus, a resume
+/// clock) counts against the same budget and can never push capture past it.
 pub fn capture_with_deadline(desktop: Arc<dyn Desktop>, deadline: Duration) -> CaptureContext {
-    let epoch = desktop.session_epoch();
     let (tx, rx) = mpsc::channel();
-    let d = desktop.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(d.capture_target()); // late answers are dropped
+        let epoch = desktop.session_epoch();
+        let target = desktop.capture_target();
+        let _ = tx.send((epoch, target)); // late answers are dropped
     });
-    let captured = match rx.recv_timeout(deadline) {
-        Ok(Some(t)) => Captured::Resolved(t),
-        _ => Captured::Uncertain,
-    };
-    CaptureContext { captured, epoch }
+    match rx.recv_timeout(deadline) {
+        Ok((epoch, Some(t))) => CaptureContext {
+            captured: Captured::Resolved(t),
+            epoch,
+        },
+        Ok((epoch, None)) => CaptureContext {
+            captured: Captured::Uncertain,
+            epoch,
+        },
+        // An uncertain take never reaches the gate, so its epoch is unused.
+        Err(_) => CaptureContext {
+            captured: Captured::Uncertain,
+            epoch: 0,
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,9 +136,10 @@ pub fn deliver(
             }
             match desktop.insert_text(target, text) {
                 InsertResult::Done => {
-                    let confirmed = before.as_ref().is_some_and(|b| {
-                        await_delta(desktop, target, b, text, TIER1_CONFIRM_WINDOW)
-                    });
+                    let until = Instant::now() + TIER1_CONFIRM_WINDOW;
+                    let confirmed = before
+                        .as_ref()
+                        .is_some_and(|b| await_delta(desktop, target, b, text, until));
                     if confirmed {
                         settled(Outcome::Confirmed, Hud::Inserted)
                     } else {
@@ -221,25 +234,26 @@ fn settled(outcome: Outcome, hud: Hud) -> Delivered {
     }
 }
 
-/// Poll the field until it shows exactly Cantrip's edit or `window` passes.
+/// Poll the field until it shows exactly Cantrip's edit or `until` passes.
+/// The deadline is checked *after* each read-back completes: a read that
+/// blocks past the deadline never confirms, however good its answer.
 fn await_delta(
     desktop: &dyn Desktop,
     target: &Target,
     before: &FieldState,
     text: &str,
-    window: Duration,
+    until: Instant,
 ) -> bool {
-    let until = Instant::now() + window;
     loop {
-        if let Some(after) = desktop.read_field(target) {
-            if edit_delta_confirms(before, &after, text) {
-                return true;
-            }
-        }
-        if Instant::now() >= until {
+        let after = desktop.read_field(target);
+        let now = Instant::now();
+        if now > until {
             return false;
         }
-        std::thread::sleep(CONFIRM_POLL);
+        if after.is_some_and(|a| edit_delta_confirms(before, &a, text)) {
+            return true;
+        }
+        std::thread::sleep(CONFIRM_POLL.min(until - now));
     }
 }
 
@@ -287,12 +301,15 @@ fn tier2(
         PasteResult::Unaddressable => copied(CopyReason::PasteUnsupported),
         PasteResult::Failed => copied(CopyReason::TargetUncertain),
         PasteResult::Posted => {
+            let until = Instant::now() + TIER2_CONFIRM_WINDOW;
             let confirmed = before
                 .as_ref()
-                .is_some_and(|b| await_delta(desktop, target, b, text, TIER2_CONFIRM_WINDOW));
+                .is_some_and(|b| await_delta(desktop, target, b, text, until));
             if confirmed {
+                // Restore only inside the window: a clipboard check that
+                // completes past the deadline restores nothing.
                 let restored = match &snapshot {
-                    Some(snap) if clipboard.unchanged_since(&token) => {
+                    Some(snap) if clipboard.unchanged_since(&token) && Instant::now() <= until => {
                         clipboard.restore(snap, &token)
                     }
                     _ => false,

@@ -163,6 +163,11 @@ pub enum PasteMode {
 pub struct FakeDesktop {
     pub capture: Mutex<Option<Target>>,
     pub capture_delay: Mutex<Duration>,
+    /// How long `session_epoch` blocks (a slow logind / D-Bus query).
+    pub epoch_delay: Mutex<Duration>,
+    /// How long `read_field` blocks once an insert or paste was dispatched
+    /// (a slow AT-SPI / AX read-back).
+    pub read_delay_after_dispatch: Mutex<Duration>,
     pub focus: Mutex<Option<FocusNow>>,
     /// After this many focus_now calls, switch focus to the given value.
     pub switch_after: Mutex<Option<(usize, Option<FocusNow>)>>,
@@ -185,6 +190,8 @@ impl FakeDesktop {
             focus: Mutex::new(Some(focus_of(&t))),
             capture: Mutex::new(Some(t)),
             capture_delay: Mutex::new(Duration::ZERO),
+            epoch_delay: Mutex::new(Duration::ZERO),
+            read_delay_after_dispatch: Mutex::new(Duration::ZERO),
             switch_after: Mutex::new(None),
             focus_calls: AtomicUsize::new(0),
             field: Mutex::new(Some(FieldState {
@@ -256,12 +263,16 @@ impl Desktop for FakeDesktop {
         self.permission.lock().unwrap().clone()
     }
     fn session_epoch(&self) -> u64 {
+        std::thread::sleep(*self.epoch_delay.lock().unwrap());
         self.epoch.load(Ordering::SeqCst)
     }
     fn field_support(&self, _t: &Target) -> FieldSupport {
         self.support.lock().unwrap().clone()
     }
     fn read_field(&self, _t: &Target) -> Option<FieldState> {
+        if self.events().iter().any(|e| e == "insert" || e == "paste") {
+            std::thread::sleep(*self.read_delay_after_dispatch.lock().unwrap());
+        }
         self.field.lock().unwrap().clone()
     }
     fn insert_text(&self, _t: &Target, text: &str) -> InsertResult {
@@ -316,6 +327,8 @@ pub struct FakeClipboard {
     /// Simulate another app copying after N `unchanged_since` checks.
     pub external_after_checks: Mutex<Option<(usize, String)>>,
     pub checks: AtomicUsize,
+    /// How long each `unchanged_since` blocks.
+    pub check_delay: Mutex<Duration>,
 }
 
 impl FakeClipboard {
@@ -334,6 +347,7 @@ impl FakeClipboard {
             restores: AtomicUsize::new(0),
             external_after_checks: Mutex::new(None),
             checks: AtomicUsize::new(0),
+            check_delay: Mutex::new(Duration::ZERO),
         })
     }
     /// Another app copies (rich or plain) `text`.
@@ -381,6 +395,7 @@ impl Clipboard for FakeClipboard {
         Ok(ClipToken(g))
     }
     fn unchanged_since(&self, token: &ClipToken) -> bool {
+        std::thread::sleep(*self.check_delay.lock().unwrap());
         let n = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
         let ext = self.external_after_checks.lock().unwrap().clone();
         if let Some((after, text)) = ext {

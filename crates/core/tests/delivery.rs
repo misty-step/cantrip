@@ -6,7 +6,7 @@ use cantrip_core::ports::*;
 use cantrip_core::surface::{CopyReason, Hud};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::*;
 
 fn setup() -> (Arc<FakeDesktop>, Arc<FakeClipboard>, CaptureContext) {
@@ -374,4 +374,91 @@ fn randomized_switch_timings_never_deliver_after_a_switch_before_final_verificat
             assert_eq!(d.events().len(), 1);
         }
     }
+}
+
+// ───────────── strict deadline bounds (slow adapters) ─────────────
+
+#[test]
+fn slow_session_epoch_counts_against_the_capture_budget() {
+    let d = FakeDesktop::new(target_a());
+    *d.epoch_delay.lock().unwrap() = Duration::from_millis(600);
+    let t = Instant::now();
+    let ctx = capture_with_deadline(d.clone(), CAPTURE_DEADLINE);
+    let took = t.elapsed();
+    assert!(took < Duration::from_millis(320), "capture took {took:?}");
+    assert_eq!(
+        ctx.captured,
+        Captured::Uncertain,
+        "late capture is uncertain"
+    );
+    std::thread::sleep(Duration::from_millis(500)); // late answer lands
+    let c = FakeClipboard::new();
+    let r = deliver("x", &ctx, d.as_ref(), c.as_ref());
+    assert_eq!(r.outcome, Outcome::Copied(CopyReason::TargetUncertain));
+    assert!(d.events().is_empty());
+}
+
+#[test]
+fn epoch_and_target_together_inside_the_budget_resolve() {
+    let d = FakeDesktop::new(target_a());
+    *d.epoch_delay.lock().unwrap() = Duration::from_millis(60);
+    *d.capture_delay.lock().unwrap() = Duration::from_millis(60);
+    let ctx = capture_with_deadline(d.clone(), CAPTURE_DEADLINE);
+    assert_eq!(ctx.captured, Captured::Resolved(target_a()));
+    assert_eq!(ctx.epoch, 1);
+}
+
+#[test]
+fn tier1_read_back_finishing_past_the_window_never_confirms() {
+    let (d, c, ctx) = setup();
+    // The insert lands, but the read-back blocks past the 300 ms window.
+    *d.read_delay_after_dispatch.lock().unwrap() =
+        TIER1_CONFIRM_WINDOW + Duration::from_millis(150);
+    let t = Instant::now();
+    let r = deliver("world", &ctx, d.as_ref(), c.as_ref());
+    assert_eq!(d.field_text(), "Hello world", "the edit is there…");
+    assert_eq!(
+        r.outcome,
+        Outcome::Unconfirmed { tier: 1 },
+        "…but a late read-back is not evidence"
+    );
+    assert_eq!(r.hud, Hud::SentUnconfirmed);
+    assert!(t.elapsed() < TIER1_CONFIRM_WINDOW + Duration::from_millis(400));
+    assert_eq!(c.writes.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn tier2_read_back_finishing_past_the_window_never_confirms_or_restores() {
+    let (d, c, ctx) = setup();
+    *d.support.lock().unwrap() = FieldSupport::NoDirectInsert;
+    *d.read_delay_after_dispatch.lock().unwrap() =
+        TIER2_CONFIRM_WINDOW + Duration::from_millis(200);
+    let r = deliver("world", &ctx, d.as_ref(), c.as_ref());
+    assert_eq!(d.field_text(), "Hello world");
+    assert_eq!(r.outcome, Outcome::Unconfirmed { tier: 2 });
+    assert_eq!(r.hud.text(), "Posted — unconfirmed");
+    assert!(!r.restored);
+    assert_eq!(c.restores.load(Ordering::SeqCst), 0);
+    assert_eq!(c.text().as_deref(), Some("world"), "Cantrip's text stays");
+}
+
+#[test]
+fn tier2_clipboard_check_finishing_past_the_window_restores_nothing() {
+    let (d, c, ctx) = setup();
+    *d.support.lock().unwrap() = FieldSupport::NoDirectInsert;
+    // Read-backs are quick, but checking the clipboard blocks past the window.
+    *c.check_delay.lock().unwrap() = TIER2_CONFIRM_WINDOW + Duration::from_millis(100);
+    let r = deliver("world", &ctx, d.as_ref(), c.as_ref());
+    assert_eq!(r.outcome, Outcome::Confirmed, "the delta came in time");
+    assert!(!r.restored, "but a restore past the deadline never happens");
+    assert_eq!(c.restores.load(Ordering::SeqCst), 0);
+    assert!(r.clip.is_some(), "the claim is still tracked");
+}
+
+#[test]
+fn slow_but_in_time_read_back_still_confirms() {
+    let (d, c, ctx) = setup();
+    *d.read_delay_after_dispatch.lock().unwrap() = Duration::from_millis(100);
+    let r = deliver("world", &ctx, d.as_ref(), c.as_ref());
+    assert_eq!(r.outcome, Outcome::Confirmed);
 }
