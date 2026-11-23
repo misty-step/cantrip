@@ -598,6 +598,7 @@ version = "2.0.0-dev"
 dependencies = [
  "anyhow",
  "cantrip-core",
+ "dbus",
  "eframe",
  "image",
  "libc",
@@ -605,6 +606,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ureq",
+ "x11rb",
 ]
 
 [[package]]
@@ -824,6 +826,17 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
+
+[[package]]
+name = "dbus"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ab69f03cc8c4340c9c8e315114e1658e6775a9b16a04357973aa21cec22b32e"
+dependencies = [
+ "libc",
+ "libdbus-sys",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "der"
@@ -1893,6 +1906,15 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libdbus-sys"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
+dependencies = [
+ "pkg-config",
+]
 
 [[package]]
 name = "libloading"
