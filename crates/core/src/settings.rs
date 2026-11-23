@@ -93,9 +93,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert_eq!(Settings::load(&path).unwrap(), Settings::default());
-        let mut s = Settings::default();
-        s.mode = Mode::Elevated;
-        s.vocabulary = vec!["Scry".into()];
+        let s = Settings {
+            mode: Mode::Elevated,
+            vocabulary: vec!["Scry".into()],
+            ..Default::default()
+        };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path).unwrap(), s);
     }

@@ -6,13 +6,17 @@
 //! post, restore only on a confirmed edit delta *and* an unchanged clipboard)
 //! → copy-only with a reason. Never a blind keystroke; a handoff that may have
 //! completed is never retried through the other tier.
-//!
-//! OWNER: core-dictation fork.
 
-use crate::ports::{ClipToken, Clipboard, Desktop, FieldState, Target};
+use crate::ports::{
+    ClipToken, Clipboard, Desktop, FieldState, FieldSupport, InsertResult, PasteResult, Target,
+};
 use crate::surface::{CopyReason, Hud};
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Poll interval while waiting for an edit delta.
+const CONFIRM_POLL: Duration = Duration::from_millis(15);
 
 pub const CAPTURE_DEADLINE: Duration = Duration::from_millis(250);
 pub const TIER1_CONFIRM_WINDOW: Duration = Duration::from_millis(300);
@@ -49,8 +53,17 @@ pub struct CaptureContext {
 /// Capture on a worker thread; a result later than `deadline` is ignored and
 /// the take is `Uncertain`.
 pub fn capture_with_deadline(desktop: Arc<dyn Desktop>, deadline: Duration) -> CaptureContext {
-    let _ = (desktop, deadline);
-    todo!()
+    let epoch = desktop.session_epoch();
+    let (tx, rx) = mpsc::channel();
+    let d = desktop.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(d.capture_target()); // late answers are dropped
+    });
+    let captured = match rx.recv_timeout(deadline) {
+        Ok(Some(t)) => Captured::Resolved(t),
+        _ => Captured::Uncertain,
+    };
+    CaptureContext { captured, epoch }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,22 +97,222 @@ pub fn deliver(
     desktop: &dyn Desktop,
     clipboard: &dyn Clipboard,
 ) -> Delivered {
-    let _ = (text, ctx, desktop, clipboard);
-    todo!()
+    let target = match &ctx.captured {
+        Captured::Resolved(t) => t,
+        Captured::Uncertain => return copy_only(text, CopyReason::TargetUncertain, clipboard),
+    };
+    if let Err(reason) = gate(target, ctx.epoch, desktop) {
+        return copy_only(text, reason, clipboard);
+    }
+    if on_copy_only_list(&target.app.app_id) {
+        return copy_only(text, CopyReason::TargetUncertain, clipboard);
+    }
+    let support = match &target.field {
+        None => FieldSupport::NoDirectInsert,
+        Some(_) => desktop.field_support(target),
+    };
+    match support {
+        FieldSupport::Gone => copy_only(text, CopyReason::TargetUncertain, clipboard),
+        FieldSupport::NoDirectInsert => tier2(text, target, ctx.epoch, desktop, clipboard),
+        FieldSupport::DirectInsert => {
+            let before = desktop.read_field(target);
+            // Final verification, immediately before dispatch.
+            if let Err(reason) = gate(target, ctx.epoch, desktop) {
+                return copy_only(text, reason, clipboard);
+            }
+            match desktop.insert_text(target, text) {
+                InsertResult::Done => {
+                    let confirmed = before.as_ref().is_some_and(|b| {
+                        await_delta(desktop, target, b, text, TIER1_CONFIRM_WINDOW)
+                    });
+                    if confirmed {
+                        settled(Outcome::Confirmed, Hud::Inserted)
+                    } else {
+                        settled(Outcome::Unconfirmed { tier: 1 }, Hud::SentUnconfirmed)
+                    }
+                }
+                // May have landed: never retried through the other tier.
+                InsertResult::Ambiguous => {
+                    settled(Outcome::Unconfirmed { tier: 1 }, Hud::SentUnconfirmed)
+                }
+                InsertResult::Refused => tier2(text, target, ctx.epoch, desktop, clipboard),
+            }
+        }
+    }
 }
 
 /// Copy-only: put the text on the clipboard, send nothing, say why.
 pub fn copy_only(text: &str, reason: CopyReason, clipboard: &dyn Clipboard) -> Delivered {
-    let _ = (text, reason, clipboard);
-    todo!()
+    match clipboard.write_text(text, true) {
+        Err(_) => Delivered {
+            outcome: Outcome::Failed,
+            hud: Hud::NotDelivered,
+            clip: None,
+            restored: false,
+        },
+        Ok(token) => {
+            let on_clipboard = clipboard.unchanged_since(&token);
+            Delivered {
+                outcome: Outcome::Copied(reason.clone()),
+                hud: Hud::Copied {
+                    reason,
+                    on_clipboard,
+                },
+                clip: Some(token),
+                restored: false,
+            }
+        }
+    }
 }
 
 /// `confirmed` evidence: `after` equals `before` with exactly its selection
 /// replaced by `inserted`, the caret right after the insertion, both values
 /// complete, and the content actually changed.
 pub fn edit_delta_confirms(before: &FieldState, after: &FieldState, inserted: &str) -> bool {
-    let _ = (before, after, inserted);
-    todo!()
+    if !before.complete || !after.complete || inserted.is_empty() {
+        return false;
+    }
+    let chars: Vec<char> = before.text.chars().collect();
+    let (start, end) = before.selection;
+    if start > end || end > chars.len() {
+        return false;
+    }
+    let prefix: String = chars[..start].iter().collect();
+    let selected: String = chars[start..end].iter().collect();
+    let suffix: String = chars[end..].iter().collect();
+    if selected == inserted {
+        // Replacing text with identical text is not an observable edit.
+        return false;
+    }
+    let expected = format!("{prefix}{inserted}{suffix}");
+    let caret = start + inserted.chars().count();
+    after.text == expected && after.selection == (caret, caret) && after.text != before.text
+}
+
+/// The gate, run before either tier and again at final verification.
+fn gate(target: &Target, epoch: u64, desktop: &dyn Desktop) -> Result<(), CopyReason> {
+    if let Some(p) = desktop.missing_delivery_permission() {
+        return Err(CopyReason::Allow(p));
+    }
+    if desktop.session_epoch() != epoch || !desktop.app_alive(&target.app) {
+        return Err(CopyReason::TargetUncertain);
+    }
+    let now = desktop.focus_now().ok_or(CopyReason::TargetUncertain)?;
+    if now.app != target.app || now.window != target.window {
+        return Err(CopyReason::FocusChanged);
+    }
+    Ok(())
+}
+
+fn on_copy_only_list(app_id: &str) -> bool {
+    COPY_ONLY_APPS
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(app_id))
+}
+
+fn settled(outcome: Outcome, hud: Hud) -> Delivered {
+    Delivered {
+        outcome,
+        hud,
+        clip: None,
+        restored: false,
+    }
+}
+
+/// Poll the field until it shows exactly Cantrip's edit or `window` passes.
+fn await_delta(
+    desktop: &dyn Desktop,
+    target: &Target,
+    before: &FieldState,
+    text: &str,
+    window: Duration,
+) -> bool {
+    let until = Instant::now() + window;
+    loop {
+        if let Some(after) = desktop.read_field(target) {
+            if edit_delta_confirms(before, &after, text) {
+                return true;
+            }
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(CONFIRM_POLL);
+    }
+}
+
+/// Tier 2: addressed paste with snapshot / guarded restore.
+fn tier2(
+    text: &str,
+    target: &Target,
+    epoch: u64,
+    desktop: &dyn Desktop,
+    clipboard: &dyn Clipboard,
+) -> Delivered {
+    if !desktop.can_address_paste(&target.app) {
+        return copy_only(text, CopyReason::PasteUnsupported, clipboard);
+    }
+    let before = target
+        .field
+        .as_ref()
+        .and_then(|_| desktop.read_field(target));
+    let snapshot = clipboard.snapshot();
+    let token = match clipboard.write_text(text, true) {
+        Ok(t) => t,
+        Err(_) => {
+            return Delivered {
+                outcome: Outcome::Failed,
+                hud: Hud::NotDelivered,
+                clip: None,
+                restored: false,
+            }
+        }
+    };
+    let copied = |reason: CopyReason| Delivered {
+        outcome: Outcome::Copied(reason.clone()),
+        hud: Hud::Copied {
+            reason,
+            on_clipboard: clipboard.unchanged_since(&token),
+        },
+        clip: Some(token.clone()),
+        restored: false,
+    };
+    // Final verification, immediately before dispatch.
+    if let Err(reason) = gate(target, epoch, desktop) {
+        return copied(reason);
+    }
+    match desktop.post_paste(target) {
+        PasteResult::Unaddressable => copied(CopyReason::PasteUnsupported),
+        PasteResult::Failed => copied(CopyReason::TargetUncertain),
+        PasteResult::Posted => {
+            let confirmed = before
+                .as_ref()
+                .is_some_and(|b| await_delta(desktop, target, b, text, TIER2_CONFIRM_WINDOW));
+            if confirmed {
+                let restored = match &snapshot {
+                    Some(snap) if clipboard.unchanged_since(&token) => {
+                        clipboard.restore(snap, &token)
+                    }
+                    _ => false,
+                };
+                Delivered {
+                    outcome: Outcome::Confirmed,
+                    hud: Hud::Inserted,
+                    clip: if restored { None } else { Some(token) },
+                    restored,
+                }
+            } else {
+                Delivered {
+                    outcome: Outcome::Unconfirmed { tier: 2 },
+                    hud: Hud::PostedUnconfirmed {
+                        on_clipboard: clipboard.unchanged_since(&token),
+                    },
+                    clip: Some(token),
+                    restored: false,
+                }
+            }
+        }
+    }
 }
 
 /// Sticky clipboard claim: true while Cantrip's write is unchanged; once false
