@@ -571,8 +571,10 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "smithay-client-toolkit",
  "tempfile",
  "ureq",
+ "wayland-client",
  "winit",
  "x11rb",
 ]

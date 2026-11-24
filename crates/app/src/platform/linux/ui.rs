@@ -4,14 +4,17 @@
 //! behavior delegated to [`super::window::WindowPatcher`].
 
 use super::dbus_util;
+use super::layer_hud::LayerHud;
+use super::sway::SwayIpc;
 use super::window::WindowPatcher;
 use crate::platform::raw_window::Raw;
-use crate::platform::UiPlatform;
+use crate::platform::{NativeHud, UiPlatform};
 use dbus::arg::{PropMap, RefArg, Variant};
 use dbus::blocking::Connection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 const PORTAL: &str = "org.freedesktop.portal.Desktop";
@@ -21,12 +24,43 @@ const PICKER_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct LinuxUi {
     windows: WindowPatcher,
+    native_hud: Option<Arc<LayerHud>>,
 }
+
+/// Sway criteria for the egui root window (the HUD window on X11).
+const SWAY_HUD_WINDOW: &str = r#"[app_id="cantrip" title="^Cantrip HUD$"]"#;
 
 impl LinuxUi {
     pub fn new() -> LinuxUi {
+        let native_hud = if super::x11::session_is_wayland() {
+            LayerHud::start().map(Arc::new)
+        } else {
+            None
+        };
+        if native_hud.is_some() {
+            hide_root_window_on_sway();
+        }
         LinuxUi {
             windows: WindowPatcher::new(),
+            native_hud,
+        }
+    }
+}
+
+/// With the layer-shell HUD, the egui root window is never shown. Wayland
+/// cannot keep it unmapped (eframe paints the root to paint the popover and
+/// Settings), so on Sway it is kept off every workspace and unfocused: rules
+/// set before the window exists, applied when it maps.
+fn hide_root_window_on_sway() {
+    let Some(ipc) = SwayIpc::from_env() else {
+        return;
+    };
+    for cmd in [
+        format!("no_focus {SWAY_HUD_WINDOW}"),
+        format!("for_window {SWAY_HUD_WINDOW} move scratchpad"),
+    ] {
+        if let Err(e) = ipc.run(&cmd) {
+            eprintln!("[cantrip] sway rule for the HUD window failed: {e}");
         }
     }
 }
@@ -56,6 +90,10 @@ impl UiPlatform for LinuxUi {
 
     fn prefers_dark(&self) -> bool {
         prefers_dark()
+    }
+
+    fn native_hud(&self) -> Option<Arc<dyn NativeHud>> {
+        self.native_hud.clone().map(|h| h as Arc<dyn NativeHud>)
     }
 
     fn system_fonts(&self) -> (Option<Vec<u8>>, Option<Vec<u8>>) {

@@ -113,6 +113,36 @@ pub trait UiPlatform: Send + Sync {
     /// Native folder picker. `Err` when no picker exists on this session (the
     /// UI then offers an inline path field).
     fn choose_folder(&self, start: &std::path::Path) -> Result<Option<PathBuf>, String>;
+    /// A compositor-native HUD surface (Wayland `wlr-layer-shell`), when this
+    /// session has one. The UI then renders the pill to pixels for it and
+    /// never shows its own HUD window.
+    fn native_hud(&self) -> Option<Arc<dyn NativeHud>> {
+        None
+    }
+}
+
+/// One rendered HUD pill for a native surface: `width`×`height` physical
+/// pixels at integer `scale` (both divisible by it), ARGB8888 premultiplied
+/// little-endian, placed bottom-centre `bottom_margin` logical px above the
+/// bottom of the usable area.
+#[derive(Clone, Debug)]
+#[cfg_attr(target_os = "macos", allow(dead_code))] // read by the Wayland layer-shell HUD
+pub struct HudFrame {
+    pub width: u32,
+    pub height: u32,
+    pub scale: u32,
+    pub argb: Vec<u8>,
+    pub bottom_margin: u32,
+}
+
+/// A compositor-native HUD surface: non-activating, click-through, on every
+/// workspace.
+pub trait NativeHud: Send + Sync {
+    /// The integer buffer scale to render at.
+    fn scale(&self) -> u32;
+    /// Show `frame` (replacing the previous one) or hide (`None`). `false`
+    /// when the surface is gone (the UI then falls back to its own window).
+    fn present(&self, frame: Option<HudFrame>) -> bool;
 }
 
 pub mod raw_window {
@@ -151,8 +181,8 @@ pub fn event_loop_tweaks(options: &mut eframe::NativeOptions) {
     {
         options.event_loop_builder = Some(Box::new(macos::event_loop_tweaks));
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = options;
+    #[cfg(target_os = "linux")]
+    linux::event_loop_tweaks(options);
 }
 
 /// Build the platform for this session. `requests` receives tray/launcher

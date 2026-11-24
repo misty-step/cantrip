@@ -8,16 +8,22 @@
 //! tray / launcher requests. Before the root's first paint eframe runs only
 //! `App::logic`; opening a child asks for a painted pass with
 //! `RequestPaintWhileHidden`.
+//!
+//! Where the platform offers a compositor-native HUD surface (Wayland
+//! `wlr-layer-shell`), the pill is rendered to pixels by [`raster`] — the same
+//! painting code and theme tokens — and shown there instead; the root window
+//! then never shows the pill (it keeps only its accessible label).
 
 pub mod gallery;
 pub mod hud;
 pub mod popover;
+pub mod raster;
 pub mod settings;
 pub mod theme;
 pub mod widgets;
 
 use crate::platform::raw_window::Raw;
-use crate::platform::{UiPlatform, UiRequest};
+use crate::platform::{HudFrame, NativeHud, UiPlatform, UiRequest};
 use cantrip_core::app::{Command, Control, UiSnapshot};
 use cantrip_core::surface::Hud;
 use eframe::egui::{self, Pos2, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
@@ -92,14 +98,25 @@ pub fn run(
         Box::new(move |cc| {
             let _ = UI_CTX.set(cc.egui_ctx.clone());
             let (sans, mono) = platform.system_fonts();
+            let native = platform.native_hud();
+            let raster = native
+                .is_some()
+                .then(|| raster::PillRaster::new(sans.clone(), mono.clone()));
             theme::install_fonts(&cc.egui_ctx, sans, mono);
             let dark = platform.prefers_dark();
             theme::apply(&cc.egui_ctx, &theme::palette(dark));
             let raw = raw_of(cc.window_handle().ok().map(|h| h.as_raw()));
             platform.configure_hud(raw);
-            Ok(Box::new(Shell::new(
-                control, platform, requests, raw, dark, tick,
-            )))
+            let mut shell = Shell::new(control, platform, requests, raw, dark, tick);
+            if let (Some(n), Some(r)) = (native, raster) {
+                eprintln!("[cantrip] HUD: wlr-layer-shell overlay");
+                shell.native = Some(NativeShell {
+                    hud: n,
+                    raster: r,
+                    last: None,
+                });
+            }
+            Ok(Box::new(shell))
         }),
     )
     .map_err(|e| anyhow::anyhow!("UI event loop failed: {e}"))
@@ -131,6 +148,15 @@ struct Shell {
     settings: Child<settings::SettingsState>,
     quitting: bool,
     tick: Tick,
+    /// The compositor-native HUD, when the session has one.
+    native: Option<NativeShell>,
+}
+
+/// The native HUD surface, its pill renderer and the last frame shown.
+struct NativeShell {
+    hud: Arc<dyn NativeHud>,
+    raster: raster::PillRaster,
+    last: Option<raster::Pixels>,
 }
 
 /// One child window's open/focus bookkeeping.
@@ -188,6 +214,7 @@ impl Shell {
             },
             quitting: false,
             tick,
+            native: None,
         }
     }
 
@@ -204,8 +231,50 @@ impl Shell {
         }
     }
 
+    /// Show, update or hide the native HUD surface to match `hud`. `false`
+    /// when there is none (or it just failed: the HUD window takes over).
+    fn sync_native_hud(&mut self, ctx: &egui::Context, hud: &Hud, level: f32) -> bool {
+        let p = self.palette();
+        let Some(n) = self.native.as_mut() else {
+            return false;
+        };
+        let ok = if *hud == Hud::Hidden {
+            n.last = None;
+            self.hud_shown == Hud::Hidden || n.hud.present(None)
+        } else {
+            let px = n.raster.render(hud, level, &p, n.hud.scale());
+            if n.last.as_ref() == Some(&px) {
+                true
+            } else {
+                let frame = HudFrame {
+                    width: px.width,
+                    height: px.height,
+                    scale: px.scale,
+                    argb: px.argb.clone(),
+                    bottom_margin: HUD_BOTTOM_MARGIN as u32,
+                };
+                n.last = Some(px);
+                n.hud.present(Some(frame))
+            }
+        };
+        if !ok {
+            eprintln!("[cantrip] HUD: layer-shell surface lost; using the HUD window");
+            self.native = None;
+            self.hud_shown = Hud::Hidden;
+            return false;
+        }
+        if *hud != Hud::Hidden {
+            self.hud_size = hud::pill_size(ctx, hud);
+        }
+        self.hud_shown = hud.clone();
+        true
+    }
+
     /// Show, resize, move or park the HUD window to match `hud`.
-    fn sync_hud(&mut self, ctx: &egui::Context, hud: &Hud) {
+    fn sync_hud(&mut self, ctx: &egui::Context, hud: &Hud, level: f32) {
+        if self.sync_native_hud(ctx, hud, level) {
+            return;
+        }
         if *hud == Hud::Hidden {
             if self.hud_shown != Hud::Hidden {
                 ctx.send_viewport_cmd_to(
@@ -396,7 +465,7 @@ impl eframe::App for Shell {
         } else {
             snap.hud.clone()
         };
-        self.sync_hud(ctx, &hud);
+        self.sync_hud(ctx, &hud, snap.level);
         let live = hud != Hud::Hidden;
         self.snap = Some(snap);
         if self.popover.open || self.settings.open {
@@ -417,7 +486,12 @@ impl eframe::App for Shell {
         let p = self.palette();
         if self.hud_shown != Hud::Hidden {
             let hud = self.hud_shown.clone();
-            let rect = hud::paint_pill(ui, &p, ui.max_rect().min, &hud, snap.level);
+            let rect = if self.native.is_some() {
+                // Shown by the native surface; keep the accessible label.
+                egui::Rect::from_min_size(ui.max_rect().min, self.hud_size)
+            } else {
+                hud::paint_pill(ui, &p, ui.max_rect().min, &hud, snap.level)
+            };
             let desc = hud::describe(&hud);
             ui.allocate_rect(rect, egui::Sense::hover())
                 .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &desc));

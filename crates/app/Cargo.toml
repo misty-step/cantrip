@@ -27,6 +27,9 @@ ureq = { version = "3", features = ["json"] }
 dbus = "0.9"
 ksni = "0.2.2"
 x11rb = { version = "0.13", features = ["xkb", "shape", "randr", "xfixes"] }
+# Wayland layer-shell HUD (the versions winit already uses)
+smithay-client-toolkit = { version = "0.19.2", default-features = false }
+wayland-client = "0.31"
 
 # macos platform (owned by platform/macos)
 [target.'cfg(target_os = "macos")'.dependencies]

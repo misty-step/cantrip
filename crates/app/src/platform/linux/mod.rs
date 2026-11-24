@@ -10,6 +10,7 @@
 //! - focus, delivery, clipboard, shortcut, window behavior: [`desktop`],
 //!   [`clipboard`], [`hotkeys`], [`window`]
 //! - Sway: compositor IPC for the shortcut and Escape ([`sway`])
+//! - HUD on native Wayland: a `wlr-layer-shell` overlay ([`layer_hud`])
 //! - sleep: systemd-logind inhibitor locks + `PrepareForSleep` ([`sleep`])
 
 pub mod atspi;
@@ -18,6 +19,7 @@ pub mod clipboard;
 pub mod dbus_util;
 pub mod desktop;
 pub mod hotkeys;
+pub mod layer_hud;
 pub mod local;
 pub mod login;
 pub mod meeting_capture;
@@ -57,4 +59,14 @@ pub fn platform(requests: Sender<UiRequest>) -> anyhow::Result<(Platform, Option
         session: name,
     };
     Ok((platform, tray))
+}
+
+/// Native Wayland: never let an EGL swap wait on frame callbacks. The egui
+/// root (HUD) window may be hidden by the compositor (Sway's scratchpad, see
+/// [`ui::LinuxUi`]), and a vsynced swap on a hidden surface would block the
+/// UI loop that also paints the popover and Settings.
+pub fn event_loop_tweaks(options: &mut eframe::NativeOptions) {
+    if x11::session_is_wayland() {
+        options.glow_options.vsync = false;
+    }
 }
