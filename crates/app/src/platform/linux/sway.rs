@@ -12,6 +12,12 @@
 //! `binding` event Sway emits for every binding it runs, and a listener
 //! thread hands the marker straight to the core's key channel.
 //!
+//! Every chord and Escape `bindsym` / `unbindsym` is qualified with
+//! `mode "default"`: an unqualified one edits whichever binding mode is
+//! active, so in Sway's stock `resize` mode it would remove `resize`'s own
+//! Escape and leave Cantrip's `nop`s stuck in `default`. Sway runs the
+//! qualified command on `default` and keeps the active mode.
+//!
 //! `swaymsg reload` drops every runtime binding and then emits a `workspace`
 //! event with `change: "reload"`; on it the listener re-checks the reloaded
 //! config and re-installs the chord (and Escape, during a take). A lost
@@ -64,6 +70,8 @@ const GET_TREE: u32 = 4;
 const GET_BINDING_MODES: u32 = 8;
 const GET_VERSION: u32 = 7;
 const GET_CONFIG: u32 = 9;
+#[cfg(test)]
+const GET_BINDING_STATE: u32 = 12;
 const EVENT_WORKSPACE: u32 = 0x8000_0000;
 const EVENT_BINDING: u32 = 0x8000_0005;
 const EVENT_SHUTDOWN: u32 = 0x8000_0006;
@@ -80,6 +88,13 @@ pub const NOP_CANCEL: &str = "nop cantrip-cancel";
 /// The reload sentinel's mode-name prefix and its one inert binding.
 const SENTINEL_PREFIX: &str = "__cantrip_live_";
 const SENTINEL_BINDING: &str = "XF86Launch9 nop cantrip-sentinel";
+/// Prefix of every chord / Escape `bindsym` and `unbindsym` Cantrip runs.
+/// An unqualified one edits whichever binding mode is active, so in
+/// Sway's `resize` mode it would remove that mode's own Escape and leave
+/// Cantrip's `nop`s bound in `default`. Sway runs a `mode "<name>"`
+/// subcommand against that mode and restores the active one, so the
+/// qualified form never leaves `resize`.
+const IN_DEFAULT: &str = "mode \"default\"";
 
 /// One Sway IPC endpoint (a fresh connection per request: requests are rare).
 #[derive(Clone, Debug)]
@@ -904,9 +919,14 @@ impl Bindings {
     fn install_chord(&mut self, c: &str) -> Result<(), String> {
         self.arm_sentinel();
         self.ipc
-            .run(&format!("bindsym --no-repeat {c} {NOP_DOWN}"))?;
-        if let Err(e) = self.ipc.run(&format!("bindsym --release {c} {NOP_UP}")) {
-            let _ = self.ipc.run(&format!("unbindsym {c}"));
+            .run(&format!("{IN_DEFAULT} bindsym --no-repeat {c} {NOP_DOWN}"))?;
+        if let Err(e) = self
+            .ipc
+            .run(&format!("{IN_DEFAULT} bindsym --release {c} {NOP_UP}"))
+        {
+            let _ = self
+                .ipc
+                .run(&format!("{IN_DEFAULT} unbindsym --no-repeat {c}"));
             return Err(e);
         }
         Ok(())
@@ -923,8 +943,12 @@ impl Bindings {
         }
         self.chord_owned = false;
         if let Some(c) = &self.chord {
-            let _ = self.ipc.run(&format!("unbindsym {c}"));
-            let _ = self.ipc.run(&format!("unbindsym --release {c}"));
+            let _ = self
+                .ipc
+                .run(&format!("{IN_DEFAULT} unbindsym --no-repeat {c}"));
+            let _ = self
+                .ipc
+                .run(&format!("{IN_DEFAULT} unbindsym --release {c}"));
         }
     }
 
@@ -934,10 +958,9 @@ impl Bindings {
             return;
         }
         self.arm_sentinel();
-        match self
-            .ipc
-            .run(&format!("bindsym --no-repeat Escape {NOP_CANCEL}"))
-        {
+        match self.ipc.run(&format!(
+            "{IN_DEFAULT} bindsym --no-repeat Escape {NOP_CANCEL}"
+        )) {
             Ok(()) => self.escape_owned_by_cantrip = true,
             Err(_) => eprintln!("[cantrip] escape bind unavailable on this Sway session"),
         }
@@ -950,7 +973,9 @@ impl Bindings {
     fn unbind_escape(&mut self) {
         if self.escape_owned_by_cantrip && self.still_installed() {
             self.escape_owned_by_cantrip = false;
-            let _ = self.ipc.run("unbindsym Escape");
+            let _ = self
+                .ipc
+                .run(&format!("{IN_DEFAULT} unbindsym --no-repeat Escape"));
         }
     }
 
@@ -1206,6 +1231,8 @@ mod tests {
         assert!(!config_binds(vars, "Escape"));
     }
 
+    const UNBIND_ESCAPE: &str = "mode \"default\" unbindsym --no-repeat Escape";
+
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("cantrip-sway-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1336,21 +1363,112 @@ mod tests {
         assert!(!is_reload(br#"{"change":"focus"}"#));
     }
 
+    /// One binding of [`FakeTables`]: (`--release`, key, command).
+    type FakeBinding = (bool, String, String);
+
+    /// The binding tables of [`fake_sway`]: each mode's bindings keyed by
+    /// (`--release`, key) with their command, and the active mode.
+    #[derive(Default)]
+    struct FakeTables {
+        modes: Vec<(String, Vec<FakeBinding>)>,
+        active: String,
+    }
+
+    impl FakeTables {
+        fn mode(&mut self, name: &str) -> &mut Vec<FakeBinding> {
+            if !self.modes.iter().any(|(n, _)| n == name) {
+                self.modes.push((name.to_string(), Vec::new()));
+            }
+            &mut self.modes.iter_mut().find(|(n, _)| n == name).unwrap().1
+        }
+
+        /// The command `key` (with `--release` or not) runs in `mode`.
+        fn bound(&self, mode: &str, release: bool, key: &str) -> Option<String> {
+            let (_, b) = self.modes.iter().find(|(n, _)| n == mode)?;
+            b.iter()
+                .find(|(r, k, _)| *r == release && k == key)
+                .map(|(_, _, c)| c.clone())
+        }
+
+        /// Run one command like Sway 1.9: `mode "<m>" (un)bindsym …` edits
+        /// mode `m` and keeps the active mode; a bare `(un)bindsym` edits
+        /// the active mode; `mode <m>` alone enters `m`. `--no-repeat` is
+        /// not part of a binding's identity, `--release` is. An
+        /// `unbindsym` of nothing bound fails.
+        fn run(&mut self, cmd: &str) -> bool {
+            let w = words(cmd);
+            if cmd == "reload" {
+                self.modes.truncate(1);
+                self.modes[0].1.clear();
+                self.active = "default".into();
+                return true;
+            }
+            let (target, rest) = match w.first().map(String::as_str) {
+                Some("mode") if w.len() == 2 => {
+                    let ok = self.modes.iter().any(|(n, _)| *n == w[1]);
+                    if ok {
+                        self.active = w[1].clone();
+                    }
+                    return ok;
+                }
+                Some("mode") if w.len() > 2 => (w[1].clone(), &w[2..]),
+                _ => (self.active.clone(), &w[..]),
+            };
+            let Some(verb) = rest.first().map(String::as_str) else {
+                return false;
+            };
+            let flags: Vec<&String> = rest[1..]
+                .iter()
+                .take_while(|a| a.starts_with("--"))
+                .collect();
+            let release = flags.iter().any(|f| *f == "--release");
+            let Some(key) = rest.get(1 + flags.len()).cloned() else {
+                return false;
+            };
+            let command = rest[2 + flags.len()..].join(" ");
+            let table = self.mode(&target);
+            let at = table
+                .iter()
+                .position(|(r, k, _)| *r == release && *k == key);
+            match verb {
+                "bindsym" => {
+                    if let Some(i) = at {
+                        table.remove(i);
+                    }
+                    table.push((release, key, command));
+                    true
+                }
+                "unbindsym" => at.map(|i| table.remove(i)).is_some(),
+                _ => false,
+            }
+        }
+    }
+
     /// A loopback stand-in for Sway's IPC socket: answers `GET_VERSION`,
     /// `SUBSCRIBE` (kept open, silent), `GET_CONFIG` with `config`,
-    /// `GET_BINDING_MODES` with `default` plus every mode a
-    /// `mode "<name>" bindsym …` command defined, and records every
-    /// `RUN_COMMAND` as a success. `reload` drops the defined modes like
-    /// Sway's, but sends no event: the listener never learns of it (the
-    /// "listener paused" race).
+    /// `GET_BINDING_MODES` and `GET_BINDING_STATE` from [`FakeTables`], and
+    /// records every `RUN_COMMAND`, running it on the tables. `reload`
+    /// drops the defined modes and runtime bindings like Sway's, but sends
+    /// no event: the listener never learns of it (the "listener paused"
+    /// race).
     fn fake_sway(dir: &Path, config: String) -> (SwayIpc, Arc<Mutex<Vec<String>>>) {
+        let (ipc, ran, _) = fake_sway_tables(dir, config);
+        (ipc, ran)
+    }
+
+    type Fake = (SwayIpc, Arc<Mutex<Vec<String>>>, Arc<Mutex<FakeTables>>);
+
+    fn fake_sway_tables(dir: &Path, config: String) -> Fake {
         let path = dir.join("sway.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let ran: Arc<Mutex<Vec<String>>> = Arc::default();
-        let log = ran.clone();
+        let tables = Arc::new(Mutex::new(FakeTables {
+            modes: vec![("default".into(), Vec::new())],
+            active: "default".into(),
+        }));
+        let (log, tab) = (ran.clone(), tables.clone());
         std::thread::spawn(move || {
             let mut subscribed = Vec::new();
-            let mut modes: Vec<String> = vec!["default".into()];
             for conn in listener.incoming() {
                 let Ok(mut s) = conn else { return };
                 let Ok((kind, body)) = read_msg(&mut s) else {
@@ -1359,16 +1477,18 @@ mod tests {
                 let reply = match kind {
                     RUN_COMMAND => {
                         let cmd = String::from_utf8_lossy(&body).into_owned();
-                        let w = words(&cmd);
-                        if cmd == "reload" {
-                            modes.truncate(1);
-                        } else if w.len() > 2 && w[0] == "mode" && !modes.contains(&w[1]) {
-                            modes.push(w[1].clone());
-                        }
+                        let ok = lock(&tab).run(&cmd);
                         lock(&log).push(cmd);
-                        r#"[{"success":true}]"#.to_string()
+                        serde_json::json!([{ "success": ok }]).to_string()
                     }
-                    GET_BINDING_MODES => serde_json::json!(modes).to_string(),
+                    GET_BINDING_MODES => {
+                        let names: Vec<String> =
+                            lock(&tab).modes.iter().map(|(n, _)| n.clone()).collect();
+                        serde_json::json!(names).to_string()
+                    }
+                    GET_BINDING_STATE => {
+                        serde_json::json!({ "name": lock(&tab).active }).to_string()
+                    }
                     GET_CONFIG => serde_json::json!({ "config": config }).to_string(),
                     SUBSCRIBE => r#"{"success":true}"#.to_string(),
                     _ => "{}".to_string(),
@@ -1379,7 +1499,92 @@ mod tests {
                 }
             }
         });
-        (SwayIpc { path }, ran)
+        (SwayIpc { path }, ran, tables)
+    }
+
+    /// Pass 8 finding: with Sway in its stock `resize` mode, an unqualified
+    /// `unbindsym Escape` removed `resize`'s own Escape and left Cantrip's
+    /// `nop`s bound in `default`. Every chord and Escape (un)bind targets
+    /// `mode "default"`: `resize` and the active mode are left untouched,
+    /// and Cantrip's `default` bindings are removed.
+    #[test]
+    fn binds_and_unbinds_target_the_default_mode_even_in_resize() {
+        let dir = tmpdir("resize");
+        let (ipc, ran, tables) = fake_sway_tables(&dir, String::new());
+        // The stock config's resize mode, entered with Super+R.
+        let resize_escape = || lock(&tables).bound("resize", false, "Escape");
+        ipc.run("mode \"resize\" bindsym Escape mode \"default\"")
+            .unwrap();
+        ipc.run("mode \"resize\" bindsym Left resize shrink width 10px")
+            .unwrap();
+        let state = || {
+            let v: serde_json::Value =
+                serde_json::from_str(&ipc.request(GET_BINDING_STATE, "").unwrap()).unwrap();
+            v["name"].as_str().unwrap().to_string()
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut keys = SwayKeys::new(ipc.clone()).unwrap();
+        keys.register(&Chord::platform_default(), tx).unwrap();
+        keys.set_escape(true); // a take
+        ipc.run("mode resize").unwrap(); // Super+R during the take
+        assert_eq!(state(), "resize");
+        let ours = || {
+            let t = lock(&tables);
+            [
+                t.bound("default", false, "Escape"),
+                t.bound("default", false, "Control+Mod1+space"),
+                t.bound("default", true, "Control+Mod1+space"),
+            ]
+        };
+        assert_eq!(
+            ours(),
+            [
+                Some(NOP_CANCEL.to_string()),
+                Some(NOP_DOWN.to_string()),
+                Some(NOP_UP.to_string())
+            ]
+        );
+        // Take end and a rebind, still in resize.
+        keys.set_escape(false);
+        assert_eq!(state(), "resize", "an unbind never leaves resize");
+        assert_eq!(resize_escape().as_deref(), Some("mode default"));
+        assert_eq!(ours()[0], None, "Cantrip's Escape removed from default");
+        keys.set_escape(true);
+        assert_eq!(ours()[0].as_deref(), Some(NOP_CANCEL), "bound in default");
+        assert_eq!(
+            lock(&tables).bound("resize", false, "Escape").as_deref(),
+            Some("mode default")
+        );
+        // SIGTERM mid-take, still in resize.
+        drop(keys);
+        assert_eq!(state(), "resize");
+        assert_eq!(ours(), [None, None, None], "nothing left in default");
+        let t = lock(&tables);
+        assert_eq!(
+            t.bound("resize", false, "Escape").as_deref(),
+            Some("mode default")
+        );
+        assert_eq!(
+            t.bound("resize", false, "Left").as_deref(),
+            Some("resize shrink width 10px")
+        );
+        assert_eq!(
+            t.modes.iter().find(|(n, _)| n == "resize").unwrap().1.len(),
+            2
+        );
+        drop(t);
+        // Every chord / Escape command Cantrip ran named the default mode.
+        for cmd in lock(&ran).iter() {
+            if cmd.contains("bindsym") && !cmd.starts_with(&format!("mode \"{SENTINEL_PREFIX}")) {
+                let cantrips = cmd.contains("Escape nop")
+                    || cmd.contains("Control+Mod1")
+                    || cmd.ends_with("Escape");
+                if cantrips && !cmd.contains("resize") {
+                    assert!(cmd.starts_with("mode \"default\" "), "unqualified: {cmd}");
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Pass 6 finding: a binding saved to an included file during a take,
@@ -1398,7 +1603,10 @@ mod tests {
         keys.register(&Chord::platform_default(), tx.clone())
             .unwrap();
         keys.set_escape(true);
-        assert_eq!(taken("bindsym --no-repeat Escape nop cantrip-cancel"), 1);
+        assert_eq!(
+            taken("mode \"default\" bindsym --no-repeat Escape nop cantrip-cancel"),
+            1
+        );
         // Saved during the take, not reloaded.
         std::fs::write(
             &inc,
@@ -1406,15 +1614,30 @@ mod tests {
         )
         .unwrap();
         keys.set_escape(false);
-        assert_eq!(taken("unbindsym Escape"), 1, "take end: {:?}", lock(&ran));
+        assert_eq!(
+            taken("mode \"default\" unbindsym --no-repeat Escape"),
+            1,
+            "take end: {:?}",
+            lock(&ran)
+        );
         keys.set_escape(false);
-        assert_eq!(taken("unbindsym Escape"), 1, "removed once only");
+        assert_eq!(
+            taken("mode \"default\" unbindsym --no-repeat Escape"),
+            1,
+            "removed once only"
+        );
         // Rebinding drops Cantrip's old chord even though the file now binds it.
         let mut d = Chord::platform_default();
         d.key = "D".into();
         keys.register(&d, tx).unwrap();
-        assert_eq!(taken("unbindsym Control+Mod1+space"), 1);
-        assert_eq!(taken("unbindsym --release Control+Mod1+space"), 1);
+        assert_eq!(
+            taken("mode \"default\" unbindsym --no-repeat Control+Mod1+space"),
+            1
+        );
+        assert_eq!(
+            taken("mode \"default\" unbindsym --release Control+Mod1+space"),
+            1
+        );
         // Exit mid-take after the file also binds the new chord.
         keys.set_escape(true);
         std::fs::write(
@@ -1424,16 +1647,26 @@ mod tests {
         .unwrap();
         // The file now binds Escape, so no new Escape bind happened; the
         // config's binding is left alone.
-        assert_eq!(taken("bindsym --no-repeat Escape nop cantrip-cancel"), 1);
-        drop(keys);
-        assert_eq!(taken("unbindsym Escape"), 1, "never Escape it did not bind");
         assert_eq!(
-            taken("unbindsym Control+Mod1+d"),
+            taken("mode \"default\" bindsym --no-repeat Escape nop cantrip-cancel"),
+            1
+        );
+        drop(keys);
+        assert_eq!(
+            taken("mode \"default\" unbindsym --no-repeat Escape"),
+            1,
+            "never Escape it did not bind"
+        );
+        assert_eq!(
+            taken("mode \"default\" unbindsym --no-repeat Control+Mod1+d"),
             1,
             "exit: {:?}",
             lock(&ran)
         );
-        assert_eq!(taken("unbindsym --release Control+Mod1+d"), 1);
+        assert_eq!(
+            taken("mode \"default\" unbindsym --release Control+Mod1+d"),
+            1
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1449,7 +1682,7 @@ mod tests {
         let unbinds = || {
             lock(&ran)
                 .iter()
-                .filter(|r| r.starts_with("unbindsym"))
+                .filter(|r| r.contains("unbindsym"))
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -1475,16 +1708,12 @@ mod tests {
         keys.set_escape(true);
         assert_eq!(sentinels().len(), 1, "a live sentinel is reused");
         keys.set_escape(false);
-        assert_eq!(unbinds(), ["unbindsym Escape"]);
+        assert_eq!(unbinds(), [UNBIND_ESCAPE]);
         // A new take, then a reload the listener has not processed.
         keys.set_escape(true);
         ipc.run("reload").unwrap();
         keys.set_escape(false);
-        assert_eq!(
-            unbinds(),
-            ["unbindsym Escape"],
-            "reloaded Escape left alone"
-        );
+        assert_eq!(unbinds(), [UNBIND_ESCAPE], "reloaded Escape left alone");
         {
             let st = lock(&keys.state);
             assert!(
@@ -1495,7 +1724,7 @@ mod tests {
         }
         // Exit: the chord is not Cantrip's any more either.
         drop(keys);
-        assert_eq!(unbinds(), ["unbindsym Escape"], "exit unbinds nothing");
+        assert_eq!(unbinds(), [UNBIND_ESCAPE], "exit unbinds nothing");
 
         // Reload during a take, then SIGTERM (Drop) mid-take: nothing unbound.
         let dir2 = tmpdir("sentinel-exit");
@@ -1507,7 +1736,7 @@ mod tests {
         ipc2.run("reload").unwrap();
         drop(keys);
         assert!(
-            !lock(&ran2).iter().any(|r| r.starts_with("unbindsym")),
+            !lock(&ran2).iter().any(|r| r.contains("unbindsym")),
             "{:?}",
             lock(&ran2)
         );
@@ -1521,15 +1750,15 @@ mod tests {
         drop(keys);
         let got: Vec<String> = lock(&ran3)
             .iter()
-            .filter(|r| r.starts_with("unbindsym"))
+            .filter(|r| r.contains("unbindsym"))
             .cloned()
             .collect();
         assert_eq!(
             got,
             [
-                "unbindsym Escape",
-                "unbindsym Control+Mod1+space",
-                "unbindsym --release Control+Mod1+space"
+                UNBIND_ESCAPE,
+                "mode \"default\" unbindsym --no-repeat Control+Mod1+space",
+                "mode \"default\" unbindsym --release Control+Mod1+space"
             ]
         );
         for d in [dir, dir2, dir3] {
@@ -1559,12 +1788,12 @@ mod tests {
         drop(keys);
         let got: Vec<String> = lock(&ran)
             .iter()
-            .filter(|r| r.starts_with("unbindsym"))
+            .filter(|r| r.contains("unbindsym"))
             .cloned()
             .collect();
         assert_eq!(
             got,
-            ["unbindsym Escape"],
+            [UNBIND_ESCAPE],
             "only what the new sentinel vouches for"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1582,7 +1811,7 @@ mod tests {
             return;
         };
         let bound = |spec: &str| {
-            let ok = ipc.run(&format!("unbindsym {spec}")).is_ok();
+            let ok = ipc.run(&format!("{IN_DEFAULT} unbindsym {spec}")).is_ok();
             ok // a probe that succeeds also removed it
         };
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1627,7 +1856,7 @@ mod tests {
             eprintln!("skip: no Sway session ($SWAYSOCK)");
             return;
         };
-        let bound = |spec: &str| ipc.run(&format!("unbindsym {spec}")).is_ok();
+        let bound = |spec: &str| ipc.run(&format!("{IN_DEFAULT} unbindsym {spec}")).is_ok();
         let wait = || std::thread::sleep(Duration::from_millis(400));
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut keys = SwayKeys::new(ipc.clone()).unwrap();
