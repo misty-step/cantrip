@@ -11,18 +11,26 @@
     <key>CFBundleExecutable</key>
     <string>cantrip</string>
     <key>CFBundleIdentifier</key>
-    <string>com.misty-step.cantrip</string>
+    <string>io.mistystep.cantrip</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>2.0.0</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.3</string>
+    <string>15.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Cantrip records only while you dictate; audio stays on this Mac unless you enable a cloud provider.</string>
+    <string>Cantrip records your microphone only while you dictate or record a meeting.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Cantrip records other meeting participants from your Mac's audio output only while a meeting is being recorded.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Without an OpenRouter key or a connection, Cantrip can transcribe a dictation with on-device recognition that never leaves this Mac.</string>
 </dict>
 </plist>

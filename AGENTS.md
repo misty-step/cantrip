@@ -1,44 +1,59 @@
 # Cantrip
 
-Cantrip is a local-first Linux/macOS dictation app: the `cantrip` native host
-and `cantrip-engine` shared workflow crate in one Rust workspace, with
-`workspace.package.version` as the version authority. Start with
-[`README.md`](README.md) and the contract relevant to the request. `VISION.md`
-is optional context, not a required first read or product lock.
-Open docs/decisions/index.md before proposing a new primitive, surface, or storage home.
-See the [steering list](docs/decisions/index.md); the platform boundary is
-[Decision 0031](docs/decisions/0031-shared-engine-native-macos.md).
+Cantrip v2 is a macOS + Linux tray app for dictation and meeting notes. Its
+present-tense intent is [PRODUCT.md](PRODUCT.md) (what and why) and
+[DESIGN.md](DESIGN.md) (observable contracts, UI, checklist); never edit them
+to fit code. How it is built is [ARCHITECTURE.md](ARCHITECTURE.md). SPEC.md,
+VISION.md, `docs/` and `docs/decisions/` are v1 history: context, not
+constraints.
 
+Design principles (UX/DX/AX) live in [mistystack design](https://github.com/misty-step/mistystack/blob/master/skills/design/SKILL.md#principles); point there, don't copy them.
 
-Design principles (UX/DX/AX; no layout captions) live in [mistystack design](https://github.com/misty-step/mistystack/blob/master/skills/design/SKILL.md#principles); point there, don't copy them.
+## Layout
 
-## Contracts
+- `crates/core` (`cantrip-core`): every rule a user can observe. No OS calls,
+  no UI, no async runtime. OS boundaries are the traits in `ports.rs`.
+- `crates/app` (`cantrip`): the egui UI (`ui/`), wiring (`main.rs`), HTTP
+  (`net.rs`), single-instance IPC (`ipc.rs`), and per-OS adapters in
+  `platform/{linux,macos}`. `cfg(target_os)` stays inside `platform/`.
 
-- Local STT is the default. Cloud STT and cleanup are opt-in OpenAI-compatible HTTP lanes.
-- Cloud STT waits for a response, real failure, or cancellation without app-imposed inference deadlines. Before changing STT waiting/fallback, cancellation, or cleanup timeouts, read [Decision 0032](docs/decisions/0032-cloud-stt-without-inference-deadlines.md). Keep upload byte caps, exact nonoverlapping local recovery, retained audio, and honest local/cloud/mixed provenance; never implicitly download models or switch cloud providers. Cancellation prevents later work and delivery, but need not interrupt in-flight HTTP or DNS. Optional cleanup shares explicit `postproc.timeout_ms` across credentials, DNS, passes, and decisions, preserving the alias-corrected Clean text (Raw has no aliases) and the watchdog's fail-open contract. Vocabulary aliases apply only in Clean and never reach providers ([Decision 0012](docs/decisions/0012-eval-driven-postprocessing.md)).
-- Never put transcript text or audio in operational logs or telemetry. Log character counts, durations, model/backend names, and error classes only; `cantrip transcribe` stdout is the sole transcript-output exception. Keep the existing tags: `[Daemon]`, `[Capture]`, `[STT]`, `[Postproc]`, `[Inject]`, `[Models]`, `[HUD]`, `[Telemetry]`.
-- API keys belong in the OS keyring via `cantrip key`, never in files, logs, or git. Keep independently bounded, cancellable automatic credential waits and at most one outstanding native lookup; discard late results without caching secrets. Charge cleanup credential waits to its shared budget as well. Automatic macOS reads never open prompts; explicit idle-only authorization waits off the engine thread without a deadline and discards the secret. [Credentials](docs/CONFIGURATION.md#credentials) owns the approval flow.
-- Linux capture stops `pw-record` with SIGINT and waits; SIGKILL can corrupt the WAV. macOS capture owns a CoreAudio HAL input unit bound to the selected device on its native thread; AVAudioEngine rebinds its input to the system default aggregate on Bluetooth route changes. Startup failure must quiesce producers and finalize any accepted WAV prefix before returning; remove only conclusively empty, unaccepted headers.
-- Linux Type-mode injection never touches the clipboard; paste-first may use `wl-copy`. macOS supports explicit clipboard/manual paste only: existing Auto/Paste/Type must defer without clipboard or keyboard effects, never silently downgrade or rewrite the choice. Clipboard mode on either OS does not read/restore prior contents.
-- In-flight recordings live in the platform runtime directory (`$XDG_RUNTIME_DIR/cantrip` on Linux; private temporary runtime on macOS). Stopped takes are durably retained under their own IDs in transcript history before STT, including cancellation, startup failure with surviving audio, and graceful shutdown. Successful, failed, partial, empty, cancelled, and undelivered takes remain independent; only confirmed Forget deletes retained audio. Import trusted finalized runtime leftovers on startup, consuming originals only after matching durable audio is confirmed. Surface storage failures and preserve runtime originals when durability is uncertain; runtime-only audio is not guaranteed to survive reboot.
-- Successful transcripts are owner-only local plaintext history (`$XDG_STATE_HOME/cantrip/transcripts` on Linux; `~/Library/Application Support/cantrip/state/transcripts` on macOS) and are never uploaded automatically. macOS defaults use Application Support and login Keychain; absolute XDG overrides provide isolation. Private permissions/ACL stripping are not encryption.
-- Dismissal acknowledges feedback, never deletes artifacts. Forget requires explicit confirmation and removes only the selected take's retained audio and incomplete text; complete archived text stays.
-- Automatic delivery requires uninterrupted verified destination/session history. Unknown focus, lock, suspend, or reconnection defers; potentially completed handoffs are uncertain and never retried through another backend.
-- The engine owns workflow, cancellation, config/IPC, and the durable archive/recovery store. The native host supplies `Platform`, `Recorder`, and `DeliveryPermit` mechanisms, not alternate policy or a per-OS workflow. Linux keeps its supervised Wayland HUD; the macOS app owns AppKit on the main thread and an engine std thread, or attaches without owning an existing daemon. macOS `daemon` is engine-only; app quit must not kill an externally owned daemon.
-- macOS microphone requests and first-press continuation follow [Decision 0033](docs/decisions/0033-capture-owner-microphone-authorization.md). No Accessibility, Input Monitoring, or Screen Recording grants are needed for supported capture/HUD/Carbon shortcut behavior. Open At Login is an explicit SMAppService choice, never enabled automatically.
-- Keep the std-thread + mpsc process model; do not add an async runtime or a second durable work ledger.
+## Contracts that are easy to break
+
+- **Closed control surface.** The popover has 7 standing controls, plus 1
+  contextual recovery row, and Settings has 6 controls in one pane. Add
+  nothing. Labels come from `cantrip_core::surface`.
+- **Delivery.** Every write or paste is addressed to the target captured at
+  start (250 ms deadline, else `uncertain` forever), and focus is verified
+  again just before dispatch.
+  - Never send a keystroke to whatever holds focus.
+  - Never retry a possibly completed handoff through the other tier.
+  - `Inserted` needs a read-back edit delta.
+  - Restore the clipboard only on a confirmed edit with the clipboard
+    unchanged by identity (not text).
+- **Speech.** Every OpenRouter request carries
+  `provider.data_collection: "deny"`. A rewrite error, empty reply, truncation
+  or 4 s timeout gives Raw. A transcription error keeps the audio staged and
+  never falls back to local recognition. Local recognition only with no key or
+  no connection, and only when guaranteed on-device.
+- **Meeting folder is append-only.** A note appears only by a no-clobber
+  step (Linux `O_TMPFILE` + `linkat`, macOS `renameatx_np(RENAME_EXCL)` from
+  staging, else `O_EXCL` create): no temp names, overwrites, renames or
+  deletes of existing files, no write-opens of existing files. Disjointness
+  from staging is judged by filesystem identity. Staging is deleted only after
+  a complete note is verified and flushed.
+- **Privacy.** Logs hold outcomes, durations, counts, model names and error
+  classes, never transcript text, audio, clipboard or field contents, or note
+  file names. Keys live only in the OS secret store.
 
 ## Proof
 
-`./scripts/check` is the canonical Linux CI-equivalent local gate and owns its
-contents. Native macOS workspace/runtime gates and relocated app verification
-are defined in `.github/workflows/macos.yml` and documented in
-`docs/INSTALLATION.md`; offscreen NSView pixels are not live panel/focus proof.
-Choose a smaller command only for a named, changed surface.
+`./scripts/check` is the local gate: fmt, clippy on Linux, a clippy
+type-check of the macOS module (`aarch64-apple-darwin`), and every test. Live
+desktop tests are `#[ignore]`; run them on a real session. Real-path evidence
+means the compiled binary on a real session (`cantrip e2e …`, or the app driven
+by its shortcut), not only unit tests. Never claim macOS runtime behavior
+without a Mac.
 
-## Work tracking and secrets
+## Secrets
 
-Work from the operator's current request. Check current code and overlapping
-work before starting. Link the result and sanitized verification evidence from
-the existing work record when available and from the PR/session.
-Historical issues are context, not an intake queue. Never commit secrets.
+Never commit secrets or print `OPENROUTER_API_KEY`.

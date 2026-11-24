@@ -1,0 +1,55 @@
+[package]
+name = "cantrip"
+description = "Cantrip v2: dictation and meeting notes for macOS and Linux."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cantrip"
+path = "src/main.rs"
+
+[dependencies]
+cantrip-core = { path = "../core" }
+anyhow = "1"
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+# ui (owned by the ui module)
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+raw-window-handle = "0.6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# linux platform (owned by platform/linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+ureq = { version = "3", features = ["json"] }
+dbus = "0.9"
+ksni = "0.2.2"
+x11rb = { version = "0.13", features = ["xkb", "shape", "randr", "xfixes"] }
+# Wayland layer-shell HUD (the versions winit already uses)
+smithay-client-toolkit = { version = "0.19.2", default-features = false }
+wayland-client = "0.31"
+
+# macos platform (owned by platform/macos)
+[target.'cfg(target_os = "macos")'.dependencies]
+ureq = { version = "3", default-features = false, features = ["json", "native-tls", "gzip"] }
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = "0.3.2"
+objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-application-services = "0.3.2"
+objc2-av-foundation = "0.3.2"
+objc2-core-audio = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-speech = "0.3.2"
+objc2-service-management = "0.3.2"
+security-framework = "3"
+global-hotkey = "0.10"
+winit = { version = "0.30", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

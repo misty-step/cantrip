@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Tray (StatusNotifierItem) test on a private D-Bus session with a fake
+# watcher: no watcher → no tray; watcher → item exported, activation opens
+# the popover, its menu reads "Open Cantrip".
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+cargo test -p cantrip --no-run --quiet
+dbus-run-session -- bash -c '
+  cargo test -p cantrip tray::tests::tray_absent_without_watcher -- --ignored --nocapture
+  python3 -I scripts/testdata/fake_sni_watcher.py > /tmp/cantrip-fake-watcher.log 2>&1 &
+  for _ in $(seq 50); do grep -q ready /tmp/cantrip-fake-watcher.log 2>/dev/null && break; sleep 0.1; done
+  cargo test -p cantrip tray::tests::tray_exported_with_watcher -- --ignored --nocapture
+  kill %1
+'
