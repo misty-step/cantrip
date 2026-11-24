@@ -9,7 +9,14 @@
 //!   cannot collide with window-manager chords such as Openbox's stock
 //!   `Alt+Escape`. Press and release are reported: hold-to-talk and
 //!   tap-to-toggle.
-//! - **Native Wayland**: xdg-desktop-portal `GlobalShortcuts` (the compositor
+//! - **Sway** (native Wayland with `$SWAYSOCK` answering, preferred there:
+//!   `xdg-desktop-portal-wlr` exports no `GlobalShortcuts`): compositor
+//!   bindings over Sway IPC ([`super::sway`]). The chord's press and release
+//!   are bound to `cantrip ipc hotkey-down|hotkey-up`, plain Escape to
+//!   `cantrip ipc cancel` only while a take is active; the lines reach the
+//!   core through the single-instance socket. Press and release are
+//!   reported: hold-to-talk, tap-to-toggle and Escape cancel.
+//! - **Other native Wayland**: xdg-desktop-portal `GlobalShortcuts` (the compositor
 //!   may ask the user to approve the chord). `Activated`/`Deactivated` map to
 //!   press/release on desktops whose portals report release (KDE Plasma,
 //!   GNOME, Hyprland); elsewhere every activation is a tap (ActivationOnly).
@@ -18,6 +25,7 @@
 //!   *finishes* the take — it is transcribed and delivered, never discarded.
 //!   A documented session limit. No portal → `Err`.
 
+use super::sway::{SwayIpc, SwayKeys};
 use super::x11::{self, X11};
 use crate::platform::{HotkeyMode, Hotkeys};
 use cantrip_core::shortcut::{Chord, KeyEvent};
@@ -150,6 +158,7 @@ struct X11Keys {
 
 enum Inner {
     X11(X11Keys),
+    Sway(SwayKeys),
     Portal(portal::PortalKeys),
     None,
 }
@@ -167,7 +176,16 @@ impl Default for LinuxHotkeys {
 impl LinuxHotkeys {
     pub fn new() -> LinuxHotkeys {
         let inner = if x11::session_is_wayland() {
-            Inner::Portal(portal::PortalKeys::default())
+            let sway =
+                SwayIpc::from_env().map(|ipc| SwayKeys::new(ipc, &crate::ipc::socket_path()));
+            match sway {
+                Some(Ok(keys)) => Inner::Sway(keys),
+                Some(Err(e)) => {
+                    eprintln!("[cantrip] sway shortcut backend unavailable: {e}");
+                    Inner::Portal(portal::PortalKeys::default())
+                }
+                None => Inner::Portal(portal::PortalKeys::default()),
+            }
         } else {
             match X11::connect() {
                 Some(x) => Inner::X11(X11Keys {
@@ -186,14 +204,28 @@ impl Hotkeys for LinuxHotkeys {
     fn register(&mut self, chord: &Chord, sink: Sender<KeyEvent>) -> Result<HotkeyMode, String> {
         match &mut self.inner {
             Inner::X11(k) => k.register(chord, sink),
+            // Sway runs `cantrip ipc …`; the lines arrive on the IPC socket,
+            // whose key sink is this same channel (see `main.rs`).
+            Inner::Sway(k) => k.register(chord),
             Inner::Portal(p) => p.register(chord, sink),
             Inner::None => Err("Global shortcuts are not available on this session".into()),
         }
     }
 
     fn set_escape_grab(&mut self, active: bool) {
-        if let Inner::X11(k) = &mut self.inner {
-            k.set_escape(active);
+        match &mut self.inner {
+            Inner::X11(k) => k.set_escape(active),
+            Inner::Sway(k) => k.set_escape(active),
+            Inner::Portal(_) | Inner::None => {}
+        }
+    }
+
+    fn backend(&self) -> &'static str {
+        match self.inner {
+            Inner::X11(_) => "x11-grab",
+            Inner::Sway(_) => "sway-ipc",
+            Inner::Portal(_) => "xdg-portal",
+            Inner::None => "none",
         }
     }
 }

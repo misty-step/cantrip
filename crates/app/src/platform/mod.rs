@@ -35,6 +35,20 @@ pub trait Hotkeys: Send {
     fn register(&mut self, chord: &Chord, sink: Sender<KeyEvent>) -> Result<HotkeyMode, String>;
     /// Grab Escape only while a take is active (`KeyEvent::Escape` to the sink).
     fn set_escape_grab(&mut self, active: bool);
+    /// The mechanism, for the startup log (e.g. `x11-grab`, `sway-ipc`).
+    fn backend(&self) -> &'static str {
+        "native"
+    }
+}
+
+impl HotkeyMode {
+    /// The capability report for logs.
+    pub fn describe(self) -> &'static str {
+        match self {
+            HotkeyMode::PressRelease => "hold-to-talk + tap-to-toggle",
+            HotkeyMode::ActivationOnly => "tap-to-toggle (activation only)",
+        }
+    }
 }
 
 /// System sleep: told while a meeting records, so the OS backend can hold
@@ -63,6 +77,8 @@ pub enum UiRequest {
     ShowPopover,
     ShowSettings,
     ToggleDictation,
+    /// Quit like the Quit control (a termination signal).
+    Quit,
 }
 
 /// Status-area icon. Activation (click) sends `UiRequest::ShowPopover`.

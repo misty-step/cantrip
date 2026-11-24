@@ -9,6 +9,7 @@
 //! - local recognition: none guaranteed on-device → fails closed ([`local`])
 //! - focus, delivery, clipboard, shortcut, window behavior: [`desktop`],
 //!   [`clipboard`], [`hotkeys`], [`window`]
+//! - Sway: compositor IPC for the shortcut and Escape ([`sway`])
 //! - sleep: systemd-logind inhibitor locks + `PrepareForSleep` ([`sleep`])
 
 pub mod atspi;
@@ -23,6 +24,7 @@ pub mod meeting_capture;
 pub mod secrets;
 pub mod session;
 pub mod sleep;
+pub mod sway;
 pub mod tray;
 pub mod ui;
 pub mod window;

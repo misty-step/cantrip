@@ -4,6 +4,8 @@
 //! `cantrip popover`    show the popover (the launcher entry on trayless sessions)
 //! `cantrip settings`   show Settings
 //! `cantrip toggle`     start/stop dictation (bindable as a compositor shortcut)
+//! `cantrip ipc …`      `hotkey-down` / `hotkey-up` / `cancel`: the lines Sway
+//!                      bindings run (one socket write, before any UI setup)
 //! `cantrip gallery …`  render UI evidence screenshots from fixture state
 //! `cantrip e2e …`      headless end-to-end runs over recorded audio (verification)
 
@@ -25,6 +27,14 @@ use std::sync::Arc;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Compositor-bound shortcut lines: the fast path, nothing else starts.
+    if args.first().map(String::as_str) == Some("ipc") {
+        if let Err(e) = ipc::run_cli(&args[1..]) {
+            eprintln!("cantrip: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let code = match args.first().map(String::as_str) {
         None => run_app(None),
         Some("popover") => run_app(Some(UiRequest::ShowPopover)),
@@ -65,6 +75,11 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // SIGTERM / SIGINT / SIGHUP quit like the Quit control (bindings and
+    // grabs are released on the way out). Blocked before any thread starts
+    // so only the waiter receives them; children get a clean mask.
+    let quit_signals = block_quit_signals();
+
     let (req_tx, req_rx) = mpsc::channel();
     let (platform, tray) = platform::detect(req_tx.clone())?;
     eprintln!("[cantrip] session {}", platform.session);
@@ -97,10 +112,20 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
         home: home(),
     })?);
 
-    let _server = ipc::serve(&ipc::socket_path(), req_tx.clone())?;
-
-    // Shortcut events → the core's press-length state machine.
+    // Shortcut events → the core's press-length state machine. Compositor-
+    // bound shortcuts (Sway) arrive on the IPC socket into the same channel.
     let (key_tx, key_rx) = mpsc::channel();
+    let _server = ipc::serve(
+        &ipc::socket_path(),
+        ipc::Sinks {
+            ui: req_tx.clone(),
+            keys: key_tx.clone(),
+        },
+    )?;
+    if let Some(set) = quit_signals {
+        let tx = req_tx.clone();
+        std::thread::spawn(move || wait_for_quit_signal(set, tx));
+    }
     {
         let core = core.clone();
         std::thread::spawn(move || {
@@ -111,8 +136,14 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
     }
     let mut hotkeys: Box<dyn Hotkeys> = platform.hotkeys;
     let mut chord = core.settings().shortcut;
-    if let Err(e) = hotkeys.register(&chord, key_tx.clone()) {
-        eprintln!("[cantrip] shortcut unavailable: {e}");
+    match hotkeys.register(&chord, key_tx.clone()) {
+        Ok(mode) => eprintln!(
+            "[cantrip] shortcut {} via {}: {}",
+            chord.display(),
+            hotkeys.backend(),
+            mode.describe()
+        ),
+        Err(e) => eprintln!("[cantrip] shortcut unavailable: {e}"),
     }
     {
         let core = core.clone();
@@ -137,7 +168,15 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
     let tick = Box::new(move || {
         if let Some(next) = tick_core.take_shortcut_change() {
             match hotkeys.register(&next, key_tx.clone()) {
-                Ok(_) => chord = next,
+                Ok(mode) => {
+                    eprintln!(
+                        "[cantrip] shortcut {} via {}: {}",
+                        next.display(),
+                        hotkeys.backend(),
+                        mode.describe()
+                    );
+                    chord = next;
+                }
                 Err(e) => {
                     let _ = hotkeys.register(&chord, key_tx.clone());
                     tick_core.revert_shortcut(chord.clone(), &e);
@@ -166,4 +205,28 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
     // Let a meeting stopped by Quit finalize its staged audio.
     core.meetings().wait_idle(std::time::Duration::from_secs(2));
     Ok(())
+}
+
+/// Block the quit signals in this (and every later) thread; `None` if the
+/// mask could not be set (the default handlers then stay in place).
+fn block_quit_signals() -> Option<libc::sigset_t> {
+    // SAFETY: plain sigset manipulation on an owned, zeroed set.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::sigaddset(&mut set, s);
+        }
+        (libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) == 0).then_some(set)
+    }
+}
+
+fn wait_for_quit_signal(set: libc::sigset_t, ui: mpsc::Sender<UiRequest>) {
+    let mut sig = 0;
+    // SAFETY: sigwait on a set blocked in every thread.
+    if unsafe { libc::sigwait(&set, &mut sig) } == 0 {
+        eprintln!("[cantrip] quitting on signal {sig}");
+        let _ = ui.send(UiRequest::Quit);
+        ui::wake();
+    }
 }

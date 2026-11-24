@@ -572,7 +572,7 @@ mod tests {
 
     /// Published notes are owner-only (`0600`) on the atomic path and on the
     /// direct exclusive-create fallback (a `0644` regression shows under any
-    /// usual umask: `022`, `002`).
+    /// usual umask: `022`, `002`), on any host filesystem.
     #[test]
     fn published_notes_are_owner_only_on_every_path() {
         let t = tempfile::tempdir().unwrap();
@@ -583,7 +583,13 @@ mod tests {
         let note = b"# a note\n";
         let atomic = dir.join("atomic.md");
         let mut prepared = prepare(&dir, &scratch, note, &RealFs).unwrap();
-        assert!(prepared.atomic(), "this platform publishes atomically");
+        // A host filesystem without `O_TMPFILE` (`EOPNOTSUPP`: some overlay,
+        // network and FUSE mounts) prepares the direct path instead; the mode
+        // contract holds either way. Atomicity itself is asserted by the
+        // dedicated atomic-publication tests.
+        if !prepared.atomic() {
+            eprintln!("note: O_TMPFILE unsupported here; checked the direct path twice");
+        }
         assert_eq!(prepared.publish_at(&atomic).unwrap(), Create::Created);
         drop(prepared);
 
@@ -598,6 +604,38 @@ mod tests {
             let mode = fs::metadata(p).unwrap().mode() & 0o777;
             assert_eq!(mode, 0o600, "{p:?}: {mode:o}");
         }
+    }
+
+    /// The atomic path on the real filesystem: wherever the host supports
+    /// `O_TMPFILE` (ext4, xfs, btrfs, tmpfs), publication must be atomic and
+    /// the note owner-only. Hosts that refuse it are reported and skipped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_fs_publishes_atomically_where_o_tmpfile_works() {
+        use std::os::unix::ffi::OsStrExt;
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("mm");
+        fs::create_dir(&dir).unwrap();
+        let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).unwrap();
+        // SAFETY: probe open of an unnamed inode; closed at once.
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_TMPFILE | libc::O_WRONLY, 0o600) };
+        if fd < 0 {
+            eprintln!(
+                "skip: O_TMPFILE unsupported on this host filesystem ({})",
+                io::Error::last_os_error()
+            );
+            return;
+        }
+        // SAFETY: fd was just opened above.
+        unsafe { libc::close(fd) };
+        let mut prepared = prepare(&dir, t.path(), b"n", &RealFs).unwrap();
+        assert!(
+            prepared.atomic(),
+            "O_TMPFILE works here: publish atomically"
+        );
+        let p = dir.join("n.md");
+        assert_eq!(prepared.publish_at(&p).unwrap(), Create::Created);
+        assert_eq!(fs::metadata(&p).unwrap().mode() & 0o777, 0o600);
     }
 
     #[test]

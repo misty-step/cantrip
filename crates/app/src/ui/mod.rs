@@ -379,6 +379,7 @@ impl eframe::App for Shell {
                 UiRequest::ShowPopover => self.popover.open(),
                 UiRequest::ShowSettings => self.settings.open(),
                 UiRequest::ToggleDictation => self.control.send(Command::ToggleDictation),
+                UiRequest::Quit => self.handle(ctx, Command::Quit),
             }
         }
         if self.theme_checked.elapsed() >= THEME_POLL {
