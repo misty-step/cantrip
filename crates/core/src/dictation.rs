@@ -225,26 +225,18 @@ impl Dictation {
         matches!(self.lock().phase, Phase::Recording(_) | Phase::Starting)
     }
 
-    /// Start a take. Shows `Listening` immediately; mic failure shows
-    /// `Microphone blocked` (or the device error) and leaves nothing staged.
+    /// Start a take. Shows `Listening` immediately (before the durable
+    /// staging write, so the HUD never waits on a disk flush); a storage or
+    /// mic failure then shows its notice (`Microphone blocked`, the device
+    /// error) and leaves nothing staged.
     pub fn start(&self, cfg: TakeConfig) {
-        let (generation, item_id, wav) = {
+        let started_unix = unix_now();
+        let (generation, item_id) = {
             let mut g = self.lock();
             if !matches!(g.phase, Phase::Idle) {
                 return;
             }
-            let (item, wav) = match self.deps.staging.new_dictation(unix_now()) {
-                Ok(x) => x,
-                Err(_) => {
-                    g.set_hud(
-                        Hud::Notice("Cannot record: private storage unavailable".into()),
-                        ClaimWatch::new(None),
-                    );
-                    drop(g);
-                    self.notify();
-                    return;
-                }
-            };
+            let item_id = Staging::dictation_id(started_unix);
             g.generation += 1;
             let generation = g.generation;
             g.phase = Phase::Starting;
@@ -257,21 +249,47 @@ impl Dictation {
             });
             g.take = Some(Take {
                 generation,
-                item_id: item.id.clone(),
+                item_id: item_id.clone(),
                 cfg: cfg.clone(),
                 capture: Some(rx),
                 cancelled: Arc::new(AtomicBool::new(false)),
                 started: Instant::now(),
             });
-            (generation, item.id, wav)
+            (generation, item_id)
         };
         self.notify();
+        let still_ours = |g: &Inner| {
+            g.generation == generation
+                && g.take
+                    .as_ref()
+                    .is_some_and(|t| !t.cancelled.load(Ordering::SeqCst))
+        };
+        let wav = match self.deps.staging.create_dictation(&item_id, started_unix) {
+            Ok((_, wav)) => wav,
+            Err(_) => {
+                let _ = self.deps.staging.delete_dictation(&item_id);
+                let mut g = self.lock();
+                if still_ours(&g) {
+                    g.phase = Phase::Idle;
+                    g.take = None;
+                    g.set_hud(
+                        Hud::Notice("Cannot record: private storage unavailable".into()),
+                        ClaimWatch::new(None),
+                    );
+                }
+                drop(g);
+                self.notify();
+                return;
+            }
+        };
+        if !still_ours(&self.lock()) {
+            // Cancelled while the item was being written.
+            let _ = self.deps.staging.delete_dictation(&item_id);
+            return;
+        }
         let started = self.deps.recorder.start(cfg.microphone.as_deref(), &wav);
         let mut g = self.lock();
-        let still_ours = g.generation == generation
-            && g.take
-                .as_ref()
-                .is_some_and(|t| !t.cancelled.load(Ordering::SeqCst));
+        let still_ours = still_ours(&g);
         match started {
             Ok(rec) if still_ours => g.phase = Phase::Recording(rec),
             Ok(rec) => {
@@ -349,6 +367,8 @@ impl Dictation {
             g.set_hud(Hud::Hidden, ClaimWatch::new(None));
             (rec, take.item_id)
         };
+        // Hide the HUD at once; stopping the mic and the durable delete follow.
+        self.notify();
         if let Some(r) = rec {
             r.cancel();
         }

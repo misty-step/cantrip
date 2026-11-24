@@ -4,8 +4,10 @@
 //! `cantrip popover`    show the popover (the launcher entry on trayless sessions)
 //! `cantrip settings`   show Settings
 //! `cantrip toggle`     start/stop dictation (bindable as a compositor shortcut)
-//! `cantrip ipc …`      `hotkey-down` / `hotkey-up` / `cancel`: the lines Sway
-//!                      bindings run (one socket write, before any UI setup)
+//! `cantrip ipc …`      `hotkey-down` / `hotkey-up` / `cancel`: one socket write,
+//!                      before any UI setup, for compositor bindings a user
+//!                      writes (Cantrip's own Sway bindings are `nop` markers
+//!                      read from Sway's event stream; see `platform::linux::sway`)
 //! `cantrip gallery …`  render UI evidence screenshots from fixture state
 //! `cantrip e2e …`      headless end-to-end runs over recorded audio (verification)
 
@@ -112,8 +114,8 @@ fn run_app(request: Option<UiRequest>) -> anyhow::Result<()> {
         home: home(),
     })?);
 
-    // Shortcut events → the core's press-length state machine. Compositor-
-    // bound shortcuts (Sway) arrive on the IPC socket into the same channel.
+    // Shortcut events → the core's press-length state machine. Sway binding
+    // events and `cantrip ipc` lines arrive in the same channel.
     let (key_tx, key_rx) = mpsc::channel();
     let _server = ipc::serve(
         &ipc::socket_path(),

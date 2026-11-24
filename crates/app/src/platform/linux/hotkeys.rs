@@ -12,9 +12,10 @@
 //! - **Sway** (native Wayland with `$SWAYSOCK` answering, preferred there:
 //!   `xdg-desktop-portal-wlr` exports no `GlobalShortcuts`): compositor
 //!   bindings over Sway IPC ([`super::sway`]). The chord's press and release
-//!   are bound to `cantrip ipc hotkey-down|hotkey-up`, plain Escape to
-//!   `cantrip ipc cancel` only while a take is active; the lines reach the
-//!   core through the single-instance socket. Press and release are
+//!   are bound to `nop cantrip-hotkey-down|up`, plain Escape to
+//!   `nop cantrip-cancel` only while a take is active; a persistent
+//!   `SUBSCRIBE ["binding"]` connection delivers them (no process spawn),
+//!   and `swaymsg reload` re-installs them. Press and release are
 //!   reported: hold-to-talk, tap-to-toggle and Escape cancel.
 //! - **Other native Wayland**: xdg-desktop-portal `GlobalShortcuts` (the compositor
 //!   may ask the user to approve the chord). `Activated`/`Deactivated` map to
@@ -176,8 +177,7 @@ impl Default for LinuxHotkeys {
 impl LinuxHotkeys {
     pub fn new() -> LinuxHotkeys {
         let inner = if x11::session_is_wayland() {
-            let sway =
-                SwayIpc::from_env().map(|ipc| SwayKeys::new(ipc, &crate::ipc::socket_path()));
+            let sway = SwayIpc::from_env().map(SwayKeys::new);
             match sway {
                 Some(Ok(keys)) => Inner::Sway(keys),
                 Some(Err(e)) => {
@@ -204,9 +204,9 @@ impl Hotkeys for LinuxHotkeys {
     fn register(&mut self, chord: &Chord, sink: Sender<KeyEvent>) -> Result<HotkeyMode, String> {
         match &mut self.inner {
             Inner::X11(k) => k.register(chord, sink),
-            // Sway runs `cantrip ipc …`; the lines arrive on the IPC socket,
-            // whose key sink is this same channel (see `main.rs`).
-            Inner::Sway(k) => k.register(chord),
+            // Sway runs `nop cantrip-…`; its binding events reach `sink`
+            // from the Sway event listener thread.
+            Inner::Sway(k) => k.register(chord, sink),
             Inner::Portal(p) => p.register(chord, sink),
             Inner::None => Err("Global shortcuts are not available on this session".into()),
         }

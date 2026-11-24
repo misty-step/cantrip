@@ -138,7 +138,21 @@ impl Staging {
 
     /// Create a new dictation item in `Recording`; returns (item, wav path).
     pub fn new_dictation(&self, started_unix: u64) -> io::Result<(DictationItem, PathBuf)> {
-        let id = format!("d{started_unix}-{}", unique_suffix());
+        self.create_dictation(&Self::dictation_id(started_unix), started_unix)
+    }
+
+    /// A fresh dictation id (no I/O), for [`Staging::create_dictation`].
+    pub fn dictation_id(started_unix: u64) -> String {
+        format!("d{started_unix}-{}", unique_suffix())
+    }
+
+    /// Durably create the item `id` (state `Recording`); the audio path.
+    pub fn create_dictation(
+        &self,
+        id: &str,
+        started_unix: u64,
+    ) -> io::Result<(DictationItem, PathBuf)> {
+        let id = id.to_string();
         let dir = self.root.join("dictations").join(&id);
         ensure_private_dir(&dir)?;
         let item = DictationItem {

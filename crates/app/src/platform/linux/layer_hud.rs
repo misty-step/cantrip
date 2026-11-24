@@ -7,7 +7,9 @@
 //! every workspace. Pixels come from the UI's CPU rendering of the same pill
 //! (`crate::ui::raster`) into a `wl_shm` buffer.
 //!
-//! One thread owns the Wayland connection; the UI sends it frames. Showing
+//! One thread owns the Wayland connection; the UI sends it frames and writes
+//! a byte to a wake pipe, so the thread (blocked in `poll` on the Wayland fd
+//! and that pipe) acts on a new frame at once instead of on a timer. Showing
 //! creates the surface, hiding destroys it (a fresh configure on each show).
 //! A compositor without the protocol (GNOME) gets `None` from
 //! [`LayerHud::start`], and the UI keeps its own HUD window.
@@ -28,7 +30,7 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -39,8 +41,9 @@ use wayland_client::{
     Connection, EventQueue, QueueHandle,
 };
 
-/// Longest wait for the next UI frame while the thread is idle.
-const POLL: Duration = Duration::from_millis(8);
+/// Longest wait in `poll` with nothing to do (the wake pipe and the Wayland
+/// fd end it early; this only bounds a lost wake-up).
+const POLL: Duration = Duration::from_millis(500);
 
 enum Msg {
     Show(HudFrame),
@@ -50,6 +53,8 @@ enum Msg {
 /// Handle to the layer-shell HUD thread.
 pub struct LayerHud {
     tx: Mutex<Sender<Msg>>,
+    /// Write end of the wake pipe (non-blocking).
+    wake: OwnedFd,
     scale: Arc<AtomicU32>,
     alive: Arc<AtomicBool>,
 }
@@ -83,11 +88,12 @@ impl LayerHud {
         queue.roundtrip(&mut state).ok()?;
         state.update_scale_from_outputs();
         let (tx, rx) = mpsc::channel();
+        let (wake_rx, wake_tx) = wake_pipe()?;
         let alive2 = alive.clone();
         std::thread::Builder::new()
             .name("cantrip-layer-hud".into())
             .spawn(move || {
-                if let Err(e) = run(&conn, &mut queue, &mut state, &rx) {
+                if let Err(e) = run(&conn, &mut queue, &mut state, &rx, &wake_rx) {
                     eprintln!("[cantrip] layer-shell HUD stopped: {e}");
                 }
                 alive2.store(false, Ordering::SeqCst);
@@ -95,6 +101,7 @@ impl LayerHud {
             .ok()?;
         Some(LayerHud {
             tx: Mutex::new(tx),
+            wake: wake_tx,
             scale,
             alive,
         })
@@ -114,12 +121,35 @@ impl NativeHud for LayerHud {
             Some(f) => Msg::Show(f),
             None => Msg::Hide,
         };
-        self.tx
+        let sent = self
+            .tx
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .send(msg)
-            .is_ok()
+            .is_ok();
+        // SAFETY: one-byte write to our own non-blocking pipe; a full pipe
+        // (EAGAIN) already holds a pending wake-up.
+        unsafe { libc::write(self.wake.as_raw_fd(), b"w".as_ptr().cast(), 1) };
+        sent
     }
+}
+
+/// A non-blocking, close-on-exec pipe: (read end, write end).
+fn wake_pipe() -> Option<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills two fds we then own.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_NONBLOCK | libc::O_CLOEXEC) } != 0 {
+        return None;
+    }
+    // SAFETY: both fds were just created and are owned by nobody else.
+    Some(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Empty the wake pipe.
+fn drain(fd: &OwnedFd) {
+    let mut buf = [0u8; 64];
+    // SAFETY: reads into a local buffer from our own non-blocking pipe.
+    while unsafe { libc::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
 }
 
 fn run(
@@ -127,9 +157,11 @@ fn run(
     queue: &mut EventQueue<State>,
     state: &mut State,
     rx: &Receiver<Msg>,
+    wake: &OwnedFd,
 ) -> Result<(), String> {
     let qh = queue.handle();
     loop {
+        drain(wake);
         // Newest message wins; frames in between are stale.
         let mut latest = None;
         loop {
@@ -149,29 +181,41 @@ fn run(
             None => {}
         }
         state.draw()?;
-        dispatch(queue, state, POLL)?;
+        dispatch(queue, state, POLL, wake)?;
     }
 }
 
-/// Flush, wait up to `timeout` for compositor events, dispatch them.
+/// Flush, wait up to `timeout` for compositor events or a wake-up from the
+/// UI, dispatch the events.
 fn dispatch(
     queue: &mut EventQueue<State>,
     state: &mut State,
     timeout: Duration,
+    wake: &OwnedFd,
 ) -> Result<(), String> {
+    // A wake-up written since the last drain is still in the pipe, so a frame
+    // sent meanwhile never waits for the timeout.
+    let w = libc::pollfd {
+        fd: wake.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
     queue.flush().map_err(|e| e.to_string())?;
     let Some(guard) = queue.prepare_read() else {
         queue.dispatch_pending(state).map_err(|e| e.to_string())?;
         return Ok(());
     };
-    let mut fd = libc::pollfd {
-        fd: guard.connection_fd().as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: poll on one valid pollfd.
-    let n = unsafe { libc::poll(&mut fd, 1, timeout.as_millis() as i32) };
-    if n > 0 && fd.revents & libc::POLLIN != 0 {
+    let mut fds = [
+        libc::pollfd {
+            fd: guard.connection_fd().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        w,
+    ];
+    // SAFETY: poll on two valid pollfds.
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout.as_millis() as i32) };
+    if n > 0 && fds[0].revents & libc::POLLIN != 0 {
         guard.read().map_err(|e| e.to_string())?;
     } else {
         drop(guard);

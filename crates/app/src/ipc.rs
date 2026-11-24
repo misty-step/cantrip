@@ -4,10 +4,11 @@
 //! the app-launcher entry on trayless sessions (`cantrip popover`), a
 //! compositor-bound command (`cantrip toggle`) — sends one line and exits.
 //! Lines: `popover`, `settings`, `toggle`, and the compositor-bound shortcut
-//! lines `hotkey-down`, `hotkey-up`, `cancel` (Sway binds the chord's press
-//! and release, and plain Escape during a take, to `cantrip ipc …`); reply
-//! `ok` or `unknown`. Shortcut lines go straight to the core's press-length
-//! state machine on the IPC thread, never through the UI loop.
+//! lines `hotkey-down`, `hotkey-up`, `cancel` (for bindings a user writes as
+//! `cantrip ipc …`; Cantrip's own Sway bindings are `nop` markers delivered by
+//! Sway's event stream, `platform::linux::sway`); reply `ok` or `unknown`.
+//! Shortcut lines go straight to the core's press-length state machine on the
+//! IPC thread, never through the UI loop. [`KeyRelay`] is shared by both.
 
 use crate::platform::UiRequest;
 use cantrip_core::shortcut::KeyEvent;

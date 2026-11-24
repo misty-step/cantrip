@@ -495,3 +495,77 @@ fn blocked_microphone_stages_nothing() {
     assert!(!r.d.busy());
     assert_eq!(dictation_dirs(&r), 0);
 }
+
+/// The HUD shows `Listening` (and the UI is woken) before the durable staging
+/// write, so the pill never waits on a disk flush; the take is still staged.
+#[test]
+fn listening_is_published_before_the_staging_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let staging = Staging::open(&dir.path().join("stage")).unwrap();
+    let desktop = FakeDesktop::new(target_a());
+    let clip = FakeClipboard::new();
+    let recorder = FakeRecorder::new();
+    let dictations = staging.root().join("dictations");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    let deps = DictationDeps {
+        recorder: recorder.clone(),
+        desktop,
+        clipboard: clip,
+        secrets: FakeSecrets::with_key(),
+        local: FakeLocal::new(LocalAvailability::NoOnDeviceEnglish),
+        openrouter: OpenRouter::with_base(FakeTransport::new(|_, _| status(500)), "http://stub"),
+        staging: staging.clone(),
+        notify: Arc::new(move || {
+            let n = std::fs::read_dir(&dictations).unwrap().count();
+            seen2.lock().unwrap().push(n);
+        }),
+    };
+    let d = Dictation::new(deps);
+    d.start(cfg(Mode::Clean, true));
+    assert_eq!(d.hud(), Hud::Listening);
+    assert!(d.recording());
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.first(),
+        Some(&0),
+        "first wake before the item exists: {seen:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(staging.root().join("dictations"))
+            .unwrap()
+            .count(),
+        1,
+        "the take is staged once started"
+    );
+    d.cancel();
+    assert_eq!(
+        std::fs::read_dir(staging.root().join("dictations"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+/// Private storage failing after `Listening` was shown: the notice replaces
+/// it, nothing stays staged and the take is not running.
+#[test]
+fn storage_failure_after_listening_shows_the_notice_and_stages_nothing() {
+    let r = rig(FakeTransport::new(|_, _| status(500)));
+    let dictations = r.staging.root().join("dictations");
+    std::fs::remove_dir_all(&dictations).unwrap();
+    std::fs::write(&dictations, b"not a directory").unwrap();
+    r.d.start(cfg(Mode::Clean, true));
+    assert!(!r.d.recording());
+    assert!(!r.d.busy());
+    assert_eq!(
+        r.d.hud(),
+        Hud::Notice("Cannot record: private storage unavailable".into())
+    );
+    std::fs::remove_file(&dictations).unwrap();
+    std::fs::create_dir(&dictations).unwrap();
+    r.d.start(cfg(Mode::Clean, true));
+    assert!(r.d.recording(), "recovers once storage works");
+    r.d.cancel();
+    assert_eq!(dictation_dirs(&r), 0);
+}
