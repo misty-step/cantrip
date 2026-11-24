@@ -86,7 +86,7 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 | Concern | macOS 15+ | Linux X11 (and XWayland apps) | Linux native Wayland |
 | --- | --- | --- | --- |
 | Global shortcut | Carbon hot key (`global-hotkey`): press + release | `XGrabKey` + XKB detectable auto-repeat: press + release | **Sway** (`$SWAYSOCK` answers; preferred there, since `xdg-desktop-portal-wlr` has no GlobalShortcuts): Sway IPC `bindsym --no-repeat <chord> nop cantrip-hotkey-down` and `bindsym --release <chord> nop cantrip-hotkey-up` (chord as keysyms, e.g. `Control+Mod1+space`): press + release. `nop` runs nothing, so a keypress spawns no process: one persistent `SUBSCRIBE ["binding","workspace","shutdown"]` connection receives Sway's `binding` event and its listener thread hands the marker straight to the core's key thread (sub-millisecond); a press while already down ends a hold whose release was lost. `swaymsg reload` drops runtime bindings and then emits a `workspace` event with `change: "reload"`: the listener re-reads the config and re-installs the chord (and Escape during a take); a lost event connection is re-subscribed and re-asserted the same way. Rebinding unbinds the old chord; Quit and SIGTERM/SIGINT/SIGHUP (now a graceful Quit) unbind everything Cantrip installed (and nothing else); a chord the user's Sway config binds is reported as taken, never overwritten. The config is read as Sway loads it: the `GET_CONFIG` main text plus every `include` (Sway's `-c` from the compositor's `/proc` entry found through `SO_PEERCRED`, else its search path; `$variables`, `~`, environment variables and globs, relative to the including file's directory, each file once), `bindsym`/`bindcode` with any flags, `bindsym { }` and `mode` blocks, line continuations and modifier aliases. **Elsewhere**: xdg-desktop-portal GlobalShortcuts: press + release where the portal sends `Deactivated` (KDE, GNOME, Hyprland), else tap-to-toggle |
-| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | **Sway**: `bindsym --no-repeat Escape nop cantrip-cancel` only while a take is active, `unbindsym Escape` as soon as it ends and on exit, so Escape belongs to apps whenever Cantrip is idle; skipped if the user's config (or any file it includes) binds plain Escape. Cantrip only removes an Escape binding it installed itself (`escape_owned_by_cantrip`), never at startup: a leftover from a crashed Cantrip (a `nop`) stays until `swaymsg reload` or the next take's end. **Portal sessions**: not grabbable (caveat): no cancel; the popover's Stop, like the shortcut, finishes the take (transcribed and delivered), never discards it |
+| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | **Sway**: `bindsym --no-repeat Escape nop cantrip-cancel` only while a take is active, `unbindsym Escape` as soon as it ends and on exit, so Escape belongs to apps whenever Cantrip is idle; skipped if the user's config (or any file it includes) binds plain Escape. Cantrip only removes an Escape binding it installed itself (`escape_owned_by_cantrip`), never at startup, and always removes the one it installed (take end, Quit), as it does its chord on rebind and Quit, even when an `include`d file saved since without a reload now binds the key (Sway's live table still holds Cantrip's `nop`): a leftover from a crashed Cantrip (a `nop`) stays until `swaymsg reload` or the next take's end. **Portal sessions**: not grabbable (caveat): no cancel; the popover's Stop, like the shortcut, finishes the take (transcribed and delivered), never discards it |
 | Focus capture | NSWorkspace frontmost app + AX focused window/element | `_NET_ACTIVE_WINDOW` + `_NET_WM_PID` + AT-SPI focused editable in that window's frame | AT-SPI active frame + focused editable; unidentified → `uncertain` |
 | Tier 1 insert | AX `kAXSelectedTextAttribute` set | AT-SPI EditableText `DeleteText`/`InsertText` | same as X11 |
 | Edit read-back | AX value + selected range (UTF-16 → chars) | AT-SPI Text `GetText` / caret / selection | same |
@@ -276,6 +276,24 @@ binary; numbers in the builder evidence):
   both user bindings fire while Cantrip is idle, during a `cantrip toggle`
   take, and after it quits; the shortcut is reported as taken. (The previous
   build clobbered both, and they stayed gone after it quit.)
+
+**Pass 7, live on headless Sway 1.9** (release binary, loopback stub, zero
+provider calls): a take is started with the chord while the `include`d file
+binds nothing; `bindsym Escape exec …` is then saved to that file without
+`swaymsg reload`. Escape cancels the take (Sway runs `nop cantrip-cancel`,
+staged WAV deleted within 60 ms, receiver gets no Escape); afterwards, idle and
+after Quit, Escape reaches the GTK receiver with no Sway binding run, and after
+a reload the saved user binding fires. The `fff8dd4` build on the same harness
+left `nop cantrip-cancel` bound: idle and after Quit, Escape was swallowed.
+
+Sway boundaries: Sway 1.9's `GET_CONFIG` returns only the main config's text,
+never the included files Sway holds in memory, and no IPC request returns
+them, so conflict checks read `include`d files from disk and reflect their
+last saved state; a file edited without `swaymsg reload` can differ from Sway's
+live bindings until the next reload. The Pass 6 review reproduced a Sway 1.9
+compositor segfault when a physically held key spans `swaymsg reload`, also in
+a Cantrip-free Sway control; virtual-keyboard (`wtype`) holds across a reload
+did not crash Sway here.
 
 Headless caveats: the seat has no physical keyboard or pointer, so the check
 keeps one virtual keyboard alive (GTK reports its window active only while a

@@ -24,7 +24,10 @@
 //! `~`, environment variables and globs, relative to the including file's
 //! directory, each file once). A chord the config binds is reported as taken;
 //! an Escape the config binds is left to the config. Cantrip only ever
-//! `unbindsym`s a binding it installed itself (never at startup).
+//! `unbindsym`s a binding it installed itself (never at startup), and always
+//! removes one it installed: included files are read from disk, so an edit
+//! saved without `swaymsg reload` is not yet in Sway's live table, where
+//! Cantrip's own `nop` still is.
 
 use crate::ipc::{KeyLine, KeyRelay};
 use crate::platform::HotkeyMode;
@@ -812,17 +815,18 @@ impl Bindings {
         Ok(())
     }
 
-    /// Remove Cantrip's chord bindings (only if Cantrip installed them and a
-    /// reloaded config has not since taken the combo).
-    fn remove_chord(&mut self, user: &UserBindings) {
+    /// Remove Cantrip's chord bindings, if Cantrip installed them. Always,
+    /// whatever the config files on disk say now: `chord_owned` means Sway's
+    /// live table holds Cantrip's `nop`s (a reload, which would load an
+    /// edited file, clears it first), so an edit saved without a reload must
+    /// not leave them bound.
+    fn remove_chord(&mut self) {
         if !std::mem::take(&mut self.chord_owned) {
             return;
         }
         if let Some(c) = &self.chord {
-            if !user.binds(c) {
-                let _ = self.ipc.run(&format!("unbindsym {c}"));
-                let _ = self.ipc.run(&format!("unbindsym --release {c}"));
-            }
+            let _ = self.ipc.run(&format!("unbindsym {c}"));
+            let _ = self.ipc.run(&format!("unbindsym --release {c}"));
         }
     }
 
@@ -840,8 +844,11 @@ impl Bindings {
         }
     }
 
-    fn unbind_escape(&mut self, user: &UserBindings) {
-        if std::mem::take(&mut self.escape_owned_by_cantrip) && !user.binds("Escape") {
+    /// Remove Cantrip's Escape binding, if Cantrip installed it. Always,
+    /// like [`Bindings::remove_chord`]: an Escape saved to a config file
+    /// without a reload is not in Sway's live table, Cantrip's `nop` is.
+    fn unbind_escape(&mut self) {
+        if std::mem::take(&mut self.escape_owned_by_cantrip) {
             let _ = self.ipc.run("unbindsym Escape");
         }
     }
@@ -930,7 +937,7 @@ impl SwayKeys {
                 chord.display_linux()
             ));
         }
-        st.remove_chord(&user);
+        st.remove_chord();
         st.install_chord(&c)?;
         st.chord = Some(c);
         st.chord_owned = true;
@@ -945,11 +952,11 @@ impl SwayKeys {
         if active == st.escape_owned_by_cantrip {
             return;
         }
-        let user = st.user();
         if active {
+            let user = st.user();
             st.bind_escape(&user);
         } else {
-            st.unbind_escape(&user);
+            st.unbind_escape();
         }
     }
 }
@@ -960,9 +967,8 @@ impl Drop for SwayKeys {
         let mut st = lock(&self.state);
         st.closed = true;
         st.escape_wanted = false;
-        let user = st.user();
-        st.unbind_escape(&user);
-        st.remove_chord(&user);
+        st.unbind_escape();
+        st.remove_chord();
     }
 }
 
@@ -1224,6 +1230,94 @@ mod tests {
             br#"{"change":"reload","old":null,"current":null}"#
         ));
         assert!(!is_reload(br#"{"change":"focus"}"#));
+    }
+
+    /// A loopback stand-in for Sway's IPC socket: answers `GET_VERSION`,
+    /// `SUBSCRIBE` (kept open, silent), `GET_CONFIG` with `config`, and
+    /// records every `RUN_COMMAND` as a success.
+    fn fake_sway(dir: &Path, config: String) -> (SwayIpc, Arc<Mutex<Vec<String>>>) {
+        let path = dir.join("sway.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let ran: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = ran.clone();
+        std::thread::spawn(move || {
+            let mut subscribed = Vec::new();
+            for conn in listener.incoming() {
+                let Ok(mut s) = conn else { return };
+                let Ok((kind, body)) = read_msg(&mut s) else {
+                    continue;
+                };
+                let reply = match kind {
+                    RUN_COMMAND => {
+                        lock(&log).push(String::from_utf8_lossy(&body).into_owned());
+                        r#"[{"success":true}]"#.to_string()
+                    }
+                    GET_CONFIG => serde_json::json!({ "config": config }).to_string(),
+                    SUBSCRIBE => r#"{"success":true}"#.to_string(),
+                    _ => "{}".to_string(),
+                };
+                let _ = write_msg(&mut s, kind, &reply);
+                if kind == SUBSCRIBE {
+                    subscribed.push(s);
+                }
+            }
+        });
+        (SwayIpc { path }, ran)
+    }
+
+    /// Pass 6 finding: a binding saved to an included file during a take,
+    /// without `swaymsg reload`, is not in Sway's live table, so Cantrip's
+    /// own Escape and chord `nop`s must still be removed (end of take,
+    /// rebind, exit), never skipped on the edited file's say-so.
+    #[test]
+    fn owned_bindings_are_removed_even_after_an_unreloaded_include_edit() {
+        let dir = tmpdir("owned");
+        let inc = dir.join("keys.conf");
+        std::fs::write(&inc, "# nothing bound yet\n").unwrap();
+        let (ipc, ran) = fake_sway(&dir, format!("include {}\n", inc.display()));
+        let taken = |c: &str| lock(&ran).iter().filter(|r| r.as_str() == c).count();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut keys = SwayKeys::new(ipc).unwrap();
+        keys.register(&Chord::platform_default(), tx.clone())
+            .unwrap();
+        keys.set_escape(true);
+        assert_eq!(taken("bindsym --no-repeat Escape nop cantrip-cancel"), 1);
+        // Saved during the take, not reloaded.
+        std::fs::write(
+            &inc,
+            "bindsym Escape exec user-escape\nbindsym Ctrl+Alt+space exec user-chord\n",
+        )
+        .unwrap();
+        keys.set_escape(false);
+        assert_eq!(taken("unbindsym Escape"), 1, "take end: {:?}", lock(&ran));
+        keys.set_escape(false);
+        assert_eq!(taken("unbindsym Escape"), 1, "removed once only");
+        // Rebinding drops Cantrip's old chord even though the file now binds it.
+        let mut d = Chord::platform_default();
+        d.key = "D".into();
+        keys.register(&d, tx).unwrap();
+        assert_eq!(taken("unbindsym Control+Mod1+space"), 1);
+        assert_eq!(taken("unbindsym --release Control+Mod1+space"), 1);
+        // Exit mid-take after the file also binds the new chord.
+        keys.set_escape(true);
+        std::fs::write(
+            &inc,
+            "bindsym Escape exec user-escape\nbindsym Ctrl+Alt+d exec user-chord\n",
+        )
+        .unwrap();
+        // The file now binds Escape, so no new Escape bind happened; the
+        // config's binding is left alone.
+        assert_eq!(taken("bindsym --no-repeat Escape nop cantrip-cancel"), 1);
+        drop(keys);
+        assert_eq!(taken("unbindsym Escape"), 1, "never Escape it did not bind");
+        assert_eq!(
+            taken("unbindsym Control+Mod1+d"),
+            1,
+            "exit: {:?}",
+            lock(&ran)
+        );
+        assert_eq!(taken("unbindsym --release Control+Mod1+d"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Live (on a Sway session; skipped elsewhere): rebinding replaces the old chord's press
