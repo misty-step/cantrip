@@ -13,6 +13,16 @@ ARCHITECTURE.md › Verification boundaries.
   measures press → HUD on-screen and Escape → HUD hidden / audio deleted, and
   checks that a tap keeps listening. Run it against a running `cantrip`.
 
+- `sway_check.py BINARY OUTDIR [MEDIA]`: the full live Sway check (HUD
+  placement on workspaces 1 and 2, focus, click-through with `VPTR`, Escape
+  cancel, hold and tap takes through the stub, Settings rebind, nothing left
+  bound after quit). `SHOT_PREFIX` prefixes its screenshot names.
+- `sway_ipc_check.py BINARY OUTDIR latency N|reload|include`: Sway shortcut
+  checks timed on Sway's own `binding` events (a separate IPC subscriber):
+  binding event → HUD pill visible via `grim` over N taps; recovery after
+  `swaymsg reload`; user bindings in an `include`d file left intact (run with
+  a config whose included file binds `Ctrl+Alt+space` and `Escape` to
+  `exec touch $MARKER_DIR/chord|escape`).
 - `escape_check.py DISPLAY BINARY LABEL OUTDIR [next]`: launches the app with
   the stub, focuses a receiver, taps the shortcut, presses plain Escape and
   reports HUD hide / staged-audio deletion times and stub requests (with

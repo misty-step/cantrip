@@ -66,7 +66,8 @@ crates/app/src
                   native overlay surfaces
   net.rs          ureq Transport (Offline vs Failed vs Timeout mapping)
   ipc.rs          Unix-socket single-instance channel (popover/settings/toggle,
-                  and the compositor-bound hotkey-down/hotkey-up/cancel lines)
+                  and hotkey-down/hotkey-up/cancel lines for user-written
+                  compositor bindings)
   cli.rs          `cantrip e2e …` headless verification over recorded audio
   platform/mod.rs Platform bundle + Hotkeys/Tray/UiPlatform traits
   platform/linux/ X11/XWayland, AT-SPI, PipeWire, Secret Service, SNI, portals,
@@ -84,8 +85,8 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 
 | Concern | macOS 15+ | Linux X11 (and XWayland apps) | Linux native Wayland |
 | --- | --- | --- | --- |
-| Global shortcut | Carbon hot key (`global-hotkey`): press + release | `XGrabKey` + XKB detectable auto-repeat: press + release | **Sway** (`$SWAYSOCK` answers; preferred there, since `xdg-desktop-portal-wlr` has no GlobalShortcuts): Sway IPC `bindsym --no-repeat <chord> exec cantrip ipc hotkey-down` and `bindsym --release <chord> exec cantrip ipc hotkey-up` (chord as keysyms, e.g. `Control+Mod1+space`): press + release. The lines go over the single-instance socket straight to the core's key thread; a press while already down ends a hold whose release was lost. Rebinding unbinds the old chord; Quit and SIGTERM/SIGINT/SIGHUP (now a graceful Quit) unbind everything; a chord the user's Sway config binds is reported as taken, never overwritten. **Elsewhere**: xdg-desktop-portal GlobalShortcuts: press + release where the portal sends `Deactivated` (KDE, GNOME, Hyprland), else tap-to-toggle |
-| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | **Sway**: `bindsym --no-repeat Escape exec cantrip ipc cancel` only while a take is active, `unbindsym Escape` as soon as it ends (and on exit; a leftover from a crash is cleared at start), so Escape belongs to apps whenever Cantrip is idle; skipped if the user's config binds plain Escape. **Portal sessions**: not grabbable (caveat): no cancel; the popover's Stop, like the shortcut, finishes the take (transcribed and delivered), never discards it |
+| Global shortcut | Carbon hot key (`global-hotkey`): press + release | `XGrabKey` + XKB detectable auto-repeat: press + release | **Sway** (`$SWAYSOCK` answers; preferred there, since `xdg-desktop-portal-wlr` has no GlobalShortcuts): Sway IPC `bindsym --no-repeat <chord> nop cantrip-hotkey-down` and `bindsym --release <chord> nop cantrip-hotkey-up` (chord as keysyms, e.g. `Control+Mod1+space`): press + release. `nop` runs nothing, so a keypress spawns no process: one persistent `SUBSCRIBE ["binding","workspace","shutdown"]` connection receives Sway's `binding` event and its listener thread hands the marker straight to the core's key thread (sub-millisecond); a press while already down ends a hold whose release was lost. `swaymsg reload` drops runtime bindings and then emits a `workspace` event with `change: "reload"`: the listener re-reads the config and re-installs the chord (and Escape during a take); a lost event connection is re-subscribed and re-asserted the same way. Rebinding unbinds the old chord; Quit and SIGTERM/SIGINT/SIGHUP (now a graceful Quit) unbind everything Cantrip installed (and nothing else); a chord the user's Sway config binds is reported as taken, never overwritten. The config is read as Sway loads it: the `GET_CONFIG` main text plus every `include` (Sway's `-c` from the compositor's `/proc` entry found through `SO_PEERCRED`, else its search path; `$variables`, `~`, environment variables and globs, relative to the including file's directory, each file once), `bindsym`/`bindcode` with any flags, `bindsym { }` and `mode` blocks, line continuations and modifier aliases. **Elsewhere**: xdg-desktop-portal GlobalShortcuts: press + release where the portal sends `Deactivated` (KDE, GNOME, Hyprland), else tap-to-toggle |
+| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | **Sway**: `bindsym --no-repeat Escape nop cantrip-cancel` only while a take is active, `unbindsym Escape` as soon as it ends and on exit, so Escape belongs to apps whenever Cantrip is idle; skipped if the user's config (or any file it includes) binds plain Escape. Cantrip only removes an Escape binding it installed itself (`escape_owned_by_cantrip`), never at startup: a leftover from a crashed Cantrip (a `nop`) stays until `swaymsg reload` or the next take's end. **Portal sessions**: not grabbable (caveat): no cancel; the popover's Stop, like the shortcut, finishes the take (transcribed and delivered), never discards it |
 | Focus capture | NSWorkspace frontmost app + AX focused window/element | `_NET_ACTIVE_WINDOW` + `_NET_WM_PID` + AT-SPI focused editable in that window's frame | AT-SPI active frame + focused editable; unidentified → `uncertain` |
 | Tier 1 insert | AX `kAXSelectedTextAttribute` set | AT-SPI EditableText `DeleteText`/`InsertText` | same as X11 |
 | Edit read-back | AX value + selected range (UTF-16 → chars) | AT-SPI Text `GetText` / caret / selection | same |
@@ -256,6 +257,25 @@ OpenRouter stub (`scripts/e2e/sway_check.py`; numbers in the builder evidence):
   binding is left.
 - The popover and Settings open on workspace 1 and 2 with the layer-shell HUD
   active.
+
+**Pass 6, live on headless Sway 1.9** (`scripts/e2e/sway_ipc_check.py`, release
+binary; numbers in the builder evidence):
+
+- HUD latency: 15 of 15 focused-receiver taps (two runs of 15) show the pill
+  within 23 ms of Sway's `binding` event, measured by a separate IPC
+  subscriber and `grim` polling (the capture itself is ~16 ms); the previous
+  `exec cantrip ipc …` build measured 10 of 15, worst 215 ms, on the same
+  harness. Instrumented, event → core is ~0.1 ms and event → layer-surface
+  commit ~3 ms: `Dictation::start` publishes `Listening` and wakes the UI
+  before the durable staging write, and the layer-shell thread is woken by a
+  pipe rather than a timer.
+- `swaymsg reload` while idle: 1 s later the chord starts a take and Escape
+  cancels it, no restart; a reload during a take keeps Escape cancelling; after
+  reloads while idle, Escape reaches the focused app.
+- A config whose `include`d file binds `Ctrl+Alt+space` and plain `Escape`:
+  both user bindings fire while Cantrip is idle, during a `cantrip toggle`
+  take, and after it quits; the shortcut is reported as taken. (The previous
+  build clobbered both, and they stayed gone after it quit.)
 
 Headless caveats: the seat has no physical keyboard or pointer, so the check
 keeps one virtual keyboard alive (GTK reports its window active only while a

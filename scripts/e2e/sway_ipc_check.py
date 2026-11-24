@@ -101,10 +101,14 @@ threading.Thread(target=subscriber, daemon=True).start()
 
 
 def wait_bind(cmd, after, timeout=2.0):
+    """Time of the first binding event for `cmd` after index `after`. Also
+    matches an older build's `exec <cantrip> ipc <line> …` bindings (same
+    line name), so builds can be compared on the same clock."""
+    line = cmd.removeprefix("nop cantrip-")
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
         for i, (t, c) in enumerate(bind_events):
-            if i >= after and c == cmd:
+            if i >= after and c and (c == cmd or f" ipc {line} " in f"{c} "):
                 return t
         time.sleep(0.001)
     return None

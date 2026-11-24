@@ -127,6 +127,7 @@ def shot(name):
     subprocess.run(["grim", f"{media}/{name}"], env=env)
 
 
+SHOT = os.environ.get("SHOT_PREFIX", "")  # screenshot name prefix
 LEAD = 0.15  # wtype lead-in before the first key (s); excluded from timings
 
 
@@ -185,7 +186,7 @@ res["tap_to_hud_visible_ms_upper_bound_incl_grim"] = round((seen_hud - t0) * 100
 time.sleep(0.6)
 res["ws1_hud_bbox"] = bbox(base_ws1, grab())
 res["focused_while_recording"] = focused_title()
-shot("pass5-sway-ws1-bottom.png")
+shot(f"{SHOT}sway-ws1-bottom.png")
 # Pointer click on the pill reaches the receiver beneath it (click-through).
 hb = res["ws1_hud_bbox"]
 if hb:
@@ -204,7 +205,7 @@ if hb:
 # 2. Workspace 2 while recording.
 swaymsg("workspace", "2"); time.sleep(0.5)
 res["ws2_hud_bbox"] = bbox(base_ws2, grab())
-shot("pass5-sway-ws2-visible.png")
+shot(f"{SHOT}sway-ws2-visible.png")
 swaymsg("workspace", "1"); time.sleep(0.5)
 res["back_on_ws1_hud_bbox"] = bbox(base_ws1, grab())
 res["focused_back_on_ws1"] = focused_title()
@@ -222,7 +223,7 @@ while time.monotonic() - t1 < 2.0 and not (gone and deleted):
 res["escape_to_audio_deleted_ms"] = round((deleted - t1) * 1000) if deleted else None
 res["escape_to_hud_gone_ms_upper_bound_incl_grim"] = round((gone - t1) * 1000) if gone else None
 time.sleep(0.3)
-shot("pass5-sway-after-escape.png")
+shot(f"{SHOT}sway-after-escape.png")
 res["receiver_keys_during_cancel"] = [e for e in events() if e[0] == "key"][len(keys_before):]
 time.sleep(3.0)
 res["stub_requests_3s_after_escape"] = stub_reqs()
@@ -242,7 +243,7 @@ while time.monotonic() - t2 < 15 and "Tuesday" not in open(recv_log).read():
 res["hold_release_to_delivered_ms"] = round((time.monotonic() - t2) * 1000)
 play.wait()
 time.sleep(0.4)
-shot("pass5-sway-hold-delivered.png")
+shot(f"{SHOT}sway-hold-delivered.png")
 res["receiver_text_after_hold"] = open(recv_log).read().strip().split("\n")[-1:]
 res["stub_requests_after_hold"] = [json.loads(l)["path"] for l in open(stub_log)]
 res["stub_data_collection_deny"] = all((json.loads(l).get("provider") or {}).get("data_collection") == "deny"
@@ -280,7 +281,7 @@ def record(chord_args):
 if vptr and record(["-M", "ctrl", "-M", "alt", "-k", "d", "-m", "alt", "-m", "ctrl"]):
     res["rebind_log"] = [l.strip() for l in open(app_log_path) if "shortcut" in l][-1:]
     res["rebind_settings_notices"] = [l.strip() for l in open(app_log_path) if "not saved" in l]
-    shot("pass5-sway-settings-rebound.png")
+    shot(f"{SHOT}sway-settings-rebound.png")
     swaymsg('[title="^Receiver A$"] focus'); time.sleep(0.3)
     chord_tap(); time.sleep(0.6)
     res["old_chord_starts_take_after_rebind"] = staged() > 0
