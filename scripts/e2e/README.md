@@ -23,6 +23,17 @@ ARCHITECTURE.md › Verification boundaries.
   `swaymsg reload`; user bindings in an `include`d file left intact (run with
   a config whose included file binds `Ctrl+Alt+space` and `Escape` to
   `exec touch $MARKER_DIR/chord|escape`).
+- `sway_sentinel_check.py BINARY OUTDIR noreload|race-root|race-include
+  [MEDIA]`: reload-safe unbinds. `noreload`: a user Escape saved to an
+  `include`d file without a reload during a take; Escape cancels and is the
+  receiver's again when idle and after Quit. `race-*`: user Escape + chord
+  saved to the root config or the included file, the listener thread paused,
+  `swaymsg reload`, SIGTERM; both user bindings must still fire after exit.
+  Needs `SWAY_CONFIG`, `SWAY_BASE_CONFIG`, `INCLUDE_FILE`, `MARKER_DIR` and
+  passwordless `sudo` for the pause. The receiver shows on-screen counters
+  (`RECEIVER_COUNTER`) for the screenshots.
+- `thread_pause.py PID THREAD-NAME`: stop one thread of a process (a
+  per-thread ptrace stop, unlike `SIGSTOP`) until stdin closes.
 - `escape_check.py DISPLAY BINARY LABEL OUTDIR [next]`: launches the app with
   the stub, focuses a receiver, taps the shortcut, presses plain Escape and
   reports HUD hide / staged-audio deletion times and stub requests (with

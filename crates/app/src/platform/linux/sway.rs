@@ -28,6 +28,21 @@
 //! removes one it installed: included files are read from disk, so an edit
 //! saved without `swaymsg reload` is not yet in Sway's live table, where
 //! Cantrip's own `nop` still is.
+//!
+//! The reload event reaches the listener asynchronously, so ownership alone
+//! cannot tell whether a `swaymsg reload` has already replaced Sway's live
+//! table (with the user's freshly loaded bindings) and the listener has just
+//! not run yet. Whenever Cantrip installs runtime bindings it first registers
+//! a sentinel binding mode, `__cantrip_live_<pid>_<generation>`, holding one
+//! inert binding. The mode is never entered (the active mode stays
+//! `default`) and a reload wipes it with every other runtime binding.
+//! Immediately before any `unbindsym`, Cantrip checks synchronously with
+//! `GET_BINDING_MODES`: if the sentinel is still listed, no reload has
+//! happened since the install and Cantrip's `nop`s are still live, so they
+//! are removed. If it is gone, the reload has already dropped them and
+//! anything bound now is the user's, so Cantrip removes nothing and just
+//! clears its ownership. Sway cannot delete a mode, so a sentinel stays,
+//! inactive, until the next reload.
 
 use crate::ipc::{KeyLine, KeyRelay};
 use crate::platform::HotkeyMode;
@@ -46,6 +61,7 @@ const MAGIC: &[u8; 6] = b"i3-ipc";
 const RUN_COMMAND: u32 = 0;
 const SUBSCRIBE: u32 = 2;
 const GET_TREE: u32 = 4;
+const GET_BINDING_MODES: u32 = 8;
 const GET_VERSION: u32 = 7;
 const GET_CONFIG: u32 = 9;
 const EVENT_WORKSPACE: u32 = 0x8000_0000;
@@ -61,6 +77,9 @@ const MAX_MESSAGE: usize = 64 << 20;
 pub const NOP_DOWN: &str = "nop cantrip-hotkey-down";
 pub const NOP_UP: &str = "nop cantrip-hotkey-up";
 pub const NOP_CANCEL: &str = "nop cantrip-cancel";
+/// The reload sentinel's mode-name prefix and its one inert binding.
+const SENTINEL_PREFIX: &str = "__cantrip_live_";
+const SENTINEL_BINDING: &str = "XF86Launch9 nop cantrip-sentinel";
 
 /// One Sway IPC endpoint (a fresh connection per request: requests are rare).
 #[derive(Clone, Debug)]
@@ -167,6 +186,15 @@ impl SwayIpc {
             .and_then(|c| c.as_str())
             .unwrap_or_default()
             .to_string())
+    }
+
+    /// The names of every binding mode Sway holds now (`GET_BINDING_MODES`).
+    pub fn binding_modes(&self) -> Result<Vec<String>, String> {
+        let reply = self
+            .request(GET_BINDING_MODES, "")
+            .map_err(|e| e.to_string())?;
+        let v: Vec<String> = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
+        Ok(v)
     }
 
     /// The compositor's process id (the socket peer).
@@ -798,6 +826,15 @@ struct Bindings {
     escape_owned_by_cantrip: bool,
     /// The backend was dropped (graceful exit): install nothing more.
     closed: bool,
+    /// The reload sentinel mode registered with Cantrip's current runtime
+    /// bindings (`None`: none registered yet, or the last one was found
+    /// wiped by a reload).
+    sentinel: Option<String>,
+    /// The sentinel could not be registered on this Sway: liveness is
+    /// unverifiable, so owned bindings are removed as before.
+    sentinel_unsupported: bool,
+    /// Sentinel generation counter (each one gets a fresh name).
+    generation: u64,
 }
 
 impl Bindings {
@@ -805,7 +842,67 @@ impl Bindings {
         self.ipc.user_bindings().unwrap_or_default()
     }
 
-    fn install_chord(&self, c: &str) -> Result<(), String> {
+    /// Before installing runtime bindings: make sure a sentinel mode is
+    /// registered and still live. A missing one means a reload has wiped
+    /// Sway's runtime table, so ownership is cleared first.
+    fn arm_sentinel(&mut self) {
+        if self.sentinel.is_some() && self.sentinel_live() {
+            return;
+        }
+        self.generation += 1;
+        let name = format!(
+            "{SENTINEL_PREFIX}{}_{}",
+            std::process::id(),
+            self.generation
+        );
+        match self
+            .ipc
+            .run(&format!("mode \"{name}\" bindsym {SENTINEL_BINDING}"))
+        {
+            Ok(()) => {
+                self.sentinel = Some(name);
+                self.sentinel_unsupported = false;
+            }
+            Err(e) => {
+                self.sentinel_unsupported = true;
+                eprintln!("[cantrip] reload sentinel unavailable on this Sway session: {e}");
+            }
+        }
+    }
+
+    /// Whether the registered sentinel is still in Sway's mode table; if
+    /// not (or Sway does not answer), a reload has dropped Cantrip's
+    /// runtime bindings: ownership and the sentinel are cleared.
+    fn sentinel_live(&mut self) -> bool {
+        let live = match &self.sentinel {
+            None => self.sentinel_unsupported,
+            Some(name) => self
+                .ipc
+                .binding_modes()
+                .is_ok_and(|modes| modes.iter().any(|m| m == name)),
+        };
+        if !live {
+            self.sentinel = None;
+            self.chord_owned = false;
+            self.escape_owned_by_cantrip = false;
+        }
+        live
+    }
+
+    /// Immediately before an `unbindsym` of an owned binding: whether
+    /// Cantrip's `nop`s are still in Sway's live table.
+    fn still_installed(&mut self) -> bool {
+        if self.sentinel_live() {
+            return true;
+        }
+        eprintln!(
+            "[cantrip] Sway reloaded since Cantrip bound its keys; leaving the reloaded bindings alone"
+        );
+        false
+    }
+
+    fn install_chord(&mut self, c: &str) -> Result<(), String> {
+        self.arm_sentinel();
         self.ipc
             .run(&format!("bindsym --no-repeat {c} {NOP_DOWN}"))?;
         if let Err(e) = self.ipc.run(&format!("bindsym --release {c} {NOP_UP}")) {
@@ -815,15 +912,16 @@ impl Bindings {
         Ok(())
     }
 
-    /// Remove Cantrip's chord bindings, if Cantrip installed them. Always,
-    /// whatever the config files on disk say now: `chord_owned` means Sway's
-    /// live table holds Cantrip's `nop`s (a reload, which would load an
-    /// edited file, clears it first), so an edit saved without a reload must
-    /// not leave them bound.
+    /// Remove Cantrip's chord bindings, if Cantrip installed them and no
+    /// reload has wiped them since (the sentinel check). Whatever the config
+    /// files on disk say now: while the sentinel is live, Sway's table holds
+    /// Cantrip's `nop`s, so an edit saved without a reload must not leave
+    /// them bound.
     fn remove_chord(&mut self) {
-        if !std::mem::take(&mut self.chord_owned) {
+        if !self.chord_owned || !self.still_installed() {
             return;
         }
+        self.chord_owned = false;
         if let Some(c) = &self.chord {
             let _ = self.ipc.run(&format!("unbindsym {c}"));
             let _ = self.ipc.run(&format!("unbindsym --release {c}"));
@@ -835,6 +933,7 @@ impl Bindings {
             eprintln!("[cantrip] escape bind skipped: the Sway config binds plain Escape");
             return;
         }
+        self.arm_sentinel();
         match self
             .ipc
             .run(&format!("bindsym --no-repeat Escape {NOP_CANCEL}"))
@@ -844,11 +943,13 @@ impl Bindings {
         }
     }
 
-    /// Remove Cantrip's Escape binding, if Cantrip installed it. Always,
-    /// like [`Bindings::remove_chord`]: an Escape saved to a config file
-    /// without a reload is not in Sway's live table, Cantrip's `nop` is.
+    /// Remove Cantrip's Escape binding, if Cantrip installed it and no
+    /// reload has wiped it since, like [`Bindings::remove_chord`]: an Escape
+    /// saved to a config file without a reload is not in Sway's live table,
+    /// Cantrip's `nop` is; after a reload the live Escape is the user's.
     fn unbind_escape(&mut self) {
-        if std::mem::take(&mut self.escape_owned_by_cantrip) {
+        if self.escape_owned_by_cantrip && self.still_installed() {
+            self.escape_owned_by_cantrip = false;
             let _ = self.ipc.run("unbindsym Escape");
         }
     }
@@ -907,6 +1008,9 @@ impl SwayKeys {
             escape_wanted: false,
             escape_owned_by_cantrip: false,
             closed: false,
+            sentinel: None,
+            sentinel_unsupported: false,
+            generation: 0,
         }));
         let sink: Sink = Arc::default();
         let (st, sk) = (state.clone(), sink.clone());
@@ -1233,8 +1337,12 @@ mod tests {
     }
 
     /// A loopback stand-in for Sway's IPC socket: answers `GET_VERSION`,
-    /// `SUBSCRIBE` (kept open, silent), `GET_CONFIG` with `config`, and
-    /// records every `RUN_COMMAND` as a success.
+    /// `SUBSCRIBE` (kept open, silent), `GET_CONFIG` with `config`,
+    /// `GET_BINDING_MODES` with `default` plus every mode a
+    /// `mode "<name>" bindsym …` command defined, and records every
+    /// `RUN_COMMAND` as a success. `reload` drops the defined modes like
+    /// Sway's, but sends no event: the listener never learns of it (the
+    /// "listener paused" race).
     fn fake_sway(dir: &Path, config: String) -> (SwayIpc, Arc<Mutex<Vec<String>>>) {
         let path = dir.join("sway.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
@@ -1242,6 +1350,7 @@ mod tests {
         let log = ran.clone();
         std::thread::spawn(move || {
             let mut subscribed = Vec::new();
+            let mut modes: Vec<String> = vec!["default".into()];
             for conn in listener.incoming() {
                 let Ok(mut s) = conn else { return };
                 let Ok((kind, body)) = read_msg(&mut s) else {
@@ -1249,9 +1358,17 @@ mod tests {
                 };
                 let reply = match kind {
                     RUN_COMMAND => {
-                        lock(&log).push(String::from_utf8_lossy(&body).into_owned());
+                        let cmd = String::from_utf8_lossy(&body).into_owned();
+                        let w = words(&cmd);
+                        if cmd == "reload" {
+                            modes.truncate(1);
+                        } else if w.len() > 2 && w[0] == "mode" && !modes.contains(&w[1]) {
+                            modes.push(w[1].clone());
+                        }
+                        lock(&log).push(cmd);
                         r#"[{"success":true}]"#.to_string()
                     }
+                    GET_BINDING_MODES => serde_json::json!(modes).to_string(),
                     GET_CONFIG => serde_json::json!({ "config": config }).to_string(),
                     SUBSCRIBE => r#"{"success":true}"#.to_string(),
                     _ => "{}".to_string(),
@@ -1317,6 +1434,139 @@ mod tests {
             lock(&ran)
         );
         assert_eq!(taken("unbindsym --release Control+Mod1+d"), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pass 7 finding: `swaymsg reload` replaced Sway's live table, and
+    /// take end / exit ran before the listener saw the reload event (here:
+    /// never, the fake sends none). The sentinel mode is gone, so Cantrip
+    /// must not `unbindsym` the user's reloaded Escape or chord, and its
+    /// ownership is cleared. With the sentinel present it removes its own.
+    #[test]
+    fn a_reload_the_listener_has_not_seen_skips_every_unbind() {
+        let dir = tmpdir("sentinel");
+        let (ipc, ran) = fake_sway(&dir, String::new());
+        let unbinds = || {
+            lock(&ran)
+                .iter()
+                .filter(|r| r.starts_with("unbindsym"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let sentinels = || {
+            lock(&ran)
+                .iter()
+                .filter(|r| r.starts_with(&format!("mode \"{SENTINEL_PREFIX}")))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut keys = SwayKeys::new(ipc.clone()).unwrap();
+        keys.register(&Chord::platform_default(), tx).unwrap();
+        let first = sentinels();
+        assert_eq!(first.len(), 1, "sentinel registered at startup");
+        let gen1 = format!("{SENTINEL_PREFIX}{}_1", std::process::id());
+        assert_eq!(
+            first[0],
+            format!("mode \"{gen1}\" bindsym {SENTINEL_BINDING}")
+        );
+        assert!(ipc.binding_modes().unwrap().contains(&gen1));
+        // Sentinel present: the take's own Escape is removed at take end.
+        keys.set_escape(true);
+        assert_eq!(sentinels().len(), 1, "a live sentinel is reused");
+        keys.set_escape(false);
+        assert_eq!(unbinds(), ["unbindsym Escape"]);
+        // A new take, then a reload the listener has not processed.
+        keys.set_escape(true);
+        ipc.run("reload").unwrap();
+        keys.set_escape(false);
+        assert_eq!(
+            unbinds(),
+            ["unbindsym Escape"],
+            "reloaded Escape left alone"
+        );
+        {
+            let st = lock(&keys.state);
+            assert!(
+                !st.escape_owned_by_cantrip && !st.chord_owned,
+                "ownership cleared"
+            );
+            assert!(st.sentinel.is_none());
+        }
+        // Exit: the chord is not Cantrip's any more either.
+        drop(keys);
+        assert_eq!(unbinds(), ["unbindsym Escape"], "exit unbinds nothing");
+
+        // Reload during a take, then SIGTERM (Drop) mid-take: nothing unbound.
+        let dir2 = tmpdir("sentinel-exit");
+        let (ipc2, ran2) = fake_sway(&dir2, String::new());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut keys = SwayKeys::new(ipc2.clone()).unwrap();
+        keys.register(&Chord::platform_default(), tx).unwrap();
+        keys.set_escape(true);
+        ipc2.run("reload").unwrap();
+        drop(keys);
+        assert!(
+            !lock(&ran2).iter().any(|r| r.starts_with("unbindsym")),
+            "{:?}",
+            lock(&ran2)
+        );
+        // Without a reload, exit mid-take removes all of Cantrip's own.
+        let dir3 = tmpdir("sentinel-clean");
+        let (ipc3, ran3) = fake_sway(&dir3, String::new());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut keys = SwayKeys::new(ipc3).unwrap();
+        keys.register(&Chord::platform_default(), tx).unwrap();
+        keys.set_escape(true);
+        drop(keys);
+        let got: Vec<String> = lock(&ran3)
+            .iter()
+            .filter(|r| r.starts_with("unbindsym"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "unbindsym Escape",
+                "unbindsym Control+Mod1+space",
+                "unbindsym --release Control+Mod1+space"
+            ]
+        );
+        for d in [dir, dir2, dir3] {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// After a reload Cantrip has not yet processed, the next install
+    /// registers a fresh sentinel generation (and drops stale ownership),
+    /// so later unbinds are vouched for by the new one.
+    #[test]
+    fn an_install_after_an_unseen_reload_registers_a_new_generation() {
+        let dir = tmpdir("sentinel-gen");
+        let (ipc, ran) = fake_sway(&dir, String::new());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut keys = SwayKeys::new(ipc.clone()).unwrap();
+        keys.register(&Chord::platform_default(), tx).unwrap();
+        ipc.run("reload").unwrap();
+        keys.set_escape(true);
+        let gen2 = format!("{SENTINEL_PREFIX}{}_2", std::process::id());
+        assert!(ipc.binding_modes().unwrap().contains(&gen2));
+        {
+            let st = lock(&keys.state);
+            assert!(st.escape_owned_by_cantrip);
+            assert!(!st.chord_owned, "the reload wiped the chord");
+        }
+        drop(keys);
+        let got: Vec<String> = lock(&ran)
+            .iter()
+            .filter(|r| r.starts_with("unbindsym"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            got,
+            ["unbindsym Escape"],
+            "only what the new sentinel vouches for"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
