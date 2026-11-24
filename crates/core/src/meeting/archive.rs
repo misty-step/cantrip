@@ -206,8 +206,8 @@ pub fn open_unnamed_in(dir: &Path) -> io::Result<File> {
         libc::open(
             c.as_ptr(),
             libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
-            // The same mode (under the umask) a directly created note gets.
-            0o644 as libc::c_uint,
+            // Owner-only, the same mode a directly created note gets.
+            0o600 as libc::c_uint,
         )
     };
     if fd < 0 {
@@ -261,7 +261,7 @@ fn create_direct(path: &Path, bytes: &[u8], afs: &dyn ArchiveFs) -> io::Result<C
     let mut f = match OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o644)
+        .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
     {
@@ -330,7 +330,7 @@ fn prepare_how(_dir: &Path, scratch: &Path, bytes: &[u8], afs: &dyn ArchiveFs) -
     let mut f = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o644)
+        .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&tmp)?;
     match afs.write_note(&mut f, bytes).and_then(|()| f.sync_all()) {
@@ -568,6 +568,36 @@ mod tests {
         let link = t.path().join("link");
         symlink(&inside, &link).unwrap();
         assert!(overlaps(&staging, &link).unwrap());
+    }
+
+    /// Published notes are owner-only (`0600`) on the atomic path and on the
+    /// direct exclusive-create fallback (a `0644` regression shows under any
+    /// usual umask: `022`, `002`).
+    #[test]
+    fn published_notes_are_owner_only_on_every_path() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("mm");
+        let scratch = t.path().join("staging");
+        fs::create_dir(&dir).unwrap();
+        fs::create_dir(&scratch).unwrap();
+        let note = b"# a note\n";
+        let atomic = dir.join("atomic.md");
+        let mut prepared = prepare(&dir, &scratch, note, &RealFs).unwrap();
+        assert!(prepared.atomic(), "this platform publishes atomically");
+        assert_eq!(prepared.publish_at(&atomic).unwrap(), Create::Created);
+        drop(prepared);
+
+        let direct = dir.join("direct.md");
+        assert_eq!(
+            create_direct(&direct, note, &RealFs).unwrap(),
+            Create::Created
+        );
+
+        for p in [&atomic, &direct] {
+            assert_eq!(fs::read(p).unwrap(), note);
+            let mode = fs::metadata(p).unwrap().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{p:?}: {mode:o}");
+        }
     }
 
     #[test]

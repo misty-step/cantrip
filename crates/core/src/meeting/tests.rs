@@ -1155,6 +1155,7 @@ fn files_under(root: &Path) -> Vec<Seen> {
 
 /// Watches `root` in a tight loop until told to stop; returns every distinct
 /// non-directory entry it saw as (relative path, size, digest).
+#[cfg(target_os = "linux")]
 fn watch(
     root: PathBuf,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -1174,6 +1175,7 @@ fn watch(
     })
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn slow_note_write_is_never_visible_in_the_meeting_folder_until_whole() {
     let h = H::new(tone(1500), silence(1500));
@@ -1218,6 +1220,7 @@ fn slow_note_write_is_never_visible_in_the_meeting_folder_until_whole() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn without_o_tmpfile_the_note_is_created_directly_and_still_archives() {
     let h = H::new(tone(1500), silence(1500));
@@ -1294,6 +1297,7 @@ fn eio_with_and_without_o_tmpfile_keeps_staging_flushes_the_chain_and_retry_arch
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn eexist_steps_to_the_next_name_and_never_touches_what_is_there() {
     for no_tmpfile in [false, true] {
@@ -1330,6 +1334,11 @@ fn eexist_steps_to_the_next_name_and_never_touches_what_is_there() {
         );
         drop(prepared);
         assert_eq!(fs::read(&third).unwrap(), note);
+        assert_eq!(
+            fs::metadata(&third).unwrap().mode() & 0o777,
+            0o600,
+            "{no_tmpfile}: owner-only note"
+        );
         let after = snapshot(&dir);
         for (k, v) in &before {
             assert_eq!(after.get(k), Some(v), "{k:?} untouched");
