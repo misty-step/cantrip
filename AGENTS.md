@@ -35,8 +35,10 @@ Design principles (UX/DX/AX) live in [mistystack design](https://github.com/mist
   or 4 s timeout gives Raw. A transcription error keeps the audio staged and
   never falls back to local recognition. Local recognition only with no key or
   no connection, and only when guaranteed on-device.
-- **Meeting folder is append-only.** Exclusive create only: no temp files,
-  overwrites, renames, deletes or write-opens of existing files. Disjointness
+- **Meeting folder is append-only.** A note appears only by a no-clobber
+  step (Linux `O_TMPFILE` + `linkat`, macOS `renameatx_np(RENAME_EXCL)` from
+  staging, else `O_EXCL` create): no temp names, overwrites, renames or
+  deletes of existing files, no write-opens of existing files. Disjointness
   from staging is judged by filesystem identity. Staging is deleted only after
   a complete note is verified and flushed.
 - **Privacy.** Logs hold outcomes, durations, counts, model names and error

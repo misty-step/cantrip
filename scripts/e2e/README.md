@@ -27,6 +27,15 @@ ARCHITECTURE.md › Verification boundaries.
   `EIO` while a flag file exists and logs every flush; with
   `cantrip e2e meeting` / `cantrip e2e meeting-retry` it proves staging stays
   until the whole Meeting-folder chain flushes.
+- `slow_write.c`: `LD_PRELOAD` slow-disk shim. The first `write(2)` to each
+  file under `$SLOW_WRITE_PREFIX` (the Meeting folder, including an unnamed
+  `O_TMPFILE` inode there) writes half, then sleeps `$SLOW_WRITE_MS` (1500).
+  `SLOW_WRITE_NO_TMPFILE=1` refuses `O_TMPFILE` with `EOPNOTSUPP` (the
+  direct-create fallback); `SLOW_WRITE_RACE=1` creates the first `linkat`
+  destination just before the call (a racing writer → `EEXIST`).
+- `publish_watch.py FOLDER LOG STOPFILE`: scans the Meeting folder in a tight
+  loop and on inotify events, logging every distinct (path, size, SHA-256) it
+  sees. With `slow_write.c` it shows a note is only ever absent or whole.
 - `fake_logind.py LOG`: a fake `org.freedesktop.login1` on a private bus
   (`FAKE_BUS`); logs inhibitor locks and their release, and emits
   `PrepareForSleep(true)` on `SIGUSR1`. Point the app at it with

@@ -709,12 +709,20 @@ fn injected_verify_or_flush_failure_keeps_staging_and_retry_publishes_with_zero_
     }
 }
 
-/// Directory flush boundary that fails with `EIO` for one directory (by
-/// filesystem identity) while armed, and records every directory it flushes.
+type MidWrite = Arc<dyn Fn() + Send + Sync>;
+
+/// Publication filesystem boundary for tests: fails the flush of one
+/// directory (by filesystem identity) with `EIO` while armed and records
+/// every directory it flushes; optionally reports `O_TMPFILE` as unsupported
+/// (`EOPNOTSUPP`); optionally splits the note's write in two, running a hook
+/// and pausing between the halves (a slow disk).
 #[derive(Default)]
 struct FaultyFs {
     fail: Mutex<Option<PathBuf>>,
     synced: Mutex<Vec<PathBuf>>,
+    no_tmpfile: std::sync::atomic::AtomicBool,
+    mid_write: Mutex<Option<(MidWrite, Duration)>>,
+    unnamed_opened: AtomicUsize,
 }
 
 impl archive::ArchiveFs for FaultyFs {
@@ -726,6 +734,28 @@ impl archive::ArchiveFs for FaultyFs {
             }
         }
         archive::RealFs.sync_dir(dir)
+    }
+
+    fn open_unnamed(&self, dir: &Path) -> std::io::Result<fs::File> {
+        if self.no_tmpfile.load(Ordering::SeqCst) {
+            return Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+        }
+        self.unnamed_opened.fetch_add(1, Ordering::SeqCst);
+        archive::RealFs.open_unnamed(dir)
+    }
+
+    fn write_note(&self, f: &mut fs::File, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        let hook = self.mid_write.lock().unwrap().clone();
+        let Some((hook, pause)) = hook else {
+            return f.write_all(bytes);
+        };
+        let half = bytes.len() / 2;
+        f.write_all(&bytes[..half])?;
+        f.flush()?;
+        hook();
+        std::thread::sleep(pause);
+        f.write_all(&bytes[half..])
     }
 }
 
@@ -1107,4 +1137,212 @@ fn discard_removes_staging_and_never_touches_the_folder() {
     assert!(!h.store().exists(&id));
     assert_eq!(snapshot(&h.folder), before);
     assert!(m.recoverable().is_empty());
+}
+
+// ─────────────────────── atomic publication ───────────────────────
+
+/// One watched entry: (relative path, size, content digest).
+type Seen = (PathBuf, u64, String);
+
+/// Every regular file beneath `root` as (relative path, size, digest).
+fn files_under(root: &Path) -> Vec<Seen> {
+    snapshot(root)
+        .into_iter()
+        .filter(|(_, v)| v.0 != "dir")
+        .map(|(p, v)| (p, v.3, v.4))
+        .collect()
+}
+
+/// Watches `root` in a tight loop until told to stop; returns every distinct
+/// non-directory entry it saw as (relative path, size, digest).
+fn watch(
+    root: PathBuf,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<(usize, Vec<Seen>)> {
+    std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        let mut scans = 0;
+        while !stop.load(Ordering::SeqCst) {
+            for e in files_under(&root) {
+                if !seen.contains(&e) {
+                    seen.push(e);
+                }
+            }
+            scans += 1;
+        }
+        (scans, seen)
+    })
+}
+
+#[test]
+fn slow_note_write_is_never_visible_in_the_meeting_folder_until_whole() {
+    let h = H::new(tone(1500), silence(1500));
+    let fsx = Arc::new(FaultyFs::default());
+    // Mid-write: half the bytes are on disk, the rest are 400 ms away. The
+    // Meeting folder must hold no file at all (no note, no temp name).
+    let mid: Arc<Mutex<Vec<Vec<Seen>>>> = Arc::default();
+    let (folder, mid2) = (h.folder.clone(), mid.clone());
+    *fsx.mid_write.lock().unwrap() = Some((
+        Arc::new(move || mid2.lock().unwrap().push(files_under(&folder))),
+        Duration::from_millis(400),
+    ));
+    let m = h.meetings().with_archive_fs(fsx.clone());
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = watch(h.folder.clone(), stop.clone());
+    let id = h.run(&m, &h.folder.clone());
+    stop.store(true, Ordering::SeqCst);
+    let (scans, seen) = watcher.join().unwrap();
+
+    let Some(Finish::Archived(p)) = m.last_finish() else {
+        panic!("{:?}", m.last_finish())
+    };
+    assert_eq!(
+        fsx.unnamed_opened.load(Ordering::SeqCst),
+        1,
+        "O_TMPFILE used"
+    );
+    let bytes = fs::read(&p).unwrap();
+    let rel = p.strip_prefix(&h.folder).unwrap().to_path_buf();
+    let whole = (rel, bytes.len() as u64, archive::digest(&bytes));
+    let mid = mid.lock().unwrap().clone();
+    assert_eq!(mid, vec![vec![]], "nothing visible during the write");
+    assert!(scans > 10, "watcher ran throughout ({scans} scans)");
+    assert_eq!(
+        seen,
+        vec![whole],
+        "the watcher only ever saw the whole, final note"
+    );
+    assert!(
+        !h.store().exists(&id),
+        "staging deleted after verify + flush"
+    );
+}
+
+#[test]
+fn without_o_tmpfile_the_note_is_created_directly_and_still_archives() {
+    let h = H::new(tone(1500), silence(1500));
+    let fsx = Arc::new(FaultyFs::default());
+    fsx.no_tmpfile.store(true, Ordering::SeqCst);
+    let mid: Arc<Mutex<Vec<Vec<Seen>>>> = Arc::default();
+    let (folder, mid2) = (h.folder.clone(), mid.clone());
+    *fsx.mid_write.lock().unwrap() = Some((
+        Arc::new(move || mid2.lock().unwrap().push(files_under(&folder))),
+        Duration::from_millis(1),
+    ));
+    let m = h.meetings().with_archive_fs(fsx.clone());
+    let id = h.run(&m, &h.folder.clone());
+    let Some(Finish::Archived(p)) = m.last_finish() else {
+        panic!("{:?}", m.last_finish())
+    };
+    assert_eq!(fsx.unnamed_opened.load(Ordering::SeqCst), 0);
+    // The fallback is the documented non-atomic one: the seam sees the note
+    // by its final name, half written (which is exactly what the atomic path
+    // above never shows).
+    let mid = mid.lock().unwrap().clone();
+    let bytes = fs::read(&p).unwrap();
+    assert_eq!(mid.len(), 1);
+    assert_eq!(mid[0].len(), 1);
+    assert_eq!(mid[0][0].0, p.strip_prefix(&h.folder).unwrap());
+    assert_eq!(mid[0][0].1, (bytes.len() / 2) as u64);
+    assert_eq!(notes_under(&h.folder), vec![p.clone()]);
+    assert_eq!(files_under(&h.folder).len(), 1, "no temp names");
+    assert!(!h.store().exists(&id));
+}
+
+#[test]
+fn eio_with_and_without_o_tmpfile_keeps_staging_flushes_the_chain_and_retry_archives() {
+    for no_tmpfile in [false, true] {
+        let h = H::new(tone(1500), silence(1500));
+        let fsx = Arc::new(FaultyFs::default());
+        fsx.no_tmpfile.store(no_tmpfile, Ordering::SeqCst);
+        *fsx.fail.lock().unwrap() = Some(h.folder.clone());
+        let m = h.meetings().with_archive_fs(fsx.clone());
+        let id = h.run(&m, &h.folder.clone());
+        assert!(
+            matches!(
+                m.last_finish(),
+                Some(Finish::PendingArchive(archive::Blocked::FlushFailed(_)))
+            ),
+            "{no_tmpfile}: {:?}",
+            m.last_finish()
+        );
+        let rec = h.store().load(&id).unwrap().publish_path.unwrap();
+        let staged = h.store().note(&id).expect("staged note kept intact");
+        assert_eq!(fs::read_to_string(&rec).unwrap(), staged);
+        let stage_files: Vec<_> = snapshot(&h.store().meeting_dir(&id))
+            .into_keys()
+            .filter(|k| k.to_str().unwrap().contains("publish-"))
+            .collect();
+        assert!(stage_files.is_empty(), "no publish copies left in staging");
+        let mm = rec.parent().unwrap().to_path_buf();
+        let yyyy = mm.parent().unwrap().to_path_buf();
+        let sub = yyyy.parent().unwrap().to_path_buf();
+        let chain = vec![mm, yyyy, sub, h.folder.clone()];
+        let synced = fsx.take_synced();
+        assert!(synced.ends_with(&chain), "{no_tmpfile}: {synced:?}");
+
+        *fsx.fail.lock().unwrap() = None;
+        let calls = h.speech.calls();
+        m.retry(&id, h.folder.clone());
+        assert!(m.wait_idle(Duration::from_secs(10)));
+        assert_eq!(m.last_finish(), Some(Finish::Archived(rec.clone())));
+        assert_eq!(fsx.take_synced(), chain, "{no_tmpfile}");
+        assert_eq!(h.speech.calls(), calls, "publish-only Retry: zero calls");
+        assert!(!h.store().exists(&id));
+        assert_eq!(notes_under(&h.folder), vec![rec]);
+        assert_eq!(files_under(&h.folder).len(), 1, "no temp names");
+    }
+}
+
+#[test]
+fn eexist_steps_to_the_next_name_and_never_touches_what_is_there() {
+    for no_tmpfile in [false, true] {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("mm");
+        let scratch = t.path().join("staging");
+        fs::create_dir(&dir).unwrap();
+        fs::create_dir(&scratch).unwrap();
+        let taken = dir.join("n.md");
+        fs::write(&taken, "the user's own file").unwrap();
+        let dangling = dir.join("n-2.md");
+        symlink(t.path().join("nowhere"), &dangling).unwrap();
+        let before = snapshot(&dir);
+        let fsx = FaultyFs::default();
+        fsx.no_tmpfile.store(no_tmpfile, Ordering::SeqCst);
+        let note = b"# a whole note\n".repeat(1000);
+        let mut prepared = archive::prepare(&dir, &scratch, &note, &fsx).unwrap();
+        assert_eq!(prepared.atomic(), !no_tmpfile);
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            2,
+            "prepared bytes have no name"
+        );
+        assert_eq!(prepared.publish_at(&taken).unwrap(), archive::Create::Taken);
+        assert_eq!(
+            prepared.publish_at(&dangling).unwrap(),
+            archive::Create::Taken
+        );
+        assert_eq!(snapshot(&dir), before, "{no_tmpfile}: nothing touched");
+        let third = dir.join("n-3.md");
+        assert_eq!(
+            prepared.publish_at(&third).unwrap(),
+            archive::Create::Created
+        );
+        drop(prepared);
+        assert_eq!(fs::read(&third).unwrap(), note);
+        let after = snapshot(&dir);
+        for (k, v) in &before {
+            assert_eq!(after.get(k), Some(v), "{k:?} untouched");
+        }
+        assert_eq!(after.len(), 3, "only the note appeared: {after:?}");
+        assert_eq!(fs::read_dir(&scratch).unwrap().count(), 0);
+        let r = archive::verify_and_flush(
+            &third,
+            &archive::digest(&note),
+            std::slice::from_ref(&dir),
+            None,
+            &archive::RealFs,
+        );
+        assert_eq!(r, Ok(()));
+    }
 }

@@ -7,9 +7,16 @@
 //! - the chosen folder is never created; `cantrip-meeting/YYYY/MM` are created
 //!   one level at a time, each existing level checked before anything is
 //!   created or written inside it;
-//! - notes are created with `O_CREAT|O_EXCL|O_NOFOLLOW` and written in place:
-//!   no temp files, no renames, no deletes, no truncation, no write-opens of
-//!   pre-existing files;
+//! - a note's complete bytes are written and fsynced *before* it gets a name,
+//!   then it appears in one step that can never replace an existing name:
+//!   Linux writes an unnamed `O_TMPFILE` inode in the `MM` directory and
+//!   `linkat`s it; macOS writes a copy inside the meeting's own staging
+//!   directory and moves it with `renameatx_np(RENAME_EXCL)`. `EEXIST` steps to
+//!   the next name. Where neither is supported (`EOPNOTSUPP`, `EXDEV`, no
+//!   `/proc`, …) the note is created with `O_CREAT|O_EXCL|O_NOFOLLOW` and
+//!   written in place. Either way: no temp file names in the Meeting folder, no
+//!   renames or deletes there, no truncation, no write-opens of pre-existing
+//!   files;
 //! - verification opens with `O_NOFOLLOW|O_NONBLOCK`, so a symlink, FIFO,
 //!   socket or device at the path is refused without being followed, read or
 //!   waited on.
@@ -37,22 +44,6 @@ pub enum Blocked {
     /// directories up to and including the Meeting folder did not flush to
     /// stable storage; it is left alone and staging is kept.
     FlushFailed(String),
-}
-
-/// The directory-flush boundary of publication. The real implementation
-/// fsyncs; tests inject `EIO` on a chosen directory (e.g. the Meeting folder)
-/// to prove that staging is never deleted before the whole chain is durable.
-pub trait ArchiveFs: Send + Sync {
-    fn sync_dir(&self, dir: &Path) -> io::Result<()>;
-}
-
-/// `fsync(2)` on the directory.
-pub struct RealFs;
-
-impl ArchiveFs for RealFs {
-    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
-        File::open(dir)?.sync_all()
-    }
 }
 
 /// Test-only fault injection for verification and flush.
@@ -174,16 +165,99 @@ pub fn candidate_name(stamp: &str, slug: &str, partial: bool, n: u32) -> String 
     }
 }
 
-/// Outcome of one exclusive create.
+/// Outcome of one exclusive publication attempt.
+#[derive(Debug, PartialEq, Eq)]
 pub enum Create {
     Created,
     Taken,
 }
 
+/// Errors meaning "this filesystem (or `/proc`) cannot publish atomically
+/// here": the note is then created directly instead. Anything else is a real
+/// failure (permissions, space, I/O) and blocks publication.
+fn atomic_unsupported(e: &io::Error) -> bool {
+    // `ENOTSUP` and `EOPNOTSUPP` are one value on Linux, two on macOS.
+    const UNSUPPORTED: [i32; 6] = [
+        libc::EOPNOTSUPP,
+        libc::ENOTSUP,
+        libc::EISDIR,
+        libc::EINVAL,
+        libc::EXDEV,
+        libc::ENOENT,
+    ];
+    e.raw_os_error().is_some_and(|n| UNSUPPORTED.contains(&n))
+}
+
+fn c_path(p: &Path) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
+}
+
+/// Linux: an unnamed regular-file inode in `dir` (`O_TMPFILE`). It has no
+/// name in the directory, so nothing is visible there until it is linked.
+#[cfg(target_os = "linux")]
+pub fn open_unnamed_in(dir: &Path) -> io::Result<File> {
+    use std::os::fd::FromRawFd;
+    let c = c_path(dir)?;
+    // SAFETY: `c` is a valid NUL-terminated path; the returned descriptor is
+    // owned by the `File` below and nowhere else.
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+            // The same mode (under the umask) a directly created note gets.
+            0o644 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a freshly opened descriptor we exclusively own.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// No unnamed inodes outside Linux.
+#[cfg(not(target_os = "linux"))]
+pub fn open_unnamed_in(_dir: &Path) -> io::Result<File> {
+    Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP))
+}
+
+/// The filesystem boundary of publication. The real implementation fsyncs,
+/// opens `O_TMPFILE` inodes and writes straight through; tests inject `EIO`
+/// on a chosen directory (e.g. the Meeting folder) to prove that staging is
+/// never deleted before the whole chain is durable, simulate a filesystem
+/// without `O_TMPFILE`, and slow or split the note's write to prove no
+/// partial note is ever visible.
+pub trait ArchiveFs: Send + Sync {
+    fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+
+    /// Open an unnamed inode in `dir` (Linux `O_TMPFILE`).
+    fn open_unnamed(&self, dir: &Path) -> io::Result<File> {
+        open_unnamed_in(dir)
+    }
+
+    /// Write the note's complete bytes into a freshly created file.
+    fn write_note(&self, f: &mut File, bytes: &[u8]) -> io::Result<()> {
+        f.write_all(bytes)
+    }
+}
+
+/// `fsync(2)` on the directory; real `O_TMPFILE`; straight writes.
+pub struct RealFs;
+
+impl ArchiveFs for RealFs {
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        File::open(dir)?.sync_all()
+    }
+}
+
 /// Exclusively create `path` and write `bytes` into it, then fsync it. Never
 /// opens an existing file. A write error after creation leaves the
-/// incomplete file in place (it will fail verification).
-pub fn create_exclusive(path: &Path, bytes: &[u8]) -> io::Result<Create> {
+/// incomplete file in place (it will fail verification). This is the
+/// fallback where atomic publication is unsupported: the name exists before
+/// its bytes do.
+fn create_direct(path: &Path, bytes: &[u8], afs: &dyn ArchiveFs) -> io::Result<Create> {
     let mut f = match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -195,9 +269,199 @@ pub fn create_exclusive(path: &Path, bytes: &[u8]) -> io::Result<Create> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(Create::Taken),
         Err(e) => return Err(e),
     };
-    f.write_all(bytes)?;
+    afs.write_note(&mut f, bytes)?;
     f.sync_all()?;
     Ok(Create::Created)
+}
+
+/// How a prepared note will be published.
+enum How {
+    /// Linux: complete, fsynced bytes in an unnamed inode of the `MM`
+    /// directory, published by `linkat` (which never replaces a name).
+    #[cfg(target_os = "linux")]
+    Unnamed(File),
+    /// macOS: a complete, fsynced copy in the meeting's own staging
+    /// directory, published by `renameatx_np(RENAME_EXCL)`.
+    #[cfg(target_os = "macos")]
+    StagedCopy(PathBuf),
+    /// No atomic publication here: exclusive create, then write.
+    Direct,
+}
+
+/// A note ready to appear under a name in the `MM` directory: whole and in
+/// one step where the filesystem supports it (DESIGN.md › Publication
+/// invariant 2). The primary staged `note.md` is never touched.
+pub struct Prepared<'a> {
+    bytes: &'a [u8],
+    afs: &'a dyn ArchiveFs,
+    how: How,
+}
+
+/// Write `bytes` somewhere no Meeting-folder listing can see and fsync them,
+/// before any name is chosen. `dir` is the `MM` directory; `scratch` is the
+/// meeting's own staging directory (macOS only; never inside the Meeting
+/// folder).
+pub fn prepare<'a>(
+    dir: &Path,
+    scratch: &Path,
+    bytes: &'a [u8],
+    afs: &'a dyn ArchiveFs,
+) -> io::Result<Prepared<'a>> {
+    let how = prepare_how(dir, scratch, bytes, afs)?;
+    Ok(Prepared { bytes, afs, how })
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_how(dir: &Path, _scratch: &Path, bytes: &[u8], afs: &dyn ArchiveFs) -> io::Result<How> {
+    match afs.open_unnamed(dir) {
+        Ok(mut f) => {
+            afs.write_note(&mut f, bytes)?;
+            f.sync_all()?;
+            Ok(How::Unnamed(f))
+        }
+        Err(e) if atomic_unsupported(&e) => Ok(How::Direct),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_how(_dir: &Path, scratch: &Path, bytes: &[u8], afs: &dyn ArchiveFs) -> io::Result<How> {
+    let tmp = scratch.join(format!("publish-{}.tmp", crate::staging::unique_suffix()));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)?;
+    match afs.write_note(&mut f, bytes).and_then(|()| f.sync_all()) {
+        Ok(()) => Ok(How::StagedCopy(tmp)),
+        Err(e) => {
+            drop(f);
+            // Inside staging only, never the Meeting folder.
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn prepare_how(_: &Path, _: &Path, _: &[u8], _: &dyn ArchiveFs) -> io::Result<How> {
+    Ok(How::Direct)
+}
+
+impl Prepared<'_> {
+    /// True when the next [`Prepared::publish_at`] is atomic.
+    pub fn atomic(&self) -> bool {
+        !matches!(self.how, How::Direct)
+    }
+
+    /// Publish the prepared note at `path` without ever replacing or opening
+    /// anything already there: `Taken` when the name exists (the prepared
+    /// bytes stay ready for the next name).
+    pub fn publish_at(&mut self, path: &Path) -> io::Result<Create> {
+        match self.publish_atomic(path) {
+            Some(Ok(c)) => Ok(c),
+            Some(Err(e)) if atomic_unsupported(&e) => {
+                self.discard();
+                create_direct(path, self.bytes, self.afs)
+            }
+            Some(Err(e)) => Err(e),
+            None => create_direct(path, self.bytes, self.afs),
+        }
+    }
+
+    /// `None` when this note is published directly.
+    fn publish_atomic(&mut self, path: &Path) -> Option<io::Result<Create>> {
+        match &self.how {
+            #[cfg(target_os = "linux")]
+            How::Unnamed(f) => {
+                use std::os::fd::AsRawFd;
+                Some(link_unnamed(f.as_raw_fd(), path))
+            }
+            #[cfg(target_os = "macos")]
+            How::StagedCopy(tmp) => {
+                let r = rename_excl(tmp, path);
+                if matches!(r, Ok(Create::Created)) {
+                    // Consumed by the rename: nothing left to unlink.
+                    self.how = How::Direct;
+                }
+                Some(r)
+            }
+            How::Direct => None,
+        }
+    }
+
+    /// Drop the prepared bytes (an unnamed inode simply vanishes; a macOS
+    /// staged copy is unlinked inside staging, never in the Meeting folder).
+    fn discard(&mut self) {
+        #[cfg(target_os = "macos")]
+        if let How::StagedCopy(tmp) = &self.how {
+            let _ = fs::remove_file(tmp);
+        }
+        self.how = How::Direct;
+    }
+}
+
+impl Drop for Prepared<'_> {
+    fn drop(&mut self) {
+        self.discard();
+    }
+}
+
+/// `linkat(AT_FDCWD, "/proc/self/fd/N", AT_FDCWD, path, AT_SYMLINK_FOLLOW)`:
+/// gives the unnamed inode its name in one step; `EEXIST` if anything (a
+/// file, a directory, a dangling symlink) already has that name.
+#[cfg(target_os = "linux")]
+fn link_unnamed(fd: std::os::fd::RawFd, path: &Path) -> io::Result<Create> {
+    let from = c_path(Path::new(&format!("/proc/self/fd/{fd}")))?;
+    let to = c_path(path)?;
+    // SAFETY: both are valid NUL-terminated paths; `fd` is open for the
+    // duration of the call.
+    let r = unsafe {
+        libc::linkat(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::AT_SYMLINK_FOLLOW,
+        )
+    };
+    if r == 0 {
+        return Ok(Create::Created);
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::EEXIST) {
+        Ok(Create::Taken)
+    } else {
+        Err(e)
+    }
+}
+
+/// `renameatx_np(…, RENAME_EXCL)`: moves the staged copy to `path` in one
+/// step; `EEXIST` (never a replacement) if the name exists.
+#[cfg(target_os = "macos")]
+fn rename_excl(from: &Path, to: &Path) -> io::Result<Create> {
+    let f = c_path(from)?;
+    let t = c_path(to)?;
+    // SAFETY: both are valid NUL-terminated paths.
+    let r = unsafe {
+        libc::renameatx_np(
+            libc::AT_FDCWD,
+            f.as_ptr(),
+            libc::AT_FDCWD,
+            t.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if r == 0 {
+        return Ok(Create::Created);
+    }
+    let e = io::Error::last_os_error();
+    if e.raw_os_error() == Some(libc::EEXIST) {
+        Ok(Create::Taken)
+    } else {
+        Err(e)
+    }
 }
 
 pub fn digest(bytes: &[u8]) -> String {

@@ -356,7 +356,8 @@ impl Ctx<'_> {
     }
 
     /// Publish `note` into `folder` under the first free name (invariants
-    /// 1–3). A complete note's path is recorded in staging before writing.
+    /// 1–3). A complete note's path is recorded in staging before each
+    /// attempt to publish under it.
     fn publish(
         &self,
         meta: &mut MeetingMeta,
@@ -370,6 +371,12 @@ impl Ctx<'_> {
         let dir = chain.last().expect("chain has the MM dir").clone();
         let slug = note::slug(title);
         let want = archive::digest(note_text.as_bytes());
+        // The whole note is written and fsynced before any name is tried;
+        // each free name is then taken in one step (or, without atomic
+        // support, created exclusively and written).
+        let scratch = self.store.meeting_dir(&meta.id);
+        let mut prepared = archive::prepare(&dir, &scratch, note_text.as_bytes(), self.fs)
+            .map_err(|e| Blocked::Unwritable(e.kind().to_string()))?;
         for n in 1..=9999 {
             let path = dir.join(archive::candidate_name(&meta.utc_stamp, &slug, partial, n));
             if fs::symlink_metadata(&path).is_ok() {
@@ -381,7 +388,7 @@ impl Ctx<'_> {
                     .save(meta)
                     .map_err(|e| Blocked::Unwritable(e.kind().to_string()))?;
             }
-            match archive::create_exclusive(&path, note_text.as_bytes()) {
+            match prepared.publish_at(&path) {
                 Ok(Create::Taken) => continue,
                 Ok(Create::Created) => {
                     archive::verify_and_flush(&path, &want, &chain, (self.fault)(), self.fs)?;

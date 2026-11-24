@@ -81,7 +81,7 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 | Concern | macOS 15+ | Linux X11 (and XWayland apps) | Linux native Wayland |
 | --- | --- | --- | --- |
 | Global shortcut | Carbon hot key (`global-hotkey`): press + release | `XGrabKey` + XKB detectable auto-repeat: press + release | xdg-desktop-portal GlobalShortcuts: press + release where the portal sends `Deactivated`, else tap-to-toggle |
-| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | not grabbable via the portal (caveat) |
+| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | not grabbable via the portal (caveat): no cancel; the popover's Stop, like the shortcut, finishes the take (transcribed and delivered), never discards it |
 | Focus capture | NSWorkspace frontmost app + AX focused window/element | `_NET_ACTIVE_WINDOW` + `_NET_WM_PID` + AT-SPI focused editable in that window's frame | AT-SPI active frame + focused editable; unidentified → `uncertain` |
 | Tier 1 insert | AX `kAXSelectedTextAttribute` set | AT-SPI EditableText `DeleteText`/`InsertText` | same as X11 |
 | Edit read-back | AX value + selected range (UTF-16 → chars) | AT-SPI Text `GetText` / caret / selection | same |
@@ -116,6 +116,22 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
   recorded note verifies but does not flush and the folder chosen now is the
   one it lives in, Retry does not publish a duplicate there (it would hit the
   same flush); a different folder chosen now gets a fresh publication.
+- **Atomic, no-clobber note publication.** A note's complete bytes are
+  written and fsynced before it has any name, then it appears whole in one
+  step that can never replace an existing name. Linux opens an unnamed
+  `O_TMPFILE` inode in the `MM` directory and publishes it with
+  `linkat(AT_FDCWD, "/proc/self/fd/N", AT_FDCWD, dst, AT_SYMLINK_FOLLOW)`.
+  macOS writes a copy `publish-<unique>.tmp` inside the meeting's own staging
+  directory (never the Meeting folder) and moves it with
+  `renameatx_np(…, RENAME_EXCL)`. `EEXIST` keeps the same prepared bytes and
+  tries `-2.md`, `-3.md`, …; the staged `note.md` is never touched. When the
+  filesystem cannot (`EOPNOTSUPP`/`ENOTSUP`, `EISDIR`, `EINVAL`, `EXDEV`,
+  `ENOENT`, e.g. no `O_TMPFILE`, no `/proc`, a cross-volume or FAT/network
+  folder), the macOS copy is unlinked from staging and the note is created
+  directly with `O_CREAT|O_EXCL|O_NOFOLLOW` and written in place — the
+  documented non-atomic fallback. Either way the Meeting folder never holds
+  a temp name, and nothing there is renamed, deleted, truncated or
+  write-opened.
 - **Sleep.** A meeting stopped by sleep shows "Meeting stopped: the computer
   went to sleep", and its outcome notice is prefixed "Stopped by sleep.".
 
@@ -129,9 +145,11 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 - The OpenRouter key lives only in the OS secret store.
 - Test hooks (not settings): `CANTRIP_OPENROUTER_BASE` (loopback stub),
   `CANTRIP_STAGING` and `--key-env` (`cantrip e2e` only, including
-  `cantrip e2e meeting-retry`). The archive's directory flushes go through
-  `meeting::archive::ArchiveFs` so tests inject `EIO`; the compiled binary is
-  fault-injected with `scripts/e2e/fsync_fault.c` (`LD_PRELOAD`).
+  `cantrip e2e meeting-retry`). The archive's directory flushes, `O_TMPFILE`
+  open and note write go through `meeting::archive::ArchiveFs`, so tests
+  inject `EIO`, an `EOPNOTSUPP` filesystem and a slow write; the compiled
+  binary is fault-injected with `scripts/e2e/fsync_fault.c` and
+  `scripts/e2e/slow_write.c` (`LD_PRELOAD`).
 
 ## Verification boundaries
 
@@ -156,6 +174,13 @@ are in the builder evidence for the PR:
   publication and recorded-path Retry, from `cantrip e2e` and from the running
   app's popover: staging kept until the fault clears, then one note, staging
   deleted.
+- Atomic publication on ext4 with the release binary: `write(2)` of the
+  note slowed by 1.5 s (`LD_PRELOAD`) while a watcher scans the Meeting
+  folder — the note is never seen empty or partial, only absent or whole
+  (matching SHA-256), no temp name ever appears, and `strace` shows
+  `O_TMPFILE` + `linkat` with no rename, unlink or truncate in the folder.
+  With `O_TMPFILE` refused (`EOPNOTSUPP`) the direct exclusive create still
+  archives.
 - Rewrite HTTP 500 on uncertain-target and focus-changed takes: the HUD's
   accessible text and pixels show the copy reason and `Raw (cleanup
   skipped)`; Raw is on the clipboard.

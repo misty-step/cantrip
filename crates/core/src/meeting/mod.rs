@@ -134,7 +134,8 @@ impl Meetings {
         }
     }
 
-    /// Replace the directory-flush boundary (tests inject `EIO`).
+    /// Replace the publication filesystem boundary (tests inject `EIO`,
+    /// simulate a filesystem without `O_TMPFILE`, or slow the note's write).
     pub fn with_archive_fs(self, fs: Arc<dyn ArchiveFs>) -> Self {
         let inner = Arc::try_unwrap(self.inner)
             .unwrap_or_else(|_| panic!("with_archive_fs must be called before use"));

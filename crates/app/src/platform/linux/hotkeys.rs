@@ -13,9 +13,10 @@
 //!   may ask the user to approve the chord). `Activated`/`Deactivated` map to
 //!   press/release on desktops whose portals report release (KDE Plasma,
 //!   GNOME, Hyprland); elsewhere every activation is a tap (ActivationOnly).
-//!   Escape cannot be grabbed through the portal, so on Wayland a take is
-//!   cancelled from the popover's Stop control rather than Escape — a
-//!   documented session limit. No portal → `Err`.
+//!   Escape cannot be grabbed through the portal, so a native Wayland
+//!   session has no cancel: the popover's Stop control (like the shortcut)
+//!   *finishes* the take — it is transcribed and delivered, never discarded.
+//!   A documented session limit. No portal → `Err`.
 
 use super::x11::{self, X11};
 use crate::platform::{HotkeyMode, Hotkeys};
