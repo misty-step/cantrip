@@ -62,9 +62,10 @@ pub fn platform(requests: Sender<UiRequest>) -> anyhow::Result<(Platform, Option
 }
 
 /// Native Wayland: never let an EGL swap wait on frame callbacks. The egui
-/// root (HUD) window may be hidden by the compositor (Sway's scratchpad, see
-/// [`ui::LinuxUi`]), and a vsynced swap on a hidden surface would block the
-/// UI loop that also paints the popover and Settings.
+/// root window is a small transparent window kept out of the way there (the HUD is a layer
+/// surface); if the compositor stops sending it frame callbacks (occluded),
+/// a vsynced swap would block the UI thread that also runs the HUD and the
+/// shortcut/Escape bookkeeping.
 pub fn event_loop_tweaks(options: &mut eframe::NativeOptions) {
     if x11::session_is_wayland() {
         options.glow_options.vsync = false;

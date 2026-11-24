@@ -38,7 +38,7 @@ impl LinuxUi {
             None
         };
         if native_hud.is_some() {
-            hide_root_window_on_sway();
+            tame_root_window_on_sway();
         }
         LinuxUi {
             windows: WindowPatcher::new(),
@@ -47,22 +47,50 @@ impl LinuxUi {
     }
 }
 
-/// With the layer-shell HUD, the egui root window is never shown. Wayland
-/// cannot keep it unmapped (eframe paints the root to paint the popover and
-/// Settings), so on Sway it is kept off every workspace and unfocused: rules
-/// set before the window exists, applied when it maps.
-fn hide_root_window_on_sway() {
+/// With the layer-shell HUD, the egui root window never shows the pill, but
+/// it cannot be unmapped on Wayland, and it must stay on an output: winit
+/// paints the root only after its last frame callback, and the popover and
+/// Settings are painted from the root's pass, so a root moved off every output
+/// (Sway's scratchpad) would never open them. The UI makes it transparent and
+/// click-through at Sway's default minimum floating size; on Sway these rules
+/// (set before it maps) keep it from taking focus when it appears and make it
+/// a borderless sticky float (on every workspace, so always painted), and once
+/// it has mapped it is parked beyond the top-left corner with one pixel left
+/// on the output — nothing to see, and no area to click.
+fn tame_root_window_on_sway() {
     let Some(ipc) = SwayIpc::from_env() else {
         return;
     };
     for cmd in [
         format!("no_focus {SWAY_HUD_WINDOW}"),
-        format!("for_window {SWAY_HUD_WINDOW} move scratchpad"),
+        // Quoted: unquoted commas would end the rule and run the rest on
+        // the focused window right away.
+        format!("for_window {SWAY_HUD_WINDOW} \"floating enable, border none, sticky enable\""),
     ] {
         if let Err(e) = ipc.run(&cmd) {
             eprintln!("[cantrip] sway rule for the HUD window failed: {e}");
         }
     }
+    let pid = std::process::id();
+    let _ = std::thread::Builder::new()
+        .name("cantrip-sway-park".into())
+        .spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while std::time::Instant::now() < deadline {
+                let found = ipc
+                    .tree()
+                    .ok()
+                    .and_then(|t| super::sway::find_window(&t, pid, "Cantrip HUD"));
+                if let Some((id, _, _, w, h)) = found {
+                    let to = format!("[con_id={id}] move absolute position {} {}", 1 - w, 1 - h);
+                    if let Err(e) = ipc.run(&to) {
+                        eprintln!("[cantrip] could not park the HUD window: {e}");
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
 }
 
 impl Default for LinuxUi {

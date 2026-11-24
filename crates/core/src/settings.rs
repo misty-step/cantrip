@@ -55,7 +55,18 @@ impl Settings {
     }
 
     /// Durably replace the settings file (write, fsync, rename, fsync dir).
+    /// Durably replace the settings file, creating its folder (owner-only)
+    /// on first save: a fresh install has none.
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            if !dir.is_dir() {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)?;
+            }
+        }
         let bytes = serde_json::to_vec_pretty(self).expect("settings serialize");
         crate::staging::durable_replace(path, &bytes)
     }
@@ -78,6 +89,20 @@ pub fn default_meeting_folder(home: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// First save on a fresh install: the settings folder does not exist yet.
+    #[test]
+    fn first_save_creates_the_settings_folder_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("config/cantrip/v2/settings.json");
+        let mut s = Settings::default();
+        s.shortcut.key = "D".into();
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path).unwrap(), s);
+        let dir = std::fs::metadata(path.parent().unwrap()).unwrap();
+        assert_eq!(dir.permissions().mode() & 0o777, 0o700);
+    }
 
     #[test]
     fn defaults_seed_vocabulary_and_clean_with_post_processing() {

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
 const RUN_COMMAND: u32 = 0;
+const GET_TREE: u32 = 4;
 const GET_VERSION: u32 = 7;
 const GET_CONFIG: u32 = 9;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -82,6 +83,12 @@ impl SwayIpc {
         Ok(())
     }
 
+    /// The layout tree (`get_tree`).
+    pub fn tree(&self) -> Result<serde_json::Value, String> {
+        let reply = self.request(GET_TREE, "").map_err(|e| e.to_string())?;
+        serde_json::from_str(&reply).map_err(|e| e.to_string())
+    }
+
     /// The loaded config text (what the user's config binds).
     pub fn config(&self) -> Result<String, String> {
         let reply = self.request(GET_CONFIG, "").map_err(|e| e.to_string())?;
@@ -91,6 +98,33 @@ impl SwayIpc {
             .unwrap_or_default()
             .to_string())
     }
+}
+
+/// The first window in `tree` owned by `pid` with title `title`:
+/// (con_id, container x, y, width, height).
+pub fn find_window(
+    tree: &serde_json::Value,
+    pid: u32,
+    title: &str,
+) -> Option<(i64, i64, i64, i64, i64)> {
+    let int = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_i64());
+    if int(tree, "pid") == Some(i64::from(pid))
+        && tree.get("name").and_then(|n| n.as_str()) == Some(title)
+    {
+        let r = tree.get("rect")?;
+        return Some((
+            int(tree, "id")?,
+            int(r, "x")?,
+            int(r, "y")?,
+            int(r, "width")?,
+            int(r, "height")?,
+        ));
+    }
+    ["nodes", "floating_nodes"]
+        .iter()
+        .filter_map(|k| tree.get(*k).and_then(|n| n.as_array()))
+        .flatten()
+        .find_map(|n| find_window(n, pid, title))
 }
 
 /// Sway `bindsym` combo for a chord, e.g. `Control+Mod1+space`.
@@ -385,6 +419,62 @@ mod tests {
             assert!(!config_binds(&stock, "Escape"));
             assert!(config_binds(&stock, "Mod4+Return"));
         }
+    }
+
+    /// Live (needs `$SWAYSOCK`): rebinding replaces the old chord's press
+    /// and release bindings, Escape is bound only while asked, and dropping
+    /// the backend (graceful exit) leaves no binding. `unbindsym` fails when
+    /// nothing is bound, which is the probe.
+    #[test]
+    #[ignore]
+    fn live_sway_rebind_escape_and_exit_leave_no_stale_binding() {
+        let ipc = SwayIpc::from_env().expect("SWAYSOCK of a running Sway");
+        let bound = |spec: &str| {
+            let ok = ipc.run(&format!("unbindsym {spec}")).is_ok();
+            ok // a probe that succeeds also removed it
+        };
+        let sock = std::env::temp_dir().join("cantrip-test.sock");
+        let mut keys = SwayKeys::new(ipc.clone(), &sock).unwrap();
+        let mut d = Chord::platform_default();
+        assert_eq!(
+            keys.register(&d).unwrap(),
+            HotkeyMode::PressRelease,
+            "hold-to-talk + tap-to-toggle"
+        );
+        d.key = "D".into();
+        keys.register(&d).unwrap();
+        assert!(!bound("Control+Mod1+space"), "old press binding removed");
+        assert!(
+            !bound("--release Control+Mod1+space"),
+            "old release removed"
+        );
+        keys.set_escape(true);
+        assert!(
+            bound("Escape"),
+            "positive control: the probe sees a binding"
+        );
+        keys.set_escape(false);
+        keys.set_escape(true);
+        keys.set_escape(false);
+        assert!(!bound("Escape"), "Escape unbound when the take ends");
+        keys.set_escape(true);
+        drop(keys);
+        for spec in ["Escape", "Control+Mod1+d", "--release Control+Mod1+d"] {
+            assert!(!bound(spec), "{spec} left bound after exit");
+        }
+    }
+
+    #[test]
+    fn windows_are_found_by_pid_and_title() {
+        let tree = serde_json::json!({"id": 1, "nodes": [{"id": 2, "nodes": [],
+            "floating_nodes": [{"id": 7, "pid": 42, "name": "Cantrip HUD",
+            "rect": {"x": 0, "y": 23, "width": 75, "height": 50}}]}]});
+        assert_eq!(
+            find_window(&tree, 42, "Cantrip HUD"),
+            Some((7, 0, 23, 75, 50))
+        );
+        assert_eq!(find_window(&tree, 43, "Cantrip HUD"), None);
+        assert_eq!(find_window(&tree, 42, "Cantrip"), None);
     }
 
     #[test]

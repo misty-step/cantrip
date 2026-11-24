@@ -33,3 +33,4 @@ __pycache__/
 .iron-forest/bin/
 .iron-forest/runtime/
 /crates/*/target
+/scripts/e2e/vptr/target

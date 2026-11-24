@@ -67,10 +67,19 @@ pub fn run(
     requests: Receiver<UiRequest>,
     tick: Tick,
 ) -> anyhow::Result<()> {
+    // With a native HUD surface the root window never shows the pill: it is
+    // a transparent, click-through window the platform keeps out of the way,
+    // sized like the usual compositor minimum for floating windows (Sway's
+    // 75×50) so the compositor never pads it with clickable area.
+    let root_size = if platform.native_hud().is_some() {
+        Vec2::new(75.0, 50.0)
+    } else {
+        Vec2::new(160.0, hud::PILL_H)
+    };
     let hud_viewport = ViewportBuilder::default()
         .with_title("Cantrip HUD")
         .with_app_id("cantrip")
-        .with_inner_size(Vec2::new(160.0, hud::PILL_H))
+        .with_inner_size(root_size)
         .with_decorations(false)
         .with_transparent(true)
         .with_resizable(false)

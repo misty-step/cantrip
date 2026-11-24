@@ -1,0 +1,15 @@
+# Test helper for scripts/e2e/sway_check.py (not part of the app): a wlroots
+# virtual pointer that clicks at a point, for click-through checks on headless
+# Sway, whose seat has no pointer device. Build: cargo build --release
+# --manifest-path scripts/e2e/vptr/Cargo.toml
+[package]
+name = "vptr"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[workspace]
