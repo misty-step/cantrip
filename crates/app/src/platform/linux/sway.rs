@@ -421,14 +421,17 @@ mod tests {
         }
     }
 
-    /// Live (needs `$SWAYSOCK`): rebinding replaces the old chord's press
+    /// Live (on a Sway session; skipped elsewhere): rebinding replaces the old chord's press
     /// and release bindings, Escape is bound only while asked, and dropping
     /// the backend (graceful exit) leaves no binding. `unbindsym` fails when
     /// nothing is bound, which is the probe.
     #[test]
     #[ignore]
     fn live_sway_rebind_escape_and_exit_leave_no_stale_binding() {
-        let ipc = SwayIpc::from_env().expect("SWAYSOCK of a running Sway");
+        let Some(ipc) = SwayIpc::from_env() else {
+            eprintln!("skip: no Sway session ($SWAYSOCK)");
+            return;
+        };
         let bound = |spec: &str| {
             let ok = ipc.run(&format!("unbindsym {spec}")).is_ok();
             ok // a probe that succeeds also removed it

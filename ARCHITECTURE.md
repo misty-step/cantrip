@@ -16,7 +16,7 @@ leaves open, and exactly what has and has not been verified.
 | HTTP | `ureq` 3: rustls on Linux, the system TLS stack (native-tls → Security.framework) on macOS |
 | Concurrency | `std::thread` + channels; the UI owns the main thread |
 | macOS | `objc2` 0.6 / `objc2-*` 0.3 bindings (AppKit, Accessibility, Core Graphics, AVFoundation, Core Audio, Speech, ServiceManagement), `security-framework`, `global-hotkey` |
-| Linux | `x11rb` (X11 / XWayland), `dbus` (AT-SPI, Secret Service, portals, StatusNotifierItem via `ksni`), PipeWire `pw-record` |
+| Linux | `x11rb` (X11 / XWayland), `dbus` (AT-SPI, Secret Service, portals, StatusNotifierItem via `ksni`), PipeWire `pw-record`, Sway IPC (i3-ipc protocol, own client), `smithay-client-toolkit` 0.19 + `wayland-client` 0.31 (the versions winit links) for the `wlr-layer-shell` HUD |
 
 ### Why this beats the alternatives
 
@@ -61,12 +61,16 @@ crates/core/src            (no cfg(target_os) except default data paths)
 
 crates/app/src
   main.rs         CLI entry, single instance, wiring, hotkey thread
-  ui/             egui popover, Settings, HUD, theme (contrast-tested), gallery
+  ui/             egui popover, Settings, HUD, theme (contrast-tested), gallery;
+                  raster.rs renders the same HUD pill to pixels (CPU) for
+                  native overlay surfaces
   net.rs          ureq Transport (Offline vs Failed vs Timeout mapping)
-  ipc.rs          Unix-socket single-instance channel (popover/settings/toggle)
+  ipc.rs          Unix-socket single-instance channel (popover/settings/toggle,
+                  and the compositor-bound hotkey-down/hotkey-up/cancel lines)
   cli.rs          `cantrip e2e …` headless verification over recorded audio
   platform/mod.rs Platform bundle + Hotkeys/Tray/UiPlatform traits
-  platform/linux/ X11/XWayland, AT-SPI, PipeWire, Secret Service, SNI, portals
+  platform/linux/ X11/XWayland, AT-SPI, PipeWire, Secret Service, SNI, portals,
+                  Sway IPC (sway.rs), wlr-layer-shell HUD (layer_hud.rs)
   platform/macos/ AppKit, AX, CGEvent, NSPasteboard, AVFoundation, Core Audio
   platform/macos_logic.rs  OS-free macOS helpers, unit-tested on Linux
 ```
@@ -80,8 +84,8 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 
 | Concern | macOS 15+ | Linux X11 (and XWayland apps) | Linux native Wayland |
 | --- | --- | --- | --- |
-| Global shortcut | Carbon hot key (`global-hotkey`): press + release | `XGrabKey` + XKB detectable auto-repeat: press + release | xdg-desktop-portal GlobalShortcuts: press + release where the portal sends `Deactivated`, else tap-to-toggle |
-| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | not grabbable via the portal (caveat): no cancel; the popover's Stop, like the shortcut, finishes the take (transcribed and delivered), never discards it |
+| Global shortcut | Carbon hot key (`global-hotkey`): press + release | `XGrabKey` + XKB detectable auto-repeat: press + release | **Sway** (`$SWAYSOCK` answers; preferred there, since `xdg-desktop-portal-wlr` has no GlobalShortcuts): Sway IPC `bindsym --no-repeat <chord> exec cantrip ipc hotkey-down` and `bindsym --release <chord> exec cantrip ipc hotkey-up` (chord as keysyms, e.g. `Control+Mod1+space`): press + release. The lines go over the single-instance socket straight to the core's key thread; a press while already down ends a hold whose release was lost. Rebinding unbinds the old chord; Quit and SIGTERM/SIGINT/SIGHUP (now a graceful Quit) unbind everything; a chord the user's Sway config binds is reported as taken, never overwritten. **Elsewhere**: xdg-desktop-portal GlobalShortcuts: press + release where the portal sends `Deactivated` (KDE, GNOME, Hyprland), else tap-to-toggle |
+| Escape during a take | Carbon hot key while active | `XGrabKey` of plain Escape while active, under the exact lock masks only (none, CapsLock, NumLock, both; never `AnyModifier`, which collides with window-manager chords such as stock Openbox's `Alt+Escape`) | **Sway**: `bindsym --no-repeat Escape exec cantrip ipc cancel` only while a take is active, `unbindsym Escape` as soon as it ends (and on exit; a leftover from a crash is cleared at start), so Escape belongs to apps whenever Cantrip is idle; skipped if the user's config binds plain Escape. **Portal sessions**: not grabbable (caveat): no cancel; the popover's Stop, like the shortcut, finishes the take (transcribed and delivered), never discards it |
 | Focus capture | NSWorkspace frontmost app + AX focused window/element | `_NET_ACTIVE_WINDOW` + `_NET_WM_PID` + AT-SPI focused editable in that window's frame | AT-SPI active frame + focused editable; unidentified → `uncertain` |
 | Tier 1 insert | AX `kAXSelectedTextAttribute` set | AT-SPI EditableText `DeleteText`/`InsertText` | same as X11 |
 | Edit read-back | AX value + selected range (UTF-16 → chars) | AT-SPI Text `GetText` / caret / selection | same |
@@ -93,10 +97,25 @@ renders a `UiSnapshot` and emits `Command`s. `cfg(target_os)` appears only in
 | Key storage | Keychain (generic password) | Secret Service (gnome-keyring, KWallet) | same |
 | Open at login | SMAppService main app | XDG autostart entry | same |
 | Sleep during a meeting | `NSProcessInfo` activity with `IdleSystemSleepDisabled`; `NSWorkspaceWillSleepNotification` stops the meeting | systemd-logind inhibitor locks while recording (`idle` block, `sleep` delay); `PrepareForSleep(true)` from `org.freedesktop.login1` stops the meeting, then the locks are released. No system bus or no logind: nothing held, no error | same as X11 |
-| HUD window | egui window patched to status level, ignores mouse, all Spaces, never activates (accessory app) | override-redirect, notification type, empty input shape, sticky; XShape pill when uncomposited | XWayland override-redirect window |
+| HUD window | egui window patched to status level, ignores mouse, all Spaces, never activates (accessory app) | override-redirect, notification type, empty input shape, sticky; XShape pill when uncomposited | **With `zwlr_layer_shell_v1`** (wlroots/Sway, KDE, Hyprland): a layer surface on `Layer::Overlay`, `Anchor::BOTTOM` (horizontally centred) with the HUD's 72 px bottom margin above any panel's exclusive zone, `KeyboardInteractivity::None`, empty `wl_region` input region: never focused, click-through, on every workspace (layer surfaces belong to the output). Pixels: `ui::raster` runs the real `hud::paint_pill` with the same fonts and theme palette offscreen and fills its feathered meshes into an ARGB8888 `wl_shm` buffer at the output's integer scale; the surface is created on show and destroyed on hide. **Without it** (GNOME): the egui window as before |
 | Control surface | menu-bar status item → popover | SNI tray when a watcher exists; else the launcher entry `cantrip popover` (stock GNOME) | same |
 
 ## Choices DESIGN.md leaves open
+
+- **The egui root window on native Wayland.** eframe's root viewport is the
+  HUD window everywhere else; with the layer-shell HUD it shows nothing but
+  cannot be unmapped (Wayland reports no visibility, so eframe paints it), and
+  it must stay on an output: winit paints a window only after its previous
+  frame callback, and the popover and Settings are painted from the root's
+  pass (in Sway's scratchpad they never opened). So it is transparent and
+  click-through, sized at Sway's default floating minimum (75×50, so Sway adds
+  no clickable padding) and keeps the HUD's accessible label; on Sway,
+  `no_focus` and a `for_window` rule (set before it maps) keep it from taking
+  focus and make it a borderless sticky float, and once mapped it is parked
+  beyond the top-left corner with one pixel left on the output. EGL vsync is
+  off on Wayland so a swap can never block the UI thread if that window is
+  ever occluded. Other layer-shell compositors (KDE, Hyprland) get the
+  transparent, click-through window without the Sway rules.
 
 - **HUD note beside a delivery outcome.** When a take's text was produced by
   the Raw fallback (`Raw (cleanup skipped)`) or on-device, and the delivery
@@ -180,7 +199,8 @@ are in the builder evidence for the PR:
   (matching SHA-256), no temp name ever appears, and `strace` shows
   `O_TMPFILE` + `linkat` with no rename, unlink or truncate in the folder.
   With `O_TMPFILE` refused (`EOPNOTSUPP`) the direct exclusive create still
-  archives.
+  archives, and the owner-only (`0600`) publication test passes on such a
+  host (atomicity is asserted where `O_TMPFILE` works).
 - Rewrite HTTP 500 on uncertain-target and focus-changed takes: the HUD's
   accessible text and pixels show the copy reason and `Raw (cleanup
   skipped)`; Raw is on the clipboard.
@@ -210,10 +230,43 @@ or permissions):
 - `NSWorkspaceWillSleepNotification` stopping a meeting before sleep.
 - Signing and notarization (not part of this slice).
 
-**Not verified, Linux.** No real Wayland compositor (KDE Plasma, GNOME,
-wlroots) was available, so the portal shortcuts, `wl-copy` clipboard and
-AT-SPI-only focus path are untested, and the release matrix per desktop is
-still to be recorded. GTK3 ignores synthetic `XSendEvent` keys, so tier 2 on
+**Verified live on Sway 1.9 (wlroots, headless backend)** with the release
+binary, stock `/etc/sway/config` (minus its systemd import), swaybar,
+`xdg-desktop-portal-wlr` 0.7.1 present (no GlobalShortcuts), a private D-Bus,
+PipeWire virtual microphone, gnome-keyring with a dummy key and the loopback
+OpenRouter stub (`scripts/e2e/sway_check.py`; numbers in the builder evidence):
+
+- `Ctrl+Alt+Space` (driven through Sway's bindings with `wtype`) starts a take
+  with a GTK3 receiver focused; the receiver keeps focus throughout.
+- The HUD pill appears bottom-centre (centred to the pixel, 72 px above the
+  output's bottom edge) on workspace 1, stays there on workspace 2 while
+  recording, and is still there back on workspace 1; a pointer click on the
+  pill reaches the receiver beneath it (wlroots virtual pointer,
+  `scripts/e2e/vptr`).
+- Plain Escape during the take: the receiver receives no Escape, the HUD is
+  gone and the staged WAV deleted within tens of milliseconds, zero stub
+  requests follow; when idle, Escape reaches the receiver again (`unbindsym
+  Escape` reports no binding).
+- A hold-to-talk take and a tap-to-toggle take each run end to end through the
+  stub (transcription + rewrite, `data_collection: "deny"`) and are inserted
+  into the receiver over AT-SPI (`✓ Inserted`).
+- Rebinding in Settings (Record → `Ctrl+Alt+D`): the old chord's press and
+  release bindings are gone and it no longer starts a take, the new chord
+  starts one and Escape cancels it. After Quit (SIGTERM), no chord or Escape
+  binding is left.
+- The popover and Settings open on workspace 1 and 2 with the layer-shell HUD
+  active.
+
+Headless caveats: the seat has no physical keyboard or pointer, so the check
+keeps one virtual keyboard alive (GTK reports its window active only while a
+keyboard exists) and clicks with a virtual pointer. Only an integer output
+scale of 1 was exercised; Sway ≥ 1.10 (scene graph), Hyprland's and KDE's
+layer shells, and the Sway-specific window rules on a real multi-output
+layout are not run.
+
+**Not verified, Linux.** KDE Plasma and GNOME Wayland sessions were not
+available, so the portal shortcuts on them, and the release matrix per desktop,
+are still to be recorded. GTK3 ignores synthetic `XSendEvent` keys, so tier 2 on
 X11 reaches only toolkits that accept them; most GTK fields take tier 1
 instead. No real microphone, Bluetooth headset or human speech was used
 (neural TTS through a virtual PipeWire source).
